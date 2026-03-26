@@ -1,0 +1,14 @@
+Bundesliga_season_23_24/
+data/
+saved/
+.venv/
+
+__pycache__/
+*.py[cod]
+.DS_Store
+
+.idea/
+.vscode/
+
+*.log
+_vendor/defcon/saved

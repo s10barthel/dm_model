@@ -1,0 +1,25 @@
+name: dm_model
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - tqdm
+  - ipywidgets
+  - fastparquet
+  - pyarrow
+  - scipy
+  - scikit-learn
+  - statsmodels
+  - catboost
+  - xgboost
+  - matplotlib
+  - seaborn
+  - shapely
+  - pip:
+      - rdp
+      - kloppy
+      - socceraction
+      - pandera
