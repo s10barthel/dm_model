@@ -163,6 +163,7 @@ def construct_graph_features(match: Match, extend=True, post_action=False, verbo
         match.actions = match.label_post_actions(match.actions)
 
     feature_tensors: List[torch.Tensor] = []
+    feature_dim = 25 if extend else 19
 
     for period in match.events["period_id"].unique():
         period_actions: pd.DataFrame = match.actions[match.actions["period_id"] == period]
@@ -178,8 +179,28 @@ def construct_graph_features(match: Match, extend=True, post_action=False, verbo
                 frame = period_actions.at[i, "frame_id"]
                 possessor = period_actions.at[i, "object_id"]
 
-            if not pd.isna(frame) and possessor.split("_")[0] in ["home", "away"]:
+            if not pd.isna(frame) and possessor.split("_")[0] in ["home", "away"] and int(frame) in match.tracking.index:
+                frame = int(frame)
                 snapshot = period_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
+                if snapshot.empty or "phase_id" not in snapshot.columns:
+                    snapshot = match.tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
+
+                if (
+                    snapshot.empty
+                    or "phase_id" not in snapshot.columns
+                    or f"{possessor}_x" not in snapshot.columns
+                    or f"{possessor}_y" not in snapshot.columns
+                ):
+                    padding_features = -torch.ones((match.max_players, feature_dim))
+                    feature_tensors.append(padding_features)
+                    continue
+
+                phase_id = snapshot["phase_id"].iloc[0]
+                if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
+                    padding_features = -torch.ones((match.max_players, feature_dim))
+                    feature_tensors.append(padding_features)
+                    continue
+
                 event_features = calculate_event_features(match, snapshot, possessor, extend)
                 event_features = torch.tensor(event_features[0], dtype=torch.float32)
 
@@ -190,7 +211,7 @@ def construct_graph_features(match: Match, extend=True, post_action=False, verbo
                 feature_tensors.append(event_features)
 
             else:
-                padding_features = -torch.ones((match.max_players, event_features.shape[-1]))
+                padding_features = -torch.ones((match.max_players, feature_dim))
                 feature_tensors.append(padding_features)
 
     node_attr = torch.stack(feature_tensors, axis=0)  # [B, N, x]

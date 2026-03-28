@@ -61,15 +61,42 @@ def is_shot_anomaly(
 ) -> Tuple[bool, bool]:
     frame = events.at[event_index, "frame_id"]
     receive_frame = events.at[event_index, "receive_frame_id"]
-    ball_xy = tracking.loc[frame:receive_frame, ["ball_x", "ball_y"]]
-    simplified = np.array(rdp(ball_xy, epsilon=0.5))
+
+    if pd.isna(frame) or pd.isna(receive_frame):
+        return False, False
+
+    frame = int(frame)
+    receive_frame = int(receive_frame)
+    if receive_frame <= frame:
+        return False, False
+
+    ball_xy = tracking.loc[frame:receive_frame, ["ball_x", "ball_y"]].astype(float).dropna()
+    if len(ball_xy) < 2:
+        return False, False
+
+    try:
+        simplified = np.asarray(rdp(ball_xy.to_numpy(), epsilon=0.5), dtype=float)
+    except Exception:
+        return False, False
+
+    simplified = np.atleast_2d(simplified)
+    if simplified.ndim != 2 or simplified.shape[0] < 2 or simplified.shape[1] != 2:
+        return False, False
 
     dirs = np.diff(simplified, axis=0)
+    if dirs.ndim != 2 or dirs.shape[0] == 0:
+        return False, False
+
     norms = np.linalg.norm(dirs, axis=1, keepdims=True)
     valid_mask = np.array((norms > min_segment_len).flatten().tolist() + [True])
     simplified = simplified[valid_mask]
+    if simplified.ndim != 2 or simplified.shape[0] < 2:
+        return False, False
 
     dirs = np.diff(simplified, axis=0)
+    if dirs.ndim != 2 or dirs.shape[0] == 0:
+        return False, False
+
     norms = np.linalg.norm(dirs, axis=1, keepdims=True)
     dirs_norm = dirs / (norms + 1e-8)
 
@@ -146,6 +173,13 @@ def label_intended_receivers(
     for i in actions.index:
         event_frame = actions.at[i, "frame_id"]
         possessor = actions.at[i, "object_id"]
+        if pd.isna(event_frame) or not isinstance(possessor, str):
+            continue
+
+        event_frame = int(event_frame)
+        if event_frame not in tracking.index:
+            continue
+
         snapshot: pd.Series = tracking.loc[event_frame]
 
         receive_frame = actions.at[i, "receive_frame_id"]
@@ -185,15 +219,41 @@ def label_intended_receivers(
             actions.at[i, "intent_id"] = actions.at[i, "receiver_id"]
 
         elif not pd.isna(receiver) and not pd.isna(receive_frame):  # For failed passes
-            receive_snapshot: pd.Series = tracking.loc[int(receive_frame)]
+            receive_frame = int(receive_frame)
+            if receive_frame not in tracking.index:
+                continue
+
+            receive_snapshot: pd.Series = tracking.loc[receive_frame]
 
             teammates = [c[:-2] for c in snapshot.dropna().index if re.match(rf"{possessor[:4]}_\d+_x", c)]
-            teammates.remove(possessor)
+            teammates = [p for p in teammates if p != possessor]
+            teammates = [
+                p
+                for p in teammates
+                if f"{p}_x" in receive_snapshot.index
+                and f"{p}_y" in receive_snapshot.index
+                and not pd.isna(receive_snapshot[f"{p}_x"])
+                and not pd.isna(receive_snapshot[f"{p}_y"])
+            ]
+            if not teammates:
+                continue
 
-            start_x = snapshot[f"{possessor}_x"]
-            start_y = snapshot[f"{possessor}_y"]
-            end_x = receive_snapshot[f"{receiver}_x"] if receiver != "out" else receive_snapshot["ball_x"]
-            end_y = receive_snapshot[f"{receiver}_y"] if receiver != "out" else receive_snapshot["ball_y"]
+            start_x = snapshot.get(f"{possessor}_x", actions.at[i, "start_x"])
+            start_y = snapshot.get(f"{possessor}_y", actions.at[i, "start_y"])
+            if pd.isna(start_x) or pd.isna(start_y):
+                start_x = actions.at[i, "start_x"]
+                start_y = actions.at[i, "start_y"]
+
+            if receiver != "out":
+                end_x = receive_snapshot.get(f"{receiver}_x", actions.at[i, "end_x"])
+                end_y = receive_snapshot.get(f"{receiver}_y", actions.at[i, "end_y"])
+            else:
+                end_x = receive_snapshot.get("ball_x", actions.at[i, "end_x"])
+                end_y = receive_snapshot.get("ball_y", actions.at[i, "end_y"])
+
+            if pd.isna(start_x) or pd.isna(start_y) or pd.isna(end_x) or pd.isna(end_y):
+                continue
+
             player_x = receive_snapshot[[f"{p}_x" for p in teammates]].values
             player_y = receive_snapshot[[f"{p}_y" for p in teammates]].values
 

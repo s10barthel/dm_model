@@ -2,6 +2,8 @@ Bundesliga_season_23_24/
 data/
 saved/
 .venv/
+test/*.csv
+test/*.png
 
 __pycache__/
 *.py[cod]

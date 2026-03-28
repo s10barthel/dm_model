@@ -12,6 +12,7 @@ RAW_DATA_ROOT = PROJECT_ROOT / "Bundesliga_season_23_24"
 RAW_TRACKING_DIR = RAW_DATA_ROOT / "tracking_data"
 RAW_EVENT_DIR = RAW_DATA_ROOT / "event_data"
 RAW_META_DIR = RAW_DATA_ROOT / "match_information"
+RAW_KPI_DIR = RAW_DATA_ROOT / "KPI_Merged"
 
 DATA_ROOT = PROJECT_ROOT / "data" / "ajax"
 LINEUP_DIR = DATA_ROOT / "lineup"
