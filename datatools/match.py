@@ -30,6 +30,12 @@ class Match(ABC):
         self.events = events.copy()
         self.tracking = tracking.copy()
         self.lineup = lineup.copy()
+        self.match_id = None
+        if not self.lineup.empty and "stats_perform_match_id" in self.lineup.columns:
+            self.match_id = str(self.lineup["stats_perform_match_id"].iloc[0])
+        elif "game_id" in self.events.columns and not self.events.empty:
+            self.match_id = str(self.events["game_id"].iloc[0])
+        self.graph_features_by_dir: Dict[str, object] = {}
 
         self.action_type = action_type
         self.fps = fps

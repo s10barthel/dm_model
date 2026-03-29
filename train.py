@@ -3,6 +3,7 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,13 @@ parser.add_argument("--include_out", action="store_true", default=False, help="a
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
+parser.add_argument("--feature_dir", type=str, default=None, help="override graph feature directory")
+parser.add_argument("--label_dir", type=str, default=None, help="override label directory for evaluation/inference")
+parser.add_argument("--train_feature_dir", type=str, default=None, help="feature directory used for training")
+parser.add_argument("--train_label_dir", type=str, default=None, help="label directory used for training")
+parser.add_argument("--valid_feature_dir", type=str, default=None, help="feature directory used for validation")
+parser.add_argument("--valid_label_dir", type=str, default=None, help="label directory used for validation")
+parser.add_argument("--ipw_feature_dir", type=str, default=None, help="feature directory used for IPW estimation")
 
 parser.add_argument("--node_emb_dim", type=int, required=False, default=128, help="node embedding dim")
 parser.add_argument("--graph_emb_dim", type=int, required=False, default=128, help="graph embedding dim")
@@ -81,6 +89,17 @@ parser.add_argument("--best_acc", type=float, required=False, default=0, help="b
 args, _ = parser.parse_known_args()
 
 
+def infer_node_in_dim(feature_dir: str, task: str) -> int:
+    feature_path = Path(feature_dir)
+    for graph_file in sorted(feature_path.glob("*.pt")):
+        graphs = torch.load(graph_file, weights_only=False)
+        first_graph = next((graph for graph in graphs if graph is not None), None)
+        if first_graph is not None:
+            base_dim = int(first_graph.x.shape[1])
+            return base_dim + int(task == "failure_receiver")
+    raise FileNotFoundError(f"Could not infer node input dimension from {feature_dir}.")
+
+
 if __name__ == "__main__":
     # Set device and manual seed
     np.random.seed(args.seed)
@@ -94,9 +113,26 @@ if __name__ == "__main__":
 
     args.gnn_task = config.TASK_CONFIG.at[args.task, "gnn_task"]
     args.condition = config.TASK_CONFIG.at[args.task, "condition"]
-    args.node_in_dim = 26 if args.task == "failure_receiver" else 25
     args.edge_in_dim = 2
     args.out_dim = config.TASK_CONFIG.at[args.task, "out_dim"]
+
+    if args.task == "shot_blocking":
+        feature_dir = "data/ajax/features/augmented_shot_graphs"
+        label_dir = "data/ajax/features/augmented_shot_labels"
+    elif args.task == "failure_receiver" and args.augment_blocks:
+        feature_dir = "data/ajax/features/augmented_graphs"
+        label_dir = "data/ajax/features/augmented_labels"
+    else:
+        feature_dir = getattr(args, "feature_dir", None) or "data/ajax/features/action_graphs"
+        label_dir = getattr(args, "label_dir", None) or f"data/ajax/features/action_labels_{args.return_type}"
+    args.feature_dir = feature_dir
+    args.label_dir = label_dir
+    args.train_feature_dir = getattr(args, "train_feature_dir", None) or feature_dir
+    args.train_label_dir = getattr(args, "train_label_dir", None) or label_dir
+    args.valid_feature_dir = getattr(args, "valid_feature_dir", None) or feature_dir
+    args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
+    args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
+    args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task)
 
     # Load model
     args_dict = vars(args)
@@ -116,22 +152,10 @@ if __name__ == "__main__":
         state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False)
         model.module.load_state_dict(state_dict)
 
-    if args.task == "shot_blocking":
-        feature_dir = "data/ajax/features/augmented_shot_graphs"
-        label_dir = "data/ajax/features/augmented_shot_labels"
-    elif args.task == "failure_receiver" and args.augment_blocks:
-        feature_dir = "data/ajax/features/augmented_graphs"
-        label_dir = "data/ajax/features/augmented_labels"
-    else:
-        feature_dir = "data/ajax/features/action_graphs"
-        label_dir = f"data/ajax/features/action_labels_{args.return_type}"
-
     train_match_ids, valid_match_ids, _ = load_splits(feature_dir=feature_dir)
 
     print("Generating datasets...")
-    dataset_args = {
-        "feature_dir": feature_dir,
-        "label_dir": label_dir,
+    common_dataset_args = {
         "task": args.task,
         "inplay_only": args.task.split("_")[1] == "receiver" and not args.include_out,
         "min_pass_dur": args.min_pass_dur,
@@ -146,8 +170,18 @@ if __name__ == "__main__":
         "sparsify": args.sparsify,
         "max_edge_dist": args.max_edge_dist,
     }
-    train_dataset = ActionDataset(train_match_ids, **dataset_args)
-    valid_dataset = ActionDataset(valid_match_ids, **dataset_args)
+    train_dataset = ActionDataset(
+        train_match_ids,
+        feature_dir=args.train_feature_dir,
+        label_dir=args.train_label_dir,
+        **common_dataset_args,
+    )
+    valid_dataset = ActionDataset(
+        valid_match_ids,
+        feature_dir=args.valid_feature_dir,
+        label_dir=args.valid_label_dir,
+        **common_dataset_args,
+    )
 
     if args.task == "pass_success" and args.weight_bce:
         n_positives = train_dataset.labels[train_dataset.labels[:, -5] == 1].shape[0]
@@ -160,11 +194,24 @@ if __name__ == "__main__":
 
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
-        inverse_propensity = 1 / estimate_propensity(train_dataset, model_id=args.ipw_model_id, device=device)
+        ipw_train_dataset = ActionDataset(
+            train_match_ids,
+            feature_dir=args.ipw_feature_dir,
+            label_dir=args.label_dir,
+            **common_dataset_args,
+        )
+        ipw_valid_dataset = ActionDataset(
+            valid_match_ids,
+            feature_dir=args.ipw_feature_dir,
+            label_dir=args.label_dir,
+            **common_dataset_args,
+        )
+
+        inverse_propensity = 1 / estimate_propensity(ipw_train_dataset, model_id=args.ipw_model_id, device=device)
         train_ipw = inverse_propensity / inverse_propensity.mean()
         train_dataset.set_inverse_propensity_weights(train_ipw)
 
-        inverse_propensity = 1 / estimate_propensity(valid_dataset, model_id=args.ipw_model_id, device=device)
+        inverse_propensity = 1 / estimate_propensity(ipw_valid_dataset, model_id=args.ipw_model_id, device=device)
         valid_ipw = inverse_propensity / inverse_propensity.mean()
         valid_dataset.set_inverse_propensity_weights(valid_ipw)
 

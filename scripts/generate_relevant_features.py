@@ -16,6 +16,18 @@ def main() -> None:
     python = sys.executable
     run_command([python, "datatools/graph_feature.py", "--action_type", "all", "--split", "train"])
     run_command([python, "datatools/graph_feature.py", "--action_type", "all", "--split", "test"])
+    run_command(
+        [
+            python,
+            "datatools/graph_feature.py",
+            "--action_type",
+            "all",
+            "--split",
+            "train",
+            "--feature_variant",
+            "intent_train_augmented",
+        ]
+    )
 
 
 if __name__ == "__main__":

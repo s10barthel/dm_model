@@ -43,12 +43,6 @@ DEFENSE = [
 PASS = [
     "pass",
     "cross",
-    "throw_in",
-    "goalkick",
-    "corner_short",
-    "corner_crossed",
-    "freekick_short",
-    "freekick_crossed",
 ]
 
 INCOMING = [
@@ -77,7 +71,7 @@ TASK_CONFIG = pd.DataFrame(
         "overall_conceding": ["graph_binary", True, True, True, False, False, None, None, 1],
         "overall_return": ["graph_regression", True, True, True, False, False, None, None, 1],
         "action_intent": ["node_selection", True, True, True, True, True, None, "teammates", 1],
-        "pass_intent": ["node_selection", True, True, False, True, False, None, "teammates", 1],
+        "pass_intent": ["node_selection", True, False, False, True, False, None, "teammates", 1],
         "pass_intent_oppo_agn": ["node_selection", True, False, False, True, False, None, "teammates", 1],
         "action_success": ["node_binary", True, True, True, True, True, "intent", "teammates", 1],
         "pass_success": ["node_binary", True, True, False, True, False, "intent", "teammates", 1],

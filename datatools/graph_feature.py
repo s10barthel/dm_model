@@ -19,7 +19,13 @@ from tqdm import tqdm
 import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.match import Match
-from project_config import load_base_splits
+from project_config import (
+    ACTION_GRAPH_DIR,
+    ACTION_GRAPH_INTENT_TRAIN_DIR,
+    POST_ACTION_GRAPH_DIR,
+    INTENT_TRAIN_OFFSETS,
+    load_base_splits,
+)
 
 
 def calculate_event_features(
@@ -155,15 +161,97 @@ def calculate_event_features(
     return np.stack(event_features, axis=-1)  # [T, N, x]
 
 
-def construct_graph_features(match: Match, extend=True, post_action=False, verbose=True) -> List[Data]:
+def infer_node_feature_dim(extend: bool = True) -> int:
+    return 25 if extend else 19
+
+
+def load_frame_snapshot(primary_tracking: pd.DataFrame, fallback_tracking: pd.DataFrame, frame: int) -> pd.DataFrame:
+    snapshot = primary_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
+    if snapshot.empty or "phase_id" not in snapshot.columns:
+        snapshot = fallback_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
+    return snapshot
+
+
+def resolve_prior_frame(phase_tracking: pd.DataFrame, possessor: str, current_frame: int, offset: int) -> int | None:
+    if offset <= 0:
+        return int(current_frame)
+
+    player_x = f"{possessor}_x"
+    player_y = f"{possessor}_y"
+    if player_x not in phase_tracking.columns or player_y not in phase_tracking.columns:
+        return None
+
+    earlier_tracking = phase_tracking.loc[phase_tracking.index <= current_frame - offset]
+    if earlier_tracking.empty:
+        return None
+
+    earlier_tracking = earlier_tracking.dropna(subset=[player_x, player_y], how="any")
+    if earlier_tracking.empty:
+        return None
+
+    return int(earlier_tracking.index[-1])
+
+
+def construct_graph_for_frame(
+    match: Match,
+    frame: int,
+    possessor: str,
+    period_tracking: pd.DataFrame,
+    feature_dim: int,
+    extend: bool = True,
+) -> Data | None:
+    if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
+        return None
+
+    frame = int(frame)
+    if frame not in match.tracking.index:
+        return None
+
+    snapshot = load_frame_snapshot(period_tracking, match.tracking, frame)
+    if (
+        snapshot.empty
+        or "phase_id" not in snapshot.columns
+        or f"{possessor}_x" not in snapshot.columns
+        or f"{possessor}_y" not in snapshot.columns
+    ):
+        return None
+
+    phase_id = snapshot["phase_id"].iloc[0]
+    if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
+        return None
+
+    event_features = torch.tensor(calculate_event_features(match, snapshot, possessor, extend)[0], dtype=torch.float32)
+    missing_players = match.max_players - event_features.shape[0]
+    if missing_players > 0:
+        padding_features = -torch.ones((missing_players, feature_dim))
+        event_features = torch.cat([event_features, padding_features], 0)
+
+    node_mask = event_features[:, 0] != -1
+    node_attr = event_features[node_mask]
+    distances = torch.cdist(node_attr[:, 3:5], node_attr[:, 3:5], p=2)
+    teammates = (node_attr[:, 0].unsqueeze(-1) == node_attr[:, 0].unsqueeze(-2)).float()
+    edge_index, _ = dense_to_sparse(torch.ones_like(distances))
+    distances = distances[edge_index[0], edge_index[1]]
+    teammates = teammates[edge_index[0], edge_index[1]]
+    edge_attr = torch.stack([distances, teammates], dim=-1)
+
+    return Data(x=node_attr, edge_index=edge_index.clone(), edge_attr=edge_attr)
+
+
+def construct_graph_features(
+    match: Match,
+    extend=True,
+    post_action=False,
+    verbose=True,
+) -> List[Data]:
     if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
 
     if post_action:
         match.actions = match.label_post_actions(match.actions)
 
-    feature_tensors: List[torch.Tensor] = []
-    feature_dim = 25 if extend else 19
+    feature_graphs: List[Data] = []
+    feature_dim = infer_node_feature_dim(extend)
 
     for period in match.events["period_id"].unique():
         period_actions: pd.DataFrame = match.actions[match.actions["period_id"] == period]
@@ -179,67 +267,63 @@ def construct_graph_features(match: Match, extend=True, post_action=False, verbo
                 frame = period_actions.at[i, "frame_id"]
                 possessor = period_actions.at[i, "object_id"]
 
-            if not pd.isna(frame) and possessor.split("_")[0] in ["home", "away"] and int(frame) in match.tracking.index:
-                frame = int(frame)
-                snapshot = period_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
-                if snapshot.empty or "phase_id" not in snapshot.columns:
-                    snapshot = match.tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
-
-                if (
-                    snapshot.empty
-                    or "phase_id" not in snapshot.columns
-                    or f"{possessor}_x" not in snapshot.columns
-                    or f"{possessor}_y" not in snapshot.columns
-                ):
-                    padding_features = -torch.ones((match.max_players, feature_dim))
-                    feature_tensors.append(padding_features)
-                    continue
-
-                phase_id = snapshot["phase_id"].iloc[0]
-                if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
-                    padding_features = -torch.ones((match.max_players, feature_dim))
-                    feature_tensors.append(padding_features)
-                    continue
-
-                event_features = calculate_event_features(match, snapshot, possessor, extend)
-                event_features = torch.tensor(event_features[0], dtype=torch.float32)
-
-                missing_players = match.max_players - event_features.shape[0]
-                padding_features = -torch.ones((missing_players, event_features.shape[-1]))
-
-                event_features = torch.cat([event_features, padding_features], 0)
-                feature_tensors.append(event_features)
-
-            else:
-                padding_features = -torch.ones((match.max_players, feature_dim))
-                feature_tensors.append(padding_features)
-
-    node_attr = torch.stack(feature_tensors, axis=0)  # [B, N, x]
-    distances = torch.cdist(node_attr[..., 3:5], node_attr[..., 3:5], p=2)  # [B, N, N]
-    teammates = (node_attr[..., 0].unsqueeze(-1) == node_attr[..., 0].unsqueeze(-2)).float()  # [B, N, N]
-
-    feature_graphs: List[Data] = []
-
-    for i in range(node_attr.shape[0]):
-        if node_attr[i, 0, 0] == -1:
-            feature_graphs.append(None)
-
-        else:
-            node_mask = node_attr[i, :, 0] != -1
-            node_attr_i = node_attr[i][node_mask]
-
-            distances_i = distances[i][node_mask][:, node_mask]
-            teammates_i = teammates[i][node_mask][:, node_mask]
-            edge_index, _ = dense_to_sparse(torch.ones_like(distances_i))
-
-            distances_i = distances_i[edge_index[0], edge_index[1]]
-            teammates_i = teammates_i[edge_index[0], edge_index[1]]
-            edge_attr_i = torch.stack([distances_i, teammates_i], dim=-1)  # [N * N, 2]
-
-            graph = Data(x=node_attr_i, edge_index=edge_index.clone(), edge_attr=edge_attr_i)
+            graph = construct_graph_for_frame(match, frame, possessor, period_tracking, feature_dim, extend=extend)
             feature_graphs.append(graph)
 
     return feature_graphs
+
+
+def construct_intent_training_samples(
+    match: Match,
+    offsets: Tuple[int, ...] = INTENT_TRAIN_OFFSETS,
+    extend: bool = True,
+    verbose: bool = True,
+) -> Tuple[List[Data], torch.Tensor]:
+    if "ball_accel" not in match.tracking.columns:
+        match.tracking = proc.calc_physical_features(match.tracking, match.fps)
+
+    feature_dim = infer_node_feature_dim(extend)
+    offsets = tuple(int(offset) for offset in offsets if int(offset) > 0)
+    augmented_graphs: List[Data] = []
+    augmented_labels: List[torch.Tensor] = []
+    action_indices = match.labels[:, 0].long().numpy()
+    label_lookup = {int(label[0].item()): label for label in match.labels}
+    iterator = tqdm(action_indices, desc="Augmenting intent samples") if verbose else action_indices
+
+    for action_index in iterator:
+        action_index = int(action_index)
+        label_row = label_lookup[action_index]
+        period = int(match.actions.at[action_index, "period_id"])
+        current_frame = int(match.actions.at[action_index, "frame_id"])
+        possessor = match.actions.at[action_index, "object_id"]
+        period_tracking = match.tracking[match.tracking["period_id"] == period]
+
+        base_graph = construct_graph_for_frame(match, current_frame, possessor, period_tracking, feature_dim, extend=extend)
+        if base_graph is None:
+            continue
+
+        augmented_graphs.append(base_graph)
+        augmented_labels.append(label_row.clone())
+
+        snapshot = load_frame_snapshot(period_tracking, match.tracking, current_frame)
+        phase_id = snapshot["phase_id"].iloc[0] if not snapshot.empty and "phase_id" in snapshot.columns else np.nan
+        if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
+            continue
+
+        phase_tracking = match.tracking[match.tracking["phase_id"] == int(phase_id)]
+        for offset in offsets:
+            prior_frame = resolve_prior_frame(phase_tracking, possessor, current_frame, offset)
+            if prior_frame is None:
+                continue
+
+            graph = construct_graph_for_frame(match, prior_frame, possessor, period_tracking, feature_dim, extend=extend)
+            if graph is None:
+                continue
+
+            augmented_graphs.append(graph)
+            augmented_labels.append(label_row.clone())
+
+    return augmented_graphs, torch.stack(augmented_labels, dim=0)
 
 
 def augment_blocked_actions(match: Match, max_block_dist=5, max_block_angle=15) -> Tuple[List[Data], torch.Tensor]:
@@ -333,9 +417,12 @@ if __name__ == "__main__":
     parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining future xG")
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
     parser.add_argument("--augment_blocks", action="store_true", default=False)
+    parser.add_argument("--feature_variant", type=str, default="base", choices=["base", "intent_train_augmented"])
     args, _ = parser.parse_known_args()
 
     if args.action_type.startswith("shot"):
+        if args.feature_variant != "base":
+            raise ValueError("Intent-training augmentation is only supported for action_type=all.")
         args.action_type = "shot_augment"
         feature_dir = "data/ajax/features/augmented_shot_graphs"
         label_dir = "data/ajax/features/augmented_shot_labels"
@@ -343,13 +430,19 @@ if __name__ == "__main__":
         os.makedirs(label_dir, exist_ok=True)
 
     else:  # args.actions_type == "all"
-        feature_dir = "data/ajax/features/action_graphs"
-        label_dir = f"data/ajax/features/action_labels_{args.return_type}"
+        if args.feature_variant == "intent_train_augmented":
+            feature_dir = str(ACTION_GRAPH_INTENT_TRAIN_DIR)
+            label_dir = f"data/ajax/features/action_labels_intent_train_{args.return_type}"
+        else:
+            feature_dir = str(ACTION_GRAPH_DIR)
+            label_dir = f"data/ajax/features/action_labels_{args.return_type}"
         os.makedirs(feature_dir, exist_ok=True)
         os.makedirs(label_dir, exist_ok=True)
 
         if args.post_action:
-            post_feature_dir = "data/ajax/features/post_action_graphs"
+            if args.feature_variant != "base":
+                raise ValueError("Post-action features are only supported for base graphs.")
+            post_feature_dir = str(POST_ACTION_GRAPH_DIR)
             os.makedirs(post_feature_dir, exist_ok=True)
 
     if args.augment_blocks:
@@ -364,9 +457,9 @@ if __name__ == "__main__":
     match_dates = lineups[["game_id", "game_date"]].drop_duplicates().set_index("game_id")["game_date"]
 
     if args.split == "train":
-        match_ids, _ = load_base_splits(feature_dir)
+        match_ids, _ = load_base_splits()
     else:  # split == "test"
-        _, match_ids = load_base_splits(feature_dir)
+        _, match_ids = load_base_splits()
 
     n_matches = len(match_ids)
 
@@ -389,18 +482,33 @@ if __name__ == "__main__":
 
         action_indices = match.labels[:, 0].numpy().astype(int)
         assert np.all(np.sort(action_indices) == action_indices)
-        torch.save(match.labels, f"{label_dir}/{match_id}.pt")
+        if args.feature_variant == "intent_train_augmented":
+            print("Constructing intent-training augmentation graphs...")
+            augmented_graphs, augmented_labels = construct_intent_training_samples(match, extend=True)
+            torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
+            torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
+            print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
+        else:
+            torch.save(match.labels, f"{label_dir}/{match_id}.pt")
 
-        print("Constructing graph features for actions...")
-        match.graph_features_0 = construct_graph_features(match, extend=True, post_action=False)
-        torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
+            print("Constructing base graph features for actions...")
+            match.graph_features_0 = construct_graph_features(
+                match,
+                extend=True,
+                post_action=False,
+            )
+            torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
 
-        if args.post_action:
-            print("Constructing graph features for post-actions...")
-            match.graph_features_1 = construct_graph_features(match, extend=True, post_action=True)
-            torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
+            if args.post_action:
+                print("Constructing base graph features for post-actions...")
+                match.graph_features_1 = construct_graph_features(
+                    match,
+                    extend=True,
+                    post_action=True,
+                )
+                torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
 
-        print(f"Successfully saved for {match.labels.shape[0]} events.")
+            print(f"Successfully saved for {match.labels.shape[0]} events.")
 
         if args.augment_blocks:
             augmented_graph_features, augmented_labels = augment_blocked_actions(match)

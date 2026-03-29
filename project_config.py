@@ -23,6 +23,9 @@ TRACKING_DIR = DATA_ROOT / "tracking"
 TRACKING_PROCESSED_DIR = DATA_ROOT / "tracking_processed"
 EVENT_SYNCED_DIR = DATA_ROOT / "event_synced"
 FEATURE_DIR = DATA_ROOT / "features"
+ACTION_GRAPH_DIR = FEATURE_DIR / "action_graphs"
+ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
+POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
 SAVED_DIR = PROJECT_ROOT / "saved"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
 SPLIT_DIR = DATA_ROOT / "splits"
@@ -31,6 +34,7 @@ SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 TRAIN_POOL_SIZE = 245
 MODEL_TRAIN_SIZE = 200
 SPLIT_SEED = 100
+INTENT_TRAIN_OFFSETS = (12, 25)
 
 
 def ensure_project_dirs() -> None:

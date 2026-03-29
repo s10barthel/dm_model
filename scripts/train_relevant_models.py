@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+BASE_FEATURE_DIR = "data/ajax/features/action_graphs"
+BASE_LABEL_DIR = "data/ajax/features/action_labels_disc_0.9"
+INTENT_TRAIN_FEATURE_DIR = "data/ajax/features/action_graphs_intent_train"
+INTENT_TRAIN_LABEL_DIR = "data/ajax/features/action_labels_intent_train_disc_0.9"
 
 TRAINING_COMMANDS: list[list[str]] = [
     [
@@ -50,6 +54,14 @@ TRAINING_COMMANDS: list[list[str]] = [
         "50",
         "--seed",
         "100",
+        "--feature_dir",
+        BASE_FEATURE_DIR,
+        "--label_dir",
+        BASE_LABEL_DIR,
+        "--train_feature_dir",
+        INTENT_TRAIN_FEATURE_DIR,
+        "--train_label_dir",
+        INTENT_TRAIN_LABEL_DIR,
     ],
     [
         "--task",
@@ -96,6 +108,14 @@ TRAINING_COMMANDS: list[list[str]] = [
         "50",
         "--seed",
         "100",
+        "--feature_dir",
+        BASE_FEATURE_DIR,
+        "--label_dir",
+        BASE_LABEL_DIR,
+        "--train_feature_dir",
+        INTENT_TRAIN_FEATURE_DIR,
+        "--train_label_dir",
+        INTENT_TRAIN_LABEL_DIR,
     ],
     [
         "--task",
@@ -142,6 +162,10 @@ TRAINING_COMMANDS: list[list[str]] = [
         "50",
         "--seed",
         "100",
+        "--feature_dir",
+        BASE_FEATURE_DIR,
+        "--label_dir",
+        BASE_LABEL_DIR,
     ],
     [
         "--task",
@@ -185,6 +209,10 @@ TRAINING_COMMANDS: list[list[str]] = [
         "50",
         "--seed",
         "100",
+        "--feature_dir",
+        BASE_FEATURE_DIR,
+        "--label_dir",
+        BASE_LABEL_DIR,
     ],
     [
         "--task",
@@ -228,6 +256,10 @@ TRAINING_COMMANDS: list[list[str]] = [
         "50",
         "--seed",
         "100",
+        "--feature_dir",
+        BASE_FEATURE_DIR,
+        "--label_dir",
+        BASE_LABEL_DIR,
     ],
 ]
 
