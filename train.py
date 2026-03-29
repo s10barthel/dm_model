@@ -15,8 +15,10 @@ from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset
 from datatools import config
+from datatools.config import LABEL_INDEX
 from models.gnn import GNN
 from models.utils import (
+    validate_target_flags,
     load_splits,
     estimate_propensity,
     get_args_str,
@@ -51,6 +53,7 @@ parser.add_argument("--polar_dest", action="store_true", default=False, help="us
 parser.add_argument("--dest_sigma", type=float, default=3.0, help="sigma for smoothing target dest distribution")
 
 parser.add_argument("--use_xg", action="store_true", default=False, help="use xG instead of actual goal labels")
+parser.add_argument("--use_xt", action="store_true", default=False, help="use xT instead of xG or actual goal labels")
 parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining return")
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
@@ -110,6 +113,8 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(args.seed)
     else:
         device = "cpu"
+
+    validate_target_flags(args)
 
     args.gnn_task = config.TASK_CONFIG.at[args.task, "gnn_task"]
     args.condition = config.TASK_CONFIG.at[args.task, "condition"]
@@ -184,8 +189,8 @@ if __name__ == "__main__":
     )
 
     if args.task == "pass_success" and args.weight_bce:
-        n_positives = train_dataset.labels[train_dataset.labels[:, -5] == 1].shape[0]
-        n_negatives = train_dataset.labels[train_dataset.labels[:, -5] == 0].shape[0]
+        n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX["success"]] == 1].shape[0]
+        n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX["success"]] == 0].shape[0]
         pos_weight = n_negatives / n_positives
     else:
         pos_weight = 1

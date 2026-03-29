@@ -45,6 +45,8 @@ PASS = [
     "cross",
 ]
 
+XT_ACTION_TYPES = ["pass", "cross", "shot"]
+
 INCOMING = [
     "interception",
     "ball_recovery",
@@ -92,3 +94,31 @@ TASK_CONFIG = pd.DataFrame(
     },
     index=["gnn_task", "pass", "dribble", "shot", "intended", "include_goals", "condition", "out_filter", "out_dim"],
 ).T
+
+LABEL_COLUMNS = [
+    "action_index",
+    "is_pass",
+    "is_dribble",
+    "is_shot",
+    "n_players",
+    "intent_index",
+    "receiver_index",
+    "duration",
+    "start_x",
+    "start_y",
+    "end_x",
+    "end_y",
+    "intent_x",
+    "intent_y",
+    "is_real",
+    "blocked",
+    "success",
+    "scores",
+    "scores_xg",
+    "concedes",
+    "concedes_xg",
+    "scores_xt",
+    "concedes_xt",
+]
+
+LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

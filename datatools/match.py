@@ -13,6 +13,7 @@ import torch
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.xt import merge_xt_annotations
 from datatools.viz_snapshot import SnapshotVisualizer
 
 
@@ -36,6 +37,8 @@ class Match(ABC):
         elif "game_id" in self.events.columns and not self.events.empty:
             self.match_id = str(self.events["game_id"].iloc[0])
         self.graph_features_by_dir: Dict[str, object] = {}
+        self.events = utils.sanitize_expected_goal(self.events)
+        self.events = merge_xt_annotations(self.events, self.match_id)
 
         self.action_type = action_type
         self.fps = fps
@@ -340,6 +343,9 @@ class Match(ABC):
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
         self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg"]
         self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg"]
+        self.events = utils.label_xt_returns(self.events, lookahead_len=5, eligible_types=tuple(config.XT_ACTION_TYPES))
+        self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
+        self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
 
         if discount_xg:
             self.events = utils.label_discounted_returns(self.events, gamma)
@@ -457,6 +463,8 @@ class Match(ABC):
                     self.actions.at[i, "scores_xg_disc"] if discount_xg else self.actions.at[i, "scores_xg"],
                     self.actions.at[i, "concedes"],
                     self.actions.at[i, "concedes_xg_disc"] if discount_xg else self.actions.at[i, "concedes_xg"],
+                    self.actions.at[i, "scores_xt"],
+                    self.actions.at[i, "concedes_xt"],
                 ]
             )
 

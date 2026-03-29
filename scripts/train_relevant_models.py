@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -264,10 +265,29 @@ TRAINING_COMMANDS: list[list[str]] = [
 ]
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of xG.")
+    return parser.parse_args()
+
+
+def configure_command(args: list[str], use_xt: bool) -> list[str]:
+    configured = list(args)
+    if not use_xt or configured[1] not in {"outcome_scoring", "outcome_conceding"}:
+        return configured
+
+    configured = [arg for arg in configured if arg != "--use_xg"]
+    if "--use_xt" not in configured:
+        insert_at = configured.index("--return_type") if "--return_type" in configured else len(configured)
+        configured.insert(insert_at, "--use_xt")
+    return configured
+
+
 def main() -> None:
+    cli_args = parse_args()
     python = sys.executable
     for args in TRAINING_COMMANDS:
-        command = [python, "train.py", *args]
+        command = [python, "train.py", *configure_command(args, cli_args.use_xt)]
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
 

@@ -26,6 +26,8 @@ FEATURE_DIR = DATA_ROOT / "features"
 ACTION_GRAPH_DIR = FEATURE_DIR / "action_graphs"
 ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
 POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
+XT_DIR = DATA_ROOT / "xT"
+XT_MATCH_DIR = XT_DIR / "matches"
 SAVED_DIR = PROJECT_ROOT / "saved"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
 SPLIT_DIR = DATA_ROOT / "splits"
@@ -46,6 +48,8 @@ def ensure_project_dirs() -> None:
         TRACKING_PROCESSED_DIR,
         EVENT_SYNCED_DIR,
         FEATURE_DIR,
+        XT_DIR,
+        XT_MATCH_DIR,
         COMPONENT_DIR,
         SAVED_DIR,
         SPLIT_DIR,

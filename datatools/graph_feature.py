@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.config import LABEL_INDEX
 from datatools.match import Match
 from project_config import (
     ACTION_GRAPH_DIR,
@@ -399,9 +400,9 @@ def augment_blocked_actions(match: Match, max_block_dist=5, max_block_angle=15) 
 
                 augmented_labels_i[5] = teammates.index(blocked_intent)
                 augmented_labels_i[6] = (teammates + opponents).index(blocker)
-                augmented_labels_i[-7] = 0  # Indicating that this is an augmented event and not a real one
-                augmented_labels_i[-6] = 1  # Indicating that this is a blocked event
-                augmented_labels_i[-5] = 0  # Indicating that this is a failed event
+                augmented_labels_i[LABEL_INDEX["is_real"]] = 0  # Indicating that this is an augmented event and not a real one
+                augmented_labels_i[LABEL_INDEX["blocked"]] = 1  # Indicating that this is a blocked event
+                augmented_labels_i[LABEL_INDEX["success"]] = 0  # Indicating that this is a failed event
 
                 augmented_features.append(match.graph_features_0[i].clone())
                 augmented_labels.append(augmented_labels_i)
