@@ -512,7 +512,7 @@ def build_defcon_event_table(
     actions["spadl_type"] = actions["type_name"]
     actions["success"] = actions["result_name"].eq("success")
     actions["offside"] = actions["result_name"].eq("offside")
-    actions["expected_goal"] = actions["expected_goal"].fillna(0.0).astype(float)
+    actions["expected_goal"] = actions["expected_goal"].astype(float)
 
     supported_types = set(sync_config.SPADL_TYPES)
     actions = actions[actions["spadl_type"].isin(supported_types)].copy()
