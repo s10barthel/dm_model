@@ -1,8 +1,25 @@
 # dm_model
 
-Scoped reproduction of DEFCON for Sportec Bundesliga 2023/24 data.
+This repository is a scoped adaptation of the upstream DEFCON implementation for Sportec Bundesliga 2023/24 data.
+Upstream DEFCON source code: https://github.com/hyunsungkim-ds/defcon
 
-This project keeps the downstream DEFCON code close to upstream and adds the missing Sportec-specific preprocessing needed to produce DEFCON-compatible inputs. The retained model scope is:
+The model structure is copied from DEFCON, the upstream source code for the paper "Better Prevent than Tackle: Valuing Defense in Soccer Based on Graph Neural Networks". This repository keeps the downstream DEFCON runtime close to upstream, narrows the retained scope, and adds the dataset- and workflow-specific adaptations needed for Sportec, HawkEye, and SkillCorner data.
+
+## Changes From Upstream DEFCON
+
+The main adaptations in this repository are:
+
+- Sportec-specific preprocessing and synchronization to turn Sportec XML tracking/event data into DEFCON-compatible inputs
+- xT as an alternative soft target variable for `outcome_scoring` and `outcome_conceding`
+- temporal `t0 / t-12 / t-25` augmentation for `action_intent` and `pass_intent` training data
+- narrowed modeled pass family: only `pass` and `cross` are treated as pass-like actions, so set pieces are excluded from the modeled pass category
+- a HawkEye inference/visualization pipeline for frame-level external data
+- a SkillCorner inference/visualization pipeline for synchronized external tracking+event data
+- a HawkEye BallReceipt freeze option that can freeze the possessor and ball state after the receipt frame
+
+These changes are implementation adaptations to upstream DEFCON behavior, not separate model families or new research claims.
+
+The retained model scope here is:
 
 - `(a1)` action selection probability
 - `(b1)` pass success probability
@@ -20,7 +37,7 @@ The following upstream parts are intentionally out of scope here:
 - DEFCON snapshot: `_vendor/defcon` at commit `f8a3a2b987b376221afe30453b0f145b965edcae`
 - ELASTIC snapshot: `_vendor/elastic` at commit `bc41bcdf43451ae639c6ae7b299c1ccd3712d00e`
 
-The copied/adapted runtime files live at the project root. `_vendor` is kept only as a reference copy.
+The copied/adapted runtime files live at the project root. `_vendor` is kept as a reference copy of the upstream baseline.
 
 ## Expected Raw Data Layout
 
@@ -211,13 +228,63 @@ under `data/ajax/defcon_components/<match_id>/`.
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123
 ```
 
-By default the visualization uses the `success` branch for the outcome-conditioned models. To plot the failure-conditioned version instead:
+The script always writes 6 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
+
+- `action_intent.png`
+- `pass_success.png`
+- `outcome_scoring_success.png`
+- `outcome_scoring_failure.png`
+- `outcome_conceding_success.png`
+- `outcome_conceding_failure.png`
+
+Useful option:
+
+- `--show-trajectories` to render dashed recent player trajectories
+
+### 8. Run frame-level inference on HawkEye data
 
 ```powershell
-python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --outcome-case failure
+python scripts/run_hawkeye.py
 ```
 
-The script writes one PNG per component under `data/ajax/visualizations/<match_id>/<action_id>/`.
+This processes `hawkeye_data/centroid_data_team.csv` and `hawkeye_data/ball_data_selected.csv` and writes consolidated component outputs to:
+
+- `data/ajax/defcon_components/hawkeye_data.parquet`
+- `data/ajax/defcon_components/hawkeye_data.csv`
+
+Useful options:
+
+- `--situation-id ...` to restrict inference to selected situations
+- `--limit N` to smoke-test on the first `N` situations
+- `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
+
+To visualize one HawkEye situation as GIFs:
+
+```powershell
+python scripts/visualize_hawkeye.py --situation-id <hawkeye_id>
+```
+
+This writes 6 GIFs under `data/ajax/visualizations/hawkeye/<situation_id>/`.
+
+### 9. Run frame-level inference on SkillCorner data
+
+```powershell
+python scripts/run_skillcorner.py
+```
+
+This reads synchronized SkillCorner files from `skillcorner_data/` and writes per-match parquet outputs under:
+
+- `data/ajax/defcon_components/skillcorner/<match_id>/`
+
+The SkillCorner adapter processes `player_possession` events frame by frame and exports the same 6 retained DEFCON components.
+
+To visualize one SkillCorner possession as GIFs:
+
+```powershell
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
+```
+
+This writes 6 GIFs under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
 
 ## Outcome Target Selection
 
@@ -279,5 +346,5 @@ If you generate or rebuild xT artifacts, rerun `scripts/generate_relevant_featur
 
 - `main.py` still reflects the full upstream defensive-score pipeline and is not part of this scoped reproduction.
 - `datatools/tabular_feature.py` and the UxG/defensive-score path were left largely upstream because they are out of scope here.
-- The preprocessing script is the main project-specific adaptation; downstream GNN training and evaluation stay close to upstream DEFCON.
+- The core GNN training and evaluation flow stays close to upstream DEFCON; most project-specific changes are in preprocessing, target construction, and extra-data adapters.
 - This repository is intended to track code, docs, and vendor snapshots only. Raw data, processed data, intermediate features, model outputs, and local environments are intentionally excluded from git.
