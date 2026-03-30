@@ -265,7 +265,6 @@ class SnapshotVisualizer:
             sm.set_array([])
 
             cbar = fig.colorbar(sm, ax=ax)
-            cbar.set_label("Defender responsibility", fontsize=25, rotation=-90, labelpad=25)
             cbar.ax.tick_params(labelsize=20)
 
         if self.edges is not None:

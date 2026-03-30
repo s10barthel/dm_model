@@ -35,6 +35,7 @@ def calculate_event_features(
     possessor: str,
     extend=False,
     sequential=False,
+    rotate_to_ltr: bool = True,
     eps=1e-6,
 ) -> np.ndarray:
     seq_len = len(snapshot) if sequential else 1
@@ -80,7 +81,7 @@ def calculate_event_features(
     poss_vy = snapshot[f"{possessor}_vy"].values[:, np.newaxis]
 
     # Make the attacking team plays from left to right
-    if possessor[:4] == "away":
+    if rotate_to_ltr and possessor[:4] == "away":
         player_x = config.FIELD_SIZE[0] - player_x
         player_y = config.FIELD_SIZE[1] - player_y
         player_vx = -player_vx
@@ -200,6 +201,7 @@ def construct_graph_for_frame(
     period_tracking: pd.DataFrame,
     feature_dim: int,
     extend: bool = True,
+    rotate_to_ltr: bool = True,
 ) -> Data | None:
     if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
         return None
@@ -221,7 +223,16 @@ def construct_graph_for_frame(
     if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
         return None
 
-    event_features = torch.tensor(calculate_event_features(match, snapshot, possessor, extend)[0], dtype=torch.float32)
+    event_features = torch.tensor(
+        calculate_event_features(
+            match,
+            snapshot,
+            possessor,
+            extend,
+            rotate_to_ltr=rotate_to_ltr,
+        )[0],
+        dtype=torch.float32,
+    )
     missing_players = match.max_players - event_features.shape[0]
     if missing_players > 0:
         padding_features = -torch.ones((missing_players, feature_dim))
