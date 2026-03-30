@@ -6,6 +6,8 @@ saved/
 .venv/
 test/*.csv
 test/*.png
+test_kpi_final/
+test_nan_xg/
 
 __pycache__/
 *.py[cod]
