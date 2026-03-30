@@ -39,6 +39,8 @@ def parse_args() -> argparse.Namespace:
         "--ball-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"),
     )
+    parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
+    parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
@@ -46,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
     parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "hawkeye"))
+    parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
 
 
@@ -114,7 +117,11 @@ def main() -> None:
     if situation_tracking.empty:
         raise KeyError(f"Hawkeye situation id {situation_id} was not found in {args.tracking_csv}.")
 
-    situation, _, _ = build_hawkeye_situation(situation_tracking, ball)
+    situation, _, _ = build_hawkeye_situation(
+        situation_tracking,
+        ball,
+        freeze_ballreceipt=args.freeze_ballreceipt,
+    )
     model_specs = load_hawkeye_models(
         action_intent_model_id=args.action_intent_model_id,
         pass_success_model_id=args.pass_success_model_id,

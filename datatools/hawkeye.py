@@ -30,6 +30,7 @@ TRACKING_REQUIRED_COLUMNS = [
     "possession_team",
 ]
 BALL_REQUIRED_COLUMNS = ["game_id", "half", "abs_time", "ball_x", "ball_y", "ball_z"]
+BALLRECEIPT_ATOL = 1e-9
 COMPONENT_COLUMNS = [
     "action_intent",
     "pass_success",
@@ -94,6 +95,8 @@ def clean_hawkeye_tracking(tracking: pd.DataFrame) -> pd.DataFrame:
     cleaned["PlayerID"] = pd.to_numeric(cleaned["PlayerID"], errors="coerce").astype("Int64")
     cleaned["centroid_x"] = pd.to_numeric(cleaned["centroid_x"], errors="coerce")
     cleaned["centroid_y"] = pd.to_numeric(cleaned["centroid_y"], errors="coerce")
+    if "BallReceipt" in cleaned.columns:
+        cleaned["BallReceipt"] = pd.to_numeric(cleaned["BallReceipt"], errors="coerce")
 
     cleaned = cleaned.dropna(
         subset=["game_id", "half", "abs_time", "uefa_player_id", "PlayerID", "id", "team", "possession_team"]
@@ -224,6 +227,103 @@ def _build_frame_meta(
     frame_meta = pd.DataFrame(frame_rows).set_index("frame_id").sort_index()
     frame_meta.index.name = "frame_id"
     return frame_meta
+
+
+def _resolve_ballreceipt_anchor(situation_tracking: pd.DataFrame) -> dict[str, Any]:
+    if "BallReceipt" not in situation_tracking.columns:
+        raise KeyError(
+            f"Hawkeye situation {situation_tracking['id'].iloc[0]} is missing the BallReceipt column required for freezing."
+        )
+
+    ballreceipt_values = pd.to_numeric(situation_tracking["BallReceipt"], errors="coerce").dropna().unique()
+    if len(ballreceipt_values) != 1:
+        raise ValueError(
+            f"Hawkeye situation {situation_tracking['id'].iloc[0]} must contain exactly one BallReceipt value, found {ballreceipt_values.tolist()}."
+        )
+
+    player_ids = situation_tracking["PlayerID"].dropna().astype(int).unique()
+    if len(player_ids) != 1:
+        raise ValueError(
+            f"Hawkeye situation {situation_tracking['id'].iloc[0]} must contain exactly one PlayerID, found {player_ids.tolist()}."
+        )
+
+    ballreceipt = float(ballreceipt_values[0])
+    player_id = int(player_ids[0])
+    anchor_rows = situation_tracking.loc[
+        np.isclose(situation_tracking["abs_time"], ballreceipt, atol=BALLRECEIPT_ATOL)
+        & (situation_tracking["uefa_player_id"] == player_id)
+    ].copy()
+    if len(anchor_rows) != 1:
+        raise ValueError(
+            f"Hawkeye situation {situation_tracking['id'].iloc[0]} requires exactly one carrier row at BallReceipt={ballreceipt}, found {len(anchor_rows)}."
+        )
+
+    anchor_row = anchor_rows.iloc[0]
+    return {
+        "ballreceipt": ballreceipt,
+        "player_id": player_id,
+        "game_id": int(anchor_row["game_id"]),
+        "half": int(anchor_row["half"]),
+        "carrier_x": float(anchor_row["centroid_x"]),
+        "carrier_y": float(anchor_row["centroid_y"]),
+    }
+
+
+def _freeze_hawkeye_ballreceipt_tracking(
+    situation_tracking: pd.DataFrame,
+    anchor: dict[str, Any] | None,
+    enabled: bool = True,
+) -> pd.DataFrame:
+    frozen = situation_tracking.copy()
+    if not enabled or anchor is None:
+        return frozen
+
+    future_mask = (
+        (frozen["uefa_player_id"] == int(anchor["player_id"]))
+        & (frozen["abs_time"] > float(anchor["ballreceipt"]))
+    )
+    frozen.loc[future_mask, "centroid_x"] = float(anchor["carrier_x"])
+    frozen.loc[future_mask, "centroid_y"] = float(anchor["carrier_y"])
+    return frozen
+
+
+def _freeze_hawkeye_ballreceipt_frame_meta(
+    frame_meta: pd.DataFrame,
+    ball: pd.DataFrame,
+    anchor: dict[str, Any] | None,
+    enabled: bool = True,
+) -> pd.DataFrame:
+    frozen = frame_meta.copy()
+    if not enabled or anchor is None:
+        return frozen
+
+    ball_key = (
+        int(anchor["game_id"]),
+        int(anchor["half"]),
+        float(anchor["ballreceipt"]),
+    )
+    ball_lookup = ball.set_index(FRAME_KEY_COLUMNS)
+    if ball_key not in ball_lookup.index:
+        raise ValueError(
+            f"Hawkeye ball data is missing the BallReceipt frame {ball_key} required for freezing."
+        )
+
+    ball_row = ball_lookup.loc[ball_key]
+    if isinstance(ball_row, pd.DataFrame):
+        if len(ball_row) != 1:
+            raise ValueError(f"Hawkeye ball data contains duplicated BallReceipt rows for frame {ball_key}.")
+        ball_row = ball_row.iloc[0]
+
+    ball_x = _field_x(float(ball_row["ball_x"]))
+    ball_y = _field_y(float(ball_row["ball_y"]))
+    ball_z = float(ball_row["ball_z"]) if not pd.isna(ball_row["ball_z"]) else np.nan
+
+    future_mask = frozen["abs_time"] > float(anchor["ballreceipt"])
+    frozen.loc[future_mask, "ball_x"] = ball_x
+    frozen.loc[future_mask, "ball_y"] = ball_y
+    frozen.loc[future_mask, "ball_z"] = ball_z
+    frozen.loc[future_mask, "has_ball"] = True
+    return frozen
 
 
 def _build_tracking_wide(
@@ -410,15 +510,28 @@ def _build_actions_and_labels(situation: HawkeyeSituation) -> tuple[pd.DataFrame
 def build_hawkeye_situation(
     situation_tracking: pd.DataFrame,
     ball: pd.DataFrame,
+    freeze_ballreceipt: bool = True,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
 
     situation_tracking = situation_tracking.copy()
+    anchor = _resolve_ballreceipt_anchor(situation_tracking) if freeze_ballreceipt else None
+    situation_tracking = _freeze_hawkeye_ballreceipt_tracking(
+        situation_tracking,
+        anchor,
+        enabled=freeze_ballreceipt,
+    )
     team_map = _stable_team_map(situation_tracking)
     prefix_to_team = {prefix: team for team, prefix in team_map.items()}
     object_map = _build_object_map(situation_tracking, team_map)
     frame_meta = _build_frame_meta(situation_tracking, ball, team_map, object_map)
+    frame_meta = _freeze_hawkeye_ballreceipt_frame_meta(
+        frame_meta,
+        ball,
+        anchor,
+        enabled=freeze_ballreceipt,
+    )
     tracking = _build_tracking_wide(situation_tracking, frame_meta, team_map)
 
     keepers = object_map.loc[object_map["role"] == 2, "object_id"].dropna().tolist()

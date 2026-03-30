@@ -38,12 +38,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--situation-id", action="append", help="Restrict inference to one or more Hawkeye situation ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N Hawkeye situations after sorting.")
+    parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
+    parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
     parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
     parser.add_argument("--output-dir", default=str(COMPONENT_DIR))
+    parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
 
 
@@ -71,7 +74,11 @@ def main() -> None:
     for index, situation_id in enumerate(situation_ids, start=1):
         print(f"[{index}/{len(situation_ids)}] {situation_id}")
         situation_tracking = tracking.loc[tracking["id"] == situation_id].copy()
-        situation, attacking_rows, stats = build_hawkeye_situation(situation_tracking, ball)
+        situation, attacking_rows, stats = build_hawkeye_situation(
+            situation_tracking,
+            ball,
+            freeze_ballreceipt=args.freeze_ballreceipt,
+        )
         components = infer_hawkeye_components(situation, model_specs, device=device)
         export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
         stats_by_situation[situation_id] = stats
