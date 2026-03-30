@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"),
     )
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--outcome-case", default="success", choices=["success", "failure"])
+    parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
@@ -49,20 +49,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def normalize_for_sizes(values: pd.Series) -> pd.Series:
-    if values.empty:
-        return values
-    max_value = float(values.max())
-    if max_value <= 0:
-        return values * 0 + 0.2
-    return (values / max_value).clip(lower=0.15)
-
-
 def render_frame_image(
     situation,
     frame_id: int,
     component_name: str,
     probs: pd.Series | None,
+    show_trajectories: bool = False,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -76,17 +68,22 @@ def render_frame_image(
         attack_targets = [player_id for player_id in probs.index if isinstance(player_id, str) and player_id.startswith(attacking_prefix)]
         component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
 
-    player_sizes = normalize_for_sizes(component_probs) if not component_probs.empty else None
     player_colors = component_probs if not component_probs.empty else None
     player_annots = component_probs if not component_probs.empty else None
+    highlight_players = (
+        {frame_info["possessor_object_id"]: "#ffd400"}
+        if isinstance(frame_info.get("possessor_object_id"), str)
+        else None
+    )
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
-        player_sizes=player_sizes,
         player_colors=player_colors,
         player_annots=player_annots,
         show_velocities=True,
+        show_trajectories=show_trajectories,
+        highlight_players=highlight_players,
     )
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
@@ -136,19 +133,20 @@ def main() -> None:
         "outcome_conceding_failure": components.get("outcome_conceding_failure"),
     }
 
-    selected_components = {
-        "action_intent": component_frames["action_intent"],
-        "pass_success": component_frames["pass_success"],
-        f"outcome_scoring_{args.outcome_case}": component_frames[f"outcome_scoring_{args.outcome_case}"],
-        f"outcome_conceding_{args.outcome_case}": component_frames[f"outcome_conceding_{args.outcome_case}"],
-    }
-
     frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
-    for component_name, component_table in selected_components.items():
+    for component_name, component_table in component_frames.items():
         images: list[Image.Image] = []
         for frame_id in frame_ids:
             frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
-            images.append(render_frame_image(situation, frame_id, component_name, frame_probs))
+            images.append(
+                render_frame_image(
+                    situation,
+                    frame_id,
+                    component_name,
+                    frame_probs,
+                    show_trajectories=args.show_trajectories,
+                )
+            )
 
         output_path = output_dir / f"{component_name}.gif"
         images[0].save(

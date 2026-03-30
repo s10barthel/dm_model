@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", required=True)
     parser.add_argument("--action-id", type=int, required=True)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--outcome-case", default="success", choices=["success", "failure"])
+    parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
@@ -52,16 +52,14 @@ def load_match(match_id: str) -> Match:
     return match
 
 
-def normalize_for_sizes(values: pd.Series) -> pd.Series:
-    if values.empty:
-        return values
-    max_value = float(values.max())
-    if max_value <= 0:
-        return values * 0 + 0.2
-    return (values / max_value).clip(lower=0.15)
-
-
-def render_component(match: Match, action_id: int, component_name: str, probs: pd.Series, output_path: Path) -> None:
+def render_component(
+    match: Match,
+    action_id: int,
+    component_name: str,
+    probs: pd.Series,
+    output_path: Path,
+    show_trajectories: bool = False,
+) -> None:
     action = match.actions.loc[action_id]
     frame_id = int(action["frame_id"])
     snapshot = match.tracking.loc[max(frame_id - 24, 0) : frame_id].copy()
@@ -70,15 +68,18 @@ def render_component(match: Match, action_id: int, component_name: str, probs: p
     attacking_prefix = action["object_id"][:4]
     attack_targets = [player_id for player_id in probs.index if player_id.startswith(attacking_prefix)]
     component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
-    player_sizes = normalize_for_sizes(component_probs)
+    player_colors = component_probs if not component_probs.empty else None
+    player_annots = component_probs if not component_probs.empty else None
+    highlight_players = {action["object_id"]: "#ffd400"} if isinstance(action["object_id"], str) else None
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
-        player_sizes=player_sizes,
-        player_colors=component_probs,
-        player_annots=component_probs,
+        player_colors=player_colors,
+        player_annots=player_annots,
         show_velocities=True,
+        show_trajectories=show_trajectories,
+        highlight_players=highlight_players,
     )
 
     rotate_pitch = attacking_prefix == "away"
@@ -120,20 +121,27 @@ def main() -> None:
                 post_action=False,
                 event_indices=[args.action_id],
             )
-            probs = success_probs if args.outcome_case == "success" else failure_probs
-            output_name = f"{component_name}_{args.outcome_case}"
+            for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
+                component_probs = probs.loc[args.action_id]
+                render_component(
+                    match=match,
+                    action_id=args.action_id,
+                    component_name=f"{component_name}_{outcome_case}",
+                    probs=component_probs,
+                    output_path=output_dir / f"{component_name}_{outcome_case}.png",
+                    show_trajectories=args.show_trajectories,
+                )
         else:
             probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[args.action_id])
-            output_name = component_name
-
-        component_probs = probs.loc[args.action_id]
-        render_component(
-            match=match,
-            action_id=args.action_id,
-            component_name=output_name,
-            probs=component_probs,
-            output_path=output_dir / f"{output_name}.png",
-        )
+            component_probs = probs.loc[args.action_id]
+            render_component(
+                match=match,
+                action_id=args.action_id,
+                component_name=component_name,
+                probs=component_probs,
+                output_path=output_dir / f"{component_name}.png",
+                show_trajectories=args.show_trajectories,
+            )
 
     print(f"Saved component plots to {output_dir}")
 

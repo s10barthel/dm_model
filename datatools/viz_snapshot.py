@@ -14,6 +14,11 @@ from matplotlib import axes
 import datatools.matplotsoccer as mps
 from datatools import config
 
+COMPONENT_CMAP = mpl.colors.LinearSegmentedColormap.from_list(
+    "component_orange_red",
+    plt.get_cmap("jet")(np.linspace(0.7, 1.0, 256)),
+)
+
 
 class SnapshotVisualizer:
     def __init__(
@@ -28,6 +33,8 @@ class SnapshotVisualizer:
         arrows: List[Tuple[str, str]] = None,
         heatmap: np.ndarray = None,
         show_velocities=True,
+        show_trajectories=False,
+        highlight_players: Dict[str, str] = None,
         unnormalize=False,
     ):
         self.snapshot = snapshot.copy()
@@ -40,12 +47,25 @@ class SnapshotVisualizer:
         self.arrows = arrows
         self.heatmap = heatmap
         self.show_velocities = show_velocities
+        self.show_trajectories = show_trajectories
+        self.highlight_players = highlight_players or {}
 
         if unnormalize:
             x_cols = [c for c in self.snapshot.columns if c.endswith("_x")]
             y_cols = [c for c in self.snapshot.columns if c.endswith("_y")]
             self.snapshot[x_cols] = (self.snapshot[x_cols] + 1) * config.FIELD_SIZE[0] / 2
             self.snapshot[y_cols] = (self.snapshot[y_cols] + 1) * config.FIELD_SIZE[1] / 2
+
+    def _get_highlight_styles(self, players: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        edgecolors = np.array(["none"] * len(players), dtype=object)
+        linewidths = np.zeros(len(players), dtype=float)
+
+        for idx, player in enumerate(players):
+            if player in self.highlight_players:
+                edgecolors[idx] = self.highlight_players[player]
+                linewidths[idx] = 1.5
+
+        return edgecolors, linewidths
 
     def plot_team_players(
         self,
@@ -62,9 +82,10 @@ class SnapshotVisualizer:
 
         players = [c[:-2] for c in xy.columns[0::n_features]]
         player_dict = dict(zip(players, np.arange(len(players)) + 1))
+        highlight_edgecolors, highlight_linewidths = self._get_highlight_styles(players)
 
         if self.marks is None:
-            ax.scatter(x, y, s=sizes, c=colors, zorder=2)
+            ax.scatter(x, y, s=sizes, c=colors, edgecolors=highlight_edgecolors, linewidths=highlight_linewidths, zorder=2)
 
         else:
             linewidth = 3
@@ -110,7 +131,22 @@ class SnapshotVisualizer:
                         player_y = xy[f"{p}_y"].values
                         ax.plot(player_x, player_y, c=color, linewidth=5, zorder=player_zorder)
 
-            ax.scatter(x, y, s=sizes, c=colors, edgecolors=edgecolors, linewidths=linewidth, zorder=player_zorder)
+            scatter_edgecolors = np.array(edgecolors, dtype=object)
+            scatter_linewidths = np.full(len(players), linewidth, dtype=float)
+            highlight_mask = highlight_edgecolors != "none"
+            scatter_edgecolors[highlight_mask] = highlight_edgecolors[highlight_mask]
+            scatter_linewidths[highlight_mask] = np.maximum(
+                scatter_linewidths[highlight_mask], highlight_linewidths[highlight_mask]
+            )
+            ax.scatter(
+                x,
+                y,
+                s=sizes,
+                c=colors,
+                edgecolors=scatter_edgecolors,
+                linewidths=scatter_linewidths,
+                zorder=player_zorder,
+            )
 
         if self.show_velocities:
             assert n_features >= 4
@@ -134,15 +170,16 @@ class SnapshotVisualizer:
             player_num = player_dict[p] if anonymize else int(p.split("_")[1])
             player_color = colors if isinstance(colors, str) else colors[i]
 
-            ax.plot(player_xy[:, 0], player_xy[:, 1], c=player_color, ls="--", zorder=0)
+            if self.show_trajectories:
+                ax.plot(player_xy[:, 0], player_xy[:, 1], c=player_color, ls="--", zorder=0)
             ax.annotate(
                 player_num,
                 xy=player_xy[-1],
                 ha="center",
                 va="center",
                 color="w",
-                fontsize=18,
-                fontweight="bold",
+                fontsize=12,
+                fontweight="normal",
                 zorder=3,
             )
 
@@ -158,8 +195,8 @@ class SnapshotVisualizer:
         annotate=None,
         smin=400,
         smax=2000,
-        cmin=0,
-        cmax=0.05,
+        cmin=None,
+        cmax=None,
         annot_type=None,
         hm_cmap="jet",
     ):
@@ -209,7 +246,7 @@ class SnapshotVisualizer:
 
         home_colors = "tab:blue" if switch_teams else "tab:red"
         away_colors = "tab:red" if switch_teams else "tab:blue"
-        annot_args = {"ha": "center", "va": "center", "color": "k", "fontsize": 16, "fontweight": "bold", "zorder": 7}
+        annot_args = {"ha": "center", "va": "center", "color": "k", "fontsize": 14, "fontweight": "normal", "zorder": 7}
 
         if self.annots is not None:
             if "scoring" in annot_type or "conceding" in annot_type or "epv" in annot_type:
@@ -239,33 +276,42 @@ class SnapshotVisualizer:
                 ax.annotate(text, xy=text_xy, **annot_args)
 
         if self.colors is not None:
-            if home_players[0] in self.colors.index:  # Use [0.7, 1] of jet as the colormap
-                cmap = plt.get_cmap("jet_r") if switch_teams else plt.get_cmap("jet")
-                cbound = 0.7
-                scores = (self.colors[home_players].values - cmin) * (1 - cbound) / (cmax - cmin) + cbound
-                scores = np.clip(scores, cbound, 1)
-                cmap_segment = mpl.colors.LinearSegmentedColormap.from_list("cmap", cmap(np.linspace(cbound, 1, 256)))
-                home_colors = cmap(scores)
+            colorbar_norm = None
+            colorbar_cmap = None
 
-            elif away_players[0] in self.colors.index:  # Use [0.6, 1] of jet_r as the colormap
-                cmap = plt.get_cmap("jet") if switch_teams else plt.get_cmap("jet_r")
-                cbound = 0.65
-                scores = (self.colors[away_players].values - cmin) * (1 - cbound) / (cmax - cmin) + cbound
-                scores = np.clip(scores, cbound, 1)
-                cmap_segment = mpl.colors.LinearSegmentedColormap.from_list("cmap", cmap(np.linspace(cbound, 1, 256)))
+            def resolve_colors(players: List[str], base_color: str):
+                player_values = self.colors.reindex(players)
+                valid_values = player_values.dropna()
+                if valid_values.empty:
+                    return base_color, None, None
 
-                # cmap = plt.get_cmap("jet")
-                # scores = (self.colors[away_players].values - cmin) * (0.4) / (cmax - cmin)
-                # scores = np.clip(scores, 0, 0.4)
-                # cmap_segment = mpl.colors.LinearSegmentedColormap.from_list("cmap", cmap(np.linspace(0, 0.4, 256)))
-                away_colors = cmap(scores)
+                local_cmin = float(valid_values.min()) if cmin is None else float(cmin)
+                local_cmax = float(valid_values.max()) if cmax is None else float(cmax)
+                if local_cmax <= local_cmin:
+                    eps = max(abs(local_cmin) * 0.01, 1e-6)
+                    local_cmin -= eps
+                    local_cmax += eps
 
-            norm = mpl.colors.Normalize(vmin=cmin, vmax=cmax)
-            sm = mpl.cm.ScalarMappable(norm=norm, cmap=cmap_segment)
-            sm.set_array([])
+                norm = mpl.colors.Normalize(vmin=local_cmin, vmax=local_cmax)
+                cmap = COMPONENT_CMAP
+                base_rgba = mpl.colors.to_rgba(base_color)
+                mapped_colors = [
+                    base_rgba if pd.isna(value) else cmap(norm(float(value)))
+                    for value in player_values
+                ]
+                return np.array(mapped_colors), norm, cmap
 
-            cbar = fig.colorbar(sm, ax=ax)
-            cbar.ax.tick_params(labelsize=20)
+            if any(player in self.colors.index for player in home_players):
+                home_colors, colorbar_norm, colorbar_cmap = resolve_colors(home_players, home_colors)
+            elif any(player in self.colors.index for player in away_players):
+                away_colors, colorbar_norm, colorbar_cmap = resolve_colors(away_players, away_colors)
+
+            if colorbar_norm is not None and colorbar_cmap is not None:
+                sm = mpl.cm.ScalarMappable(norm=colorbar_norm, cmap=colorbar_cmap)
+                sm.set_array([])
+
+                cbar = fig.colorbar(sm, ax=ax)
+                cbar.ax.tick_params(labelsize=20)
 
         if self.edges is not None:
             for src, dst in self.edges:
@@ -318,12 +364,10 @@ class SnapshotVisualizer:
             ball_x = self.ball_xy["ball_x"].values
             ball_y = self.ball_xy["ball_y"].values
             ax.scatter(ball_x[-1], ball_y[-1], s=200, c="w", edgecolors="k", marker="o", zorder=5)
-            ax.plot(ball_x, ball_y, "k", zorder=3)
 
         elif "ball_x" in snapshot.columns:
             ball_x = snapshot["ball_x"].values
             ball_y = snapshot["ball_y"].values
             ax.scatter(ball_x[-1], ball_y[-1], s=200, c="w", edgecolors="k", marker="o", zorder=5)
-            ax.plot(ball_x[-30:], ball_y[-30:], "k", zorder=3)
 
         plt.show()

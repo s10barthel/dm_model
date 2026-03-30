@@ -55,7 +55,7 @@ def _build_match() -> SimpleNamespace:
         [
             {
                 "frame_id": int(tracking.index.max()),
-                "object_id": "home_8",
+                "object_id": "home_9",
                 "spadl_type": "pass",
             }
         ],
@@ -94,6 +94,7 @@ def main() -> None:
         component_name="action_intent",
         probs=probs,
         output_path=output_path,
+        show_trajectories=False,
     )
 
     print(output_path.resolve())
