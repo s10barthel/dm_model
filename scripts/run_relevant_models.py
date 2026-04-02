@@ -32,6 +32,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def summarize_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def count_valid_graphs(graphs: list[object]) -> int:
+    if not isinstance(graphs, list):
+        raise TypeError("Cached graph artifact is not a list of graphs.")
+    return sum(graph is not None for graph in graphs)
+
+
 def load_match(match_id: str) -> Match:
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(DATA_ROOT / "tracking_processed" / f"{match_id}.parquet")
@@ -43,9 +53,19 @@ def load_match(match_id: str) -> Match:
 
     graph_path = FEATURE_DIR / "action_graphs" / f"{match_id}.pt"
     if graph_path.exists():
-        match.graph_features_0 = torch.load(graph_path, weights_only=False)
+        try:
+            match.graph_features_0 = torch.load(graph_path, weights_only=False)
+        except Exception as exc:
+            print(f"  Rebuilding cached action graphs after read failure: {summarize_exception(exc)}")
+            match.graph_features_0 = construct_graph_features(match, extend=True, post_action=False)
+        else:
+            if count_valid_graphs(match.graph_features_0) == 0:
+                print("  Rebuilding cached action graphs because the cached file contains no usable graphs.")
+                match.graph_features_0 = construct_graph_features(match, extend=True, post_action=False)
     else:
         match.graph_features_0 = construct_graph_features(match, extend=True, post_action=False)
+    if count_valid_graphs(match.graph_features_0) == 0:
+        raise ValueError("No usable action graphs are available for this match.")
 
     return match
 
@@ -97,43 +117,58 @@ def main() -> None:
 
     metadata = {
         "split": args.split,
-        "match_ids": match_ids,
+        "requested_match_ids": match_ids,
         "models": {
             "action_intent": args.action_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        "processed_match_ids": [],
+        "skipped_matches": [],
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     for index, match_id in enumerate(match_ids, start=1):
         print(f"[{index}/{len(match_ids)}] {match_id}")
-        match = load_match(match_id)
-        match_output_dir = output_dir / match_id
+        try:
+            match = load_match(match_id)
+            match_output_dir = output_dir / match_id
 
-        action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
-        pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
-        scoring_failure, scoring_success = inference_gnn(
-            match,
-            model_specs["outcome_scoring"],
-            device=device,
-            post_action=False,
-        )
-        conceding_failure, conceding_success = inference_gnn(
-            match,
-            model_specs["outcome_conceding"],
-            device=device,
-            post_action=False,
-        )
+            action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
+            pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
+            scoring_failure, scoring_success = inference_gnn(
+                match,
+                model_specs["outcome_scoring"],
+                device=device,
+                post_action=False,
+            )
+            conceding_failure, conceding_success = inference_gnn(
+                match,
+                model_specs["outcome_conceding"],
+                device=device,
+                post_action=False,
+            )
+            if action_intent.empty:
+                raise ValueError("No usable inference rows were produced for this match.")
 
-        save_component_table(action_intent, match_output_dir / "action_intent.parquet")
-        save_component_table(pass_success, match_output_dir / "pass_success.parquet")
-        save_component_table(scoring_success, match_output_dir / "outcome_scoring_success.parquet")
-        save_component_table(scoring_failure, match_output_dir / "outcome_scoring_failure.parquet")
-        save_component_table(conceding_success, match_output_dir / "outcome_conceding_success.parquet")
-        save_component_table(conceding_failure, match_output_dir / "outcome_conceding_failure.parquet")
+            save_component_table(action_intent, match_output_dir / "action_intent.parquet")
+            save_component_table(pass_success, match_output_dir / "pass_success.parquet")
+            save_component_table(scoring_success, match_output_dir / "outcome_scoring_success.parquet")
+            save_component_table(scoring_failure, match_output_dir / "outcome_scoring_failure.parquet")
+            save_component_table(conceding_success, match_output_dir / "outcome_conceding_success.parquet")
+            save_component_table(conceding_failure, match_output_dir / "outcome_conceding_failure.parquet")
+            metadata["processed_match_ids"].append(match_id)
+        except Exception as exc:
+            error_summary = summarize_exception(exc)
+            metadata["skipped_matches"].append({"match_id": match_id, "error": error_summary})
+            print(f"  SKIP {match_id}: {error_summary}")
+
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if not metadata["processed_match_ids"]:
+        raise RuntimeError("No usable matches were available for component inference.")
+    if metadata["skipped_matches"]:
+        print(f"Skipped {len(metadata['skipped_matches'])} matches during component inference.")
 
     print(f"Saved component predictions to {output_dir}")
 

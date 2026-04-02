@@ -56,7 +56,13 @@ def calculate_event_features(
 
     player_cols = home_cols + away_cols if possessor.startswith("home") else away_cols + home_cols
     players = [c[:-2] for c in player_cols if c.endswith("_x")]
-    assert set(players) - {"home_goal", "away_goal"} == set(active_players)
+    expected_players = set(active_players)
+    actual_players = set(players) - {"home_goal", "away_goal"}
+    if actual_players != expected_players:
+        raise ValueError(
+            f"Active-player mismatch for possessor {possessor}: expected {len(expected_players)} players, "
+            f"found {len(actual_players)}."
+        )
 
     is_teammate = np.tile([int(p[:4] == possessor[:4]) for p in players], (seq_len, 1))
     is_keeper = np.tile([int(p in active_keepers) for p in players], (seq_len, 1))
@@ -223,16 +229,19 @@ def construct_graph_for_frame(
     if pd.isna(phase_id) or int(phase_id) not in match.phases.index:
         return None
 
-    event_features = torch.tensor(
-        calculate_event_features(
-            match,
-            snapshot,
-            possessor,
-            extend,
-            rotate_to_ltr=rotate_to_ltr,
-        )[0],
-        dtype=torch.float32,
-    )
+    try:
+        event_features = torch.tensor(
+            calculate_event_features(
+                match,
+                snapshot,
+                possessor,
+                extend,
+                rotate_to_ltr=rotate_to_ltr,
+            )[0],
+            dtype=torch.float32,
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
     missing_players = match.max_players - event_features.shape[0]
     if missing_players > 0:
         padding_features = -torch.ones((missing_players, feature_dim))
@@ -255,14 +264,14 @@ def construct_graph_features(
     extend=True,
     post_action=False,
     verbose=True,
-) -> List[Data]:
+) -> List[Data | None]:
     if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
 
     if post_action:
         match.actions = match.label_post_actions(match.actions)
 
-    feature_graphs: List[Data] = []
+    feature_graphs: List[Data | None] = []
     feature_dim = infer_node_feature_dim(extend)
 
     for period in match.events["period_id"].unique():
@@ -283,6 +292,14 @@ def construct_graph_features(
             feature_graphs.append(graph)
 
     return feature_graphs
+
+
+def count_invalid_graphs(graphs: List[Data | None]) -> int:
+    return sum(graph is None for graph in graphs)
+
+
+def summarize_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 def construct_intent_training_samples(
@@ -335,7 +352,9 @@ def construct_intent_training_samples(
             augmented_graphs.append(graph)
             augmented_labels.append(label_row.clone())
 
-    return augmented_graphs, torch.stack(augmented_labels, dim=0)
+    if augmented_labels:
+        return augmented_graphs, torch.stack(augmented_labels, dim=0)
+    return augmented_graphs, torch.empty((0, match.labels.shape[1]), dtype=match.labels.dtype)
 
 
 def augment_blocked_actions(match: Match, max_block_dist=5, max_block_angle=15) -> Tuple[List[Data], torch.Tensor]:
@@ -475,55 +494,85 @@ if __name__ == "__main__":
 
     n_matches = len(match_ids)
 
+    successful_matches = 0
+    skipped_matches: list[dict[str, str]] = []
+
     for i, match_id in enumerate(match_ids):
-        events = pd.read_csv(f"data/ajax/event_synced/{match_id}.csv", header=0, parse_dates=["utc_timestamp"])
-        tracking = pd.read_parquet(f"data/ajax/tracking_processed/{match_id}.parquet")
-        match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id]
+        try:
+            events = pd.read_csv(f"data/ajax/event_synced/{match_id}.csv", header=0, parse_dates=["utc_timestamp"])
+            tracking = pd.read_parquet(f"data/ajax/tracking_processed/{match_id}.parquet")
+            match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id]
 
-        match = Match(events, tracking, match_lineup, args.action_type, include_goals=True)
-        match_date = match_dates[match_id].date()
-        match_name = " vs ".join(match_lineup["contestant_name"].unique())
-        print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")
+            match = Match(events, tracking, match_lineup, args.action_type, include_goals=True)
+            match_date = match_dates[match_id].date()
+            match_name = " vs ".join(match_lineup["contestant_name"].unique())
+            print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")
 
-        if args.return_type.startswith("disc"):
-            gamma = float(args.return_type.split("_")[-1])
-            match.labels = match.construct_labels(discount_xg=True, gamma=gamma)
-        if args.return_type.startswith("next"):
-            lookahead_len = int(args.return_type.split("_")[-1])
-            match.labels = match.construct_labels(discount_xg=False, lookahead_len=lookahead_len)
+            if args.return_type.startswith("disc"):
+                gamma = float(args.return_type.split("_")[-1])
+                match.labels = match.construct_labels(discount_xg=True, gamma=gamma)
+            if args.return_type.startswith("next"):
+                lookahead_len = int(args.return_type.split("_")[-1])
+                match.labels = match.construct_labels(discount_xg=False, lookahead_len=lookahead_len)
+            if match.labels.numel() == 0:
+                raise ValueError("No usable labels were constructed for this match.")
 
-        action_indices = match.labels[:, 0].numpy().astype(int)
-        assert np.all(np.sort(action_indices) == action_indices)
-        if args.feature_variant == "intent_train_augmented":
-            print("Constructing intent-training augmentation graphs...")
-            augmented_graphs, augmented_labels = construct_intent_training_samples(match, extend=True)
-            torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
-            torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
-            print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
-        else:
-            torch.save(match.labels, f"{label_dir}/{match_id}.pt")
+            action_indices = match.labels[:, 0].numpy().astype(int)
+            if not np.all(np.sort(action_indices) == action_indices):
+                raise ValueError("Action labels are not sorted by action index.")
 
-            print("Constructing base graph features for actions...")
-            match.graph_features_0 = construct_graph_features(
-                match,
-                extend=True,
-                post_action=False,
-            )
-            torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
-
-            if args.post_action:
-                print("Constructing base graph features for post-actions...")
-                match.graph_features_1 = construct_graph_features(
+            if args.feature_variant == "intent_train_augmented":
+                print("Constructing intent-training augmentation graphs...")
+                augmented_graphs, augmented_labels = construct_intent_training_samples(match, extend=True)
+                if not augmented_graphs or augmented_labels.numel() == 0:
+                    raise ValueError("No usable intent-training samples were constructed for this match.")
+                torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
+                torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
+                print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
+            else:
+                print("Constructing base graph features for actions...")
+                match.graph_features_0 = construct_graph_features(
                     match,
                     extend=True,
-                    post_action=True,
+                    post_action=False,
                 )
-                torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
+                valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
+                if valid_graphs == 0:
+                    raise ValueError("No usable action graphs were constructed for this match.")
+                torch.save(match.labels, f"{label_dir}/{match_id}.pt")
+                torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
+                invalid_graphs = count_invalid_graphs(match.graph_features_0)
+                if invalid_graphs:
+                    print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
 
-            print(f"Successfully saved for {match.labels.shape[0]} events.")
+                if args.post_action:
+                    print("Constructing base graph features for post-actions...")
+                    match.graph_features_1 = construct_graph_features(
+                        match,
+                        extend=True,
+                        post_action=True,
+                    )
+                    torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
 
-        if args.augment_blocks:
-            augmented_graph_features, augmented_labels = augment_blocked_actions(match)
-            torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
-            torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
-            print(f"Successfully saved for {augmented_labels.shape[0]} augmented events.")
+                print(f"Successfully saved for {match.labels.shape[0]} events.")
+
+            if args.augment_blocks:
+                augmented_graph_features, augmented_labels = augment_blocked_actions(match)
+                torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
+                torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
+                print(f"Successfully saved for {augmented_labels.shape[0]} augmented events.")
+
+            successful_matches += 1
+        except Exception as exc:
+            error_summary = summarize_exception(exc)
+            skipped_matches.append({"match_id": match_id, "error": error_summary})
+            print(f"  SKIP {match_id}: {error_summary}")
+
+    if successful_matches == 0:
+        raise RuntimeError(f"No usable matches were processed for split={args.split}, feature_variant={args.feature_variant}.")
+    if skipped_matches:
+        print(f"Skipped {len(skipped_matches)} matches while generating graph features.")
+        for item in skipped_matches[:10]:
+            print(f"  {item['match_id']}: {item['error']}")
+        if len(skipped_matches) > 10:
+            print(f"  ... and {len(skipped_matches) - 10} more")

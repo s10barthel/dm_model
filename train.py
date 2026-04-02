@@ -95,12 +95,29 @@ args, _ = parser.parse_known_args()
 def infer_node_in_dim(feature_dir: str, task: str) -> int:
     feature_path = Path(feature_dir)
     for graph_file in sorted(feature_path.glob("*.pt")):
-        graphs = torch.load(graph_file, weights_only=False)
-        first_graph = next((graph for graph in graphs if graph is not None), None)
-        if first_graph is not None:
-            base_dim = int(first_graph.x.shape[1])
-            return base_dim + int(task == "failure_receiver")
+        try:
+            graphs = torch.load(graph_file, weights_only=False)
+            if not isinstance(graphs, list):
+                continue
+            first_graph = next((graph for graph in graphs if graph is not None), None)
+            if first_graph is not None:
+                base_dim = int(first_graph.x.shape[1])
+                return base_dim + int(task == "failure_receiver")
+        except Exception:
+            continue
     raise FileNotFoundError(f"Could not infer node input dimension from {feature_dir}.")
+
+
+def log_skipped_matches(name: str, dataset: ActionDataset, trial_path: str, max_items: int = 10) -> None:
+    skipped = getattr(dataset, "skipped_matches", {})
+    if not skipped:
+        return
+
+    printlog(f"Skipped {len(skipped)} {name} matches due to unreadable or mismatched artifacts.", trial_path)
+    for match_id, reason in list(skipped.items())[:max_items]:
+        printlog(f"  {match_id}: {reason}", trial_path)
+    if len(skipped) > max_items:
+        printlog(f"  ... and {len(skipped) - max_items} more", trial_path)
 
 
 if __name__ == "__main__":
@@ -187,6 +204,12 @@ if __name__ == "__main__":
         label_dir=args.valid_label_dir,
         **common_dataset_args,
     )
+    log_skipped_matches("training", train_dataset, trial_path)
+    log_skipped_matches("validation", valid_dataset, trial_path)
+    if len(train_dataset) == 0:
+        raise ValueError("No usable training samples remained after loading graph and label artifacts.")
+    if len(valid_dataset) == 0:
+        raise ValueError("No usable validation samples remained after loading graph and label artifacts.")
 
     if args.task == "pass_success" and args.weight_bce:
         n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX["success"]] == 1].shape[0]
@@ -211,6 +234,8 @@ if __name__ == "__main__":
             label_dir=args.label_dir,
             **common_dataset_args,
         )
+        if len(ipw_train_dataset) == 0 or len(ipw_valid_dataset) == 0:
+            raise ValueError("No usable samples remained for inverse-propensity weighting.")
 
         inverse_propensity = 1 / estimate_propensity(ipw_train_dataset, model_id=args.ipw_model_id, device=device)
         train_ipw = inverse_propensity / inverse_propensity.mean()

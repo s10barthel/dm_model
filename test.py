@@ -12,6 +12,18 @@ from dataset import ActionDataset
 from models import utils
 from models.utils import get_losses_str, load_splits, run_epoch
 
+
+def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
+    skipped = getattr(dataset, "skipped_matches", {})
+    if not skipped:
+        return
+
+    print(f"Skipped {len(skipped)} {name} matches due to unreadable or mismatched artifacts.")
+    for match_id, reason in list(skipped.items())[:max_items]:
+        print(f"  {match_id}: {reason}")
+    if len(skipped) > max_items:
+        print(f"  ... and {len(skipped) - max_items} more")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
@@ -48,6 +60,9 @@ if __name__ == "__main__":
         "train": False,
     }
     test_dataset = ActionDataset(test_match_ids, **dataset_args)
+    print_skipped_matches("test", test_dataset)
+    if len(test_dataset) == 0:
+        raise ValueError("No usable test samples remained after loading graph and label artifacts.")
     test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
 
     print(f"Evaluating {args.model_id} on {len(test_match_ids)} matches with {len(test_dataset)} samples")

@@ -225,13 +225,30 @@ def collect_match_metadata(matches: Iterable[MatchFiles]) -> pd.DataFrame:
     return pd.DataFrame(metadata_records)
 
 
-def sort_matches_by_kickoff(matches: list[MatchFiles]) -> list[MatchFiles]:
-    if not matches:
-        return []
+def summarize_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
-    metadata = collect_match_metadata(matches).sort_values(["kickoff_time", "match_id"], ignore_index=True)
+
+def sort_matches_by_kickoff(matches: list[MatchFiles]) -> tuple[list[MatchFiles], list[dict[str, str]]]:
+    if not matches:
+        return [], []
+
+    metadata_records: list[dict[str, object]] = []
+    skipped_matches: list[dict[str, str]] = []
+    for match_files in matches:
+        try:
+            _, metadata = parse_match_information(match_files)
+        except Exception as exc:
+            skipped_matches.append({"match_id": match_files.match_id, "error": summarize_exception(exc)})
+            continue
+        metadata_records.append({"match_id": match_files.match_id, "kickoff_time": metadata["kickoff_time"]})
+
+    if not metadata_records:
+        return [], skipped_matches
+
+    metadata = pd.DataFrame(metadata_records).sort_values(["kickoff_time", "match_id"], ignore_index=True)
     match_lookup = {match.match_id: match for match in matches}
-    return [match_lookup[match_id] for match_id in metadata["match_id"].tolist()]
+    return [match_lookup[match_id] for match_id in metadata["match_id"].tolist()], skipped_matches
 
 
 def extract_vendor_xg(event_path: Path) -> dict[str, float]:
@@ -372,9 +389,13 @@ def build_tracking_outputs(
     processed_output = TRACKING_PROCESSED_DIR / f"{match_files.match_id}.parquet"
 
     if raw_output.exists() and processed_output.exists() and not overwrite:
-        tracking = pd.read_parquet(raw_output)
-        fps = 25.0
-        return tracking, fps
+        try:
+            tracking = pd.read_parquet(raw_output)
+            pd.read_parquet(processed_output)
+            fps = 25.0
+            return tracking, fps
+        except Exception as exc:
+            print(f"  Rebuilding cached tracking outputs after read failure: {summarize_exception(exc)}")
 
     _, tracking, fps = load_kloppy_tracking(match_files, lineup)
     tracking.to_parquet(raw_output, index=False)
@@ -853,15 +874,23 @@ def main() -> None:
     args = parse_args()
     ensure_project_dirs()
 
-    all_matches = sort_matches_by_kickoff(discover_match_files())
-    if not all_matches:
+    discovered_matches = discover_match_files()
+    if not discovered_matches:
         raise FileNotFoundError("No Sportec XML files found in the raw data directories.")
-
-    metadata_df = collect_match_metadata(all_matches)
-    build_split_manifest(metadata_df)
+    all_matches, discovery_skips = sort_matches_by_kickoff(discovered_matches)
+    if not all_matches:
+        raise RuntimeError("No Sportec matches with readable metadata were found.")
+    if discovery_skips:
+        print(f"Skipping {len(discovery_skips)} matches during discovery due to metadata errors.")
+        for item in discovery_skips[:10]:
+            print(f"  DISCOVERY SKIP {item['match_id']}: {item['error']}")
+        if len(discovery_skips) > 10:
+            print(f"  ... and {len(discovery_skips) - 10} more")
 
     processed_lineups: list[pd.DataFrame] = []
     processed_events: list[pd.DataFrame] = []
+    successful_metadata: list[dict[str, object]] = []
+    skipped_matches: list[dict[str, str]] = []
 
     selected_matches = filter_matches(all_matches, args.match_id, args.limit)
     if not selected_matches:
@@ -869,59 +898,71 @@ def main() -> None:
 
     for index, match_files in enumerate(selected_matches, start=1):
         print(f"[{index}/{len(selected_matches)}] {match_files.match_id}")
+        try:
+            lineup, metadata = parse_match_information(match_files)
+            raw_events = load_match_raw_events(match_files)
+            finalized_lineup = finalize_lineup(lineup, raw_events, metadata)
+            tracking, fps = build_tracking_outputs(match_files, finalized_lineup, raw_events, overwrite=args.overwrite)
 
-        lineup, metadata = parse_match_information(match_files)
-        raw_events = load_match_raw_events(match_files)
-        finalized_lineup = finalize_lineup(lineup, raw_events, metadata)
-        tracking, fps = build_tracking_outputs(match_files, finalized_lineup, raw_events, overwrite=args.overwrite)
-
-        event_ds = build_kloppy_event_dataset(match_files)
-        kloppy_events = build_kloppy_event_table(event_ds)
-        actions, spadl_audit = build_spadl_actions(
-            match_files,
-            finalized_lineup,
-            raw_events,
-            metadata,
-            event_ds=event_ds,
-            kloppy_events=kloppy_events,
-            return_audit=True,
-        )
-        print(
-            "  SPADL:",
-            f"mapped={spadl_audit['mapped_event_count']}",
-            f"dropped_unmapped={spadl_audit['dropped_unmapped_events']}",
-            f"dropped_negative={spadl_audit['dropped_negative_time_actions']}",
-            f"repaired_fouls={spadl_audit['repaired_foul_coordinates']}",
-            f"dropped_missing_xy={spadl_audit['dropped_missing_coordinates']}",
-            f"dribbles={spadl_audit['auto_added_dribbles']}",
-            f"final_actions={spadl_audit['final_action_count']}",
-        )
-        defcon_events = build_defcon_event_table(match_files.match_id, actions, finalized_lineup, raw_events, metadata)
-
-        if not args.skip_sync:
-            synced_events, sync_audit = run_event_synchronization(
-                match_files.match_id,
+            event_ds = build_kloppy_event_dataset(match_files)
+            kloppy_events = build_kloppy_event_table(event_ds)
+            actions, spadl_audit = build_spadl_actions(
+                match_files,
                 finalized_lineup,
-                defcon_events,
-                tracking,
-                fps=fps,
-                sync_source=args.sync_source,
+                raw_events,
+                metadata,
+                event_ds=event_ds,
+                kloppy_events=kloppy_events,
                 return_audit=True,
             )
-            synced_events.to_csv(EVENT_SYNCED_DIR / f"{match_files.match_id}.csv", index=False, encoding="utf-8")
             print(
-                "  Sync:",
-                f"source={sync_audit['sync_source']}",
-                f"synced={sync_audit.get('final_synced_rows', 0)}",
-                f"receive={sync_audit.get('final_receive_rows', 0)}",
-                f"kpi_frames={sync_audit.get('kpi_frame_matches', 0)}",
-                f"kpi_receives={sync_audit.get('kpi_receive_matches', 0)}",
-                f"elastic_frame_fallbacks={sync_audit.get('elastic_frame_fallbacks', 0)}",
-                f"elastic_receive_fallbacks={sync_audit.get('elastic_receive_fallbacks', 0)}",
+                "  SPADL:",
+                f"mapped={spadl_audit['mapped_event_count']}",
+                f"dropped_unmapped={spadl_audit['dropped_unmapped_events']}",
+                f"dropped_negative={spadl_audit['dropped_negative_time_actions']}",
+                f"repaired_fouls={spadl_audit['repaired_foul_coordinates']}",
+                f"dropped_missing_xy={spadl_audit['dropped_missing_coordinates']}",
+                f"dribbles={spadl_audit['auto_added_dribbles']}",
+                f"final_actions={spadl_audit['final_action_count']}",
             )
+            defcon_events = build_defcon_event_table(match_files.match_id, actions, finalized_lineup, raw_events, metadata)
 
-        processed_lineups.append(export_lineup_table(finalized_lineup))
-        processed_events.append(defcon_events)
+            if not args.skip_sync:
+                synced_events, sync_audit = run_event_synchronization(
+                    match_files.match_id,
+                    finalized_lineup,
+                    defcon_events,
+                    tracking,
+                    fps=fps,
+                    sync_source=args.sync_source,
+                    return_audit=True,
+                )
+                synced_events.to_csv(EVENT_SYNCED_DIR / f"{match_files.match_id}.csv", index=False, encoding="utf-8")
+                print(
+                    "  Sync:",
+                    f"source={sync_audit['sync_source']}",
+                    f"synced={sync_audit.get('final_synced_rows', 0)}",
+                    f"receive={sync_audit.get('final_receive_rows', 0)}",
+                    f"kpi_frames={sync_audit.get('kpi_frame_matches', 0)}",
+                    f"kpi_receives={sync_audit.get('kpi_receive_matches', 0)}",
+                    f"elastic_frame_fallbacks={sync_audit.get('elastic_frame_fallbacks', 0)}",
+                    f"elastic_receive_fallbacks={sync_audit.get('elastic_receive_fallbacks', 0)}",
+                )
+
+            processed_lineups.append(export_lineup_table(finalized_lineup))
+            processed_events.append(defcon_events)
+            successful_metadata.append({"match_id": match_files.match_id, "kickoff_time": metadata["kickoff_time"]})
+        except Exception as exc:
+            error_summary = summarize_exception(exc)
+            skipped_matches.append({"match_id": match_files.match_id, "error": error_summary})
+            print(f"  SKIP {match_files.match_id}: {error_summary}")
+            continue
+
+    if not processed_lineups or not processed_events:
+        raise RuntimeError("Preprocessing did not produce any usable matches.")
+
+    successful_metadata_df = pd.DataFrame(successful_metadata)
+    build_split_manifest(successful_metadata_df)
 
     all_lineups = pd.concat(processed_lineups, ignore_index=True)
     all_lineups.to_parquet(LINEUP_PATH, index=False)
@@ -933,6 +974,12 @@ def main() -> None:
     print(f"Saved unsynced event parquet to {EVENT_PATH}")
     if not args.skip_sync:
         print(f"Saved synced per-match CSV files to {EVENT_SYNCED_DIR}")
+    if skipped_matches:
+        print(f"Skipped {len(skipped_matches)} matches during preprocessing.")
+        for item in skipped_matches[:10]:
+            print(f"  {item['match_id']}: {item['error']}")
+        if len(skipped_matches) > 10:
+            print(f"  ... and {len(skipped_matches) - 10} more")
     print("Done.")
 
 
