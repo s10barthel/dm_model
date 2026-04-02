@@ -16,6 +16,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
+    parser.add_argument("--feature_dir", type=str, required=False, default=None)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -23,7 +24,7 @@ if __name__ == "__main__":
     model_args = argparse.Namespace(**model.args)
 
     print("\nGenerating test datasets...")
-    feature_dir = "data/ajax/features/action_graphs"
+    feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")
     label_dir = f"data/ajax/features/action_labels_{model_args.return_type}"
 
     _, _, test_match_ids = load_splits(feature_dir=feature_dir)

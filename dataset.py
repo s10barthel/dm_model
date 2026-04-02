@@ -3,7 +3,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from datatools.config import TASK_CONFIG
+from datatools.config import LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     drop_goal_nodes,
     drop_non_blocker_nodes,
@@ -49,27 +49,27 @@ class ActionDataset(Dataset):
             condition &= labels[:, 3] == 1
 
         if task.startswith("success"):  # Only include successful actions
-            pass_success = (labels[:, 1] == 1) & (labels[:, -5] == 1)
-            dribble_success = (labels[:, 2] == 1) & (labels[:, -5] == 1)
+            pass_success = (labels[:, 1] == 1) & (labels[:, LABEL_INDEX["success"]] == 1)
+            dribble_success = (labels[:, 2] == 1) & (labels[:, LABEL_INDEX["success"]] == 1)
 
             if shot_success_type == "goal":
-                shot_success = (labels[:, 3] == 1) & (labels[:, -5] == 1)
+                shot_success = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["success"]] == 1)
             elif shot_success_type == "unblocked":
-                shot_success = (labels[:, 3] == 1) & (labels[:, -6] == 0)
+                shot_success = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["blocked"]] == 0)
             else:
                 shot_success = labels[:, 3] == 1
 
             condition &= pass_success | dribble_success | shot_success
 
         if task.startswith("failure"):  # Only include failed actions
-            pass_failure = (labels[:, 1] == 1) & (labels[:, -5] == 0)
-            dribble_failure = (labels[:, 2] == 1) & (labels[:, -5] == 0)
+            pass_failure = (labels[:, 1] == 1) & (labels[:, LABEL_INDEX["success"]] == 0)
+            dribble_failure = (labels[:, 2] == 1) & (labels[:, LABEL_INDEX["success"]] == 0)
 
             if shot_success_type == "goal":
                 oppo_received = [(graph.x[labels[i, 6].long(), 0] == 0).item() for i, graph in enumerate(features)]
-                shot_failure = (labels[:, 3] == 1) & (labels[:, -5] == 0) & torch.tensor(oppo_received)
+                shot_failure = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["success"]] == 0) & torch.tensor(oppo_received)
             elif shot_success_type == "unblocked":
-                shot_failure = (labels[:, 3] == 1) & (labels[:, -6] == 1)
+                shot_failure = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["blocked"]] == 1)
             else:
                 shot_failure = labels[:, 3] == 1
 
@@ -164,8 +164,8 @@ class ActionDataset(Dataset):
         self.ip_weights = ip_weights
 
     def balance_real_and_augmented(self):
-        real_indices = torch.nonzero(self.labels[:, -7] == 1).flatten()
-        augmented_indices = torch.nonzero(self.labels[:, -7] == 0).flatten()
+        real_indices = torch.nonzero(self.labels[:, LABEL_INDEX["is_real"]] == 1).flatten()
+        augmented_indices = torch.nonzero(self.labels[:, LABEL_INDEX["is_real"]] == 0).flatten()
 
         if len(real_indices) < len(augmented_indices):
             sampled_indices = torch.randperm(len(augmented_indices))[: len(real_indices)]

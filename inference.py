@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from typing import Dict, Tuple, Union
 
 import numpy as np
@@ -19,6 +20,67 @@ from datatools.utils import (
     player_sort_key,
 )
 from models.gnn import GNN
+
+
+def resolve_graph_feature_dir(model: GNN, post_action: bool = False) -> str:
+    feature_dir = model.args.get("feature_dir", "data/ajax/features/action_graphs")
+    feature_path = Path(feature_dir)
+    feature_name = feature_path.name
+
+    if not post_action:
+        return str(feature_path)
+
+    if feature_name == "action_graphs_temporal":
+        return str(feature_path.with_name("post_action_graphs_temporal"))
+    if feature_name == "action_graphs":
+        return str(feature_path.with_name("post_action_graphs"))
+    return str(feature_path)
+
+
+def resolve_match_graphs(match: Match, model: GNN, post_action: bool = False):
+    feature_dir = resolve_graph_feature_dir(model, post_action)
+    cache_key = Path(feature_dir).name
+
+    if cache_key in getattr(match, "graph_features_by_dir", {}):
+        return match.graph_features_by_dir[cache_key]
+
+    if not post_action and cache_key == "action_graphs" and match.graph_features_0 is not None:
+        match.graph_features_by_dir[cache_key] = match.graph_features_0
+        return match.graph_features_0
+
+    if post_action and cache_key == "post_action_graphs" and match.graph_features_1 is not None:
+        match.graph_features_by_dir[cache_key] = match.graph_features_1
+        return match.graph_features_1
+
+    feature_path = Path(feature_dir)
+    if not feature_path.is_absolute():
+        feature_path = Path.cwd() / feature_path
+
+    match_id = getattr(match, "match_id", None)
+    if match_id is None:
+        if not match.lineup.empty and "stats_perform_match_id" in match.lineup.columns:
+            match_id = str(match.lineup["stats_perform_match_id"].iloc[0])
+        elif "game_id" in match.events.columns and not match.events.empty:
+            match_id = str(match.events["game_id"].iloc[0])
+
+    if match_id is None:
+        raise ValueError("Could not determine match_id to resolve graph feature files.")
+
+    graph_path = feature_path / f"{match_id}.pt"
+    if graph_path.exists():
+        graphs = torch.load(graph_path, weights_only=False)
+        match.graph_features_by_dir[cache_key] = graphs
+        return graphs
+
+    if post_action and cache_key == "post_action_graphs_temporal":
+        fallback_key = "post_action_graphs"
+        if fallback_key in getattr(match, "graph_features_by_dir", {}):
+            return match.graph_features_by_dir[fallback_key]
+        if match.graph_features_1 is not None:
+            match.graph_features_by_dir[fallback_key] = match.graph_features_1
+            return match.graph_features_1
+
+    raise FileNotFoundError(f"Graph feature file not found at {graph_path}")
 
 
 def inference_boost(
@@ -52,11 +114,8 @@ def inference_gnn(
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
     include_goals = TASK_CONFIG.at[model.args["task"], "include_goals"]
     out_filter = TASK_CONFIG.at[model.args["task"], "out_filter"]
-
-    if not post_action:
-        graphs, labels = filter_features_and_labels(match.graph_features_0, match.labels, model.args, event_indices)
-    else:
-        graphs, labels = filter_features_and_labels(match.graph_features_1, match.labels, model.args, event_indices)
+    match_graphs = resolve_match_graphs(match, model, post_action)
+    graphs, labels = filter_features_and_labels(match_graphs, match.labels, model.args, event_indices)
 
     graphs = Batch.from_data_list(graphs).to(device)
     graphs.x = graphs.x[:, : model.args["node_in_dim"]]
@@ -142,7 +201,8 @@ def inference_gnn_posterior(
     event_indices: pd.Index = None,
     melt: bool = True,
 ) -> pd.DataFrame:
-    graphs, labels = filter_features_and_labels(match.graph_features_0, match.labels, model.args, event_indices)
+    match_graphs = resolve_match_graphs(match, model, post_action=False)
+    graphs, labels = filter_features_and_labels(match_graphs, match.labels, model.args, event_indices)
     include_goals = (graphs[0].x[:, 2] == 1).any().item()
     posteriors = []
 
@@ -208,7 +268,8 @@ def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, tor
     dest_tensor = torch.tensor(grid.T, dtype=torch.float32).to(device)  # [68 * 105, 2]
     n_cells = dest_tensor.shape[0]  # G = 68 * 105
 
-    graphs, labels = filter_features_and_labels(match.graph_features_0, match.labels, model.args)
+    match_graphs = resolve_match_graphs(match, model, post_action=False)
+    graphs, labels = filter_features_and_labels(match_graphs, match.labels, model.args)
     receive_probs = dict()
     success_probs = dict()
 

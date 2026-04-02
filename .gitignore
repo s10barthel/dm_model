@@ -1,7 +1,13 @@
 Bundesliga_season_23_24/
+hawkeye_data/
+skillcorner_data/
 data/
 saved/
 .venv/
+test/*.csv
+test/*.png
+test_kpi_final/
+test_nan_xg/
 
 __pycache__/
 *.py[cod]

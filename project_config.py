@@ -12,6 +12,7 @@ RAW_DATA_ROOT = PROJECT_ROOT / "Bundesliga_season_23_24"
 RAW_TRACKING_DIR = RAW_DATA_ROOT / "tracking_data"
 RAW_EVENT_DIR = RAW_DATA_ROOT / "event_data"
 RAW_META_DIR = RAW_DATA_ROOT / "match_information"
+RAW_KPI_DIR = RAW_DATA_ROOT / "KPI_Merged"
 
 DATA_ROOT = PROJECT_ROOT / "data" / "ajax"
 LINEUP_DIR = DATA_ROOT / "lineup"
@@ -22,6 +23,11 @@ TRACKING_DIR = DATA_ROOT / "tracking"
 TRACKING_PROCESSED_DIR = DATA_ROOT / "tracking_processed"
 EVENT_SYNCED_DIR = DATA_ROOT / "event_synced"
 FEATURE_DIR = DATA_ROOT / "features"
+ACTION_GRAPH_DIR = FEATURE_DIR / "action_graphs"
+ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
+POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
+XT_DIR = DATA_ROOT / "xT"
+XT_MATCH_DIR = XT_DIR / "matches"
 SAVED_DIR = PROJECT_ROOT / "saved"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
 SPLIT_DIR = DATA_ROOT / "splits"
@@ -30,6 +36,7 @@ SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 TRAIN_POOL_SIZE = 245
 MODEL_TRAIN_SIZE = 200
 SPLIT_SEED = 100
+INTENT_TRAIN_OFFSETS = (12, 25)
 
 
 def ensure_project_dirs() -> None:
@@ -41,6 +48,8 @@ def ensure_project_dirs() -> None:
         TRACKING_PROCESSED_DIR,
         EVENT_SYNCED_DIR,
         FEATURE_DIR,
+        XT_DIR,
+        XT_MATCH_DIR,
         COMPONENT_DIR,
         SAVED_DIR,
         SPLIT_DIR,

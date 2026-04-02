@@ -16,3 +16,4 @@ rdp
 kloppy
 socceraction
 pandera
+multimethod<2

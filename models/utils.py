@@ -23,7 +23,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
-from datatools.config import FIELD_SIZE
+from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from project_config import load_model_splits
 
@@ -193,13 +193,31 @@ def calc_binary_metrics(y, y_hat, threshold=0.5):
     return {k: round(v, 4) for k, v in metrics.items()}
 
 
+def validate_target_flags(args) -> None:
+    if getattr(args, "use_xg", False) and getattr(args, "use_xt", False):
+        raise ValueError("--use_xg and --use_xt are mutually exclusive.")
+
+
+def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
+    return labels[:, LABEL_INDEX[name]]
+
+
+def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor, torch.Tensor]:
+    validate_target_flags(args)
+    if getattr(args, "use_xt", False):
+        return get_label_slice(batch_labels, "scores_xt"), get_label_slice(batch_labels, "concedes_xt")
+    if getattr(args, "use_xg", False):
+        return get_label_slice(batch_labels, "scores_xg"), get_label_slice(batch_labels, "concedes_xg")
+    return get_label_slice(batch_labels, "scores"), get_label_slice(batch_labels, "concedes")
+
+
 def adjust_dests(labels: torch.Tensor) -> torch.Tensor:
-    start_xy = labels[:, 8:10]
-    end_xy = labels[:, 10:12]
-    intent_xy = labels[:, 12:14]
+    start_xy = labels[:, LABEL_INDEX["start_x"] : LABEL_INDEX["start_y"] + 1]
+    end_xy = labels[:, LABEL_INDEX["end_x"] : LABEL_INDEX["end_y"] + 1]
+    intent_xy = labels[:, LABEL_INDEX["intent_x"] : LABEL_INDEX["intent_y"] + 1]
 
     # Masks for failed passes with valid coordinates
-    is_failed_pass = (labels[:, 1] == 1) & (labels[:, -5] == 0)
+    is_failed_pass = (labels[:, 1] == 1) & (labels[:, LABEL_INDEX["success"]] == 0)
     has_valid_xy = (
         (start_xy[:, 0] >= 0)
         & (start_xy[:, 1] >= 0)
@@ -334,6 +352,7 @@ def run_epoch(
         index_range = torch.unique(batch_graphs.batch)
 
         metrics["count"] += batch_graphs.num_graphs
+        outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
 
         if args.include_out:
             # One node per player and one ball-out node per graph instance
@@ -341,7 +360,6 @@ def run_epoch(
         else:
             batch = batch_graphs.batch
 
-        batch_labels: torch.Tensor = batch_labels.to(device)
         batch_labels[batch_labels[:, 6] == -1, 6] = batch_labels[batch_labels[:, 6] == -1, 4]  # -1 to n_players
 
         if "dest" in args.task:
@@ -427,8 +445,6 @@ def run_epoch(
 
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
             intent = batch_labels[:, 5].clone().long()
-            scoring = batch_labels[:, -3] if args.use_xg else batch_labels[:, -4]
-            conceding = batch_labels[:, -1] if args.use_xg else batch_labels[:, -2]
 
             if args.task in ["pass_success", "action_success"]:
                 pred = []
@@ -436,7 +452,7 @@ def run_epoch(
                     pred.append(out[batch == graph_index][intent[graph_index]])
                 pred = torch.stack(pred)
 
-                target = batch_labels[:, -5]
+                target = get_label_slice(batch_labels, "success")
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
@@ -445,17 +461,17 @@ def run_epoch(
                 batch_metrics = calc_binary_metrics(y, y_hat, threshold)
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
-                outcome = batch_labels[:, -5].clone().long()
+                outcome = get_label_slice(batch_labels, "success").clone().long()
                 pred = []
                 for graph_index in index_range:
                     pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
                 pred = torch.stack(pred)
 
-                target = scoring if args.task.endswith("scoring") else conceding
+                target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
-                y = batch_labels[:, -4] if args.task.endswith("scoring") else batch_labels[:, -2]
+                y = get_label_slice(batch_labels, "scores") if args.task.endswith("scoring") else get_label_slice(batch_labels, "concedes")
                 y = y.cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 
@@ -468,13 +484,13 @@ def run_epoch(
                 pred_s = torch.stack(pred_s)
                 pred_c = torch.stack(pred_c)
 
-                pred_loss_s = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_s, scoring)
-                pred_loss_c = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_c, conceding)
+                pred_loss_s = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_s, outcome_scoring)
+                pred_loss_c = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_c, outcome_conceding)
                 pred_loss = pred_loss_s + pred_loss_c
 
                 # Calculate performance metrics only for goal-scoring prediction for simplicity
                 y_hat = torch.sigmoid(pred_s).cpu().detach().numpy()
-                y = batch_labels[:, -4].cpu().detach().numpy()
+                y = get_label_slice(batch_labels, "scores").cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 
             metrics["f1"] += batch_metrics["f1"] * batch_graphs.num_graphs
@@ -483,23 +499,25 @@ def run_epoch(
 
         elif args.gnn_task == "node_regression":  # outcome_return
             intent = batch_labels[:, 5].clone().long()
-            outcome = batch_labels[:, -5].clone().long()
-            scoring = batch_labels[:, -3] if args.use_xg else batch_labels[:, -4]
-            conceding = batch_labels[:, -1] if args.use_xg else batch_labels[:, -2]
+            outcome = get_label_slice(batch_labels, "success").clone().long()
 
             pred = []
             for graph_index in index_range:
                 pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
             pred = torch.stack(pred) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
 
-            target = scoring - conceding
+            target = outcome_scoring - outcome_conceding
             pred_loss = nn.MSELoss()(pred, target)
             metrics["mse_loss"] += pred_loss.item() * batch_graphs.num_graphs
 
         elif args.gnn_task == "graph_binary":
             # overll_{scoring/conceding}, dest_{outcome/scoring/conceding}, shot_blocking
             if args.task in ["shot_blocking", "dest_success"]:
-                target = batch_labels[:, -5] if args.task.endswith("success") else batch_labels[:, -6]
+                target = (
+                    get_label_slice(batch_labels, "success")
+                    if args.task.endswith("success")
+                    else get_label_slice(batch_labels, "blocked")
+                )
                 pred_loss = nn.BCEWithLogitsLoss()(out, target)
 
                 y_hat = torch.sigmoid(out).cpu().detach().numpy()
@@ -507,20 +525,17 @@ def run_epoch(
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.5)
 
             elif args.task.split("_")[0] in ["overall", "dest"]:  # {overall/dest}_{scoring/conceding}
-                scoring = batch_labels[:, -3] if args.use_xg else batch_labels[:, -4]
-                conceding = batch_labels[:, -1] if args.use_xg else batch_labels[:, -2]
-
                 if args.task.startswith("dest"):
-                    outcome = batch_labels[:, -5].clone().long()
+                    outcome = get_label_slice(batch_labels, "success").clone().long()
                     pred = out[tuple([list(range(batch_graphs.num_graphs)), outcome])]
                 else:
                     pred = out
 
-                target = scoring if args.task.endswith("scoring") else conceding
+                target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
                 pred_loss = nn.BCEWithLogitsLoss()(pred, target)
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
-                y = batch_labels[:, -4] if args.task.endswith("scoring") else batch_labels[:, -2]
+                y = get_label_slice(batch_labels, "scores") if args.task.endswith("scoring") else get_label_slice(batch_labels, "concedes")
                 y = y.cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 
@@ -548,9 +563,7 @@ def run_epoch(
                 metrics["mrr"] += (1.0 / rank).sum().item()
 
         elif args.gnn_task == "graph_regression":  # overall_return
-            scoring = batch_labels[:, -3] if args.use_xg else batch_labels[:, -4]
-            conceding = batch_labels[:, -1] if args.use_xg else batch_labels[:, -2]
-            target = scoring - conceding
+            target = outcome_scoring - outcome_conceding
 
             pred = torch.sigmoid(out) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
             pred_loss = nn.MSELoss()(pred, target)

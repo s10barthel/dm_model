@@ -43,13 +43,9 @@ DEFENSE = [
 PASS = [
     "pass",
     "cross",
-    "throw_in",
-    "goalkick",
-    "corner_short",
-    "corner_crossed",
-    "freekick_short",
-    "freekick_crossed",
 ]
+
+XT_ACTION_TYPES = ["pass", "cross", "shot"]
 
 INCOMING = [
     "interception",
@@ -77,7 +73,7 @@ TASK_CONFIG = pd.DataFrame(
         "overall_conceding": ["graph_binary", True, True, True, False, False, None, None, 1],
         "overall_return": ["graph_regression", True, True, True, False, False, None, None, 1],
         "action_intent": ["node_selection", True, True, True, True, True, None, "teammates", 1],
-        "pass_intent": ["node_selection", True, True, False, True, False, None, "teammates", 1],
+        "pass_intent": ["node_selection", True, False, False, True, False, None, "teammates", 1],
         "pass_intent_oppo_agn": ["node_selection", True, False, False, True, False, None, "teammates", 1],
         "action_success": ["node_binary", True, True, True, True, True, "intent", "teammates", 1],
         "pass_success": ["node_binary", True, True, False, True, False, "intent", "teammates", 1],
@@ -98,3 +94,31 @@ TASK_CONFIG = pd.DataFrame(
     },
     index=["gnn_task", "pass", "dribble", "shot", "intended", "include_goals", "condition", "out_filter", "out_dim"],
 ).T
+
+LABEL_COLUMNS = [
+    "action_index",
+    "is_pass",
+    "is_dribble",
+    "is_shot",
+    "n_players",
+    "intent_index",
+    "receiver_index",
+    "duration",
+    "start_x",
+    "start_y",
+    "end_x",
+    "end_y",
+    "intent_x",
+    "intent_y",
+    "is_real",
+    "blocked",
+    "success",
+    "scores",
+    "scores_xg",
+    "concedes",
+    "concedes_xg",
+    "scores_xt",
+    "concedes_xt",
+]
+
+LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

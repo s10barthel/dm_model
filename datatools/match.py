@@ -13,6 +13,7 @@ import torch
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.xt import merge_xt_annotations
 from datatools.viz_snapshot import SnapshotVisualizer
 
 
@@ -30,6 +31,14 @@ class Match(ABC):
         self.events = events.copy()
         self.tracking = tracking.copy()
         self.lineup = lineup.copy()
+        self.match_id = None
+        if not self.lineup.empty and "stats_perform_match_id" in self.lineup.columns:
+            self.match_id = str(self.lineup["stats_perform_match_id"].iloc[0])
+        elif "game_id" in self.events.columns and not self.events.empty:
+            self.match_id = str(self.events["game_id"].iloc[0])
+        self.graph_features_by_dir: Dict[str, object] = {}
+        self.events = utils.sanitize_expected_goal(self.events)
+        self.events = merge_xt_annotations(self.events, self.match_id)
 
         self.action_type = action_type
         self.fps = fps
@@ -112,6 +121,7 @@ class Match(ABC):
             actions = pd.concat([passes, dribbles, shots]).astype({"frame_id": int}).sort_index()
             self.actions = actions.dropna(subset=["next_type"]).copy()
 
+        self.actions = self.filter_valid_action_snapshots(self.actions)
         self.include_keepers = include_keepers
         self.include_goals = include_goals
         self.max_players = 20 + int(include_keepers) * 2 + int(include_goals) * 2
@@ -128,6 +138,29 @@ class Match(ABC):
         self.tabular_features_0 = None
         self.tabular_features_1 = None
         self.labels = None
+
+    def has_valid_action_snapshot(self, frame: float, possessor: str) -> bool:
+        if pd.isna(frame) or not isinstance(possessor, str) or possessor.split("_")[0] not in ["home", "away"]:
+            return False
+
+        frame = int(frame)
+        if frame not in self.tracking.index:
+            return False
+
+        player_x = f"{possessor}_x"
+        player_y = f"{possessor}_y"
+        if player_x not in self.tracking.columns or player_y not in self.tracking.columns:
+            return False
+
+        snapshot = self.tracking.loc[frame]
+        return not pd.isna(snapshot.get(player_x, np.nan)) and not pd.isna(snapshot.get(player_y, np.nan))
+
+    def filter_valid_action_snapshots(self, actions: pd.DataFrame) -> pd.DataFrame:
+        if actions.empty:
+            return actions
+
+        valid_mask = actions.apply(lambda row: self.has_valid_action_snapshot(row["frame_id"], row["object_id"]), axis=1)
+        return actions[valid_mask].copy()
 
     # To make the home team always play from left to right (not needed for the current dataset)
     def rotate_pitch_per_phase(self):
@@ -198,7 +231,10 @@ class Match(ABC):
         shots["woodwork"] = False
 
         for i in shots.index:
-            anomaly_i, woodwork_i = utils.is_shot_anomaly(self.tracking, shots, i)
+            try:
+                anomaly_i, woodwork_i = utils.is_shot_anomaly(self.tracking, shots, i)
+            except Exception:
+                anomaly_i, woodwork_i = False, False
             shots.at[i, "anomaly"] = anomaly_i
             shots.at[i, "woodwork"] = woodwork_i
 
@@ -307,6 +343,9 @@ class Match(ABC):
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
         self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg"]
         self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg"]
+        self.events = utils.label_xt_returns(self.events, lookahead_len=5, eligible_types=tuple(config.XT_ACTION_TYPES))
+        self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
+        self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
 
         if discount_xg:
             self.events = utils.label_discounted_returns(self.events, gamma)
@@ -332,9 +371,9 @@ class Match(ABC):
             if pd.isna(intent_id) or self.action_type in ["predefined", "shot", "shot_augment"]:
                 intent_index = -1
             elif intent_id.startswith("home"):
-                intent_index = home_players.index(intent_id)
+                intent_index = home_players.index(intent_id) if intent_id in home_players else -1
             else:  # if intent.startswith("away"):
-                intent_index = away_players.index(intent_id)
+                intent_index = away_players.index(intent_id) if intent_id in away_players else -1
 
             receiver_id: str = self.actions.at[i, "receiver_id"]
             receive_frame: float = self.actions.at[i, "receive_frame_id"]
@@ -359,9 +398,17 @@ class Match(ABC):
                 start_y = self.actions.at[i, "start_y"]
                 end_x = self.actions.at[i, "end_x"]
                 end_y = self.actions.at[i, "end_y"]
-                if not pd.isna(intent_id):
-                    intent_x = self.tracking.at[receive_frame, f"{intent_id}_x"]
-                    intent_y = self.tracking.at[receive_frame, f"{intent_id}_y"]
+                if not pd.isna(intent_id) and not pd.isna(receive_frame):
+                    receive_frame_int = int(receive_frame)
+                    intent_x_col = f"{intent_id}_x"
+                    intent_y_col = f"{intent_id}_y"
+                    if (
+                        receive_frame_int in self.tracking.index
+                        and intent_x_col in self.tracking.columns
+                        and intent_y_col in self.tracking.columns
+                    ):
+                        intent_x = self.tracking.at[receive_frame_int, intent_x_col]
+                        intent_y = self.tracking.at[receive_frame_int, intent_y_col]
 
                 # Make the attacking team plays from left to right
                 if self.actions.at[i, "object_id"].startswith("away"):
@@ -416,6 +463,8 @@ class Match(ABC):
                     self.actions.at[i, "scores_xg_disc"] if discount_xg else self.actions.at[i, "scores_xg"],
                     self.actions.at[i, "concedes"],
                     self.actions.at[i, "concedes_xg_disc"] if discount_xg else self.actions.at[i, "concedes_xg"],
+                    self.actions.at[i, "scores_xt"],
+                    self.actions.at[i, "concedes_xt"],
                 ]
             )
 
