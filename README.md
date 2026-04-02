@@ -101,7 +101,48 @@ Then install PyTorch and PyTorch Geometric for the machine that will actually ru
 1. Install `torch`, `torchvision`, and `torchaudio` using the official PyTorch command for your CPU/CUDA setup.
 2. Install `torch_geometric` against that PyTorch build.
 
+## Main Pipeline Runner
+
+Use `scripts/main.py` when you want the scoped end-to-end runner described in this README without any visualization steps.
+
+```powershell
+python scripts/main.py
+python scripts/main.py --use_xt
+```
+
+The runner executes these stages in order:
+
+1. `scripts/preprocess_sportec.py`
+2. `scripts/generate_xt.py` only when `--use_xt` is enabled
+3. `scripts/generate_relevant_features.py`
+4. `scripts/train_relevant_models.py`
+5. `scripts/evaluate_relevant_models.py`
+6. `scripts/run_relevant_models.py`
+7. `scripts/run_hawkeye.py`
+8. `scripts/run_skillcorner.py`
+
+Useful options:
+
+- `--skip-preprocess`, `--skip-xt`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-skillcorner`
+- `--overwrite` to rebuild supported preprocessing and xT outputs
+- `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
+- `--device cuda:0|cpu` for evaluation and inference scripts
+- `--dry-run` to print the resolved commands without running them
+
+Default target behavior:
+
+- `python scripts/main.py` keeps the xG outcome setup with `disc_0.9` and the default outcome checkpoints `outcome_scoring/20` and `outcome_conceding/20`
+- `python scripts/main.py --use_xt` switches the outcome models to xT and uses separate outcome checkpoints `outcome_scoring/21` and `outcome_conceding/21`
+
+Output behavior:
+
+- xG inference exports stay under `data/ajax/defcon_components`
+- xT inference exports are written to `data/ajax/defcon_components_xt`
+- SkillCorner xT exports are written to `data/ajax/defcon_components_xt/skillcorner`
+
 ## End-to-End Workflow
+
+The sections below describe each stage individually. `scripts/main.py` wraps steps 1-6, 8, and 9, and intentionally excludes the visualization scripts.
 
 ### 1. Preprocess Sportec data
 
@@ -185,7 +226,7 @@ The auxiliary `pass_intent/20` run is kept because the upstream `pass_success` t
 Wrapper behavior:
 
 - `python scripts/train_relevant_models.py` keeps the current retained default, which trains the outcome models with `--use_xg`
-- `python scripts/train_relevant_models.py --use_xt` switches only `outcome_scoring` and `outcome_conceding` to xT targets
+- `python scripts/train_relevant_models.py --use_xt --outcome-scoring-trial 21 --outcome-conceding-trial 21` switches only `outcome_scoring` and `outcome_conceding` to xT targets while keeping separate xT checkpoints
 - `action_intent`, `pass_intent`, and `pass_success` are unchanged by the xT toggle
 
 Model checkpoints are saved under `saved/<task>/<trial>/`.
@@ -194,6 +235,7 @@ Model checkpoints are saved under `saved/<task>/<trial>/`.
 
 ```powershell
 python scripts/evaluate_relevant_models.py
+python scripts/evaluate_relevant_models.py --outcome-scoring-model-id outcome_scoring/21 --outcome-conceding-model-id outcome_conceding/21
 ```
 
 This runs the original `test.py` flow for:
@@ -329,7 +371,7 @@ Use `scripts/train_relevant_models.py` when you want the retained default setup:
 
 ```powershell
 python scripts/train_relevant_models.py
-python scripts/train_relevant_models.py --use_xt
+python scripts/train_relevant_models.py --use_xt --outcome-scoring-trial 21 --outcome-conceding-trial 21
 ```
 
 Use `train.py` directly when you need explicit low-level control, especially for binary-goal outcome training:
@@ -344,7 +386,8 @@ If you generate or rebuild xT artifacts, rerun `scripts/generate_relevant_featur
 
 ## Notes
 
-- `main.py` still reflects the full upstream defensive-score pipeline and is not part of this scoped reproduction.
+- `scripts/main.py` is the scoped pipeline runner for this repository.
+- root-level `main.py` still reflects the full upstream defensive-score pipeline and is not part of this scoped reproduction.
 - `datatools/tabular_feature.py` and the UxG/defensive-score path were left largely upstream because they are out of scope here.
 - The core GNN training and evaluation flow stays close to upstream DEFCON; most project-specific changes are in preprocessing, target construction, and extra-data adapters.
 - This repository is intended to track code, docs, and vendor snapshots only. Raw data, processed data, intermediate features, model outputs, and local environments are intentionally excluded from git.
