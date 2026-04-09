@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 
+from datatools import config
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
 from datatools.viz_snapshot import SnapshotVisualizer
@@ -23,7 +24,21 @@ from project_config import DATA_ROOT
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", required=True)
-    parser.add_argument("--action-id", type=int, required=True)
+    identifier_group = parser.add_mutually_exclusive_group(required=True)
+    identifier_group.add_argument(
+        "--action-id",
+        type=int,
+        help="Action id from data/ajax/event_synced/<match_id>.csv.",
+    )
+    identifier_group.add_argument(
+        "--row-index",
+        type=int,
+        help="Legacy modeled-action row index used by earlier versions of this script.",
+    )
+    identifier_group.add_argument(
+        "--original-event-id",
+        help="Original Sportec event id from the original_event_id column.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
@@ -52,15 +67,98 @@ def load_match(match_id: str) -> Match:
     return match
 
 
+def describe_action_subset_exclusion(match: Match, event_index: int) -> str:
+    event = match.events.loc[event_index]
+    spadl_type = str(event.get("spadl_type", "unknown"))
+    frame_id = event.get("frame_id")
+    receive_frame_id = event.get("receive_frame_id")
+    receiver_id = event.get("receiver_id")
+    next_player_id = event.get("next_player_id")
+    next_type = event.get("next_type")
+    object_id = event.get("object_id")
+
+    if spadl_type in config.PASS:
+        if pd.isna(frame_id) or pd.isna(receive_frame_id):
+            return "pass/cross is missing frame_id or receive_frame_id"
+        if not (
+            receiver_id == next_player_id
+            or receiver_id == "out"
+            or next_type in ["foul", "freekick_short"]
+        ):
+            return (
+                "pass/cross is excluded because receiver_id does not match next_player_id, "
+                "it is not an out-of-play pass, and it does not transition into foul/freekick_short"
+            )
+    elif spadl_type in {"take_on", "dispossessed"}:
+        if pd.isna(frame_id):
+            return "dribble candidate is missing frame_id"
+    elif spadl_type in config.SHOT:
+        if pd.isna(frame_id):
+            return "shot is missing frame_id"
+    else:
+        return f"spadl_type {spadl_type!r} is not part of the modeled pass/dribble/shot subset"
+
+    if pd.isna(next_type):
+        return "event has no next_type and is dropped from the modeled action subset"
+    if not match.has_valid_action_snapshot(frame_id, object_id):
+        return "tracking snapshot for the possessor is not valid at frame_id"
+    return "event is not part of the modeled action subset"
+
+
+def build_not_modeled_error(match: Match, match_id: str, identifier_desc: str, event_index: int) -> KeyError:
+    event = match.events.loc[event_index]
+    reason = describe_action_subset_exclusion(match, event_index)
+    return KeyError(
+        f"{identifier_desc} resolves to row index {event_index} in match {match_id} "
+        f"(action_id={event.get('action_id')}, original_event_id={event.get('original_event_id')}, "
+        f"spadl_type={event.get('spadl_type')}) but that event is not part of the modeled action subset: {reason}."
+    )
+
+
+def resolve_action_index(match: Match, args: argparse.Namespace) -> tuple[int, str]:
+    match_id = match.match_id or args.match_id
+
+    if args.row_index is not None:
+        event_index = int(args.row_index)
+        identifier_desc = f"Row index {event_index}"
+        if event_index not in match.events.index:
+            raise KeyError(f"{identifier_desc} is not present in match {match_id}.")
+        if event_index not in match.actions.index:
+            raise build_not_modeled_error(match, match_id, identifier_desc, event_index)
+        return event_index, str(int(match.actions.at[event_index, "action_id"]))
+
+    if args.action_id is not None:
+        identifier_desc = f"CSV action_id {args.action_id}"
+        matches = match.events.index[match.events["action_id"] == args.action_id].tolist()
+    else:
+        requested_original_event_id = str(args.original_event_id)
+        identifier_desc = f"Original event id {requested_original_event_id}"
+        matches = match.events.index[
+            match.events["original_event_id"].astype("string") == requested_original_event_id
+        ].tolist()
+
+    if not matches:
+        raise KeyError(f"{identifier_desc} is not present in match {match_id}.")
+    if len(matches) > 1:
+        raise ValueError(f"{identifier_desc} is not unique in match {match_id}.")
+
+    event_index = int(matches[0])
+    if event_index not in match.actions.index:
+        raise build_not_modeled_error(match, match_id, identifier_desc, event_index)
+
+    return event_index, str(int(match.actions.at[event_index, "action_id"]))
+
+
 def render_component(
     match: Match,
-    action_id: int,
+    action_index: int,
+    display_action_id: str,
     component_name: str,
     probs: pd.Series,
     output_path: Path,
     show_trajectories: bool = False,
 ) -> None:
-    action = match.actions.loc[action_id]
+    action = match.actions.loc[action_index]
     frame_id = int(action["frame_id"])
     snapshot = match.tracking.loc[max(frame_id - 24, 0) : frame_id].copy()
     ball_xy = snapshot[["ball_x", "ball_y"]].copy()
@@ -68,25 +166,34 @@ def render_component(
     attacking_prefix = action["object_id"][:4]
     attack_targets = [player_id for player_id in probs.index if player_id.startswith(attacking_prefix)]
     component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
-    player_colors = component_probs if not component_probs.empty else None
     player_annots = component_probs if not component_probs.empty else None
     highlight_players = {action["object_id"]: "#ffd400"} if isinstance(action["object_id"], str) else None
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
-        player_colors=player_colors,
         player_annots=player_annots,
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
+        style="pitchcontrol",
+        attacking_team_prefix=attacking_prefix,
     )
 
     rotate_pitch = attacking_prefix == "away"
-    title = f"{action['spadl_type']} {action_id} - {component_name.replace('_', ' ').title()}"
-    visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name)
-    fig = plt.gcf()
-    fig.suptitle(title, fontsize=18)
+    title = f"{action['spadl_type']} {display_action_id} - {component_name.replace('_', ' ').title()}"
+    fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
+    fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
+    ax.text(
+        0.5,
+        1.01,
+        title,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        color="black",
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -94,12 +201,11 @@ def render_component(
 
 def main() -> None:
     args = parse_args()
-    output_dir = Path(args.output_dir) / args.match_id / str(args.action_id)
     device = args.device if torch.cuda.is_available() else "cpu"
 
     match = load_match(args.match_id)
-    if args.action_id not in match.actions.index:
-        raise KeyError(f"Action id {args.action_id} is not present in match {args.match_id}.")
+    action_index, display_action_id = resolve_action_index(match, args)
+    output_dir = Path(args.output_dir) / args.match_id / display_action_id
 
     model_specs = {
         "action_intent": args.action_intent_model_id,
@@ -119,24 +225,26 @@ def main() -> None:
                 model,
                 device=device,
                 post_action=False,
-                event_indices=[args.action_id],
+                event_indices=[action_index],
             )
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
-                component_probs = probs.loc[args.action_id]
+                component_probs = probs.loc[action_index]
                 render_component(
                     match=match,
-                    action_id=args.action_id,
+                    action_index=action_index,
+                    display_action_id=display_action_id,
                     component_name=f"{component_name}_{outcome_case}",
                     probs=component_probs,
                     output_path=output_dir / f"{component_name}_{outcome_case}.png",
                     show_trajectories=args.show_trajectories,
                 )
         else:
-            probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[args.action_id])
-            component_probs = probs.loc[args.action_id]
+            probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
+            component_probs = probs.loc[action_index]
             render_component(
                 match=match,
-                action_id=args.action_id,
+                action_index=action_index,
+                display_action_id=display_action_id,
                 component_name=component_name,
                 probs=component_probs,
                 output_path=output_dir / f"{component_name}.png",

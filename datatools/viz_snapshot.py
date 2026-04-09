@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib import axes
+from matplotlib.patches import Arc, Circle, Rectangle
 
 import datatools.matplotsoccer as mps
 from datatools import config
@@ -18,6 +19,25 @@ COMPONENT_CMAP = mpl.colors.LinearSegmentedColormap.from_list(
     "component_orange_red",
     plt.get_cmap("jet")(np.linspace(0.7, 1.0, 256)),
 )
+COMPONENT_ANNOT_TYPES = (
+    "action_intent",
+    "pass_success",
+    "outcome_scoring",
+    "outcome_conceding",
+)
+
+PITCHCONTROL_PLAYER_DOT_SIZE = 60.0
+PITCHCONTROL_BALL_DOT_SIZE = PITCHCONTROL_PLAYER_DOT_SIZE / 2.0
+PITCHCONTROL_PITCH_LINE_ALPHA = 0.35
+PITCHCONTROL_PITCH_LINE_WIDTH = 1.5
+
+
+def _column_suffix(column: str) -> str:
+    return column.rsplit("_", 1)[-1]
+
+
+def _column_entity(column: str) -> str:
+    return column.rsplit("_", 1)[0]
 
 
 class SnapshotVisualizer:
@@ -36,6 +56,9 @@ class SnapshotVisualizer:
         show_trajectories=False,
         highlight_players: Dict[str, str] = None,
         unnormalize=False,
+        style: str = "default",
+        attacking_team_prefix: str = None,
+        show_player_numbers: bool | None = None,
     ):
         self.snapshot = snapshot.copy()
         self.sizes = player_sizes
@@ -49,12 +72,304 @@ class SnapshotVisualizer:
         self.show_velocities = show_velocities
         self.show_trajectories = show_trajectories
         self.highlight_players = highlight_players or {}
+        self.style = style
+        self.attacking_team_prefix = attacking_team_prefix if attacking_team_prefix in {"home", "away"} else None
+        self.show_player_numbers = show_player_numbers
 
         if unnormalize:
             x_cols = [c for c in self.snapshot.columns if c.endswith("_x")]
             y_cols = [c for c in self.snapshot.columns if c.endswith("_y")]
             self.snapshot[x_cols] = (self.snapshot[x_cols] + 1) * config.FIELD_SIZE[0] / 2
             self.snapshot[y_cols] = (self.snapshot[y_cols] + 1) * config.FIELD_SIZE[1] / 2
+
+    def _style_profile(self) -> dict:
+        if self.style == "pitchcontrol":
+            return {
+                "pitch": "pitchcontrol",
+                "default_player_size": PITCHCONTROL_PLAYER_DOT_SIZE,
+                "player_size_range": (PITCHCONTROL_PLAYER_DOT_SIZE, PITCHCONTROL_PLAYER_DOT_SIZE),
+                "ball_size": PITCHCONTROL_BALL_DOT_SIZE,
+                "ball_facecolor": "black",
+                "ball_edgecolor": "none",
+                "ball_linewidth": 0.0,
+                "annot_fontsize": 12,
+                "annot_color": "black",
+                "show_player_numbers": False if self.show_player_numbers is None else self.show_player_numbers,
+                "velocity_scale": 1.0,
+                "velocity_width": 0.0015,
+                "velocity_headwidth": 3.0,
+                "velocity_headlength": 3.0,
+                "velocity_headaxislength": 3.0,
+                "velocity_alpha": 0.75,
+            }
+
+        return {
+            "pitch": "default",
+            "default_player_size": 600,
+            "player_size_range": (400, 2000),
+            "ball_size": 200,
+            "ball_facecolor": "white",
+            "ball_edgecolor": "k",
+            "ball_linewidth": 1.0,
+            "annot_fontsize": 14,
+            "annot_color": "k",
+            "show_player_numbers": True if self.show_player_numbers is None else self.show_player_numbers,
+            "velocity_scale": 1.5,
+            "velocity_width": 0.003,
+            "velocity_headwidth": 5,
+            "velocity_headlength": 5,
+            "velocity_headaxislength": 4.5,
+            "velocity_alpha": 1.0,
+        }
+
+    def _draw_pitchcontrol_pitch(self, fig: plt.Figure, ax: axes.Axes) -> None:
+        field_length, field_width = config.FIELD_SIZE
+        x_min, y_min = 0.0, 0.0
+        x_max, y_max = field_length, field_width
+        center_x, center_y = field_length / 2.0, field_width / 2.0
+
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
+
+        ax.add_patch(
+            Rectangle(
+                (x_min, y_min),
+                field_length,
+                field_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+        ax.plot(
+            [center_x, center_x],
+            [y_min, y_max],
+            color="black",
+            lw=PITCHCONTROL_PITCH_LINE_WIDTH,
+            alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+            zorder=0,
+        )
+        ax.add_patch(
+            Circle(
+                (center_x, center_y),
+                9.15,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+        ax.add_patch(
+            Circle(
+                (center_x, center_y),
+                0.2,
+                fill=True,
+                edgecolor="none",
+                facecolor="black",
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        penalty_area_depth = 16.5
+        penalty_area_half_width = 40.32 / 2.0
+        goal_area_depth = 5.5
+        goal_area_half_width = 18.32 / 2.0
+
+        ax.add_patch(
+            Rectangle(
+                (x_min, center_y - penalty_area_half_width),
+                penalty_area_depth,
+                2 * penalty_area_half_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+        ax.add_patch(
+            Rectangle(
+                (x_max - penalty_area_depth, center_y - penalty_area_half_width),
+                penalty_area_depth,
+                2 * penalty_area_half_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        ax.add_patch(
+            Rectangle(
+                (x_min, center_y - goal_area_half_width),
+                goal_area_depth,
+                2 * goal_area_half_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+        ax.add_patch(
+            Rectangle(
+                (x_max - goal_area_depth, center_y - goal_area_half_width),
+                goal_area_depth,
+                2 * goal_area_half_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        goal_width = 7.32
+        goal_depth = 2.0
+        ax.add_patch(
+            Rectangle(
+                (x_min - goal_depth, center_y - goal_width / 2.0),
+                goal_depth,
+                goal_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                clip_on=False,
+                zorder=0,
+            )
+        )
+        ax.add_patch(
+            Rectangle(
+                (x_max, center_y - goal_width / 2.0),
+                goal_depth,
+                goal_width,
+                fill=False,
+                edgecolor="black",
+                linewidth=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                clip_on=False,
+                zorder=0,
+            )
+        )
+
+        penalty_spot_distance = 11.0
+        left_penalty_spot = (x_min + penalty_spot_distance, center_y)
+        right_penalty_spot = (x_max - penalty_spot_distance, center_y)
+        ax.add_patch(
+            Circle(
+                left_penalty_spot,
+                0.2,
+                fill=True,
+                edgecolor="none",
+                facecolor="black",
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+        ax.add_patch(
+            Circle(
+                right_penalty_spot,
+                0.2,
+                fill=True,
+                edgecolor="none",
+                facecolor="black",
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        arc_radius = 9.15
+        left_x_line = x_min + penalty_area_depth
+        left_cos_theta = float(np.clip((left_x_line - left_penalty_spot[0]) / arc_radius, -1.0, 1.0))
+        left_theta = float(np.degrees(np.arccos(left_cos_theta)))
+        ax.add_patch(
+            Arc(
+                left_penalty_spot,
+                2 * arc_radius,
+                2 * arc_radius,
+                angle=0,
+                theta1=360 - left_theta,
+                theta2=left_theta,
+                color="black",
+                lw=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        right_x_line = x_max - penalty_area_depth
+        right_cos_theta = float(np.clip((right_x_line - right_penalty_spot[0]) / arc_radius, -1.0, 1.0))
+        right_theta = float(np.degrees(np.arccos(right_cos_theta)))
+        right_delta = 180.0 - right_theta
+        ax.add_patch(
+            Arc(
+                right_penalty_spot,
+                2 * arc_radius,
+                2 * arc_radius,
+                angle=0,
+                theta1=180 - right_delta,
+                theta2=180 + right_delta,
+                color="black",
+                lw=PITCHCONTROL_PITCH_LINE_WIDTH,
+                alpha=PITCHCONTROL_PITCH_LINE_ALPHA,
+                zorder=0,
+            )
+        )
+
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_frame_on(False)
+
+    def _draw_pitch(self, fig: plt.Figure, ax: axes.Axes, profile: dict) -> None:
+        if profile["pitch"] == "pitchcontrol":
+            self._draw_pitchcontrol_pitch(fig, ax)
+            return
+        mps.field("green", config.FIELD_SIZE[0], config.FIELD_SIZE[1], fig, ax, show=False)
+
+    def _resolve_team_colors(self, switch_teams: bool) -> tuple[str, str]:
+        if self.style == "pitchcontrol" and self.attacking_team_prefix in {"home", "away"}:
+            if self.attacking_team_prefix == "home":
+                return "blue", "red"
+            return "red", "blue"
+
+        home_color = "tab:blue" if switch_teams else "tab:red"
+        away_color = "tab:red" if switch_teams else "tab:blue"
+        return home_color, away_color
+
+    def _get_player_sizes(self, players: List[str], profile: dict) -> np.ndarray | float:
+        if self.sizes is not None and players and players[0] in self.sizes.index:
+            smin, smax = profile["player_size_range"]
+            return self.sizes[players].values * (smax - smin) + smin
+        return profile["default_player_size"]
+
+    def _resolve_velocity_colors(self, colors, profile: dict):
+        alpha = profile["velocity_alpha"]
+        if isinstance(colors, str):
+            return mpl.colors.to_rgba(colors, alpha=alpha)
+
+        color_array = np.array(colors, dtype=float, copy=True)
+        if color_array.ndim == 1:
+            if color_array.shape[0] == 3:
+                color_array = np.append(color_array, alpha)
+            else:
+                color_array[3] = alpha
+            return color_array
+
+        if color_array.shape[1] == 3:
+            alpha_column = np.full((color_array.shape[0], 1), alpha, dtype=float)
+            return np.concatenate([color_array, alpha_column], axis=1)
+
+        color_array[:, 3] = alpha
+        return color_array
 
     def _get_highlight_styles(self, players: List[str]) -> Tuple[np.ndarray, np.ndarray]:
         edgecolors = np.array(["none"] * len(players), dtype=object)
@@ -73,6 +388,7 @@ class SnapshotVisualizer:
         xy: pd.DataFrame,
         sizes: np.ndarray,
         colors: np.ndarray,
+        profile: dict,
         anonymize=True,
         annotate=None,
     ):
@@ -152,17 +468,19 @@ class SnapshotVisualizer:
             assert n_features >= 4
             vx = xy[xy.columns[2::n_features]].values[-1]
             vy = xy[xy.columns[3::n_features]].values[-1]
-            plt.quiver(
+            ax.quiver(
                 x,
                 y,
-                vx * 1.5,
-                vy * 1.5,
+                vx * profile["velocity_scale"],
+                vy * profile["velocity_scale"],
                 angles="xy",
                 scale_units="xy",
                 scale=1,
-                color=colors,
-                width=0.003,  # 0.006
-                headwidth=5,
+                color=self._resolve_velocity_colors(colors, profile),
+                width=profile["velocity_width"],
+                headwidth=profile["velocity_headwidth"],
+                headlength=profile["velocity_headlength"],
+                headaxislength=profile["velocity_headaxislength"],
             )
 
         for i, p in enumerate(players):
@@ -172,16 +490,17 @@ class SnapshotVisualizer:
 
             if self.show_trajectories:
                 ax.plot(player_xy[:, 0], player_xy[:, 1], c=player_color, ls="--", zorder=0)
-            ax.annotate(
-                player_num,
-                xy=player_xy[-1],
-                ha="center",
-                va="center",
-                color="w",
-                fontsize=12,
-                fontweight="normal",
-                zorder=3,
-            )
+            if profile["show_player_numbers"]:
+                ax.annotate(
+                    player_num,
+                    xy=player_xy[-1],
+                    ha="center",
+                    va="center",
+                    color="w",
+                    fontsize=12,
+                    fontweight="normal",
+                    zorder=3,
+                )
 
         return ax
 
@@ -199,7 +518,9 @@ class SnapshotVisualizer:
         cmax=None,
         annot_type=None,
         hm_cmap="jet",
+        show=True,
     ):
+        profile = self._style_profile()
         if focus_xy is None:
             figsize = (13.5, 9.0) if half is None else (10.4, 14.4)  # (9, 6)
         else:
@@ -209,7 +530,7 @@ class SnapshotVisualizer:
             figsize = (figsize[0] * 1.2, figsize[1])
 
         fig, ax = plt.subplots(figsize=figsize)
-        mps.field("green", config.FIELD_SIZE[0], config.FIELD_SIZE[1], fig, ax, show=False)
+        self._draw_pitch(fig, ax, profile)
 
         if half == "left":
             ax.set_xlim(-4, config.FIELD_SIZE[0] / 2)
@@ -220,36 +541,54 @@ class SnapshotVisualizer:
             ax.set_xlim(focus_xy[0] - 20, focus_xy[0] + 20)
             ax.set_ylim(focus_xy[1] - 20, focus_xy[1] + 20)
 
-        snapshot = self.snapshot.dropna(axis=1, how="all")
-        xy_cols = [c for c in snapshot.columns if c.split("_")[-1] in ["x", "y", "vx", "vy"]]
-        xy_cols = [c for c in xy_cols if c.split("_")[1] != "goal"]
+        snapshot = self.snapshot.dropna(axis=1, how="all").copy()
+        ball_xy = self.ball_xy.copy() if self.ball_xy is not None else None
+
+        x_cols = [c for c in snapshot.columns if c.endswith("_x")]
+        y_cols = [c for c in snapshot.columns if c.endswith("_y")]
+        vx_cols = [c for c in snapshot.columns if c.endswith("_vx")]
+        vy_cols = [c for c in snapshot.columns if c.endswith("_vy")]
 
         if rotate_pitch:
-            snapshot[xy_cols[0::4]] = config.FIELD_SIZE[0] - snapshot[xy_cols[0::4]]
-            snapshot[xy_cols[1::4]] = config.FIELD_SIZE[1] - snapshot[xy_cols[1::4]]
+            snapshot[x_cols] = config.FIELD_SIZE[0] - snapshot[x_cols]
+            snapshot[y_cols] = config.FIELD_SIZE[1] - snapshot[y_cols]
+            snapshot[vx_cols] = -snapshot[vx_cols]
+            snapshot[vy_cols] = -snapshot[vy_cols]
+            if ball_xy is not None:
+                ball_xy["ball_x"] = config.FIELD_SIZE[0] - ball_xy["ball_x"]
+                ball_xy["ball_y"] = config.FIELD_SIZE[1] - ball_xy["ball_y"]
 
-        home_xy = snapshot[[c for c in xy_cols if c.startswith("home")]]
-        away_xy = snapshot[[c for c in xy_cols if c.startswith("away")]]
+        player_cols = [
+            c
+            for c in snapshot.columns
+            if c.startswith(("home_", "away_")) and _column_suffix(c) in ["x", "y", "vx", "vy"] and "_goal_" not in c
+        ]
+        home_xy = snapshot[[c for c in player_cols if c.startswith("home_")]]
+        away_xy = snapshot[[c for c in player_cols if c.startswith("away_")]]
 
-        home_players = [c[:-2] for c in xy_cols[0::4] if c.startswith("home")]
-        away_players = [c[:-2] for c in xy_cols[0::4] if c.startswith("away")]
+        home_players = [_column_entity(c) for c in home_xy.columns if c.endswith("_x")]
+        away_players = [_column_entity(c) for c in away_xy.columns if c.endswith("_x")]
 
-        if self.sizes is not None and home_players[0] in self.sizes.index:
-            home_sizes = self.sizes[home_players].values * (smax - smin) + smin
-        else:
-            home_sizes = 600
+        home_sizes = self._get_player_sizes(home_players, profile)
+        away_sizes = self._get_player_sizes(away_players, profile)
 
-        if self.sizes is not None and away_players[0] in self.sizes.index:
-            away_sizes = self.sizes[away_players].values * (smax - smin) + smin
-        else:
-            away_sizes = 600
-
-        home_colors = "tab:blue" if switch_teams else "tab:red"
-        away_colors = "tab:red" if switch_teams else "tab:blue"
-        annot_args = {"ha": "center", "va": "center", "color": "k", "fontsize": 14, "fontweight": "normal", "zorder": 7}
+        home_colors = "tab:blue"
+        away_colors = "tab:red"
+        home_colors, away_colors = self._resolve_team_colors(switch_teams)
+        annot_args = {
+            "ha": "center",
+            "va": "center",
+            "color": profile["annot_color"],
+            "fontsize": profile["annot_fontsize"],
+            "fontweight": "normal",
+            "zorder": 7,
+        }
 
         if self.annots is not None:
-            if "scoring" in annot_type or "conceding" in annot_type or "epv" in annot_type:
+            annot_type = annot_type or ""
+            if any(component_type in annot_type for component_type in COMPONENT_ANNOT_TYPES):
+                annots = self.annots.dropna()
+            elif "epv" in annot_type:
                 annots = self.annots[self.annots != 0.0]
             elif "select" in annot_type or "posterior" in annot_type:
                 annots = self.annots[self.annots > 0.05]
@@ -267,13 +606,14 @@ class SnapshotVisualizer:
                     text = f"{value:.3f}"
 
                 text_xy = snapshot[[f"{p}_x", f"{p}_y"]].values[-1]
+                annot_kwargs = dict(annot_args)
                 if not p.endswith("_goal"):
-                    text_xy[1] += 2.5
+                    annot_kwargs.update({"xytext": (0, 8), "textcoords": "offset points"})
                 elif p == "home_goal":
                     text_xy[0] += 3
                 elif p == "away_goal":
                     text_xy[0] -= 3
-                ax.annotate(text, xy=text_xy, **annot_args)
+                ax.annotate(text, xy=text_xy, **annot_kwargs)
 
         if self.colors is not None:
             colorbar_norm = None
@@ -318,12 +658,12 @@ class SnapshotVisualizer:
                 edge_x = snapshot[[f"{src}_x", f"{dst}_x"]].values[-1]
                 edge_y = snapshot[[f"{src}_y", f"{dst}_y"]].values[-1]
                 if src[:4] == "home" and dst[:4] == "home":
-                    edgecolor = "tab:blue" if switch_teams else "tab:red"
+                    edgecolor = home_colors if isinstance(home_colors, str) else "dimgray"
                 elif src[:4] == "away" and dst[:4] == "away":
-                    edgecolor = "tab:red" if switch_teams else "tab:blue"
+                    edgecolor = away_colors if isinstance(away_colors, str) else "dimgray"
                 else:
                     edgecolor = "dimgray"
-                plt.plot(edge_x, edge_y, color=edgecolor, linewidth=2, alpha=0.5, zorder=-100)
+                ax.plot(edge_x, edge_y, color=edgecolor, linewidth=2, alpha=0.5, zorder=-100)
 
         if self.arrows is not None:
             for src, dst in self.arrows:
@@ -355,19 +695,40 @@ class SnapshotVisualizer:
             ax.imshow(self.heatmap, cmap=hm_cmap, vmin=cmin, vmax=cmax, extent=hm_extent, alpha=0.7, zorder=0)
 
         if len(home_xy.columns) > 0:
-            self.plot_team_players(ax, home_xy, home_sizes, home_colors, anonymize, annotate)
+            self.plot_team_players(ax, home_xy, home_sizes, home_colors, profile, anonymize, annotate)
 
         if len(away_xy.columns) > 0:
-            self.plot_team_players(ax, away_xy, away_sizes, away_colors, anonymize, annotate)
+            self.plot_team_players(ax, away_xy, away_sizes, away_colors, profile, anonymize, annotate)
 
-        if self.ball_xy is not None:
-            ball_x = self.ball_xy["ball_x"].values
-            ball_y = self.ball_xy["ball_y"].values
-            ax.scatter(ball_x[-1], ball_y[-1], s=200, c="w", edgecolors="k", marker="o", zorder=5)
+        if ball_xy is not None:
+            ball_x = ball_xy["ball_x"].values
+            ball_y = ball_xy["ball_y"].values
+            ax.scatter(
+                ball_x[-1],
+                ball_y[-1],
+                s=profile["ball_size"],
+                c=profile["ball_facecolor"],
+                edgecolors=profile["ball_edgecolor"],
+                linewidths=profile["ball_linewidth"],
+                marker="o",
+                zorder=5,
+            )
 
         elif "ball_x" in snapshot.columns:
             ball_x = snapshot["ball_x"].values
             ball_y = snapshot["ball_y"].values
-            ax.scatter(ball_x[-1], ball_y[-1], s=200, c="w", edgecolors="k", marker="o", zorder=5)
+            ax.scatter(
+                ball_x[-1],
+                ball_y[-1],
+                s=profile["ball_size"],
+                c=profile["ball_facecolor"],
+                edgecolors=profile["ball_edgecolor"],
+                linewidths=profile["ball_linewidth"],
+                marker="o",
+                zorder=5,
+            )
 
-        plt.show()
+        if show:
+            plt.show()
+
+        return fig, ax

@@ -270,6 +270,8 @@ under `data/ajax/defcon_components/<match_id>/`.
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123
 ```
 
+`--action-id` refers to the `action_id` column in `data/ajax/event_synced/<match_id>.csv`.
+
 The script always writes 6 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
 
 - `action_intent.png`
@@ -282,6 +284,8 @@ The script always writes 6 PNGs under `data/ajax/visualizations/<match_id>/<acti
 Useful option:
 
 - `--show-trajectories` to render dashed recent player trajectories
+- `--row-index <index>` to use the legacy internal modeled-action row index instead of the CSV `action_id`
+- `--original-event-id <sportec_event_id>` to look up the action by the raw Sportec event id
 
 ### 8. Run frame-level inference on HawkEye data
 
