@@ -355,6 +355,16 @@ def _build_frame_meta(event_row: pd.Series, tracking: pd.DataFrame) -> pd.DataFr
     frame_start = int(event_row["frame_start"])
     frame_end = int(event_row["frame_end"])
     possession_player_id = int(event_row["player_id"])
+    columns = [
+        "frame_id",
+        "match_id",
+        "index",
+        "period",
+        "player_id",
+        "attacking_side",
+        "possessor_object_id",
+        "has_ball",
+    ]
     rows: list[dict[str, Any]] = []
 
     for frame_id in range(frame_start, frame_end + 1):
@@ -373,7 +383,7 @@ def _build_frame_meta(event_row: pd.Series, tracking: pd.DataFrame) -> pd.DataFr
             }
         )
 
-    frame_meta = pd.DataFrame(rows).set_index("frame_id").sort_index()
+    frame_meta = pd.DataFrame(rows, columns=columns).set_index("frame_id", drop=True).sort_index()
     frame_meta.index.name = "frame_id"
     return frame_meta
 
@@ -493,7 +503,11 @@ def _build_actions_and_labels(possession: SkillcornerPossession) -> tuple[pd.Dat
         graphs.append(graph)
         stats["valid_frames"] += 1
 
-    actions_df = pd.DataFrame(actions).set_index("frame_id") if actions else pd.DataFrame(columns=["frame_id"]).set_index("frame_id")
+    actions_df = (
+        pd.DataFrame(actions).set_index("frame_id", drop=False)
+        if actions
+        else pd.DataFrame(columns=["frame_id"]).set_index("frame_id", drop=False)
+    )
     label_tensor = torch.tensor(labels, dtype=torch.float32) if labels else torch.empty((0, len(config.LABEL_COLUMNS)))
     return actions_df, label_tensor, graphs, stats
 
