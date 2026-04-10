@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -50,6 +51,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def summarize_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -70,27 +75,52 @@ def main() -> None:
 
     export_tables: list[pd.DataFrame] = []
     stats_by_situation: dict[str, dict[str, int]] = {}
+    processed_situation_ids: list[str] = []
+    skipped_situations: list[dict[str, str]] = []
 
     for index, situation_id in enumerate(situation_ids, start=1):
         print(f"[{index}/{len(situation_ids)}] {situation_id}")
-        situation_tracking = tracking.loc[tracking["id"] == situation_id].copy()
-        situation, attacking_rows, stats = build_hawkeye_situation(
-            situation_tracking,
-            ball,
-            freeze_ballreceipt=args.freeze_ballreceipt,
-        )
-        components = infer_hawkeye_components(situation, model_specs, device=device)
-        export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
-        stats_by_situation[situation_id] = stats
+        try:
+            situation_tracking = tracking.loc[tracking["id"] == situation_id].copy()
+            situation, attacking_rows, stats = build_hawkeye_situation(
+                situation_tracking,
+                ball,
+                freeze_ballreceipt=args.freeze_ballreceipt,
+            )
+            components = infer_hawkeye_components(situation, model_specs, device=device)
+            export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
+            stats_by_situation[situation_id] = stats
+            processed_situation_ids.append(str(situation_id))
+        except Exception as exc:
+            error_summary = summarize_exception(exc)
+            skipped_situations.append({"situation_id": str(situation_id), "error": error_summary})
+            print(f"  SKIP {situation_id}: {error_summary}")
+
+    totals = summarize_hawkeye_stats(stats_by_situation)
+    metadata = {
+        "output_dir": str(output_dir.resolve()),
+        "processed_situation_ids": processed_situation_ids,
+        "skipped_situations": skipped_situations,
+        "totals": totals,
+        "models": {
+            "action_intent": args.action_intent_model_id,
+            "pass_success": args.pass_success_model_id,
+            "outcome_scoring": args.outcome_scoring_model_id,
+            "outcome_conceding": args.outcome_conceding_model_id,
+        },
+    }
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if not processed_situation_ids:
+        raise RuntimeError("No usable Hawkeye situations were processed.")
 
     hawkeye_table = pd.concat(export_tables, ignore_index=True) if export_tables else pd.DataFrame()
     parquet_path = output_dir / "hawkeye_data.parquet"
     csv_path = output_dir / "hawkeye_data.csv"
     hawkeye_table.to_parquet(parquet_path, index=False)
     hawkeye_table.to_csv(csv_path, index=False)
-
-    totals = summarize_hawkeye_stats(stats_by_situation)
     print(f"Saved Hawkeye components to {parquet_path} and {csv_path}")
+    if skipped_situations:
+        print(f"Skipped {len(skipped_situations)} Hawkeye situations.")
     print(
         "Processed {situations} situations, {valid_frames}/{total_frames} valid frames, "
         "skipped {skipped_missing_ball} missing-ball frames, "

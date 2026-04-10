@@ -71,7 +71,6 @@ def render_frame_image(
         attack_targets = [player_id for player_id in probs.index if isinstance(player_id, str) and player_id.startswith(attacking_prefix)]
         component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
 
-    player_colors = component_probs if not component_probs.empty else None
     player_annots = component_probs if not component_probs.empty else None
     highlight_players = (
         {frame_info["possessor_object_id"]: "#ffd400"}
@@ -82,23 +81,35 @@ def render_frame_image(
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
-        player_colors=player_colors,
         player_annots=player_annots,
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
+        style="pitchcontrol",
+        attacking_team_prefix=attacking_prefix,
     )
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
-    visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name)
-    fig = plt.gcf()
-    fig.suptitle(title, fontsize=18)
+    fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
+    fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
+    ax.text(
+        0.5,
+        1.01,
+        title,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        color="black",
+    )
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
     plt.close(fig)
     buffer.seek(0)
-    return Image.open(buffer).convert("RGB")
+    image = Image.open(buffer).convert("RGB")
+    buffer.close()
+    return image
 
 
 def main() -> None:

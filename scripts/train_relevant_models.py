@@ -268,12 +268,36 @@ TRAINING_COMMANDS: list[list[str]] = [
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of xG.")
+    parser.add_argument(
+        "--outcome-scoring-trial",
+        type=int,
+        default=20,
+        help="Trial number for the outcome_scoring checkpoint.",
+    )
+    parser.add_argument(
+        "--outcome-conceding-trial",
+        type=int,
+        default=20,
+        help="Trial number for the outcome_conceding checkpoint.",
+    )
     return parser.parse_args()
 
 
-def configure_command(args: list[str], use_xt: bool) -> list[str]:
+def configure_command(
+    args: list[str],
+    use_xt: bool,
+    outcome_scoring_trial: int,
+    outcome_conceding_trial: int,
+) -> list[str]:
     configured = list(args)
-    if not use_xt or configured[1] not in {"outcome_scoring", "outcome_conceding"}:
+    task = configured[configured.index("--task") + 1]
+
+    if task == "outcome_scoring":
+        configured[configured.index("--trial") + 1] = str(outcome_scoring_trial)
+    elif task == "outcome_conceding":
+        configured[configured.index("--trial") + 1] = str(outcome_conceding_trial)
+
+    if not use_xt or task not in {"outcome_scoring", "outcome_conceding"}:
         return configured
 
     configured = [arg for arg in configured if arg != "--use_xg"]
@@ -287,7 +311,16 @@ def main() -> None:
     cli_args = parse_args()
     python = sys.executable
     for args in TRAINING_COMMANDS:
-        command = [python, "train.py", *configure_command(args, cli_args.use_xt)]
+        command = [
+            python,
+            "train.py",
+            *configure_command(
+                args,
+                cli_args.use_xt,
+                cli_args.outcome_scoring_trial,
+                cli_args.outcome_conceding_trial,
+            ),
+        ]
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
 

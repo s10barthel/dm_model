@@ -47,6 +47,7 @@ def render_frame_image(
     snapshot = possession.tracking.loc[snapshot_start:frame_id].copy()
     ball_xy = snapshot[["ball_x", "ball_y"]].copy()
     frame_info = possession.frame_meta.loc[frame_id]
+    attacking_prefix = "home"
 
     if probs is None or probs.empty:
         component_probs = pd.Series(dtype=float)
@@ -62,7 +63,7 @@ def render_frame_image(
             player_id
             for player_id in probs.index
             if isinstance(player_id, str)
-            and player_id.startswith("home_")
+            and player_id.startswith(f"{attacking_prefix}_")
             and player_visible(player_id)
         ]
         component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
@@ -70,17 +71,27 @@ def render_frame_image(
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
-        player_colors=component_probs if not component_probs.empty else None,
         player_annots=component_probs if not component_probs.empty else None,
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={str(frame_info["possessor_object_id"]): "#ffd400"},
+        style="pitchcontrol",
+        attacking_team_prefix=attacking_prefix,
     )
 
     title = f"{possession.match_id} | possession {possession.event_index} | frame {frame_id} | {component_name.replace('_', ' ').title()}"
-    visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name)
-    fig = plt.gcf()
-    fig.suptitle(title, fontsize=18)
+    fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
+    fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
+    ax.text(
+        0.5,
+        1.01,
+        title,
+        transform=ax.transAxes,
+        ha="center",
+        va="bottom",
+        fontsize=12,
+        color="black",
+    )
 
     buffer = io.BytesIO()
     fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")

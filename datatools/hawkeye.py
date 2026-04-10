@@ -178,6 +178,23 @@ def _build_frame_meta(
     object_map: pd.DataFrame,
 ) -> pd.DataFrame:
     player_lookup = object_map.set_index(["team", "uefa_player_id"])["object_id"]
+    columns = [
+        "id",
+        "frame_id",
+        "game_id",
+        "half",
+        "period_id",
+        "abs_time",
+        "timestamp",
+        "possession_team",
+        "possession_prefix",
+        "PlayerID",
+        "possessor_object_id",
+        "ball_x",
+        "ball_y",
+        "ball_z",
+        "has_ball",
+    ]
     frame_rows: list[dict[str, Any]] = []
     start_time = float(situation_tracking["abs_time"].min())
     ball_lookup = ball.set_index(FRAME_KEY_COLUMNS)
@@ -224,7 +241,7 @@ def _build_frame_meta(
             }
         )
 
-    frame_meta = pd.DataFrame(frame_rows).set_index("frame_id").sort_index()
+    frame_meta = pd.DataFrame(frame_rows, columns=columns).set_index("frame_id", drop=True).sort_index()
     frame_meta.index.name = "frame_id"
     return frame_meta
 
@@ -502,7 +519,11 @@ def _build_actions_and_labels(situation: HawkeyeSituation) -> tuple[pd.DataFrame
         graphs.append(graph)
         stats["valid_frames"] += 1
 
-    actions_df = pd.DataFrame(actions).set_index("frame_id") if actions else pd.DataFrame(columns=["frame_id"]).set_index("frame_id")
+    actions_df = (
+        pd.DataFrame(actions).set_index("frame_id", drop=False)
+        if actions
+        else pd.DataFrame(columns=["frame_id"]).set_index("frame_id", drop=False)
+    )
     label_tensor = torch.tensor(labels, dtype=torch.float32) if labels else torch.empty((0, len(config.LABEL_COLUMNS)))
     return actions_df, label_tensor, graphs, stats
 
@@ -526,6 +547,8 @@ def build_hawkeye_situation(
     prefix_to_team = {prefix: team for team, prefix in team_map.items()}
     object_map = _build_object_map(situation_tracking, team_map)
     frame_meta = _build_frame_meta(situation_tracking, ball, team_map, object_map)
+    if frame_meta.empty:
+        raise ValueError(f"Hawkeye situation {situation_tracking['id'].iloc[0]} does not have any addressable frames.")
     frame_meta = _freeze_hawkeye_ballreceipt_frame_meta(
         frame_meta,
         ball,
