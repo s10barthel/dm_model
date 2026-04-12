@@ -37,9 +37,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def select_match(match_id: str | None):
-    matches = sort_matches_by_kickoff(discover_match_files())
+    matches, _ = sort_matches_by_kickoff(discover_match_files())
     if not matches:
-        raise FileNotFoundError("No Sportec XML files found in the raw data directories.")
+        raise FileNotFoundError("No Sportec raw match files found in the configured season directories.")
 
     if match_id is None:
         return matches[0]
@@ -95,7 +95,7 @@ def main() -> None:
         fps=fps,
     )
     synced_events, sync_audit = run_event_synchronization(
-        match_files.match_id,
+        match_files,
         finalized_lineup,
         defcon_events,
         tracking,
@@ -104,7 +104,7 @@ def main() -> None:
         return_audit=True,
     )
     timestamps_comp = build_timestamp_comparison(
-        match_files.match_id,
+        match_files,
         elastic_only_events,
         tracking,
         defcon_events,

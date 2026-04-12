@@ -8,11 +8,12 @@ import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-RAW_DATA_ROOT = PROJECT_ROOT / "Bundesliga_season_23_24"
-RAW_TRACKING_DIR = RAW_DATA_ROOT / "tracking_data"
-RAW_EVENT_DIR = RAW_DATA_ROOT / "event_data"
-RAW_META_DIR = RAW_DATA_ROOT / "match_information"
-RAW_KPI_DIR = RAW_DATA_ROOT / "KPI_Merged"
+RAW_SEASON_ROOTS = {
+    "23_24": PROJECT_ROOT / "Bundesliga_season_23_24",
+    "24_25": PROJECT_ROOT / "Bundesliga_season_24_25",
+}
+TRAIN_SEASONS = ("23_24",)
+TEST_SEASONS = ("24_25",)
 
 DATA_ROOT = PROJECT_ROOT / "data" / "ajax"
 LINEUP_DIR = DATA_ROOT / "lineup"
@@ -33,9 +34,7 @@ COMPONENT_DIR = DATA_ROOT / "defcon_components"
 SPLIT_DIR = DATA_ROOT / "splits"
 SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 
-TRAIN_POOL_SIZE = 245
-MODEL_TRAIN_SIZE = 200
-SPLIT_SEED = 100
+MODEL_TRAIN_FRACTION = 0.8
 INTENT_TRAIN_OFFSETS = (12, 25)
 
 
@@ -97,16 +96,15 @@ def load_base_splits(feature_dir: str | Path | None = None) -> tuple[np.ndarray,
 
 
 def derive_model_train_valid(train_pool_ids: list[str] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    train_pool_ids = np.array(sorted(_unique_in_order(list(train_pool_ids))))
-    if len(train_pool_ids) < MODEL_TRAIN_SIZE:
-        raise ValueError(
-            f"Expected at least {MODEL_TRAIN_SIZE} training-pool matches, found {len(train_pool_ids)}."
-        )
+    train_pool_ids = np.array(_unique_in_order(list(train_pool_ids)))
+    if len(train_pool_ids) < 2:
+        raise ValueError(f"Expected at least 2 training-pool matches, found {len(train_pool_ids)}.")
 
-    rng = np.random.default_rng(SPLIT_SEED)
-    sampled = np.sort(rng.choice(train_pool_ids, MODEL_TRAIN_SIZE, replace=False))
-    valid = np.array([match_id for match_id in train_pool_ids if match_id not in set(sampled)])
-    return sampled, valid
+    train_size = int(len(train_pool_ids) * MODEL_TRAIN_FRACTION)
+    train_size = min(max(train_size, 1), len(train_pool_ids) - 1)
+    train_ids = train_pool_ids[:train_size]
+    valid_ids = train_pool_ids[train_size:]
+    return train_ids, valid_ids
 
 
 def load_model_splits(feature_dir: str | Path | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

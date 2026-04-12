@@ -4,6 +4,7 @@ import argparse
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -19,13 +20,11 @@ from project_config import (
     EVENT_PATH,
     EVENT_SYNCED_DIR,
     LINEUP_PATH,
-    RAW_EVENT_DIR,
-    RAW_KPI_DIR,
-    RAW_META_DIR,
-    RAW_TRACKING_DIR,
+    RAW_SEASON_ROOTS,
+    TEST_SEASONS,
     TRACKING_DIR,
     TRACKING_PROCESSED_DIR,
-    TRAIN_POOL_SIZE,
+    TRAIN_SEASONS,
     ensure_project_dirs,
     save_split_manifest,
 )
@@ -111,9 +110,12 @@ INTERNAL_LINEUP_COLS = CANONICAL_LINEUP_COLS + ["starting", "team_prefix"]
 @dataclass(frozen=True)
 class MatchFiles:
     match_id: str
+    season: str
     meta_path: Path
     event_path: Path
     tracking_path: Path
+    kpi_path: Path | None = None
+    matchplan_path: Path | None = None
 
 
 class SportecSpadlData(MatchData):
@@ -153,23 +155,103 @@ def to_utc_naive(timestamp: str | pd.Timestamp) -> pd.Timestamp:
     return ts
 
 
+def _match_file_map(directory: Path, pattern: str = "*") -> dict[str, Path]:
+    return {
+        path.stem: path
+        for path in directory.glob(pattern)
+        if path.is_file() and path.name.startswith("DFL-MAT-")
+    }
+
+
+@lru_cache(maxsize=None)
+def _load_matchplan_index(matchplan_path: str) -> dict[str, dict[str, str]]:
+    path = Path(matchplan_path)
+    if not path.exists():
+        return {}
+
+    tree = ET.parse(path)
+    root = tree.getroot()
+    fixtures: dict[str, dict[str, str]] = {}
+    for fixture in root.findall(".//Fixture"):
+        match_id = fixture.attrib.get("MatchId")
+        if match_id:
+            fixtures[match_id] = fixture.attrib
+    return fixtures
+
+
 def discover_match_files() -> list[MatchFiles]:
-    meta_files = {path.stem: path for path in RAW_META_DIR.glob("*.xml")}
-    event_files = {path.stem: path for path in RAW_EVENT_DIR.glob("*.xml")}
-    tracking_files = {path.stem: path for path in RAW_TRACKING_DIR.glob("*.xml")}
-    match_ids = sorted(meta_files.keys() & event_files.keys() & tracking_files.keys())
-    return [MatchFiles(match_id, meta_files[match_id], event_files[match_id], tracking_files[match_id]) for match_id in match_ids]
+    discovered: list[MatchFiles] = []
+
+    for season, season_root in RAW_SEASON_ROOTS.items():
+        if not season_root.exists():
+            continue
+
+        if season == "23_24":
+            meta_files = _match_file_map(season_root / "match_information", "*.xml")
+            event_files = _match_file_map(season_root / "event_data", "*.xml")
+            tracking_files = _match_file_map(season_root / "tracking_data", "*.xml")
+            kpi_dir = season_root / "KPI_Merged"
+            match_ids = sorted(meta_files.keys() & event_files.keys() & tracking_files.keys())
+            for match_id in match_ids:
+                kpi_path = kpi_dir / f"KPI_MGD_{match_id}.csv"
+                discovered.append(
+                    MatchFiles(
+                        match_id=match_id,
+                        season=season,
+                        meta_path=meta_files[match_id],
+                        event_path=event_files[match_id],
+                        tracking_path=tracking_files[match_id],
+                        kpi_path=kpi_path if kpi_path.exists() else None,
+                    )
+                )
+        elif season == "24_25":
+            meta_dir = season_root / "match_information" / "starting_players"
+            meta_files = _match_file_map(meta_dir)
+            event_files = _match_file_map(season_root / "event_data")
+            tracking_files = _match_file_map(season_root / "tracking_data")
+            kpi_dir = season_root / "KPI_Merged"
+            matchplan_path = season_root / "match_information" / "master" / "matchplan"
+            match_ids = sorted(meta_files.keys() & event_files.keys() & tracking_files.keys())
+            for match_id in match_ids:
+                kpi_path = kpi_dir / match_id
+                discovered.append(
+                    MatchFiles(
+                        match_id=match_id,
+                        season=season,
+                        meta_path=meta_files[match_id],
+                        event_path=event_files[match_id],
+                        tracking_path=tracking_files[match_id],
+                        kpi_path=kpi_path if kpi_path.exists() else None,
+                        matchplan_path=matchplan_path if matchplan_path.exists() else None,
+                    )
+                )
+
+    return discovered
+
+
+def _matchplan_fixture(match_files: MatchFiles) -> dict[str, str]:
+    if match_files.matchplan_path is None:
+        return {}
+    fixtures = _load_matchplan_index(str(match_files.matchplan_path))
+    return fixtures.get(match_files.match_id, {})
 
 
 def parse_match_information(match_files: MatchFiles) -> tuple[pd.DataFrame, dict[str, object]]:
     tree = ET.parse(match_files.meta_path)
     root = tree.getroot()
     general = root.find(".//General")
-    if general is None:
+    fixture = _matchplan_fixture(match_files)
+    if general is None and not fixture:
         raise ValueError(f"Missing General section in {match_files.meta_path}")
 
-    kickoff_time = to_utc_naive(general.attrib["KickoffTime"])
-    match_title = general.attrib.get("MatchTitle") or f"{general.attrib.get('HomeTeamName')}:{general.attrib.get('GuestTeamName')}"
+    general_attrib = general.attrib if general is not None else fixture
+    kickoff_value = general_attrib.get("KickoffTime") or general_attrib.get("PlannedKickoffTime")
+    if kickoff_value is None:
+        raise ValueError(f"Missing kickoff time in {match_files.meta_path}")
+    kickoff_time = to_utc_naive(kickoff_value)
+    match_title = general_attrib.get("MatchTitle") or (
+        f"{general_attrib.get('HomeTeamName')}:{general_attrib.get('GuestTeamName')}"
+    )
     other_info = root.find(".//OtherGameInformation")
 
     period_totals_ms = {
@@ -210,6 +292,7 @@ def parse_match_information(match_files: MatchFiles) -> tuple[pd.DataFrame, dict
     lineup = pd.DataFrame(lineup_rows).sort_values(["contestant_name", "shirt_number"], ignore_index=True)
     metadata = {
         "match_id": match_files.match_id,
+        "season": match_files.season,
         "kickoff_time": kickoff_time,
         "match_title": match_title,
         "period_totals_ms": period_totals_ms,
@@ -221,7 +304,13 @@ def collect_match_metadata(matches: Iterable[MatchFiles]) -> pd.DataFrame:
     metadata_records: list[dict[str, object]] = []
     for match_files in matches:
         _, metadata = parse_match_information(match_files)
-        metadata_records.append({"match_id": match_files.match_id, "kickoff_time": metadata["kickoff_time"]})
+        metadata_records.append(
+            {
+                "match_id": match_files.match_id,
+                "kickoff_time": metadata["kickoff_time"],
+                "season": metadata["season"],
+            }
+        )
     return pd.DataFrame(metadata_records)
 
 
@@ -241,7 +330,13 @@ def sort_matches_by_kickoff(matches: list[MatchFiles]) -> tuple[list[MatchFiles]
         except Exception as exc:
             skipped_matches.append({"match_id": match_files.match_id, "error": summarize_exception(exc)})
             continue
-        metadata_records.append({"match_id": match_files.match_id, "kickoff_time": metadata["kickoff_time"]})
+        metadata_records.append(
+            {
+                "match_id": match_files.match_id,
+                "kickoff_time": metadata["kickoff_time"],
+                "season": metadata["season"],
+            }
+        )
 
     if not metadata_records:
         return [], skipped_matches
@@ -257,7 +352,7 @@ def extract_vendor_xg(event_path: Path) -> dict[str, float]:
     xg_map: dict[str, float] = {}
 
     for event in root.findall(".//Event"):
-        shot = event.find("./ShotAtGoal")
+        shot = event.find(".//ShotAtGoal")
         if shot is not None and shot.attrib.get("xG") is not None:
             xg_map[event.attrib["EventId"]] = float(shot.attrib["xG"])
 
@@ -568,13 +663,111 @@ def build_defcon_event_table(
     return events
 
 
-def load_kpi_merged_table(match_id: str) -> pd.DataFrame:
-    kpi_path = RAW_KPI_DIR / f"KPI_MGD_{match_id}.csv"
-    if not kpi_path.exists():
-        raise FileNotFoundError(f"Missing KPI_Merged file for {match_id}: {kpi_path}")
+def _parse_kpi_xml_time(value: str | None) -> pd.Timestamp:
+    if not value:
+        return pd.NaT
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    return ts.tz_convert("Europe/Berlin").tz_localize(None)
+
+
+def _strip_kpi_xml_prefix(raw_text: str) -> str:
+    stripped = raw_text.lstrip("\ufeff \t\r\n")
+    if stripped.startswith("KP<"):
+        return "<" + stripped[3:]
+    return stripped
+
+
+def _parse_kpi_xml_table(match_files: MatchFiles) -> pd.DataFrame:
+    if match_files.kpi_path is None or not match_files.kpi_path.exists():
+        raise FileNotFoundError(f"Missing KPI_Merged file for {match_files.match_id}: {match_files.kpi_path}")
+
+    raw_text = match_files.kpi_path.read_text(encoding="utf-8", errors="replace")
+    root = ET.fromstring(_strip_kpi_xml_prefix(raw_text))
+
+    records: dict[str, dict[str, object]] = {}
+    receptions: dict[str, dict[str, object]] = {}
+    possession_fallbacks: dict[str, dict[str, object]] = {}
+
+    for wrapper in root.findall(".//Event"):
+        children = list(wrapper)
+        if not children:
+            continue
+        node = children[0]
+        tag = node.tag
+
+        if tag == "Reception":
+            play_id = node.attrib.get("PlayId")
+            if play_id:
+                receptions[play_id] = {
+                    "RECFRM": pd.to_numeric(node.attrib.get("SyncedFrameId"), errors="coerce"),
+                    "RECEPTION_PLAYER_ID": node.attrib.get("PlayerId"),
+                    "RECEPTION_TIME": _parse_kpi_xml_time(node.attrib.get("SyncedEventTime")),
+                }
+            continue
+
+        if tag == "TeamPossession":
+            end_frame = pd.to_numeric(node.attrib.get("EndSyncedFrameId"), errors="coerce")
+            end_time = _parse_kpi_xml_time(node.attrib.get("EndSyncedEventTime"))
+            for event_ref in node.findall("./PossessionEvent"):
+                event_id = event_ref.attrib.get("EventId")
+                if event_id:
+                    possession_fallbacks[event_id] = {
+                        "RECFRM": end_frame,
+                        "RECEIVE_TIME": end_time,
+                    }
+            continue
+
+        event_id = node.attrib.get("EventId")
+        if not event_id:
+            continue
+
+        receiver_id = node.attrib.get("ReceiverId")
+        reception_id = node.attrib.get("ReceptionId")
+        sync_successful = node.attrib.get("SyncSuccessful", "").lower() == "true"
+        records[event_id] = {
+            "EVENT_ID": event_id,
+            "FRAME_NUMBER": pd.to_numeric(node.attrib.get("SyncedFrameId"), errors="coerce"),
+            "RECFRM": pd.NA,
+            "PUID2": receiver_id,
+            "NORECEIVER": bool(sync_successful and reception_id is None and receiver_id is None),
+            "TRACKING_TIME": _parse_kpi_xml_time(node.attrib.get("SyncedEventTime")),
+            "GDCP_EVENT_TIME": _parse_kpi_xml_time(node.attrib.get("SyncedEventTime")),
+        }
+
+    for event_id, record in records.items():
+        reception = receptions.get(event_id)
+        if reception is not None:
+            record["RECFRM"] = reception["RECFRM"]
+        elif event_id in possession_fallbacks:
+            record["RECFRM"] = possession_fallbacks[event_id]["RECFRM"]
+
+    kpi = pd.DataFrame.from_records(list(records.values()))
+    if kpi.empty:
+        raise ValueError(f"No usable KPI XML records found for {match_files.match_id}.")
+
+    kpi["EVENT_ID"] = kpi["EVENT_ID"].astype("string")
+    kpi["PUID2"] = kpi.get("PUID2", pd.Series(index=kpi.index, dtype="string")).astype("string")
+    kpi["GDCP_EVENT_TIME"] = pd.to_datetime(kpi.get("GDCP_EVENT_TIME"), errors="coerce")
+    kpi["TRACKING_TIME"] = pd.to_datetime(kpi.get("TRACKING_TIME"), errors="coerce")
+    kpi["FRAME_NUMBER"] = pd.to_numeric(kpi.get("FRAME_NUMBER"), errors="coerce").astype("Int64")
+    kpi["RECFRM"] = pd.to_numeric(kpi.get("RECFRM"), errors="coerce").astype("Int64")
+    kpi["NORECEIVER"] = kpi.get("NORECEIVER", pd.Series(index=kpi.index, dtype="boolean")).astype("boolean")
+    return kpi.drop_duplicates("EVENT_ID", keep="first").copy()
+
+
+def load_kpi_merged_table(match_files: MatchFiles) -> pd.DataFrame:
+    if match_files.kpi_path is None or not match_files.kpi_path.exists():
+        raise FileNotFoundError(f"Missing KPI_Merged file for {match_files.match_id}: {match_files.kpi_path}")
+
+    if match_files.season == "24_25":
+        return _parse_kpi_xml_table(match_files)
 
     kpi = pd.read_csv(
-        kpi_path,
+        match_files.kpi_path,
         sep=";",
         decimal=",",
         encoding="cp1252",
@@ -703,7 +896,7 @@ def run_elastic_synchronization(
 
 
 def run_kpi_synchronization(
-    match_id: str,
+    match_files: MatchFiles,
     lineup: pd.DataFrame,
     events: pd.DataFrame,
     tracking: pd.DataFrame,
@@ -714,7 +907,7 @@ def run_kpi_synchronization(
     frame_lookup = frame_table.set_index("frame_id")
     valid_frames = set(frame_lookup.index.dropna().tolist())
     lineup_lookup = lineup[["player_id", "object_id"]].drop_duplicates().set_index("player_id")["object_id"].to_dict()
-    kpi = load_kpi_merged_table(match_id)
+    kpi = load_kpi_merged_table(match_files)
 
     merged = output_events[["action_id", "original_event_id", "spadl_type"]].merge(
         kpi[["EVENT_ID", "FRAME_NUMBER", "RECFRM", "PUID2", "NORECEIVER"]],
@@ -752,7 +945,7 @@ def run_kpi_synchronization(
     }
 
     if needs_elastic_frame.any() or needs_elastic_receive.any():
-        elastic_output = run_elastic_synchronization(match_id, lineup, events, tracking, fps).set_index("action_id")
+        elastic_output = run_elastic_synchronization(match_files.match_id, lineup, events, tracking, fps).set_index("action_id")
 
         frame_fill = needs_elastic_frame & output_events["action_id"].isin(elastic_output.index)
         output_events.loc[frame_fill, "frame_id"] = output_events.loc[frame_fill, "action_id"].map(elastic_output["frame_id"])
@@ -776,7 +969,7 @@ def run_kpi_synchronization(
 
 
 def run_event_synchronization(
-    match_id: str,
+    match_files: MatchFiles,
     lineup: pd.DataFrame,
     events: pd.DataFrame,
     tracking: pd.DataFrame,
@@ -785,10 +978,10 @@ def run_event_synchronization(
     return_audit: bool = False,
 ) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, object]]:
     if sync_source == "elastic":
-        output_events = run_elastic_synchronization(match_id, lineup, events, tracking, fps)
+        output_events = run_elastic_synchronization(match_files.match_id, lineup, events, tracking, fps)
         audit = {"sync_source": "elastic", "final_synced_rows": int(output_events["frame_id"].notna().sum())}
     else:
-        output_events, audit = run_kpi_synchronization(match_id, lineup, events, tracking, fps)
+        output_events, audit = run_kpi_synchronization(match_files, lineup, events, tracking, fps)
 
     if return_audit:
         return output_events, audit
@@ -796,14 +989,14 @@ def run_event_synchronization(
 
 
 def build_timestamp_comparison(
-    match_id: str,
+    match_files: MatchFiles,
     elastic_events: pd.DataFrame,
     tracking: pd.DataFrame,
     events: pd.DataFrame,
     fps: float,
 ) -> pd.DataFrame:
     frame_table = build_tracking_frame_table(events, tracking, fps).set_index("frame_id")
-    kpi = load_kpi_merged_table(match_id)
+    kpi = load_kpi_merged_table(match_files)
 
     comparison = elastic_events[["stats_perform_match_id", "original_event_id", "period_id", "frame_id"]].copy()
     comparison = comparison.rename(
@@ -826,7 +1019,7 @@ def build_timestamp_comparison(
 
 
 def sync_events(
-    match_id: str,
+    match_files: MatchFiles,
     lineup: pd.DataFrame,
     events: pd.DataFrame,
     tracking: pd.DataFrame,
@@ -834,29 +1027,34 @@ def sync_events(
     overwrite: bool,
     sync_source: str = "sportec_kpi",
 ) -> pd.DataFrame:
-    output_path = EVENT_SYNCED_DIR / f"{match_id}.csv"
+    output_path = EVENT_SYNCED_DIR / f"{match_files.match_id}.csv"
     if output_path.exists() and not overwrite:
         return pd.read_csv(output_path)
 
-    output_events = run_event_synchronization(match_id, lineup, events, tracking, fps=fps, sync_source=sync_source)
+    output_events = run_event_synchronization(match_files, lineup, events, tracking, fps=fps, sync_source=sync_source)
     output_events.to_csv(output_path, index=False, encoding="utf-8")
     return output_events
 
 
 def build_split_manifest(metadata_records: pd.DataFrame) -> None:
     ordered = metadata_records.sort_values(["kickoff_time", "match_id"], ignore_index=True)
-    if len(ordered) <= TRAIN_POOL_SIZE:
-        raise ValueError(f"Need more than {TRAIN_POOL_SIZE} matches to create train/test splits.")
+    train_ids = ordered.loc[ordered["season"].isin(TRAIN_SEASONS), "match_id"].tolist()
+    test_ids = ordered.loc[ordered["season"].isin(TEST_SEASONS), "match_id"].tolist()
+    if not train_ids:
+        raise ValueError(f"No training-season matches were available for seasons: {', '.join(TRAIN_SEASONS)}")
+    if not test_ids:
+        raise ValueError(f"No test-season matches were available for seasons: {', '.join(TEST_SEASONS)}")
 
-    train_ids = ordered["match_id"].iloc[:TRAIN_POOL_SIZE].tolist()
-    test_ids = ordered["match_id"].iloc[TRAIN_POOL_SIZE:].tolist()
     save_split_manifest(
         train_ids,
         test_ids,
         metadata={
-            "train_pool_size": TRAIN_POOL_SIZE,
+            "train_size": len(train_ids),
             "test_size": len(test_ids),
-            "split_rule": "sorted by kickoff_time, then match_id",
+            "train_seasons": list(TRAIN_SEASONS),
+            "test_seasons": list(TEST_SEASONS),
+            "season_counts": ordered["season"].value_counts().sort_index().to_dict(),
+            "split_rule": "season-based; matches ordered by kickoff_time, then match_id",
         },
     )
 
@@ -929,7 +1127,7 @@ def main() -> None:
 
             if not args.skip_sync:
                 synced_events, sync_audit = run_event_synchronization(
-                    match_files.match_id,
+                    match_files,
                     finalized_lineup,
                     defcon_events,
                     tracking,
@@ -951,7 +1149,13 @@ def main() -> None:
 
             processed_lineups.append(export_lineup_table(finalized_lineup))
             processed_events.append(defcon_events)
-            successful_metadata.append({"match_id": match_files.match_id, "kickoff_time": metadata["kickoff_time"]})
+            successful_metadata.append(
+                {
+                    "match_id": match_files.match_id,
+                    "kickoff_time": metadata["kickoff_time"],
+                    "season": metadata["season"],
+                }
+            )
         except Exception as exc:
             error_summary = summarize_exception(exc)
             skipped_matches.append({"match_id": match_files.match_id, "error": error_summary})
