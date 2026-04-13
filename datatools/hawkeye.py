@@ -108,6 +108,14 @@ def clean_hawkeye_tracking(tracking: pd.DataFrame) -> pd.DataFrame:
     cleaned["id"] = cleaned["id"].astype(str)
     cleaned["team"] = cleaned["team"].astype(str)
     cleaned["possession_team"] = cleaned["possession_team"].astype(str)
+    if "GameID" in cleaned.columns:
+        game_ids = cleaned["GameID"].astype(str)
+        has_m = game_ids.str.contains("M", na=False)
+        has_r = game_ids.str.contains("R", na=False)
+        flip_x = np.where(has_r, -1.0, 1.0)
+        flip_y = np.where(has_m ^ has_r, -1.0, 1.0)
+        cleaned["centroid_x"] = cleaned["centroid_x"].to_numpy(dtype=float) * flip_x
+        cleaned["centroid_y"] = cleaned["centroid_y"].to_numpy(dtype=float) * flip_y
 
     return cleaned.sort_values(SITUATION_FRAME_KEY_COLUMNS + ["team", "uefa_player_id"]).reset_index(drop=True)
 
@@ -149,6 +157,20 @@ def _field_x(x: float) -> float:
 
 def _field_y(y: float) -> float:
     return float(y) + config.FIELD_SIZE[1] / 2
+
+
+def _hawkeye_flip_factors(game_id_value: Any) -> tuple[float, float]:
+    game_id = "" if pd.isna(game_id_value) else str(game_id_value)
+    has_m = "M" in game_id
+    has_r = "R" in game_id
+    flip_x = -1.0 if has_r else 1.0
+    flip_y = -1.0 if has_m ^ has_r else 1.0
+    return flip_x, flip_y
+
+
+def _apply_hawkeye_xy_transform(x: float, y: float, game_id_value: Any) -> tuple[float, float]:
+    flip_x, flip_y = _hawkeye_flip_factors(game_id_value)
+    return float(x) * flip_x, float(y) * flip_y
 
 
 def _stable_team_map(situation_tracking: pd.DataFrame) -> dict[str, str]:
@@ -213,8 +235,13 @@ def _build_frame_meta(
             ball_row = ball_lookup.loc[ball_key]
             if isinstance(ball_row, pd.DataFrame):
                 ball_row = ball_row.iloc[0]
-            ball_x = _field_x(float(ball_row["ball_x"]))
-            ball_y = _field_y(float(ball_row["ball_y"]))
+            ball_x_raw, ball_y_raw = _apply_hawkeye_xy_transform(
+                float(ball_row["ball_x"]),
+                float(ball_row["ball_y"]),
+                frame_info.get("GameID"),
+            )
+            ball_x = _field_x(ball_x_raw)
+            ball_y = _field_y(ball_y_raw)
             ball_z = float(ball_row["ball_z"]) if not pd.isna(ball_row["ball_z"]) else np.nan
         else:
             ball_x = np.nan
@@ -281,6 +308,7 @@ def _resolve_ballreceipt_anchor(situation_tracking: pd.DataFrame) -> dict[str, A
         "player_id": player_id,
         "game_id": int(anchor_row["game_id"]),
         "half": int(anchor_row["half"]),
+        "GameID": anchor_row.get("GameID"),
         "carrier_x": float(anchor_row["centroid_x"]),
         "carrier_y": float(anchor_row["centroid_y"]),
     }
@@ -331,8 +359,13 @@ def _freeze_hawkeye_ballreceipt_frame_meta(
             raise ValueError(f"Hawkeye ball data contains duplicated BallReceipt rows for frame {ball_key}.")
         ball_row = ball_row.iloc[0]
 
-    ball_x = _field_x(float(ball_row["ball_x"]))
-    ball_y = _field_y(float(ball_row["ball_y"]))
+    ball_x_raw, ball_y_raw = _apply_hawkeye_xy_transform(
+        float(ball_row["ball_x"]),
+        float(ball_row["ball_y"]),
+        anchor.get("GameID"),
+    )
+    ball_x = _field_x(ball_x_raw)
+    ball_y = _field_y(ball_y_raw)
     ball_z = float(ball_row["ball_z"]) if not pd.isna(ball_row["ball_z"]) else np.nan
 
     future_mask = frozen["abs_time"] > float(anchor["ballreceipt"])
