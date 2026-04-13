@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import sys
 from pathlib import Path
 
@@ -23,6 +22,7 @@ from datatools.hawkeye import (
     load_hawkeye_models,
     load_hawkeye_tracking,
 )
+from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import DATA_ROOT, PROJECT_ROOT
 
@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
@@ -103,12 +104,8 @@ def render_frame_image(
         color="black",
     )
 
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    image = figure_to_rgb_image(fig, dpi=150)
     plt.close(fig)
-    buffer.seek(0)
-    image = Image.open(buffer).convert("RGB")
-    buffer.close()
     return image
 
 
@@ -150,32 +147,44 @@ def main() -> None:
         "outcome_conceding_success": components.get("outcome_conceding_success"),
         "outcome_conceding_failure": components.get("outcome_conceding_failure"),
     }
+    if all(
+        component_frames[name] is not None
+        for name in [
+            "pass_success",
+            "outcome_scoring_success",
+            "outcome_scoring_failure",
+            "outcome_conceding_success",
+            "outcome_conceding_failure",
+        ]
+    ):
+        component_frames["pass_score"] = compute_pass_score(
+            pass_success=component_frames["pass_success"],
+            outcome_scoring_success=component_frames["outcome_scoring_success"],
+            outcome_scoring_failure=component_frames["outcome_scoring_failure"],
+            outcome_conceding_success=component_frames["outcome_conceding_success"],
+            outcome_conceding_failure=component_frames["outcome_conceding_failure"],
+        )
+    else:
+        component_frames["pass_score"] = None
 
     frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
     for component_name, component_table in component_frames.items():
-        images: list[Image.Image] = []
-        for frame_id in frame_ids:
-            frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
-            images.append(
-                render_frame_image(
+        def iter_component_images():
+            for frame_id in frame_ids:
+                frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
+                yield render_frame_image(
                     situation,
                     frame_id,
                     component_name,
                     frame_probs,
                     show_trajectories=args.show_trajectories,
                 )
-            )
 
-        output_path = output_dir / f"{component_name}.gif"
-        images[0].save(
-            output_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=40,
-            loop=0,
-        )
+        suffix = "gif" if args.gif else "mp4"
+        output_path = output_dir / f"{component_name}.{suffix}"
+        save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
 
-    print(f"Saved Hawkeye GIFs to {output_dir}")
+    print(f"Saved Hawkeye animations to {output_dir}")
 
 
 if __name__ == "__main__":

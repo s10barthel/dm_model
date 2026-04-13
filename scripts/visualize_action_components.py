@@ -15,6 +15,7 @@ import torch
 from datatools import config
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
+from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn
 from models.utils import load_model
@@ -213,6 +214,7 @@ def main() -> None:
         "outcome_scoring": args.outcome_scoring_model_id,
         "outcome_conceding": args.outcome_conceding_model_id,
     }
+    component_prob_rows: dict[str, pd.Series] = {}
 
     for component_name, model_id in model_specs.items():
         model = load_model(model_id, device)
@@ -228,28 +230,38 @@ def main() -> None:
                 event_indices=[action_index],
             )
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
-                component_probs = probs.loc[action_index]
-                render_component(
-                    match=match,
-                    action_index=action_index,
-                    display_action_id=display_action_id,
-                    component_name=f"{component_name}_{outcome_case}",
-                    probs=component_probs,
-                    output_path=output_dir / f"{component_name}_{outcome_case}.png",
-                    show_trajectories=args.show_trajectories,
-                )
+                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[action_index]
         else:
             probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
-            component_probs = probs.loc[action_index]
-            render_component(
-                match=match,
-                action_index=action_index,
-                display_action_id=display_action_id,
-                component_name=component_name,
-                probs=component_probs,
-                output_path=output_dir / f"{component_name}.png",
-                show_trajectories=args.show_trajectories,
-            )
+            component_prob_rows[component_name] = probs.loc[action_index]
+
+    component_prob_rows["pass_score"] = compute_pass_score(
+        pass_success=component_prob_rows["pass_success"],
+        outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
+        outcome_scoring_failure=component_prob_rows["outcome_scoring_failure"],
+        outcome_conceding_success=component_prob_rows["outcome_conceding_success"],
+        outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
+    )
+
+    component_order = [
+        "action_intent",
+        "pass_success",
+        "outcome_scoring_success",
+        "outcome_scoring_failure",
+        "outcome_conceding_success",
+        "outcome_conceding_failure",
+        "pass_score",
+    ]
+    for component_name in component_order:
+        render_component(
+            match=match,
+            action_index=action_index,
+            display_action_id=display_action_id,
+            component_name=component_name,
+            probs=component_prob_rows[component_name],
+            output_path=output_dir / f"{component_name}.png",
+            show_trajectories=args.show_trajectories,
+        )
 
     print(f"Saved component plots to {output_dir}")
 

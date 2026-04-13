@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import sys
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from datatools.skillcorner import (
     build_visualization_probs,
     load_skillcorner_component_tables,
 )
+from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import COMPONENT_DIR, DATA_ROOT, PROJECT_ROOT
 
@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--component-dir", default=str(COMPONENT_DIR / "skillcorner"))
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "skillcorner"))
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     return parser.parse_args()
 
 
@@ -93,12 +94,8 @@ def render_frame_image(
         color="black",
     )
 
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    image = figure_to_rgb_image(fig, dpi=150)
     plt.close(fig)
-    buffer.seek(0)
-    image = Image.open(buffer).convert("RGB")
-    buffer.close()
     return image
 
 
@@ -110,6 +107,31 @@ def _row_for_frame(component_table: pd.DataFrame, frame_id: int) -> pd.Series | 
     if isinstance(row, pd.DataFrame):
         row = row.iloc[0]
     return row
+
+
+def _probs_for_component_frame(
+    component_name: str,
+    component_tables: dict[str, pd.DataFrame],
+    frame_id: int,
+) -> pd.Series:
+    if component_name == "pass_score":
+        return compute_pass_score(
+            pass_success=build_visualization_probs(_row_for_frame(component_tables["pass_success"], frame_id)),
+            outcome_scoring_success=build_visualization_probs(
+                _row_for_frame(component_tables["outcome_scoring_success"], frame_id)
+            ),
+            outcome_scoring_failure=build_visualization_probs(
+                _row_for_frame(component_tables["outcome_scoring_failure"], frame_id)
+            ),
+            outcome_conceding_success=build_visualization_probs(
+                _row_for_frame(component_tables["outcome_conceding_success"], frame_id)
+            ),
+            outcome_conceding_failure=build_visualization_probs(
+                _row_for_frame(component_tables["outcome_conceding_failure"], frame_id)
+            ),
+        )
+
+    return build_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
 
 def main() -> None:
@@ -124,7 +146,7 @@ def main() -> None:
 
     component_tables = load_skillcorner_component_tables(args.component_dir, args.match_id)
     frame_ids = [int(frame_id) for frame_id in possession.frame_meta.index.tolist()]
-    duration_ms = max(1, int(round(1000 / possession.fps)))
+    component_names = [*COMPONENT_COLUMNS, "pass_score"]
 
     for component_name in COMPONENT_COLUMNS:
         component_table = component_tables[component_name]
@@ -132,31 +154,25 @@ def main() -> None:
         if not component_table.empty:
             component_table = component_table.sort_values("frame").drop_duplicates(subset=["frame"], keep="last")
             component_table = component_table.set_index("frame")
+        component_tables[component_name] = component_table
 
-        images: list[Image.Image] = []
-        for frame_id in frame_ids:
-            row = _row_for_frame(component_table, frame_id)
-            probs = build_visualization_probs(row)
-            images.append(
-                render_frame_image(
+    for component_name in component_names:
+        def iter_component_images():
+            for frame_id in frame_ids:
+                probs = _probs_for_component_frame(component_name, component_tables, frame_id)
+                yield render_frame_image(
                     possession,
                     frame_id,
                     component_name,
                     probs,
                     show_trajectories=args.show_trajectories,
                 )
-            )
 
-        output_path = output_dir / f"{component_name}.gif"
-        images[0].save(
-            output_path,
-            save_all=True,
-            append_images=images[1:],
-            duration=duration_ms,
-            loop=0,
-        )
+        suffix = "gif" if args.gif else "mp4"
+        output_path = output_dir / f"{component_name}.{suffix}"
+        save_animation(iter_component_images(), output_path, fps=float(possession.fps), gif=args.gif)
 
-    print(f"Saved SkillCorner GIFs to {output_dir}")
+    print(f"Saved SkillCorner animations to {output_dir}")
 
 
 if __name__ == "__main__":

@@ -272,7 +272,7 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 
 `--action-id` refers to the `action_id` column in `data/ajax/event_synced/<match_id>.csv`.
 
-The script always writes 6 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
+The script always writes 7 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
 
 - `action_intent.png`
 - `pass_success.png`
@@ -280,6 +280,7 @@ The script always writes 6 PNGs under `data/ajax/visualizations/<match_id>/<acti
 - `outcome_scoring_failure.png`
 - `outcome_conceding_success.png`
 - `outcome_conceding_failure.png`
+- `pass_score.png`
 
 Useful option:
 
@@ -304,13 +305,17 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` situations
 - `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
 
-To visualize one HawkEye situation as GIFs:
+To visualize one HawkEye situation as MP4s:
 
 ```powershell
 python scripts/visualize_hawkeye.py --situation-id <hawkeye_id>
 ```
 
-This writes 6 GIFs under `data/ajax/visualizations/hawkeye/<situation_id>/`.
+This writes 7 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
+
+Useful option:
+
+- `--gif` to write GIFs instead of the default MP4 animations
 
 ### 9. Run frame-level inference on SkillCorner data
 
@@ -324,13 +329,17 @@ This reads synchronized SkillCorner files from `skillcorner_data/` and writes pe
 
 The SkillCorner adapter processes `player_possession` events frame by frame and exports the same 6 retained DEFCON components.
 
-To visualize one SkillCorner possession as GIFs:
+To visualize one SkillCorner possession as MP4s:
 
 ```powershell
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
 ```
 
-This writes 6 GIFs under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
+This writes 7 MP4s under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
+
+Useful option:
+
+- `--gif` to write GIFs instead of the default MP4 animations
 
 ## Outcome Target Selection
 

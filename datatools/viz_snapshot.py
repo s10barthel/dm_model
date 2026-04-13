@@ -24,6 +24,7 @@ COMPONENT_ANNOT_TYPES = (
     "pass_success",
     "outcome_scoring",
     "outcome_conceding",
+    "pass_score",
 )
 
 PITCHCONTROL_PLAYER_DOT_SIZE = 60.0
