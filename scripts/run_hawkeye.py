@@ -24,7 +24,7 @@ from datatools.hawkeye import (
     resolve_situation_ids,
     summarize_hawkeye_stats,
 )
-from project_config import COMPONENT_DIR, PROJECT_ROOT
+from project_config import COMPONENT_DIR, PROJECT_ROOT, get_component_dir, get_relevant_model_ids, resolve_intended_receiver_mode
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,11 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--action-intent-model-id", default="action_intent/00")
-    parser.add_argument("--pass-success-model-id", default="pass_success/20")
-    parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
-    parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
-    parser.add_argument("--output-dir", default=str(COMPONENT_DIR))
+    parser.add_argument("--use_xt", action="store_true")
+    parser.add_argument("--use-original-intended-receiver", action="store_true")
+    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--outcome-scoring-model-id")
+    parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--output-dir")
     parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
 
@@ -58,7 +61,12 @@ def summarize_exception(exc: Exception) -> str:
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    output_dir = Path(args.output_dir)
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
+    default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
+    output_dir = Path(args.output_dir or get_component_dir(args.use_xt, intended_receiver_mode))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
@@ -66,10 +74,10 @@ def main() -> None:
     situation_ids = resolve_situation_ids(tracking, requested_ids=args.situation_id, limit=args.limit)
 
     model_specs = load_hawkeye_models(
-        action_intent_model_id=args.action_intent_model_id,
-        pass_success_model_id=args.pass_success_model_id,
-        outcome_scoring_model_id=args.outcome_scoring_model_id,
-        outcome_conceding_model_id=args.outcome_conceding_model_id,
+        action_intent_model_id=args.action_intent_model_id or default_model_ids["action_intent"],
+        pass_success_model_id=args.pass_success_model_id or default_model_ids["pass_success"],
+        outcome_scoring_model_id=args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
+        outcome_conceding_model_id=args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
         device=device,
     )
 
@@ -99,14 +107,15 @@ def main() -> None:
     totals = summarize_hawkeye_stats(stats_by_situation)
     metadata = {
         "output_dir": str(output_dir.resolve()),
+        "intended_receiver_mode": intended_receiver_mode,
         "processed_situation_ids": processed_situation_ids,
         "skipped_situations": skipped_situations,
         "totals": totals,
         "models": {
-            "action_intent": args.action_intent_model_id,
-            "pass_success": args.pass_success_model_id,
-            "outcome_scoring": args.outcome_scoring_model_id,
-            "outcome_conceding": args.outcome_conceding_model_id,
+            "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
+            "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
+            "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
+            "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
         },
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")

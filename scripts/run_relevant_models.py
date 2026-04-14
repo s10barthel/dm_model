@@ -16,7 +16,16 @@ from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
 from inference import inference_gnn
 from models.utils import load_model
-from project_config import COMPONENT_DIR, DATA_ROOT, FEATURE_DIR, load_base_splits
+from project_config import (
+    ACTION_GRAPH_DIR,
+    DATA_ROOT,
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    get_component_dir,
+    get_relevant_model_ids,
+    get_resolved_action_path,
+    load_base_splits,
+    resolve_intended_receiver_mode,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,11 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="test", choices=["train", "test", "all"])
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--action-intent-model-id", default="action_intent/00")
-    parser.add_argument("--pass-success-model-id", default="pass_success/20")
-    parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
-    parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
-    parser.add_argument("--output-dir", default=str(COMPONENT_DIR))
+    parser.add_argument("--use_xt", action="store_true")
+    parser.add_argument("--use-original-intended-receiver", action="store_true")
+    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--outcome-scoring-model-id")
+    parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--output-dir")
     return parser.parse_args()
 
 
@@ -42,16 +54,27 @@ def count_valid_graphs(graphs: list[object]) -> int:
     return sum(graph is not None for graph in graphs)
 
 
-def load_match(match_id: str) -> Match:
+def load_match(match_id: str, intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Match:
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(DATA_ROOT / "tracking_processed" / f"{match_id}.parquet")
     lineups = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
-    match.labels = match.construct_labels(discount_xg=True)
+    resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+    if not resolved_action_path.exists():
+        raise FileNotFoundError(
+            f"Resolved actions not found at {resolved_action_path}. Run scripts/generate_relevant_features.py for this mode first."
+        )
+    resolved_actions = pd.read_parquet(resolved_action_path)
+    match.labels = match.construct_labels(
+        discount_xg=True,
+        intended_receiver_mode=intended_receiver_mode,
+        relabel_intended_receivers=False,
+        resolved_actions=resolved_actions,
+    )
 
-    graph_path = FEATURE_DIR / "action_graphs" / f"{match_id}.pt"
+    graph_path = ACTION_GRAPH_DIR / f"{match_id}.pt"
     if graph_path.exists():
         try:
             match.graph_features_0 = torch.load(graph_path, weights_only=False)
@@ -78,7 +101,7 @@ def save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
 
 
 def resolve_match_ids(split: str, requested_match_ids: list[str] | None) -> list[str]:
-    feature_dir = FEATURE_DIR / "action_graphs"
+    feature_dir = ACTION_GRAPH_DIR
     train_ids, test_ids = load_base_splits(feature_dir)
 
     if split == "train":
@@ -101,13 +124,21 @@ def resolve_match_ids(split: str, requested_match_ids: list[str] | None) -> list
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    output_dir = Path(args.output_dir)
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
+    default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
+    output_dir = Path(args.output_dir or get_component_dir(args.use_xt, intended_receiver_mode))
 
     model_specs = {
-        "action_intent": load_model(args.action_intent_model_id, device),
-        "pass_success": load_model(args.pass_success_model_id, device),
-        "outcome_scoring": load_model(args.outcome_scoring_model_id, device),
-        "outcome_conceding": load_model(args.outcome_conceding_model_id, device),
+        "action_intent": load_model(args.action_intent_model_id or default_model_ids["action_intent"], device),
+        "pass_success": load_model(args.pass_success_model_id or default_model_ids["pass_success"], device),
+        "outcome_scoring": load_model(args.outcome_scoring_model_id or default_model_ids["outcome_scoring"], device),
+        "outcome_conceding": load_model(
+            args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
+            device,
+        ),
     }
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
@@ -118,11 +149,12 @@ def main() -> None:
     metadata = {
         "split": args.split,
         "requested_match_ids": match_ids,
+        "intended_receiver_mode": intended_receiver_mode,
         "models": {
-            "action_intent": args.action_intent_model_id,
-            "pass_success": args.pass_success_model_id,
-            "outcome_scoring": args.outcome_scoring_model_id,
-            "outcome_conceding": args.outcome_conceding_model_id,
+            "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
+            "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
+            "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
+            "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
         },
         "processed_match_ids": [],
         "skipped_matches": [],
@@ -132,7 +164,7 @@ def main() -> None:
     for index, match_id in enumerate(match_ids, start=1):
         print(f"[{index}/{len(match_ids)}] {match_id}")
         try:
-            match = load_match(match_id)
+            match = load_match(match_id, intended_receiver_mode=intended_receiver_mode)
             match_output_dir = output_dir / match_id
 
             action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)

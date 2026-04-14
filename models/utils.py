@@ -413,7 +413,13 @@ def run_epoch(
             accuracy = 0
 
             for graph_index in index_range:
-                if args.task in ["pass_intent", "pass_intent_oppo_agn", "action_intent", "success_receiver"]:
+                if args.task in [
+                    "pass_intent",
+                    "success_intent",
+                    "pass_intent_oppo_agn",
+                    "action_intent",
+                    "success_receiver",
+                ]:
                     # Only take teammate nodes
                     assert not args.include_out
                     pred_i = out[(batch == graph_index) & (batch_graphs.x[:, 0] == 1)]  # [N_i]

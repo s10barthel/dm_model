@@ -19,7 +19,14 @@ from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn
 from models.utils import load_model
-from project_config import DATA_ROOT
+from project_config import (
+    ACTION_GRAPH_DIR,
+    DATA_ROOT,
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    get_relevant_model_ids,
+    get_resolved_action_path,
+    resolve_intended_receiver_mode,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,24 +49,38 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
-    parser.add_argument("--action-intent-model-id", default="action_intent/00")
-    parser.add_argument("--pass-success-model-id", default="pass_success/20")
-    parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
-    parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
+    parser.add_argument("--use_xt", action="store_true")
+    parser.add_argument("--use-original-intended-receiver", action="store_true")
+    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--outcome-scoring-model-id")
+    parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations"))
     return parser.parse_args()
 
 
-def load_match(match_id: str) -> Match:
+def load_match(match_id: str, intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Match:
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(DATA_ROOT / "tracking_processed" / f"{match_id}.parquet")
     lineups = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
-    match.labels = match.construct_labels(discount_xg=True)
+    resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+    if not resolved_action_path.exists():
+        raise FileNotFoundError(
+            f"Resolved actions not found at {resolved_action_path}. Run scripts/generate_relevant_features.py for this mode first."
+        )
+    resolved_actions = pd.read_parquet(resolved_action_path)
+    match.labels = match.construct_labels(
+        discount_xg=True,
+        intended_receiver_mode=intended_receiver_mode,
+        relabel_intended_receivers=False,
+        resolved_actions=resolved_actions,
+    )
 
-    graph_path = DATA_ROOT / "features" / "action_graphs" / f"{match_id}.pt"
+    graph_path = ACTION_GRAPH_DIR / f"{match_id}.pt"
     if graph_path.exists():
         match.graph_features_0 = torch.load(graph_path, weights_only=False)
     else:
@@ -203,16 +224,21 @@ def render_component(
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
+    default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
 
-    match = load_match(args.match_id)
+    match = load_match(args.match_id, intended_receiver_mode=intended_receiver_mode)
     action_index, display_action_id = resolve_action_index(match, args)
     output_dir = Path(args.output_dir) / args.match_id / display_action_id
 
     model_specs = {
-        "action_intent": args.action_intent_model_id,
-        "pass_success": args.pass_success_model_id,
-        "outcome_scoring": args.outcome_scoring_model_id,
-        "outcome_conceding": args.outcome_conceding_model_id,
+        "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
+        "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
+        "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
+        "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
     }
     component_prob_rows: dict[str, pd.Series] = {}
 

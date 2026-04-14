@@ -14,23 +14,39 @@ from datatools.defcon import DEFCON
 from datatools.event_xg import EventXGModel
 from datatools.match import Match
 from datatools.tabular_feature import construct_tabular_features
+from project_config import (
+    ACTION_GRAPH_DIR,
+    POST_ACTION_GRAPH_DIR,
+    get_component_dir,
+    get_relevant_model_ids,
+    get_resolved_action_path,
+    resolve_intended_receiver_mode,
+)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--shot_success", type=str, default="unblocked", choices=["goal", "on_target", "unblocked"])
     parser.add_argument("--load_saved", action="store_true", default=False, help="load saved components")
-    parser.add_argument("--component_path", type=str, required=False, default="data/ajax/defcon_components")
+    parser.add_argument("--use-original-intended-receiver", action="store_true")
+    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--component_path", type=str, required=False, default=None)
     parser.add_argument("--result_path", type=str, required=False, default="data/ajax/player_scores.parquet")
     args, _ = parser.parse_known_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
+    model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=False)
+    component_path = args.component_path or str(get_component_dir(False, intended_receiver_mode))
     defcon_args = {
         "shot_success": args.shot_success,
-        "select_model_id": "action_intent/00",
-        "pass_success_model_id": "pass_success/20",
-        "score_model_id": "outcome_scoring/20",
-        "concede_model_id": "outcome_conceding/20",
-        "posterior_model_id": "failure_receiver/21",
+        "select_model_id": model_ids["action_intent"],
+        "pass_success_model_id": model_ids["pass_success"],
+        "score_model_id": model_ids["outcome_scoring"],
+        "concede_model_id": model_ids["outcome_conceding"],
+        "posterior_model_id": model_ids["failure_receiver"],
         "device": device,
     }
 
@@ -64,9 +80,20 @@ if __name__ == "__main__":
 
         match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
         print("Constructing labels...")
-        match.labels = match.construct_labels(discount_xg=True)
-        match.graph_features_0 = torch.load(f"data/ajax/features/action_graphs/{match_id}.pt", weights_only=False)
-        match.graph_features_1 = torch.load(f"data/ajax/features/post_action_graphs/{match_id}.pt", weights_only=False)
+        resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+        if not resolved_action_path.exists():
+            raise FileNotFoundError(
+                f"Resolved actions not found at {resolved_action_path}. Run scripts/generate_relevant_features.py for this mode first."
+            )
+        resolved_actions = pd.read_parquet(resolved_action_path)
+        match.labels = match.construct_labels(
+            discount_xg=True,
+            intended_receiver_mode=intended_receiver_mode,
+            relabel_intended_receivers=False,
+            resolved_actions=resolved_actions,
+        )
+        match.graph_features_0 = torch.load(ACTION_GRAPH_DIR / f"{match_id}.pt", weights_only=False)
+        match.graph_features_1 = torch.load(POST_ACTION_GRAPH_DIR / f"{match_id}.pt", weights_only=False)
         match.actions = match.label_post_actions(match.actions)
 
         if args.shot_success in ["goal", "on_target"]:
@@ -79,11 +106,11 @@ if __name__ == "__main__":
         defcon = DEFCON(match, **defcon_args)
 
         if args.load_saved:
-            defcon.load_components(args.component_path)
+            defcon.load_components(component_path)
             # defcon.estimate_shot_components()
         else:
             defcon.estimate_components()
-            defcon.save_components(args.component_path)
+            defcon.save_components(component_path)
 
         player_scores = defcon.evaluate_players()
 

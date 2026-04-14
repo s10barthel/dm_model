@@ -188,7 +188,7 @@ class ActionDataset(Dataset):
             if not ball_z_aware:  # Set the ball height for every action as 0
                 graph.x[:, 12] = 0
 
-            if not extend_features:
+            if not extend_features and task != "success_intent":
                 graph.x[:, 19:] = 0
 
             if not TASK_CONFIG.at[task, "include_goals"]:

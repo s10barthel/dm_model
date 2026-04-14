@@ -15,6 +15,12 @@ import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.xt import merge_xt_annotations
 from datatools.viz_snapshot import SnapshotVisualizer
+from project_config import (
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+    INTENDED_RECEIVER_MODE_ANGLE_ONLY,
+    INTENDED_RECEIVER_MODE_MODEL,
+)
 
 
 class Match(ABC):
@@ -138,6 +144,96 @@ class Match(ABC):
         self.tabular_features_0 = None
         self.tabular_features_1 = None
         self.labels = None
+        self.intended_receiver_stats: Dict[str, object] = {}
+
+    def _apply_intended_receiver_model(
+        self,
+        actions: pd.DataFrame,
+        intended_receiver_model_id: str = DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+    ) -> pd.DataFrame:
+        from torch_geometric.data import Batch
+
+        from datatools.graph_feature import construct_graph_for_action
+        from models.utils import load_model
+
+        failed_pass_indices = actions.index[
+            (actions["action_type"] == "pass")
+            & (~actions["success"])
+            & actions["receive_frame_id"].notna()
+            & actions["receiver_id"].notna()
+        ].tolist()
+        stats = dict(actions.attrs.get("intended_receiver_stats", {}))
+        stats["intended_receiver_model_id"] = intended_receiver_model_id
+        stats["model_failed_passes_total"] = len(failed_pass_indices)
+        stats["model_failed_passes_scored"] = 0
+
+        if not failed_pass_indices:
+            stats["model_angle_only_fallbacks"] = 0
+            actions.attrs["intended_receiver_stats"] = stats
+            return actions
+
+        model = load_model(intended_receiver_model_id, device="cpu")
+        if model is None:
+            raise FileNotFoundError(f"Could not load intended receiver model checkpoint {intended_receiver_model_id}.")
+        model.eval()
+
+        graphs = []
+        graph_action_indices: list[int] = []
+        graph_teammate_ids: list[list[str]] = []
+        previous_actions = self.actions
+        self.actions = actions
+        try:
+            for action_index in failed_pass_indices:
+                graph = construct_graph_for_action(
+                    self,
+                    action_index,
+                    feature_variant="success_intent",
+                    extend=False,
+                    post_action=False,
+                )
+                if graph is None:
+                    continue
+
+                dummy_label = torch.zeros((1, len(config.LABEL_COLUMNS)), dtype=torch.float32)
+                dummy_label[0, 0] = float(action_index)
+                filtered_graphs, _ = utils.filter_features_and_labels([graph], dummy_label, model.args, [action_index])
+                if not filtered_graphs:
+                    continue
+
+                graphs.append(filtered_graphs[0])
+                graph_action_indices.append(int(action_index))
+                filtered_node_ids = getattr(filtered_graphs[0], "node_ids", [])
+                graph_teammate_ids.append(
+                    [node_id for node_id, is_teammate in zip(filtered_node_ids, filtered_graphs[0].x[:, 0].tolist()) if is_teammate == 1]
+                )
+        finally:
+            self.actions = previous_actions
+
+        if graphs:
+            batch_graphs = Batch.from_data_list(graphs).to("cpu")
+            batch_graphs.x = batch_graphs.x[:, : model.args["node_in_dim"]]
+
+            with torch.no_grad():
+                logits = model(batch_graphs)
+
+            for graph_index, action_index in enumerate(graph_action_indices):
+                teammate_logits = logits[(batch_graphs.batch == graph_index) & (batch_graphs.x[:, 0] == 1)]
+                if teammate_logits.numel() == 0:
+                    continue
+
+                teammates = graph_teammate_ids[graph_index]
+                if not teammates:
+                    continue
+                target_index = int(teammate_logits.argmax().item())
+                if 0 <= target_index < len(teammates):
+                    actions.at[action_index, "intent_id"] = teammates[target_index]
+                    stats["model_failed_passes_scored"] += 1
+
+        stats["model_angle_only_fallbacks"] = (
+            stats["model_failed_passes_total"] - stats["model_failed_passes_scored"]
+        )
+        actions.attrs["intended_receiver_stats"] = stats
+        return actions
 
     def has_valid_action_snapshot(self, frame: float, possessor: str) -> bool:
         if pd.isna(frame) or not isinstance(possessor, str) or possessor.split("_")[0] not in ["home", "away"]:
@@ -335,8 +431,30 @@ class Match(ABC):
         discount_xg=True,
         lookahead_len: int = 10,
         gamma: float = 0.9,
+        intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+        intended_receiver_model_id: str = DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+        relabel_intended_receivers: bool = True,
+        resolved_actions: pd.DataFrame | None = None,
     ) -> torch.Tensor:
-        self.actions = utils.label_intended_receivers(self.actions, self.tracking, self.action_type)
+        if resolved_actions is not None:
+            self.actions = resolved_actions.copy()
+        elif relabel_intended_receivers:
+            heuristic_mode = (
+                INTENDED_RECEIVER_MODE_ANGLE_ONLY
+                if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL
+                else intended_receiver_mode
+            )
+            self.actions = utils.label_intended_receivers(
+                self.actions,
+                self.tracking,
+                self.action_type,
+                intended_receiver_mode=heuristic_mode,
+                fps=self.fps,
+            )
+            if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:
+                self.actions = self._apply_intended_receiver_model(self.actions, intended_receiver_model_id)
+
+        self.intended_receiver_stats = dict(self.actions.attrs.get("intended_receiver_stats", {}))
 
         self.events = utils.label_returns(self.events, lookahead_len)
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]

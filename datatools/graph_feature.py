@@ -3,6 +3,7 @@ import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import List, Tuple
 
 if not os.getcwd() in sys.path:
@@ -23,10 +24,23 @@ from datatools.match import Match
 from project_config import (
     ACTION_GRAPH_DIR,
     ACTION_GRAPH_INTENT_TRAIN_DIR,
+    DEFAULT_INTENDED_RECEIVER_MODEL_ID,
     POST_ACTION_GRAPH_DIR,
     INTENT_TRAIN_OFFSETS,
+    SUCCESS_INTENT_GRAPH_DIR,
+    get_action_label_dir,
+    get_augmented_feature_dir,
+    get_augmented_label_dir,
+    get_intent_train_label_dir,
+    get_resolved_action_path,
     load_base_splits,
+    resolve_intended_receiver_mode,
 )
+
+BASE_NODE_FEATURE_DIM = 19
+EXTENDED_NODE_FEATURE_DIM = 25
+SUCCESS_INTENT_EXTRA_DIM = 4
+SUCCESS_INTENT_WINDOW_SECONDS = 1.0
 
 
 def calculate_event_features(
@@ -169,8 +183,11 @@ def calculate_event_features(
     return np.stack(event_features, axis=-1)  # [T, N, x]
 
 
-def infer_node_feature_dim(extend: bool = True) -> int:
-    return 25 if extend else 19
+def infer_node_feature_dim(extend: bool = True, feature_variant: str = "base") -> int:
+    base_dim = EXTENDED_NODE_FEATURE_DIM if extend else BASE_NODE_FEATURE_DIM
+    if feature_variant == "success_intent":
+        return BASE_NODE_FEATURE_DIM + SUCCESS_INTENT_EXTRA_DIM
+    return base_dim
 
 
 def load_frame_snapshot(primary_tracking: pd.DataFrame, fallback_tracking: pd.DataFrame, frame: int) -> pd.DataFrame:
@@ -200,6 +217,152 @@ def resolve_prior_frame(phase_tracking: pd.DataFrame, possessor: str, current_fr
     return int(earlier_tracking.index[-1])
 
 
+def resolve_snapshot_player_ids(match: Match, snapshot: pd.DataFrame, possessor: str) -> list[str]:
+    phase_id = snapshot["phase_id"].iloc[0]
+    active_players = match.phases.at[phase_id, "active_players"]
+    active_keepers = match.phases.at[phase_id, "active_keepers"]
+
+    if not match.include_keepers:
+        keeper_cols = [c for c in snapshot.columns if "_".join(c.split("_")[:2]) in active_keepers]
+        snapshot = snapshot.drop(keeper_cols, axis=1).copy()
+
+    home_cols = [c for c in snapshot.dropna(axis=1).columns if c.startswith("home")]
+    away_cols = [c for c in snapshot.dropna(axis=1).columns if c.startswith("away")]
+    if not match.include_goals:
+        home_cols = [c for c in home_cols if not c.startswith("home_goal")]
+        away_cols = [c for c in away_cols if not c.startswith("away_goal")]
+
+    player_cols = home_cols + away_cols if possessor.startswith("home") else away_cols + home_cols
+    players = [c[:-2] for c in player_cols if c.endswith("_x")]
+    expected_players = set(active_players)
+    actual_players = set(players) - {"home_goal", "away_goal"}
+    if actual_players != expected_players:
+        raise ValueError(
+            f"Active-player mismatch for possessor {possessor}: expected {len(expected_players)} players, "
+            f"found {len(actual_players)}."
+        )
+    return players
+
+
+def resolve_action_graph_context(
+    match: Match,
+    action_index: int,
+    post_action: bool = False,
+) -> tuple[int | float, str, pd.DataFrame]:
+    period = int(match.actions.at[action_index, "period_id"])
+    if post_action:
+        frame = match.actions.at[action_index, "end_frame_id"]
+        possessor = match.actions.at[action_index, "end_player_id"]
+    else:
+        frame = match.actions.at[action_index, "frame_id"]
+        possessor = match.actions.at[action_index, "object_id"]
+    period_tracking = match.tracking[match.tracking["period_id"] == period]
+    return frame, possessor, period_tracking
+
+
+def append_node_level_globals(graph: Data, global_features: np.ndarray | list[float] | None) -> Data:
+    if graph is None or global_features is None:
+        return graph
+
+    global_features = np.asarray(global_features, dtype=float).reshape(1, -1)
+    repeated = torch.tensor(global_features, dtype=torch.float32).repeat(graph.x.shape[0], 1)
+    graph.x = torch.cat([graph.x, repeated], dim=1)
+    return graph
+
+
+def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to_ltr: bool = True) -> np.ndarray:
+    action = match.actions.loc[action_index]
+    start_x = float(action.get("start_x", np.nan))
+    start_y = float(action.get("start_y", np.nan))
+    end_x = float(action.get("end_x", np.nan))
+    end_y = float(action.get("end_y", np.nan))
+    start_z = float(action.get("start_z", 0.0))
+
+    end_z = start_z
+    receive_frame = action.get("receive_frame_id", np.nan)
+    if not pd.isna(receive_frame) and int(receive_frame) in match.tracking.index:
+        end_z = float(match.tracking.at[int(receive_frame), "ball_z"]) if "ball_z" in match.tracking.columns else start_z
+
+    if any(pd.isna(v) for v in [start_x, start_y, end_x, end_y]):
+        return np.zeros(SUCCESS_INTENT_EXTRA_DIM, dtype=float)
+
+    dx = end_x - start_x
+    dy = end_y - start_y
+    dz = end_z - start_z
+    if rotate_to_ltr and str(action["object_id"]).startswith("away"):
+        dx = -dx
+        dy = -dy
+
+    disp = np.array([dx, dy, dz], dtype=float)
+    disp_norm = float(np.linalg.norm(disp))
+    direction = disp / disp_norm if disp_norm > 1e-6 else np.zeros(3, dtype=float)
+
+    frame = action.get("frame_id", np.nan)
+    end_frame = receive_frame if not pd.isna(receive_frame) else frame
+    duration = 0.0 if pd.isna(frame) or pd.isna(end_frame) else max((float(end_frame) - float(frame)) / match.fps, 1 / match.fps)
+    mean_speed = disp_norm / duration
+    return np.array([mean_speed, *direction], dtype=float)
+
+
+def summarize_ball_trajectory(
+    match: Match,
+    action_index: int,
+    fps: int | None = None,
+    rotate_to_ltr: bool = True,
+) -> np.ndarray:
+    fps = fps or match.fps
+    action = match.actions.loc[action_index]
+    frame = action.get("frame_id", np.nan)
+    receive_frame = action.get("receive_frame_id", np.nan)
+
+    if pd.isna(frame):
+        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+
+    frame = int(frame)
+    end_frame = frame + max(int(round(fps * SUCCESS_INTENT_WINDOW_SECONDS)), 1)
+    if action.get("receiver_id") == "out":
+        episode_end_frame = utils.resolve_episode_end_frame(match.tracking, frame)
+        if episode_end_frame is not None:
+            receive_frame = episode_end_frame
+    if not pd.isna(receive_frame):
+        end_frame = min(end_frame, int(receive_frame))
+    if end_frame <= frame:
+        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+
+    available_cols = [col for col in ["ball_x", "ball_y", "ball_z", "ball_speed", "ball_vz"] if col in match.tracking.columns]
+    trajectory = match.tracking.loc[frame:end_frame, available_cols].copy()
+    if trajectory.empty or not {"ball_x", "ball_y"}.issubset(set(trajectory.columns)):
+        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+
+    trajectory["ball_z"] = trajectory.get("ball_z", 0.0)
+    spatial = trajectory[["ball_x", "ball_y", "ball_z"]].dropna(subset=["ball_x", "ball_y"])
+    if spatial.shape[0] < 2:
+        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+
+    start_xyz = spatial.iloc[0].to_numpy(dtype=float)
+    end_xyz = spatial.iloc[-1].to_numpy(dtype=float)
+    disp = end_xyz - start_xyz
+    if rotate_to_ltr and str(action["object_id"]).startswith("away"):
+        disp[0] = -disp[0]
+        disp[1] = -disp[1]
+
+    disp_norm = float(np.linalg.norm(disp))
+    direction = disp / disp_norm if disp_norm > 1e-6 else np.zeros(3, dtype=float)
+
+    if {"ball_speed", "ball_vz"}.issubset(set(trajectory.columns)):
+        velocity = trajectory[["ball_speed", "ball_vz"]].dropna()
+        if not velocity.empty:
+            mean_speed = float(np.sqrt(velocity["ball_speed"].astype(float) ** 2 + velocity["ball_vz"].astype(float) ** 2).mean())
+        else:
+            duration = max((spatial.index[-1] - spatial.index[0]) / fps, 1 / fps)
+            mean_speed = disp_norm / duration
+    else:
+        duration = max((spatial.index[-1] - spatial.index[0]) / fps, 1 / fps)
+        mean_speed = disp_norm / duration
+
+    return np.array([mean_speed, *direction], dtype=float)
+
+
 def construct_graph_for_frame(
     match: Match,
     frame: int,
@@ -208,6 +371,7 @@ def construct_graph_for_frame(
     feature_dim: int,
     extend: bool = True,
     rotate_to_ltr: bool = True,
+    extra_node_features: np.ndarray | None = None,
 ) -> Data | None:
     if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
         return None
@@ -230,6 +394,7 @@ def construct_graph_for_frame(
         return None
 
     try:
+        player_ids = resolve_snapshot_player_ids(match, snapshot, possessor)
         event_features = torch.tensor(
             calculate_event_features(
                 match,
@@ -242,6 +407,9 @@ def construct_graph_for_frame(
         )
     except (KeyError, IndexError, TypeError, ValueError):
         return None
+    if extra_node_features is not None:
+        extra = torch.tensor(np.asarray(extra_node_features, dtype=float), dtype=torch.float32).unsqueeze(0)
+        event_features = torch.cat([event_features, extra.repeat(event_features.shape[0], 1)], dim=1)
     missing_players = match.max_players - event_features.shape[0]
     if missing_players > 0:
         padding_features = -torch.ones((missing_players, feature_dim))
@@ -255,14 +423,50 @@ def construct_graph_for_frame(
     distances = distances[edge_index[0], edge_index[1]]
     teammates = teammates[edge_index[0], edge_index[1]]
     edge_attr = torch.stack([distances, teammates], dim=-1)
+    graph = Data(x=node_attr, edge_index=edge_index.clone(), edge_attr=edge_attr)
+    graph.node_ids = list(player_ids)
+    return graph
 
-    return Data(x=node_attr, edge_index=edge_index.clone(), edge_attr=edge_attr)
+
+def construct_graph_for_action(
+    match: Match,
+    action_index: int,
+    feature_variant: str = "base",
+    extend: bool = True,
+    post_action: bool = False,
+    rotate_to_ltr: bool = True,
+) -> Data | None:
+    if action_index not in match.actions.index:
+        return None
+
+    if "ball_accel" not in match.tracking.columns or (feature_variant == "success_intent" and "ball_vz" not in match.tracking.columns):
+        match.tracking = proc.calc_physical_features(match.tracking, match.fps)
+
+    frame, possessor, period_tracking = resolve_action_graph_context(match, action_index, post_action=post_action)
+    base_extend = extend if feature_variant == "base" else False
+    feature_dim = infer_node_feature_dim(base_extend, feature_variant=feature_variant)
+    extra_node_features = None
+    if feature_variant == "success_intent":
+        extra_node_features = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=rotate_to_ltr)
+
+    return construct_graph_for_frame(
+        match,
+        frame,
+        possessor,
+        period_tracking,
+        feature_dim,
+        extend=base_extend,
+        rotate_to_ltr=rotate_to_ltr,
+        extra_node_features=extra_node_features,
+    )
 
 
 def construct_graph_features(
     match: Match,
     extend=True,
     post_action=False,
+    feature_variant: str = "base",
+    action_indices: np.ndarray | list[int] | None = None,
     verbose=True,
 ) -> List[Data | None]:
     if "ball_accel" not in match.tracking.columns:
@@ -272,24 +476,20 @@ def construct_graph_features(
         match.actions = match.label_post_actions(match.actions)
 
     feature_graphs: List[Data | None] = []
-    feature_dim = infer_node_feature_dim(extend)
+    if action_indices is None:
+        action_indices = match.labels[:, 0].long().numpy()
+    action_indices = np.asarray(action_indices, dtype=int)
+    iterator = tqdm(action_indices, desc=f"Constructing {feature_variant} graphs") if verbose else action_indices
 
-    for period in match.events["period_id"].unique():
-        period_actions: pd.DataFrame = match.actions[match.actions["period_id"] == period]
-        period_tracking: pd.DataFrame = match.tracking[match.tracking["period_id"] == period]
-        action_indices = np.intersect1d(period_actions.index, match.labels[:, 0].long().numpy())
-        iterator = tqdm(action_indices, desc=f"Period {period}") if verbose else action_indices
-
-        for i in iterator:
-            if post_action:
-                frame = period_actions.at[i, "end_frame_id"]
-                possessor = period_actions.at[i, "end_player_id"]
-            else:
-                frame = period_actions.at[i, "frame_id"]
-                possessor = period_actions.at[i, "object_id"]
-
-            graph = construct_graph_for_frame(match, frame, possessor, period_tracking, feature_dim, extend=extend)
-            feature_graphs.append(graph)
+    for action_index in iterator:
+        graph = construct_graph_for_action(
+            match,
+            int(action_index),
+            feature_variant=feature_variant,
+            extend=extend,
+            post_action=post_action,
+        )
+        feature_graphs.append(graph)
 
     return feature_graphs
 
@@ -327,7 +527,7 @@ def construct_intent_training_samples(
         possessor = match.actions.at[action_index, "object_id"]
         period_tracking = match.tracking[match.tracking["period_id"] == period]
 
-        base_graph = construct_graph_for_frame(match, current_frame, possessor, period_tracking, feature_dim, extend=extend)
+        base_graph = construct_graph_for_action(match, action_index, feature_variant="base", extend=extend)
         if base_graph is None:
             continue
 
@@ -448,8 +648,24 @@ if __name__ == "__main__":
     parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining future xG")
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
     parser.add_argument("--augment_blocks", action="store_true", default=False)
-    parser.add_argument("--feature_variant", type=str, default="base", choices=["base", "intent_train_augmented"])
+    parser.add_argument(
+        "--feature_variant",
+        type=str,
+        default="base",
+        choices=["base", "intent_train_augmented", "success_intent"],
+    )
+    parser.add_argument("--use-original-intended-receiver", action="store_true", default=False)
+    parser.add_argument("--use-intended-receiver-model", action="store_true", default=False)
+    parser.add_argument(
+        "--intended-receiver-model-id",
+        type=str,
+        default=DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+    )
     args, _ = parser.parse_known_args()
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
 
     if args.action_type.startswith("shot"):
         if args.feature_variant != "base":
@@ -462,13 +678,16 @@ if __name__ == "__main__":
 
     else:  # args.actions_type == "all"
         if args.feature_variant == "intent_train_augmented":
-            feature_dir = str(ACTION_GRAPH_INTENT_TRAIN_DIR)
-            label_dir = f"data/ajax/features/action_labels_intent_train_{args.return_type}"
+            feature_dir = ACTION_GRAPH_INTENT_TRAIN_DIR
+            label_dir = get_intent_train_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
+        elif args.feature_variant == "success_intent":
+            feature_dir = SUCCESS_INTENT_GRAPH_DIR
+            label_dir = get_action_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
         else:
-            feature_dir = str(ACTION_GRAPH_DIR)
-            label_dir = f"data/ajax/features/action_labels_{args.return_type}"
-        os.makedirs(feature_dir, exist_ok=True)
-        os.makedirs(label_dir, exist_ok=True)
+            feature_dir = ACTION_GRAPH_DIR
+            label_dir = get_action_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
+        Path(feature_dir).mkdir(parents=True, exist_ok=True)
+        Path(label_dir).mkdir(parents=True, exist_ok=True)
 
         if args.post_action:
             if args.feature_variant != "base":
@@ -477,8 +696,8 @@ if __name__ == "__main__":
             os.makedirs(post_feature_dir, exist_ok=True)
 
     if args.augment_blocks:
-        augmented_feature_dir = "data/ajax/features/augmented_graphs"
-        augmented_label_dir = "data/ajax/features/augmented_labels"
+        augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode))
+        augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode))
         os.makedirs(augmented_feature_dir, exist_ok=True)
         os.makedirs(augmented_label_dir, exist_ok=True)
 
@@ -496,6 +715,14 @@ if __name__ == "__main__":
 
     successful_matches = 0
     skipped_matches: list[dict[str, str]] = []
+    aggregate_stats = {
+        "failed_passes_total": 0,
+        "failed_passes_labeled": 0,
+        "failed_passes_missing_endpoint": 0,
+        "model_failed_passes_total": 0,
+        "model_failed_passes_scored": 0,
+        "model_angle_only_fallbacks": 0,
+    }
 
     for i, match_id in enumerate(match_ids):
         try:
@@ -510,12 +737,37 @@ if __name__ == "__main__":
 
             if args.return_type.startswith("disc"):
                 gamma = float(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(discount_xg=True, gamma=gamma)
-            if args.return_type.startswith("next"):
+                match.labels = match.construct_labels(
+                    discount_xg=True,
+                    gamma=gamma,
+                    intended_receiver_mode=intended_receiver_mode,
+                    intended_receiver_model_id=args.intended_receiver_model_id,
+                )
+            elif args.return_type.startswith("next"):
                 lookahead_len = int(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(discount_xg=False, lookahead_len=lookahead_len)
+                match.labels = match.construct_labels(
+                    discount_xg=False,
+                    lookahead_len=lookahead_len,
+                    intended_receiver_mode=intended_receiver_mode,
+                    intended_receiver_model_id=args.intended_receiver_model_id,
+                )
             if match.labels.numel() == 0:
                 raise ValueError("No usable labels were constructed for this match.")
+
+            match_stats = dict(match.intended_receiver_stats)
+            for key in aggregate_stats:
+                aggregate_stats[key] += int(match_stats.get(key, 0) or 0)
+            if match_stats.get("model_failed_passes_total", 0):
+                print(
+                    "  Intended-receiver model fallback: "
+                    f"{int(match_stats.get('model_angle_only_fallbacks', 0))} / "
+                    f"{int(match_stats.get('model_failed_passes_total', 0))} failed passes used angle_only."
+                )
+
+            if args.action_type == "all":
+                resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+                resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
+                match.actions.to_parquet(resolved_action_path)
 
             action_indices = match.labels[:, 0].numpy().astype(int)
             if not np.all(np.sort(action_indices) == action_indices):
@@ -529,12 +781,30 @@ if __name__ == "__main__":
                 torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
                 torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
                 print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
+            elif args.feature_variant == "success_intent":
+                print("Constructing success-intent graph features for actions...")
+                success_graphs = construct_graph_features(
+                    match,
+                    extend=False,
+                    post_action=False,
+                    feature_variant="success_intent",
+                )
+                valid_graphs = len(success_graphs) - count_invalid_graphs(success_graphs)
+                if valid_graphs == 0:
+                    raise ValueError("No usable success-intent graphs were constructed for this match.")
+                torch.save(match.labels, f"{label_dir}/{match_id}.pt")
+                torch.save(success_graphs, f"{feature_dir}/{match_id}.pt")
+                invalid_graphs = count_invalid_graphs(success_graphs)
+                if invalid_graphs:
+                    print(f"  Skipped {invalid_graphs} corrupted action frames while building success-intent graphs.")
+                print(f"Successfully saved success-intent graphs for {match.labels.shape[0]} events.")
             else:
                 print("Constructing base graph features for actions...")
                 match.graph_features_0 = construct_graph_features(
                     match,
                     extend=True,
                     post_action=False,
+                    feature_variant="base",
                 )
                 valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
                 if valid_graphs == 0:
@@ -551,6 +821,7 @@ if __name__ == "__main__":
                         match,
                         extend=True,
                         post_action=True,
+                        feature_variant="base",
                     )
                     torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
 
@@ -576,3 +847,9 @@ if __name__ == "__main__":
             print(f"  {item['match_id']}: {item['error']}")
         if len(skipped_matches) > 10:
             print(f"  ... and {len(skipped_matches) - 10} more")
+    if intended_receiver_mode == "model" and aggregate_stats["model_failed_passes_total"] > 0:
+        print(
+            "Intended-receiver model fallback summary: "
+            f"{aggregate_stats['model_angle_only_fallbacks']} / {aggregate_stats['model_failed_passes_total']} "
+            "failed passes used angle_only."
+        )

@@ -12,6 +12,11 @@ from shapely.geometry import Point, Polygon
 from torch_geometric.data import Batch, Data
 
 from datatools import config
+from project_config import (
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    INTENDED_RECEIVER_MODE_ANGLE_ONLY,
+    INTENDED_RECEIVER_MODE_ORIGINAL,
+)
 
 
 def calc_dist(x: np.ndarray, y: np.ndarray, ref_x: np.ndarray, ref_y: np.ndarray):
@@ -48,6 +53,50 @@ def calc_angle(
         cos = np.clip((ab_x * ac_x + ab_y * ac_y) / (ab_len * ac_len), -1, 1)
 
     return np.arccos(cos)
+
+
+def downscale_closer_candidates(dists: np.ndarray) -> np.ndarray:
+    out = np.empty_like(dists)
+    out[dists < -10] = 0.5
+    out[(dists >= -10) & (dists < 0)] = dists[(dists >= -10) & (dists < 0)] / 20 + 1
+    out[dists >= 0] = 1.0
+    return out
+
+
+def resolve_episode_end_frame(tracking: pd.DataFrame, frame: int) -> int | None:
+    if frame not in tracking.index or "episode_id" not in tracking.columns:
+        return None
+
+    episode_id = tracking.at[frame, "episode_id"]
+    if pd.isna(episode_id):
+        return None
+
+    episode_frames = tracking.index[(tracking["episode_id"] == episode_id) & (tracking["ball_state"] == "alive")]
+    if len(episode_frames) == 0:
+        return None
+    return int(episode_frames.max())
+
+
+def resolve_ball_endpoint(
+    tracking: pd.DataFrame,
+    preferred_frame: int,
+    fallback_frame: int | None,
+    fallback_xy: tuple[float, float],
+) -> tuple[int | None, float, float]:
+    frame_candidates = [preferred_frame]
+    if fallback_frame is not None and fallback_frame != preferred_frame:
+        frame_candidates.append(fallback_frame)
+
+    for frame in frame_candidates:
+        if frame is None or frame not in tracking.index:
+            continue
+        snapshot = tracking.loc[frame]
+        ball_x = snapshot.get("ball_x", np.nan)
+        ball_y = snapshot.get("ball_y", np.nan)
+        if not pd.isna(ball_x) and not pd.isna(ball_y):
+            return int(frame), float(ball_x), float(ball_y)
+
+    return None, float(fallback_xy[0]), float(fallback_xy[1])
 
 
 # Identify whether the shot trajectory is erroneous and the shot hits a post
@@ -222,16 +271,21 @@ def label_intended_receivers(
     tracking: pd.DataFrame,
     action_type="shot",
     max_angle=45,
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    fps: int = 25,
 ) -> pd.DataFrame:
-    def downscale_closer_candidates(dists: np.ndarray) -> np.ndarray:
-        out = np.empty_like(dists)
-        out[dists < -10] = 0.5
-        out[(dists >= -10) & (dists < 0)] = dists[(dists >= -10) & (dists < 0)] / 20 + 1
-        out[dists >= 0] = 1.0
-        return out
+    if intended_receiver_mode not in {INTENDED_RECEIVER_MODE_ORIGINAL, INTENDED_RECEIVER_MODE_ANGLE_ONLY}:
+        raise ValueError(f"Unsupported heuristic intended receiver mode: {intended_receiver_mode}")
 
     actions = actions.copy()
     actions["intent_id"] = pd.Series(index=actions.index, dtype="object")
+    stats = {
+        "mode": intended_receiver_mode,
+        "failed_passes_total": 0,
+        "failed_passes_labeled": 0,
+        "failed_passes_missing_endpoint": 0,
+    }
+    trajectory_window_frames = max(int(round(float(fps) * 2.0)), 1)
 
     for i in actions.index:
         event_frame = actions.at[i, "frame_id"]
@@ -282,11 +336,21 @@ def label_intended_receivers(
             actions.at[i, "intent_id"] = actions.at[i, "receiver_id"]
 
         elif not pd.isna(receiver) and not pd.isna(receive_frame):  # For failed passes
+            stats["failed_passes_total"] += 1
             receive_frame = int(receive_frame)
             if receive_frame not in tracking.index:
                 continue
 
-            receive_snapshot: pd.Series = tracking.loc[receive_frame]
+            effective_receive_frame = receive_frame
+            if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY and receiver == "out":
+                episode_end_frame = resolve_episode_end_frame(tracking, event_frame)
+                if episode_end_frame is not None:
+                    effective_receive_frame = episode_end_frame
+
+            if effective_receive_frame not in tracking.index:
+                continue
+
+            receive_snapshot: pd.Series = tracking.loc[effective_receive_frame]
 
             teammates = [c[:-2] for c in snapshot.dropna().index if re.match(rf"{possessor[:4]}_\d+_x", c)]
             teammates = [p for p in teammates if p != possessor]
@@ -307,14 +371,28 @@ def label_intended_receivers(
                 start_x = actions.at[i, "start_x"]
                 start_y = actions.at[i, "start_y"]
 
-            if receiver != "out":
-                end_x = receive_snapshot.get(f"{receiver}_x", actions.at[i, "end_x"])
-                end_y = receive_snapshot.get(f"{receiver}_y", actions.at[i, "end_y"])
-            else:
-                end_x = receive_snapshot.get("ball_x", actions.at[i, "end_x"])
-                end_y = receive_snapshot.get("ball_y", actions.at[i, "end_y"])
+            if pd.isna(start_x) or pd.isna(start_y):
+                continue
 
-            if pd.isna(start_x) or pd.isna(start_y) or pd.isna(end_x) or pd.isna(end_y):
+            if intended_receiver_mode == INTENDED_RECEIVER_MODE_ORIGINAL:
+                if receiver != "out":
+                    end_x = receive_snapshot.get(f"{receiver}_x", actions.at[i, "end_x"])
+                    end_y = receive_snapshot.get(f"{receiver}_y", actions.at[i, "end_y"])
+                else:
+                    end_x = receive_snapshot.get("ball_x", actions.at[i, "end_x"])
+                    end_y = receive_snapshot.get("ball_y", actions.at[i, "end_y"])
+                trajectory_frame = effective_receive_frame
+            else:
+                preferred_frame = min(event_frame + trajectory_window_frames, effective_receive_frame)
+                trajectory_frame, end_x, end_y = resolve_ball_endpoint(
+                    tracking,
+                    preferred_frame=preferred_frame,
+                    fallback_frame=effective_receive_frame,
+                    fallback_xy=(actions.at[i, "end_x"], actions.at[i, "end_y"]),
+                )
+
+            if pd.isna(end_x) or pd.isna(end_y):
+                stats["failed_passes_missing_endpoint"] += 1
                 continue
 
             player_x = receive_snapshot[[f"{p}_x" for p in teammates]].values
@@ -326,12 +404,26 @@ def label_intended_receivers(
             dest_dists = np.clip(calc_dist(player_x, player_y, end_x, end_y)[-1], 1, None)
             angles = np.clip(calc_angle(start_x, start_y, end_x, end_y, player_x, player_y), 0.01, None)
 
-            max_radian = max_angle / 180 * np.pi
-            if np.min(angles) < max_radian:
-                scores = weights * (np.min(dest_dists) / dest_dists) * (np.min(angles) / angles)
-                scores = np.where(angles < max_radian, scores, 0)
-                actions.at[i, "intent_id"] = teammates[np.argmax(scores)]
+            if intended_receiver_mode == INTENDED_RECEIVER_MODE_ORIGINAL:
+                max_radian = max_angle / 180 * np.pi
+                if np.min(angles) < max_radian:
+                    scores = weights * (np.min(dest_dists) / dest_dists) * (np.min(angles) / angles)
+                    scores = np.where(angles < max_radian, scores, 0)
+                    actions.at[i, "intent_id"] = teammates[np.argmax(scores)]
+                    stats["failed_passes_labeled"] += 1
+            else:
+                min_angle = float(np.min(angles))
+                scores = weights * (min_angle / angles)
+                best_score = float(np.max(scores))
+                candidate_indices = np.flatnonzero(np.isclose(scores, best_score))
+                if len(candidate_indices) > 1:
+                    best_dest_idx = candidate_indices[np.argmin(dest_dists[candidate_indices])]
+                else:
+                    best_dest_idx = int(candidate_indices[0])
+                actions.at[i, "intent_id"] = teammates[best_dest_idx]
+                stats["failed_passes_labeled"] += 1
 
+    actions.attrs["intended_receiver_stats"] = stats
     return actions
 
 
@@ -549,6 +641,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     edge_index = index_map[graph.edge_index[:, edge_mask]]
     edge_attr = graph.edge_attr[edge_mask]
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
+    if hasattr(graph, "node_ids"):
+        masked_graph.node_ids = [graph.node_ids[idx] for idx in node_mask_indices.tolist()]
 
     masked_labels = labels.clone()
     masked_labels[4] = node_mask.long().sum()  # number of players
@@ -654,7 +748,7 @@ def filter_features_and_labels(
         if not args["ball_z_aware"]:
             graph.x[:, 12] = 0
 
-        if not args["extend_features"]:
+        if not args["extend_features"] and args.get("task") != "success_intent":
             graph.x[:, 19:] = 0
 
         if not config.TASK_CONFIG.at[args["task"], "include_goals"]:

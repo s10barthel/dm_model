@@ -164,8 +164,22 @@ def calc_physical_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
             tracking.at[coords.index[0], f"{p}_speed"] = tracking.at[coords.index[1], f"{p}_speed"]
             tracking.loc[[coords.index[0], coords.index[-1]], f"{p}_accel"] = 0
 
+    if "ball_vz" not in tracking.columns:
+        tracking["ball_vz"] = np.nan
+    if "ball_z" in tracking.columns:
+        for i in tracking["period_id"].unique():
+            z = tracking.loc[tracking["period_id"] == i, "ball_z"].dropna().astype(float)
+            if len(z) < 2:
+                continue
+
+            vz = smooth(np.diff(z.values) * fps, window_length=15, polyorder=2)
+            tracking.loc[z.index[1:], "ball_vz"] = vz
+            tracking.at[z.index[0], "ball_vz"] = tracking.at[z.index[1], "ball_vz"]
+
     state_cols = ["period_id", "timestamp", "episode_id", "ball_state", "ball_owning_home_away"]
-    feature_cols = [f"{p}_{f}" for p in objects for f in physical_features] + ["ball_z"]
+    if "phase_id" in tracking.columns:
+        state_cols.append("phase_id")
+    feature_cols = [f"{p}_{f}" for p in objects for f in physical_features] + ["ball_vz", "ball_z"]
 
     return tracking[state_cols + feature_cols].copy()
 

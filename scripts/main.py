@@ -10,21 +10,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from project_config import COMPONENT_DIR, EVENT_SYNCED_DIR, XT_DIR, XT_MATCH_DIR
-
-XG_MODEL_IDS = {
-    "action_intent": "action_intent/00",
-    "pass_success": "pass_success/20",
-    "outcome_scoring": "outcome_scoring/20",
-    "outcome_conceding": "outcome_conceding/20",
-}
-XT_MODEL_IDS = {
-    "action_intent": "action_intent/00",
-    "pass_success": "pass_success/20",
-    "outcome_scoring": "outcome_scoring/21",
-    "outcome_conceding": "outcome_conceding/21",
-}
-XT_COMPONENT_DIR = COMPONENT_DIR.with_name(f"{COMPONENT_DIR.name}_xt")
+from project_config import (
+    EVENT_SYNCED_DIR,
+    INTENDED_RECEIVER_MODE_MODEL,
+    XT_DIR,
+    XT_MATCH_DIR,
+    get_component_dir,
+    get_relevant_model_ids,
+    resolve_intended_receiver_mode,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +26,8 @@ def parse_args() -> argparse.Namespace:
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
     parser.add_argument("--use_xt", action="store_true", help="Use xT for the outcome models instead of xG.")
+    parser.add_argument("--use-original-intended-receiver", action="store_true")
+    parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
     parser.add_argument("--skip-features", action="store_true", help="Skip scripts/generate_relevant_features.py.")
@@ -50,22 +46,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0", help="Device passed to evaluation and inference scripts.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
     return parser.parse_args()
-
-
-def get_model_ids(use_xt: bool) -> dict[str, str]:
-    return XT_MODEL_IDS if use_xt else XG_MODEL_IDS
-
-
-def get_component_dirs(use_xt: bool) -> tuple[Path, Path]:
-    component_dir = XT_COMPONENT_DIR if use_xt else COMPONENT_DIR
-    return component_dir, component_dir / "skillcorner"
-
-
-def trial_from_model_id(model_id: str) -> int:
-    try:
-        return int(model_id.rsplit("/", 1)[1])
-    except (IndexError, ValueError) as exc:
-        raise ValueError(f"Invalid model id format: {model_id}") from exc
 
 
 def format_command(command: Iterable[str]) -> str:
@@ -128,12 +108,26 @@ def maybe_validate_xt_skip(args: argparse.Namespace) -> None:
     validate_xt_artifacts(require_match_sidecars=require_match_sidecars)
 
 
+def append_mode_flags(command: list[str], args: argparse.Namespace, include_xt: bool = False) -> list[str]:
+    command = list(command)
+    if include_xt and args.use_xt:
+        command.append("--use_xt")
+    if args.use_original_intended_receiver:
+        command.append("--use-original-intended-receiver")
+    if args.use_intended_receiver_model:
+        command.append("--use-intended-receiver-model")
+    return command
+
+
 def build_commands(args: argparse.Namespace) -> list[list[str]]:
     python = sys.executable
-    model_ids = get_model_ids(args.use_xt)
-    outcome_scoring_trial = trial_from_model_id(model_ids["outcome_scoring"])
-    outcome_conceding_trial = trial_from_model_id(model_ids["outcome_conceding"])
-    relevant_output_dir, skillcorner_output_dir = get_component_dirs(args.use_xt)
+    intended_receiver_mode = resolve_intended_receiver_mode(
+        use_original_intended_receiver=args.use_original_intended_receiver,
+        use_intended_receiver_model=args.use_intended_receiver_model,
+    )
+    model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
+    relevant_output_dir = get_component_dir(args.use_xt, intended_receiver_mode)
+    skillcorner_output_dir = relevant_output_dir / "skillcorner"
     commands: list[list[str]] = []
 
     if not args.skip_preprocess:
@@ -149,24 +143,22 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         commands.append(xt_command)
 
     if not args.skip_features:
-        commands.append([python, "scripts/generate_relevant_features.py"])
+        if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL and not args.skip_train:
+            commands.append([python, "scripts/generate_relevant_features.py"])
+        else:
+            commands.append(append_mode_flags([python, "scripts/generate_relevant_features.py"], args))
 
     if not args.skip_train:
-        train_command = [
-            python,
-            "scripts/train_relevant_models.py",
-            "--outcome-scoring-trial",
-            str(outcome_scoring_trial),
-            "--outcome-conceding-trial",
-            str(outcome_conceding_trial),
-        ]
-        if args.use_xt:
-            train_command.append("--use_xt")
-        commands.append(train_command)
+        if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:
+            commands.append([python, "scripts/train_relevant_models.py", "--success-intent-only"])
+            if not args.skip_features:
+                commands.append(append_mode_flags([python, "scripts/generate_relevant_features.py"], args))
+        commands.append(append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_xt=True))
 
     if not args.skip_evaluate:
         commands.append(
-            [
+            append_mode_flags(
+                [
                 python,
                 "scripts/evaluate_relevant_models.py",
                 "--action-intent-model-id",
@@ -179,12 +171,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 model_ids["outcome_conceding"],
                 "--device",
                 args.device,
-            ]
+                ],
+                args,
+                include_xt=True,
+            )
         )
 
     if not args.skip_run_relevant:
         commands.append(
-            [
+            append_mode_flags(
+                [
                 python,
                 "scripts/run_relevant_models.py",
                 "--split",
@@ -201,12 +197,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 model_ids["outcome_conceding"],
                 "--output-dir",
                 str(relevant_output_dir),
-            ]
+                ],
+                args,
+                include_xt=True,
+            )
         )
 
     if not args.skip_hawkeye:
         commands.append(
-            [
+            append_mode_flags(
+                [
                 python,
                 "scripts/run_hawkeye.py",
                 "--device",
@@ -221,12 +221,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 model_ids["outcome_conceding"],
                 "--output-dir",
                 str(relevant_output_dir),
-            ]
+                ],
+                args,
+                include_xt=True,
+            )
         )
 
     if not args.skip_skillcorner:
         commands.append(
-            [
+            append_mode_flags(
+                [
                 python,
                 "scripts/run_skillcorner.py",
                 "--device",
@@ -241,7 +245,10 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 model_ids["outcome_conceding"],
                 "--output-dir",
                 str(skillcorner_output_dir),
-            ]
+                ],
+                args,
+                include_xt=True,
+            )
         )
 
     return commands

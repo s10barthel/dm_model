@@ -142,8 +142,8 @@ if __name__ == "__main__":
         feature_dir = "data/ajax/features/augmented_shot_graphs"
         label_dir = "data/ajax/features/augmented_shot_labels"
     elif args.task == "failure_receiver" and args.augment_blocks:
-        feature_dir = "data/ajax/features/augmented_graphs"
-        label_dir = "data/ajax/features/augmented_labels"
+        feature_dir = getattr(args, "feature_dir", None) or "data/ajax/features/augmented_graphs"
+        label_dir = getattr(args, "label_dir", None) or "data/ajax/features/augmented_labels"
     else:
         feature_dir = getattr(args, "feature_dir", None) or "data/ajax/features/action_graphs"
         label_dir = getattr(args, "label_dir", None) or f"data/ajax/features/action_labels_{args.return_type}"
