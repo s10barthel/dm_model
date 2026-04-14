@@ -15,10 +15,52 @@ from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
     XT_DIR,
     XT_MATCH_DIR,
-    get_component_dir,
-    get_relevant_model_ids,
+    generate_run_id,
     resolve_intended_receiver_mode,
 )
+
+TRAINING_WRAPPER_FEATURE_DEFAULTS = {
+    "xy_only": False,
+    "possessor_aware": True,
+    "keeper_aware": True,
+    "ball_z_aware": True,
+    "poss_vel_aware": True,
+    "extend_features": False,
+}
+
+WRAPPER_OVERRIDE_FLAGS = {
+    "xy_only": ("--xy-only", "--no-xy-only"),
+    "possessor_aware": ("--possessor-aware", "--no-possessor-aware"),
+    "keeper_aware": ("--keeper-aware", "--no-keeper-aware"),
+    "ball_z_aware": ("--ball-z-aware", "--no-ball-z-aware"),
+    "poss_vel_aware": ("--poss-vel-aware", "--no-poss-vel-aware"),
+    "extend_features": ("--extend-features", "--no-extend-features"),
+}
+
+
+def add_bool_override(
+    parser: argparse.ArgumentParser,
+    option_name: str,
+    dest: str,
+    enable_help: str,
+    disable_help: str,
+) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(f"--{option_name}", dest=dest, action="store_true", help=enable_help)
+    group.add_argument(f"--no-{option_name}", dest=dest, action="store_false", help=disable_help)
+    parser.set_defaults(**{dest: None})
+
+
+def resolve_training_feature_overrides(args: argparse.Namespace) -> dict[str, bool]:
+    resolved_flags = {
+        name: TRAINING_WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name) is None else bool(getattr(args, name))
+        for name in TRAINING_WRAPPER_FEATURE_DEFAULTS
+    }
+    if not resolved_flags["possessor_aware"] and resolved_flags["extend_features"]:
+        raise ValueError(
+            "--extend-features requires possessor-aware features; remove --extend-features or enable --possessor-aware."
+        )
+    return resolved_flags
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-run-relevant", action="store_true", help="Skip scripts/run_relevant_models.py.")
     parser.add_argument("--skip-hawkeye", action="store_true", help="Skip scripts/run_hawkeye.py.")
     parser.add_argument("--skip-skillcorner", action="store_true", help="Skip scripts/run_skillcorner.py.")
+    parser.add_argument("--add_v_edge_features", action="store_true", help="Append velocity-angle edge features during feature generation.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite supported preprocessing and xT artifacts.")
     parser.add_argument(
         "--relevant-split",
@@ -45,7 +88,55 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda:0", help="Device passed to evaluation and inference scripts.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them.")
-    return parser.parse_args()
+    add_bool_override(
+        parser,
+        "xy-only",
+        "xy_only",
+        "Train downstream models with xy-only node features.",
+        "Disable xy-only node features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "possessor-aware",
+        "possessor_aware",
+        "Train downstream models with possessor-awareness features.",
+        "Disable possessor-awareness features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "keeper-aware",
+        "keeper_aware",
+        "Train downstream models with keeper/goal awareness features.",
+        "Disable keeper/goal awareness features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "ball-z-aware",
+        "ball_z_aware",
+        "Train downstream models with ball-height features.",
+        "Disable ball-height features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "poss-vel-aware",
+        "poss_vel_aware",
+        "Train downstream models with possessor-velocity relation features.",
+        "Disable possessor-velocity relation features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "extend-features",
+        "extend_features",
+        "Enable the extended handcrafted node features for downstream training.",
+        "Disable the extended handcrafted node features for downstream training.",
+    )
+    args = parser.parse_args()
+    if not args.skip_train:
+        try:
+            resolve_training_feature_overrides(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+    return args
 
 
 def format_command(command: Iterable[str]) -> str:
@@ -119,16 +210,33 @@ def append_mode_flags(command: list[str], args: argparse.Namespace, include_xt: 
     return command
 
 
+def append_feature_run_flag(command: list[str], feature_run_id: str | None) -> list[str]:
+    command = list(command)
+    if feature_run_id:
+        command.extend(["--feature-run-id", feature_run_id])
+    return command
+
+
+def append_training_feature_flags(command: list[str], args: argparse.Namespace) -> list[str]:
+    command = list(command)
+    for name, (enabled_flag, disabled_flag) in WRAPPER_OVERRIDE_FLAGS.items():
+        value = getattr(args, name)
+        if value is True:
+            command.append(enabled_flag)
+        elif value is False:
+            command.append(disabled_flag)
+    return command
+
+
 def build_commands(args: argparse.Namespace) -> list[list[str]]:
     python = sys.executable
     intended_receiver_mode = resolve_intended_receiver_mode(
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
-    model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
-    relevant_output_dir = get_component_dir(args.use_xt, intended_receiver_mode)
-    skillcorner_output_dir = relevant_output_dir / "skillcorner"
     commands: list[list[str]] = []
+    preparatory_feature_run_id: str | None = None
+    main_feature_run_id: str | None = None
 
     if not args.skip_preprocess:
         preprocess_command = [python, "scripts/preprocess_sportec.py"]
@@ -144,62 +252,84 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
 
     if not args.skip_features:
         if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL and not args.skip_train:
-            commands.append([python, "scripts/generate_relevant_features.py"])
+            preparatory_feature_run_id = generate_run_id("feature")
+            feature_command = [python, "scripts/generate_relevant_features.py", "--run-id", preparatory_feature_run_id]
+            if args.add_v_edge_features:
+                feature_command.append("--add_v_edge_features")
+            commands.append(feature_command)
         else:
-            commands.append(append_mode_flags([python, "scripts/generate_relevant_features.py"], args))
+            main_feature_run_id = generate_run_id("feature")
+            feature_command = append_mode_flags(
+                [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+                args,
+            )
+            if args.add_v_edge_features:
+                feature_command.append("--add_v_edge_features")
+            commands.append(feature_command)
 
     if not args.skip_train:
         if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:
-            commands.append([python, "scripts/train_relevant_models.py", "--success-intent-only"])
+            commands.append(
+                append_training_feature_flags(
+                    append_feature_run_flag(
+                        [python, "scripts/train_relevant_models.py", "--success-intent-only"],
+                        preparatory_feature_run_id,
+                    ),
+                    args,
+                )
+            )
             if not args.skip_features:
-                commands.append(append_mode_flags([python, "scripts/generate_relevant_features.py"], args))
-        commands.append(append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_xt=True))
+                main_feature_run_id = generate_run_id("feature")
+                feature_command = append_mode_flags(
+                    [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+                    args,
+                )
+                if args.add_v_edge_features:
+                    feature_command.append("--add_v_edge_features")
+                commands.append(feature_command)
+        commands.append(
+            append_training_feature_flags(
+                append_feature_run_flag(
+                    append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_xt=True),
+                    main_feature_run_id,
+                ),
+                args,
+            )
+        )
 
     if not args.skip_evaluate:
         commands.append(
-            append_mode_flags(
-                [
-                python,
-                "scripts/evaluate_relevant_models.py",
-                "--action-intent-model-id",
-                model_ids["action_intent"],
-                "--pass-success-model-id",
-                model_ids["pass_success"],
-                "--outcome-scoring-model-id",
-                model_ids["outcome_scoring"],
-                "--outcome-conceding-model-id",
-                model_ids["outcome_conceding"],
-                "--device",
-                args.device,
-                ],
-                args,
-                include_xt=True,
+            append_feature_run_flag(
+                append_mode_flags(
+                    [
+                    python,
+                    "scripts/evaluate_relevant_models.py",
+                    "--device",
+                    args.device,
+                    ],
+                    args,
+                    include_xt=True,
+                ),
+                main_feature_run_id,
             )
         )
 
     if not args.skip_run_relevant:
         commands.append(
-            append_mode_flags(
-                [
-                python,
-                "scripts/run_relevant_models.py",
-                "--split",
-                args.relevant_split,
-                "--device",
-                args.device,
-                "--action-intent-model-id",
-                model_ids["action_intent"],
-                "--pass-success-model-id",
-                model_ids["pass_success"],
-                "--outcome-scoring-model-id",
-                model_ids["outcome_scoring"],
-                "--outcome-conceding-model-id",
-                model_ids["outcome_conceding"],
-                "--output-dir",
-                str(relevant_output_dir),
-                ],
-                args,
-                include_xt=True,
+            append_feature_run_flag(
+                append_mode_flags(
+                    [
+                    python,
+                    "scripts/run_relevant_models.py",
+                    "--split",
+                    args.relevant_split,
+                    "--device",
+                    args.device,
+                    ],
+                    args,
+                    include_xt=True,
+                ),
+                main_feature_run_id,
             )
         )
 
@@ -211,16 +341,6 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 "scripts/run_hawkeye.py",
                 "--device",
                 args.device,
-                "--action-intent-model-id",
-                model_ids["action_intent"],
-                "--pass-success-model-id",
-                model_ids["pass_success"],
-                "--outcome-scoring-model-id",
-                model_ids["outcome_scoring"],
-                "--outcome-conceding-model-id",
-                model_ids["outcome_conceding"],
-                "--output-dir",
-                str(relevant_output_dir),
                 ],
                 args,
                 include_xt=True,
@@ -235,16 +355,6 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 "scripts/run_skillcorner.py",
                 "--device",
                 args.device,
-                "--action-intent-model-id",
-                model_ids["action_intent"],
-                "--pass-success-model-id",
-                model_ids["pass_success"],
-                "--outcome-scoring-model-id",
-                model_ids["outcome_scoring"],
-                "--outcome-conceding-model-id",
-                model_ids["outcome_conceding"],
-                "--output-dir",
-                str(skillcorner_output_dir),
                 ],
                 args,
                 include_xt=True,

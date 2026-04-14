@@ -21,7 +21,13 @@ from datatools.skillcorner import (
 )
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
-from project_config import COMPONENT_DIR, DATA_ROOT, PROJECT_ROOT
+from project_config import (
+    COMPONENT_DIR,
+    DATA_ROOT,
+    PROJECT_ROOT,
+    get_skillcorner_component_run_root,
+    resolve_named_component_run_id,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,7 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", required=True)
     parser.add_argument("--index", type=int, required=True, help="SkillCorner player_possession index to visualize.")
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
-    parser.add_argument("--component-dir", default=str(COMPONENT_DIR / "skillcorner"))
+    parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
+    parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "skillcorner"))
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
@@ -138,13 +145,20 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir) / str(args.match_id) / str(args.index)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.component_dir:
+        component_dir = Path(args.component_dir)
+    else:
+        component_run_id = resolve_named_component_run_id("skillcorner_component", args.component_run_id, required=False)
+        component_dir = (
+            get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
+        )
 
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     possession, _ = build_skillcorner_possession(context, args.index)
     if possession.frame_meta.empty:
         raise ValueError(f"Player-possession {args.index} in match {args.match_id} does not have any addressable frames.")
 
-    component_tables = load_skillcorner_component_tables(args.component_dir, args.match_id)
+    component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
     frame_ids = [int(frame_id) for frame_id in possession.frame_meta.index.tolist()]
     component_names = [*COMPONENT_COLUMNS, "pass_score"]
 

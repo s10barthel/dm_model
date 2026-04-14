@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,7 +22,15 @@ from datatools.skillcorner import (
     load_skillcorner_models,
     summarize_skillcorner_stats,
 )
-from project_config import COMPONENT_DIR, PROJECT_ROOT, get_component_dir, get_relevant_model_ids, resolve_intended_receiver_mode
+from models.utils import get_model_provenance, resolve_relevant_model_ids, validate_model_graph_schemas
+from project_config import (
+    PROJECT_ROOT,
+    SKILLCORNER_COMPONENT_RUNS_DIR,
+    generate_run_id,
+    resolve_intended_receiver_mode,
+    write_latest_run,
+    write_run_metadata,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
     return parser.parse_args()
 
@@ -58,8 +67,19 @@ def main() -> None:
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
-    default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
-    output_dir = Path(args.output_dir or (get_component_dir(args.use_xt, intended_receiver_mode) / "skillcorner"))
+    resolved_model_ids = resolve_relevant_model_ids(
+        intended_receiver_mode=intended_receiver_mode,
+        use_xt=args.use_xt,
+        explicit_model_ids={
+            "action_intent": args.action_intent_model_id,
+            "pass_success": args.pass_success_model_id,
+            "outcome_scoring": args.outcome_scoring_model_id,
+            "outcome_conceding": args.outcome_conceding_model_id,
+        },
+    )
+    component_run_id = args.run_id or generate_run_id("skillcorner_component")
+    output_parent = Path(args.output_dir) if args.output_dir else SKILLCORNER_COMPONENT_RUNS_DIR
+    output_dir = output_parent / component_run_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_match_ids, skipped_matches = discover_skillcorner_matches(
@@ -71,12 +91,14 @@ def main() -> None:
     skipped_matches.setdefault("processing_error", [])
 
     model_specs = load_skillcorner_models(
-        action_intent_model_id=args.action_intent_model_id or default_model_ids["action_intent"],
-        pass_success_model_id=args.pass_success_model_id or default_model_ids["pass_success"],
-        outcome_scoring_model_id=args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
-        outcome_conceding_model_id=args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
+        action_intent_model_id=resolved_model_ids["action_intent"],
+        pass_success_model_id=resolved_model_ids["pass_success"],
+        outcome_scoring_model_id=resolved_model_ids["outcome_scoring"],
+        outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],
         device=device,
     )
+    graph_schema = validate_model_graph_schemas(model_specs)
+    model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     stats_by_match: dict[str, dict[str, int]] = {}
     processed_matches: list[str] = []
@@ -105,7 +127,11 @@ def main() -> None:
 
             for event_index in context["events"]["index"].tolist():
                 try:
-                    possession, possession_stats = build_skillcorner_possession(context, int(event_index))
+                    possession, possession_stats = build_skillcorner_possession(
+                        context,
+                        int(event_index),
+                        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                    )
                     match_stats["possessions"] += 1
                     for key in [
                         "total_frames",
@@ -153,23 +179,32 @@ def main() -> None:
 
     summary = summarize_skillcorner_stats(stats_by_match, skipped_matches)
     metadata = {
+        "run_id": component_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
         "input_dir": str(Path(args.input_dir).resolve()),
+        "output_parent": str(output_parent),
         "output_dir": str(output_dir.resolve()),
         "intended_receiver_mode": intended_receiver_mode,
+        "use_xt": bool(args.use_xt),
+        "requested_match_ids": args.match_id or [],
+        "limit": args.limit,
         "processed_matches": processed_matches,
         "skipped_match_errors": skipped_match_errors,
         "skipped_possessions": skipped_possessions,
-        "models": {
-            "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
-            "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
-            "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
-            "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
-        },
+        "models": resolved_model_ids,
+        "model_records": model_records,
+        "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},
+        "graph_schema": graph_schema,
+        "status": "completed",
         **summary,
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     if not processed_matches:
         raise RuntimeError("No usable SkillCorner matches were processed.")
+    write_run_metadata(output_dir, metadata)
+    if output_parent.resolve() == SKILLCORNER_COMPONENT_RUNS_DIR.resolve():
+        write_latest_run("skillcorner_component", component_run_id)
+    print(f"SkillCorner component run id: {component_run_id}")
 
     totals = summary["totals"]
     print(f"Saved SkillCorner components to {output_dir}")

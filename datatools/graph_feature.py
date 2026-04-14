@@ -25,20 +25,28 @@ from project_config import (
     ACTION_GRAPH_DIR,
     ACTION_GRAPH_INTENT_TRAIN_DIR,
     DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+    FEATURE_DIR,
     POST_ACTION_GRAPH_DIR,
     INTENT_TRAIN_OFFSETS,
     SUCCESS_INTENT_GRAPH_DIR,
     get_action_label_dir,
+    get_action_graph_dir,
+    get_action_graph_intent_train_dir,
     get_augmented_feature_dir,
     get_augmented_label_dir,
+    get_feature_run_root,
     get_intent_train_label_dir,
+    get_post_action_graph_dir,
     get_resolved_action_path,
+    get_success_intent_graph_dir,
     load_base_splits,
     resolve_intended_receiver_mode,
 )
 
 BASE_NODE_FEATURE_DIM = 19
 EXTENDED_NODE_FEATURE_DIM = 25
+BASE_EDGE_FEATURE_DIM = 2
+VELOCITY_EDGE_FEATURE_EXTRA_DIM = 2
 SUCCESS_INTENT_EXTRA_DIM = 4
 SUCCESS_INTENT_WINDOW_SECONDS = 1.0
 
@@ -188,6 +196,10 @@ def infer_node_feature_dim(extend: bool = True, feature_variant: str = "base") -
     if feature_variant == "success_intent":
         return BASE_NODE_FEATURE_DIM + SUCCESS_INTENT_EXTRA_DIM
     return base_dim
+
+
+def infer_edge_feature_dim(add_v_edge_features: bool = False) -> int:
+    return BASE_EDGE_FEATURE_DIM + (VELOCITY_EDGE_FEATURE_EXTRA_DIM if add_v_edge_features else 0)
 
 
 def load_frame_snapshot(primary_tracking: pd.DataFrame, fallback_tracking: pd.DataFrame, frame: int) -> pd.DataFrame:
@@ -372,6 +384,7 @@ def construct_graph_for_frame(
     extend: bool = True,
     rotate_to_ltr: bool = True,
     extra_node_features: np.ndarray | None = None,
+    add_v_edge_features: bool = False,
 ) -> Data | None:
     if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
         return None
@@ -422,7 +435,18 @@ def construct_graph_for_frame(
     edge_index, _ = dense_to_sparse(torch.ones_like(distances))
     distances = distances[edge_index[0], edge_index[1]]
     teammates = teammates[edge_index[0], edge_index[1]]
-    edge_attr = torch.stack([distances, teammates], dim=-1)
+    edge_features = [distances, teammates]
+    if add_v_edge_features:
+        src_vx = node_attr[edge_index[0], 5]
+        src_vy = node_attr[edge_index[0], 6]
+        dst_vx = node_attr[edge_index[1], 5]
+        dst_vy = node_attr[edge_index[1], 6]
+        src_speed = torch.sqrt(src_vx.square() + src_vy.square()).clamp_min(1e-6)
+        dst_speed = torch.sqrt(dst_vx.square() + dst_vy.square()).clamp_min(1e-6)
+        vel_cos = torch.clamp((src_vx * dst_vx + src_vy * dst_vy) / (src_speed * dst_speed), -1.0, 1.0)
+        vel_angle = torch.arccos(vel_cos)
+        edge_features.extend([torch.cos(vel_angle), torch.sin(vel_angle)])
+    edge_attr = torch.stack(edge_features, dim=-1)
     graph = Data(x=node_attr, edge_index=edge_index.clone(), edge_attr=edge_attr)
     graph.node_ids = list(player_ids)
     return graph
@@ -435,6 +459,7 @@ def construct_graph_for_action(
     extend: bool = True,
     post_action: bool = False,
     rotate_to_ltr: bool = True,
+    add_v_edge_features: bool = False,
 ) -> Data | None:
     if action_index not in match.actions.index:
         return None
@@ -458,6 +483,7 @@ def construct_graph_for_action(
         extend=base_extend,
         rotate_to_ltr=rotate_to_ltr,
         extra_node_features=extra_node_features,
+        add_v_edge_features=add_v_edge_features,
     )
 
 
@@ -468,6 +494,7 @@ def construct_graph_features(
     feature_variant: str = "base",
     action_indices: np.ndarray | list[int] | None = None,
     verbose=True,
+    add_v_edge_features: bool = False,
 ) -> List[Data | None]:
     if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
@@ -488,6 +515,7 @@ def construct_graph_features(
             feature_variant=feature_variant,
             extend=extend,
             post_action=post_action,
+            add_v_edge_features=add_v_edge_features,
         )
         feature_graphs.append(graph)
 
@@ -507,6 +535,7 @@ def construct_intent_training_samples(
     offsets: Tuple[int, ...] = INTENT_TRAIN_OFFSETS,
     extend: bool = True,
     verbose: bool = True,
+    add_v_edge_features: bool = False,
 ) -> Tuple[List[Data], torch.Tensor]:
     if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
@@ -527,7 +556,13 @@ def construct_intent_training_samples(
         possessor = match.actions.at[action_index, "object_id"]
         period_tracking = match.tracking[match.tracking["period_id"] == period]
 
-        base_graph = construct_graph_for_action(match, action_index, feature_variant="base", extend=extend)
+        base_graph = construct_graph_for_action(
+            match,
+            action_index,
+            feature_variant="base",
+            extend=extend,
+            add_v_edge_features=add_v_edge_features,
+        )
         if base_graph is None:
             continue
 
@@ -545,7 +580,15 @@ def construct_intent_training_samples(
             if prior_frame is None:
                 continue
 
-            graph = construct_graph_for_frame(match, prior_frame, possessor, period_tracking, feature_dim, extend=extend)
+            graph = construct_graph_for_frame(
+                match,
+                prior_frame,
+                possessor,
+                period_tracking,
+                feature_dim,
+                extend=extend,
+                add_v_edge_features=add_v_edge_features,
+            )
             if graph is None:
                 continue
 
@@ -661,43 +704,58 @@ if __name__ == "__main__":
         type=str,
         default=DEFAULT_INTENDED_RECEIVER_MODEL_ID,
     )
+    parser.add_argument("--add_v_edge_features", action="store_true", default=False)
+    parser.add_argument("--run-id", type=str, default=None)
     args, _ = parser.parse_known_args()
     intended_receiver_mode = resolve_intended_receiver_mode(
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
+    feature_root = get_feature_run_root(args.run_id) if args.run_id else FEATURE_DIR
 
     if args.action_type.startswith("shot"):
         if args.feature_variant != "base":
             raise ValueError("Intent-training augmentation is only supported for action_type=all.")
         args.action_type = "shot_augment"
-        feature_dir = "data/ajax/features/augmented_shot_graphs"
-        label_dir = "data/ajax/features/augmented_shot_labels"
+        feature_dir = feature_root / "augmented_shot_graphs"
+        label_dir = feature_root / "augmented_shot_labels"
         os.makedirs(feature_dir, exist_ok=True)
         os.makedirs(label_dir, exist_ok=True)
 
     else:  # args.actions_type == "all"
         if args.feature_variant == "intent_train_augmented":
-            feature_dir = ACTION_GRAPH_INTENT_TRAIN_DIR
-            label_dir = get_intent_train_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
+            feature_dir = get_action_graph_intent_train_dir(feature_root)
+            label_dir = get_intent_train_label_dir(
+                args.return_type,
+                intended_receiver_mode=intended_receiver_mode,
+                root=feature_root,
+            )
         elif args.feature_variant == "success_intent":
-            feature_dir = SUCCESS_INTENT_GRAPH_DIR
-            label_dir = get_action_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
+            feature_dir = get_success_intent_graph_dir(feature_root)
+            label_dir = get_action_label_dir(
+                args.return_type,
+                intended_receiver_mode=intended_receiver_mode,
+                root=feature_root,
+            )
         else:
-            feature_dir = ACTION_GRAPH_DIR
-            label_dir = get_action_label_dir(args.return_type, intended_receiver_mode=intended_receiver_mode)
+            feature_dir = get_action_graph_dir(feature_root)
+            label_dir = get_action_label_dir(
+                args.return_type,
+                intended_receiver_mode=intended_receiver_mode,
+                root=feature_root,
+            )
         Path(feature_dir).mkdir(parents=True, exist_ok=True)
         Path(label_dir).mkdir(parents=True, exist_ok=True)
 
         if args.post_action:
             if args.feature_variant != "base":
                 raise ValueError("Post-action features are only supported for base graphs.")
-            post_feature_dir = str(POST_ACTION_GRAPH_DIR)
+            post_feature_dir = str(get_post_action_graph_dir(feature_root))
             os.makedirs(post_feature_dir, exist_ok=True)
 
     if args.augment_blocks:
-        augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode))
-        augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode))
+        augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode, root=feature_root))
+        augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode, root=feature_root))
         os.makedirs(augmented_feature_dir, exist_ok=True)
         os.makedirs(augmented_label_dir, exist_ok=True)
 
@@ -765,7 +823,11 @@ if __name__ == "__main__":
                 )
 
             if args.action_type == "all":
-                resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+                resolved_action_path = get_resolved_action_path(
+                    match_id,
+                    intended_receiver_mode=intended_receiver_mode,
+                    root=feature_root,
+                )
                 resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
                 match.actions.to_parquet(resolved_action_path)
 
@@ -775,7 +837,11 @@ if __name__ == "__main__":
 
             if args.feature_variant == "intent_train_augmented":
                 print("Constructing intent-training augmentation graphs...")
-                augmented_graphs, augmented_labels = construct_intent_training_samples(match, extend=True)
+                augmented_graphs, augmented_labels = construct_intent_training_samples(
+                    match,
+                    extend=True,
+                    add_v_edge_features=args.add_v_edge_features,
+                )
                 if not augmented_graphs or augmented_labels.numel() == 0:
                     raise ValueError("No usable intent-training samples were constructed for this match.")
                 torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
@@ -788,6 +854,7 @@ if __name__ == "__main__":
                     extend=False,
                     post_action=False,
                     feature_variant="success_intent",
+                    add_v_edge_features=args.add_v_edge_features,
                 )
                 valid_graphs = len(success_graphs) - count_invalid_graphs(success_graphs)
                 if valid_graphs == 0:
@@ -805,6 +872,7 @@ if __name__ == "__main__":
                     extend=True,
                     post_action=False,
                     feature_variant="base",
+                    add_v_edge_features=args.add_v_edge_features,
                 )
                 valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
                 if valid_graphs == 0:
@@ -822,6 +890,7 @@ if __name__ == "__main__":
                         extend=True,
                         post_action=True,
                         feature_variant="base",
+                        add_v_edge_features=args.add_v_edge_features,
                     )
                     torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
 

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 
@@ -30,9 +32,18 @@ POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
 XT_DIR = DATA_ROOT / "xT"
 XT_MATCH_DIR = XT_DIR / "matches"
 SAVED_DIR = PROJECT_ROOT / "saved"
+MODEL_BUNDLES_DIR = SAVED_DIR / "bundles"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
+FEATURE_RUNS_DIR = FEATURE_DIR / "runs"
+COMPONENT_RUNS_DIR = DATA_ROOT / "component_runs"
+HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
+SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
 SPLIT_DIR = DATA_ROOT / "splits"
 SPLIT_PATH = SPLIT_DIR / "match_splits.json"
+FEATURE_LATEST_PATH = FEATURE_RUNS_DIR / "latest.json"
+COMPONENT_LATEST_PATH = COMPONENT_RUNS_DIR / "latest.json"
+HAWKEYE_COMPONENT_LATEST_PATH = HAWKEYE_COMPONENT_RUNS_DIR / "latest.json"
+SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.json"
 
 MODEL_TRAIN_FRACTION = 0.8
 INTENT_TRAIN_OFFSETS = (12, 25)
@@ -123,11 +134,16 @@ def ensure_project_dirs() -> None:
         TRACKING_PROCESSED_DIR,
         EVENT_SYNCED_DIR,
         FEATURE_DIR,
+        FEATURE_RUNS_DIR,
         XT_DIR,
         XT_MATCH_DIR,
         COMPONENT_DIR,
+        COMPONENT_RUNS_DIR,
+        HAWKEYE_COMPONENT_RUNS_DIR,
+        SKILLCORNER_COMPONENT_RUNS_DIR,
         SUCCESS_INTENT_GRAPH_DIR,
         SAVED_DIR,
+        MODEL_BUNDLES_DIR,
         SPLIT_DIR,
     ]:
         path.mkdir(parents=True, exist_ok=True)
@@ -162,31 +178,204 @@ def intended_receiver_suffix(mode: str, include_original: bool = False) -> str:
     return f"_{mode}"
 
 
-def get_action_label_dir(return_type: str = "disc_0.9", intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Path:
-    return FEATURE_DIR / f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
+def generate_run_id(prefix: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+    return f"{prefix}_{timestamp}_{uuid4().hex[:8]}"
 
 
 def get_intent_train_label_dir(
     return_type: str = "disc_0.9",
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
 ) -> Path:
-    return FEATURE_DIR / f"action_labels_intent_train_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / f"action_labels_intent_train_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
 
 
-def get_resolved_action_dir(intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Path:
-    return FEATURE_DIR / f"resolved_actions{intended_receiver_suffix(intended_receiver_mode, include_original=True)}"
+def get_action_label_dir(
+    return_type: str = "disc_0.9",
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
+) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
 
 
-def get_resolved_action_path(match_id: str, intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Path:
-    return get_resolved_action_dir(intended_receiver_mode) / f"{match_id}.parquet"
+def get_resolved_action_dir(
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
+) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / f"resolved_actions{intended_receiver_suffix(intended_receiver_mode, include_original=True)}"
 
 
-def get_augmented_feature_dir(intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Path:
-    return FEATURE_DIR / f"augmented_graphs{intended_receiver_suffix(intended_receiver_mode)}"
+def get_resolved_action_path(
+    match_id: str,
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
+) -> Path:
+    return get_resolved_action_dir(intended_receiver_mode, root=root) / f"{match_id}.parquet"
 
 
-def get_augmented_label_dir(intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Path:
-    return FEATURE_DIR / f"augmented_labels{intended_receiver_suffix(intended_receiver_mode)}"
+def get_augmented_feature_dir(
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
+) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / f"augmented_graphs{intended_receiver_suffix(intended_receiver_mode)}"
+
+
+def get_augmented_label_dir(
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    root: Path | None = None,
+) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / f"augmented_labels{intended_receiver_suffix(intended_receiver_mode)}"
+
+
+def get_action_graph_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / ACTION_GRAPH_DIR.name
+
+
+def get_action_graph_intent_train_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / ACTION_GRAPH_INTENT_TRAIN_DIR.name
+
+
+def get_post_action_graph_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / POST_ACTION_GRAPH_DIR.name
+
+
+def get_success_intent_graph_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / SUCCESS_INTENT_GRAPH_DIR.name
+
+
+def get_feature_run_root(run_id: str) -> Path:
+    return FEATURE_RUNS_DIR / str(run_id)
+
+
+def get_component_run_root(run_id: str) -> Path:
+    return COMPONENT_RUNS_DIR / str(run_id)
+
+
+def get_hawkeye_component_run_root(run_id: str) -> Path:
+    return HAWKEYE_COMPONENT_RUNS_DIR / str(run_id)
+
+
+def get_skillcorner_component_run_root(run_id: str) -> Path:
+    return SKILLCORNER_COMPONENT_RUNS_DIR / str(run_id)
+
+
+def get_task_saved_dir(task: str) -> Path:
+    return SAVED_DIR / str(task)
+
+
+def get_model_run_root(task: str, run_id: str) -> Path:
+    return get_task_saved_dir(task) / str(run_id)
+
+
+def get_model_bundle_root(bundle_id: str) -> Path:
+    return MODEL_BUNDLES_DIR / str(bundle_id)
+
+
+def generate_model_run_id(task: str) -> str:
+    return generate_run_id(str(task))
+
+
+def _latest_path(kind: str) -> Path:
+    if kind == "feature":
+        return FEATURE_LATEST_PATH
+    if kind == "component":
+        return COMPONENT_LATEST_PATH
+    if kind == "hawkeye_component":
+        return HAWKEYE_COMPONENT_LATEST_PATH
+    if kind == "skillcorner_component":
+        return SKILLCORNER_COMPONENT_LATEST_PATH
+    raise ValueError(f"Unsupported run kind: {kind}")
+
+
+def write_latest_run(kind: str, run_id: str) -> None:
+    latest_path = _latest_path(kind)
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "run_id": str(run_id),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    latest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def load_latest_run_id(kind: str) -> str | None:
+    latest_path = _latest_path(kind)
+    if not latest_path.exists():
+        return None
+    payload = json.loads(latest_path.read_text(encoding="utf-8"))
+    run_id = payload.get("run_id")
+    return str(run_id) if run_id else None
+
+
+def resolve_feature_run_id(run_id: str | None = None, required: bool = False) -> str | None:
+    resolved = str(run_id) if run_id else load_latest_run_id("feature")
+    if resolved is None:
+        if required:
+            raise FileNotFoundError(
+                f"No feature run id was provided and no latest feature run is registered at {FEATURE_LATEST_PATH}."
+            )
+        return None
+    run_root = get_feature_run_root(resolved)
+    if not run_root.exists():
+        raise FileNotFoundError(f"Feature run {resolved} does not exist at {run_root}.")
+    return resolved
+
+
+def resolve_component_run_id(run_id: str | None = None, required: bool = False) -> str | None:
+    resolved = str(run_id) if run_id else load_latest_run_id("component")
+    if resolved is None:
+        if required:
+            raise FileNotFoundError(
+                f"No component run id was provided and no latest component run is registered at {COMPONENT_LATEST_PATH}."
+            )
+        return None
+    run_root = get_component_run_root(resolved)
+    if not run_root.exists():
+        raise FileNotFoundError(f"Component run {resolved} does not exist at {run_root}.")
+    return resolved
+
+
+def resolve_named_component_run_id(kind: str, run_id: str | None = None, required: bool = False) -> str | None:
+    resolved = str(run_id) if run_id else load_latest_run_id(kind)
+    if resolved is None:
+        if required:
+            raise FileNotFoundError(f"No run id was provided and no latest run is registered for {kind!r}.")
+        return None
+    if kind == "hawkeye_component":
+        run_root = get_hawkeye_component_run_root(resolved)
+    elif kind == "skillcorner_component":
+        run_root = get_skillcorner_component_run_root(resolved)
+    else:
+        raise ValueError(f"Unsupported named component kind: {kind}")
+    if not run_root.exists():
+        raise FileNotFoundError(f"Run {resolved} does not exist at {run_root}.")
+    return resolved
+
+
+def resolve_feature_root(feature_run_id: str | None = None) -> Path:
+    resolved = resolve_feature_run_id(feature_run_id, required=False)
+    return get_feature_run_root(resolved) if resolved else FEATURE_DIR
+
+
+def resolve_component_root(component_run_id: str | None = None) -> Path:
+    resolved = resolve_component_run_id(component_run_id, required=False)
+    return get_component_run_root(resolved) if resolved else COMPONENT_DIR
+
+
+def write_run_metadata(run_root: Path, payload: dict[str, Any]) -> Path:
+    run_root.mkdir(parents=True, exist_ok=True)
+    metadata_path = run_root / "metadata.json"
+    metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return metadata_path
 
 
 def get_component_dir(
@@ -197,6 +386,35 @@ def get_component_dir(
     if use_xt:
         base_name = f"{base_name}_xt"
     return COMPONENT_DIR.with_name(base_name)
+
+
+def infer_target_family(use_xg: bool = False, use_xt: bool = False) -> str:
+    if use_xg and use_xt:
+        raise ValueError("use_xg and use_xt are mutually exclusive.")
+    if use_xt:
+        return "xt"
+    if use_xg:
+        return "xg"
+    return "goal"
+
+
+def infer_legacy_model_context(model_id: str) -> dict[str, Any] | None:
+    model_id = str(model_id)
+    for intended_receiver_mode, by_target in RELEVANT_MODEL_IDS.items():
+        for use_xt, task_map in by_target.items():
+            for task, legacy_model_id in task_map.items():
+                if model_id != legacy_model_id:
+                    continue
+                target_family = None
+                if task.startswith("outcome_"):
+                    target_family = "xt" if use_xt else "xg"
+                return {
+                    "task": task,
+                    "intended_receiver_mode": intended_receiver_mode,
+                    "target_family": target_family,
+                    "legacy": True,
+                }
+    return None
 
 
 def get_relevant_model_ids(

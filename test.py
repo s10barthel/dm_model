@@ -1,6 +1,7 @@
 import argparse
 import os
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -10,7 +11,8 @@ from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset
 from models import utils
-from models.utils import get_losses_str, load_splits, run_epoch
+from models.utils import get_losses_str, infer_feature_graph_schema, load_splits, run_epoch
+from project_config import resolve_feature_root
 
 
 def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
@@ -29,6 +31,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
+    parser.add_argument("--feature-run-id", type=str, required=False, default=None)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -36,8 +39,28 @@ if __name__ == "__main__":
     model_args = argparse.Namespace(**model.args)
 
     print("\nGenerating test datasets...")
-    feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")
-    label_dir = f"data/ajax/features/action_labels_{model_args.return_type}"
+    resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
+    if resolved_feature_run_id:
+        feature_root = resolve_feature_root(resolved_feature_run_id)
+        feature_name = Path(getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")).name
+        label_name = Path(
+            getattr(model_args, "label_dir", f"data/ajax/features/action_labels_{model_args.return_type}")
+        ).name
+        feature_dir = args.feature_dir or str(feature_root / feature_name)
+        label_dir = str(feature_root / label_name)
+    else:
+        feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")
+        label_dir = getattr(model_args, "label_dir", f"data/ajax/features/action_labels_{model_args.return_type}")
+    feature_schema = infer_feature_graph_schema(feature_dir)
+    model_schema = {
+        "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
+        "add_v_edge_features": bool(getattr(model_args, "add_v_edge_features", getattr(model_args, "edge_in_dim", 2) > 2)),
+    }
+    if feature_schema != model_schema:
+        raise ValueError(
+            "Selected feature artifacts are incompatible with the loaded model checkpoint: "
+            f"features={feature_schema}, model={model_schema}."
+        )
 
     _, _, test_match_ids = load_splits(feature_dir=feature_dir)
 

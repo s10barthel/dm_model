@@ -22,6 +22,7 @@ from datatools.hawkeye import (
     load_hawkeye_models,
     load_hawkeye_tracking,
 )
+from models.utils import validate_model_graph_schemas
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import DATA_ROOT, PROJECT_ROOT
@@ -125,17 +126,19 @@ def main() -> None:
     if situation_tracking.empty:
         raise KeyError(f"Hawkeye situation id {situation_id} was not found in {args.tracking_csv}.")
 
-    situation, _, _ = build_hawkeye_situation(
-        situation_tracking,
-        ball,
-        freeze_ballreceipt=args.freeze_ballreceipt,
-    )
     model_specs = load_hawkeye_models(
         action_intent_model_id=args.action_intent_model_id,
         pass_success_model_id=args.pass_success_model_id,
         outcome_scoring_model_id=args.outcome_scoring_model_id,
         outcome_conceding_model_id=args.outcome_conceding_model_id,
         device=device,
+    )
+    graph_schema = validate_model_graph_schemas(model_specs)
+    situation, _, _ = build_hawkeye_situation(
+        situation_tracking,
+        ball,
+        freeze_ballreceipt=args.freeze_ballreceipt,
+        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
     )
     components = infer_hawkeye_components(situation, model_specs, device=device)
 

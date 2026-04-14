@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,7 @@ from datatools import config
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
 from models.utils import (
+    extract_model_feature_signature,
     validate_target_flags,
     load_splits,
     estimate_propensity,
@@ -27,11 +30,25 @@ from models.utils import (
     printlog,
     run_epoch,
 )
+from project_config import (
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    generate_model_run_id,
+    get_action_graph_dir,
+    get_action_label_dir,
+    get_augmented_feature_dir,
+    get_augmented_label_dir,
+    get_model_run_root,
+    infer_target_family,
+    resolve_feature_root,
+    resolve_feature_run_id,
+    write_run_metadata,
+)
 
 parser = argparse.ArgumentParser()
 
 parser.add_argument("--task", type=str, required=True)
-parser.add_argument("--trial", type=int, required=True)
+parser.add_argument("--trial", type=int, required=False, default=None)
+parser.add_argument("--run-id", type=str, default=None, help="Checkpoint run id. Auto-generated when omitted.")
 parser.add_argument("--model", type=str, required=True, default="gat")
 parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID to estimate propensity scores")
 parser.add_argument("--weight_bce", action="store_true", default=False, help="use weighted BCE to balance classes")
@@ -59,6 +76,8 @@ parser.add_argument("--include_out", action="store_true", default=False, help="a
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
+parser.add_argument("--feature_run_id", "--feature-run-id", dest="feature_run_id", type=str, default=None, help="Pinned feature-artifact run id.")
+parser.add_argument("--intended-receiver-mode", type=str, default="unknown", help="Resolved intended-receiver mode.")
 parser.add_argument("--feature_dir", type=str, default=None, help="override graph feature directory")
 parser.add_argument("--label_dir", type=str, default=None, help="override label directory for evaluation/inference")
 parser.add_argument("--train_feature_dir", type=str, default=None, help="feature directory used for training")
@@ -93,6 +112,11 @@ args, _ = parser.parse_known_args()
 
 
 def infer_node_in_dim(feature_dir: str, task: str) -> int:
+    node_in_dim, _ = infer_graph_input_dims(feature_dir)
+    return node_in_dim + int(task == "failure_receiver")
+
+
+def infer_graph_input_dims(feature_dir: str) -> tuple[int, int]:
     feature_path = Path(feature_dir)
     for graph_file in sorted(feature_path.glob("*.pt")):
         try:
@@ -101,8 +125,9 @@ def infer_node_in_dim(feature_dir: str, task: str) -> int:
                 continue
             first_graph = next((graph for graph in graphs if graph is not None), None)
             if first_graph is not None:
-                base_dim = int(first_graph.x.shape[1])
-                return base_dim + int(task == "failure_receiver")
+                node_dim = int(first_graph.x.shape[1])
+                edge_dim = int(first_graph.edge_attr.shape[1]) if getattr(first_graph, "edge_attr", None) is not None else 0
+                return node_dim, edge_dim
         except Exception:
             continue
     raise FileNotFoundError(f"Could not infer node input dimension from {feature_dir}.")
@@ -135,18 +160,31 @@ if __name__ == "__main__":
 
     args.gnn_task = config.TASK_CONFIG.at[args.task, "gnn_task"]
     args.condition = config.TASK_CONFIG.at[args.task, "condition"]
-    args.edge_in_dim = 2
     args.out_dim = config.TASK_CONFIG.at[args.task, "out_dim"]
+    args.run_id = args.run_id or (f"{args.trial:02d}" if args.trial is not None else generate_model_run_id(args.task))
+    args.model_id = f"{args.task}/{args.run_id}"
+    args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
+    feature_root = resolve_feature_root(args.feature_run_id)
 
     if args.task == "shot_blocking":
-        feature_dir = "data/ajax/features/augmented_shot_graphs"
-        label_dir = "data/ajax/features/augmented_shot_labels"
+        feature_dir = getattr(args, "feature_dir", None) or str(feature_root / "augmented_shot_graphs")
+        label_dir = getattr(args, "label_dir", None) or str(feature_root / "augmented_shot_labels")
     elif args.task == "failure_receiver" and args.augment_blocks:
-        feature_dir = getattr(args, "feature_dir", None) or "data/ajax/features/augmented_graphs"
-        label_dir = getattr(args, "label_dir", None) or "data/ajax/features/augmented_labels"
+        feature_dir = getattr(args, "feature_dir", None) or str(
+            get_augmented_feature_dir(DEFAULT_INTENDED_RECEIVER_MODE, root=feature_root)
+        )
+        label_dir = getattr(args, "label_dir", None) or str(
+            get_augmented_label_dir(DEFAULT_INTENDED_RECEIVER_MODE, root=feature_root)
+        )
     else:
-        feature_dir = getattr(args, "feature_dir", None) or "data/ajax/features/action_graphs"
-        label_dir = getattr(args, "label_dir", None) or f"data/ajax/features/action_labels_{args.return_type}"
+        feature_dir = getattr(args, "feature_dir", None) or str(get_action_graph_dir(feature_root))
+        label_dir = getattr(args, "label_dir", None) or str(
+            get_action_label_dir(
+                args.return_type,
+                intended_receiver_mode=DEFAULT_INTENDED_RECEIVER_MODE,
+                root=feature_root,
+            )
+        )
     args.feature_dir = feature_dir
     args.label_dir = label_dir
     args.train_feature_dir = getattr(args, "train_feature_dir", None) or feature_dir
@@ -155,19 +193,47 @@ if __name__ == "__main__":
     args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
     args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task)
+    _, args.edge_in_dim = infer_graph_input_dims(args.train_feature_dir)
+    args.add_v_edge_features = bool(args.edge_in_dim > 2)
 
     # Load model
     args_dict = vars(args)
     model = GNN(args_dict).to(device)
     model = nn.DataParallel(model)
     args_dict["total_params"] = num_trainable_params(model)
+    args_dict["run_id"] = args.run_id
+    args_dict["model_id"] = args.model_id
 
     # Create a path to save model arguments and parameters
-    trial_path = f"saved/{args.task}/{args.trial:02d}"
-    os.makedirs(f"saved/{args.task}", exist_ok=True)
+    trial_path = str(get_model_run_root(args.task, args.run_id))
     os.makedirs(trial_path, exist_ok=True)
-    with open(f"{trial_path}/args.json", "w") as f:
+    with open(f"{trial_path}/args.json", "w", encoding="utf-8") as f:
         json.dump(args_dict, f, indent=4)
+
+    metadata = {
+        "model_id": args.model_id,
+        "task": args.task,
+        "run_id": args.run_id,
+        "trial": args.trial,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": subprocess.list2cmdline(sys.argv),
+        "feature_run_id": args.feature_run_id,
+        "intended_receiver_mode": args.intended_receiver_mode,
+        "target_family": infer_target_family(bool(args.use_xg), bool(args.use_xt)),
+        "resolved_dirs": {
+            "feature_dir": args.feature_dir,
+            "label_dir": args.label_dir,
+            "train_feature_dir": args.train_feature_dir,
+            "train_label_dir": args.train_label_dir,
+            "valid_feature_dir": args.valid_feature_dir,
+            "valid_label_dir": args.valid_label_dir,
+            "ipw_feature_dir": args.ipw_feature_dir,
+        },
+        "feature_signature": extract_model_feature_signature(args_dict),
+        "training_args": args_dict,
+        "status": "running",
+    }
+    write_run_metadata(Path(trial_path), metadata)
 
     # Continue a previous experiment, or start a new one
     if args.cont:
@@ -304,3 +370,8 @@ if __name__ == "__main__":
                     printlog("###### Best Accuracy ######", trial_path)
 
     printlog(f"Best loss: {best_loss:.4f}", trial_path)
+    metadata["status"] = "completed"
+    metadata["best_loss"] = best_loss
+    metadata["best_acc"] = best_acc
+    metadata["completed_at"] = datetime.now().isoformat(timespec="seconds")
+    write_run_metadata(Path(trial_path), metadata)

@@ -449,7 +449,10 @@ def _valid_possessor_snapshot(tracking: pd.DataFrame, frame_id: int, possessor_o
     return not pd.isna(tracking.at[frame_id, x_col]) and not pd.isna(tracking.at[frame_id, y_col])
 
 
-def _build_actions_and_labels(situation: HawkeyeSituation) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
+def _build_actions_and_labels(
+    situation: HawkeyeSituation,
+    add_v_edge_features: bool = False,
+) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
     graphs: list[Data] = []
@@ -482,6 +485,7 @@ def _build_actions_and_labels(situation: HawkeyeSituation) -> tuple[pd.DataFrame
             feature_dim,
             extend=True,
             rotate_to_ltr=False,
+            add_v_edge_features=add_v_edge_features,
         )
         if graph is None:
             stats["skipped_missing_graph"] += 1
@@ -565,6 +569,7 @@ def build_hawkeye_situation(
     situation_tracking: pd.DataFrame,
     ball: pd.DataFrame,
     freeze_ballreceipt: bool = True,
+    add_v_edge_features: bool = False,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
@@ -606,7 +611,10 @@ def build_hawkeye_situation(
         prefix_to_team=prefix_to_team,
         max_players=20 + 2 + 2,
     )
-    actions, labels, graphs, stats = _build_actions_and_labels(situation)
+    actions, labels, graphs, stats = _build_actions_and_labels(
+        situation,
+        add_v_edge_features=add_v_edge_features,
+    )
     situation.actions = actions
     situation.labels = labels
     situation.graph_features_0 = graphs

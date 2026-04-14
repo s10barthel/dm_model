@@ -398,7 +398,10 @@ def _valid_possessor_snapshot(tracking: pd.DataFrame, frame_id: int, possessor_o
     return not pd.isna(tracking.at[frame_id, x_col]) and not pd.isna(tracking.at[frame_id, y_col])
 
 
-def _build_actions_and_labels(possession: SkillcornerPossession) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
+def _build_actions_and_labels(
+    possession: SkillcornerPossession,
+    add_v_edge_features: bool = False,
+) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
     graphs: list[Data] = []
@@ -433,6 +436,7 @@ def _build_actions_and_labels(possession: SkillcornerPossession) -> tuple[pd.Dat
             feature_dim,
             extend=True,
             rotate_to_ltr=False,
+            add_v_edge_features=add_v_edge_features,
         )
         if graph is None:
             stats["skipped_missing_graph"] += 1
@@ -512,7 +516,11 @@ def _build_actions_and_labels(possession: SkillcornerPossession) -> tuple[pd.Dat
     return actions_df, label_tensor, graphs, stats
 
 
-def build_skillcorner_possession(context: dict[str, Any], event_index: int) -> tuple[SkillcornerPossession, dict[str, int]]:
+def build_skillcorner_possession(
+    context: dict[str, Any],
+    event_index: int,
+    add_v_edge_features: bool = False,
+) -> tuple[SkillcornerPossession, dict[str, int]]:
     events = context["events"]
     event_rows = events.loc[events["index"] == int(event_index)]
     if event_rows.empty:
@@ -553,7 +561,10 @@ def build_skillcorner_possession(context: dict[str, Any], event_index: int) -> t
         }
         return possession, empty_stats
 
-    actions, labels, graphs, stats = _build_actions_and_labels(possession)
+    actions, labels, graphs, stats = _build_actions_and_labels(
+        possession,
+        add_v_edge_features=add_v_edge_features,
+    )
     possession.actions = actions
     possession.labels = labels
     possession.graph_features_0 = graphs

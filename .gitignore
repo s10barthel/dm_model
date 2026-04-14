@@ -5,6 +5,7 @@ skillcorner_data/
 data/
 saved/
 .venv/
+test*/
 test*/*.csv
 test*/*.png
 test_kpi_final/

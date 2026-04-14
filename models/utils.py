@@ -2,7 +2,9 @@ import argparse
 import json
 import os
 from collections import OrderedDict
-from typing import List, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Any, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,7 +27,213 @@ from xgboost import XGBClassifier
 
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
-from project_config import load_model_splits
+from project_config import (
+    SAVED_DIR,
+    get_task_saved_dir,
+    infer_legacy_model_context,
+    infer_target_family,
+    load_model_splits,
+)
+
+
+FEATURE_SIGNATURE_KEYS = (
+    "xy_only",
+    "possessor_aware",
+    "keeper_aware",
+    "ball_z_aware",
+    "poss_vel_aware",
+    "extend_features",
+    "filter_blockers",
+    "sparsify",
+    "max_edge_dist",
+    "add_v_edge_features",
+    "node_in_dim",
+    "edge_in_dim",
+)
+
+
+def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
+    signature = {
+        "xy_only": bool(args.get("xy_only", False)),
+        "possessor_aware": bool(args.get("possessor_aware", False)),
+        "keeper_aware": bool(args.get("keeper_aware", False)),
+        "ball_z_aware": bool(args.get("ball_z_aware", False)),
+        "poss_vel_aware": bool(args.get("poss_vel_aware", False)),
+        "extend_features": bool(args.get("extend_features", False)),
+        "filter_blockers": bool(args.get("filter_blockers", False)),
+        "sparsify": args.get("sparsify", "none"),
+        "max_edge_dist": args.get("max_edge_dist", 10),
+        "node_in_dim": int(args.get("node_in_dim", 0)),
+        "edge_in_dim": int(args.get("edge_in_dim", 2)),
+    }
+    signature["add_v_edge_features"] = bool(args.get("add_v_edge_features", signature["edge_in_dim"] > 2))
+    return signature
+
+
+def parse_model_id(model_id: str) -> tuple[str, str]:
+    try:
+        task, run_id = str(model_id).split("/", 1)
+    except ValueError as exc:
+        raise ValueError(f"Invalid model id format: {model_id!r}. Expected task/run_id.") from exc
+    if not task or not run_id:
+        raise ValueError(f"Invalid model id format: {model_id!r}. Expected task/run_id.")
+    return task, run_id
+
+
+def get_model_path(model_id: str) -> Path:
+    task, run_id = parse_model_id(model_id)
+    return get_task_saved_dir(task) / run_id
+
+
+def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _iso_or_mtime(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+
+
+def get_model_record(model_id: str) -> dict[str, Any]:
+    model_path = get_model_path(model_id)
+    args_path = model_path / "args.json"
+    metadata_path = model_path / "metadata.json"
+    if not args_path.exists():
+        raise FileNotFoundError(f"Model args.json not found at {args_path}.")
+
+    args = _read_json_if_exists(args_path) or {}
+    metadata = _read_json_if_exists(metadata_path) or {}
+    task, run_id = parse_model_id(model_id)
+
+    args.setdefault("edge_in_dim", 2)
+    args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+    args.setdefault("feature_run_id", None)
+
+    legacy_context = infer_legacy_model_context(model_id)
+    target_family = metadata.get("target_family")
+    if target_family is None and task.startswith("outcome_"):
+        target_family = infer_target_family(bool(args.get("use_xg", False)), bool(args.get("use_xt", False)))
+    if target_family is None and legacy_context is not None:
+        target_family = legacy_context.get("target_family")
+
+    intended_receiver_mode = metadata.get("intended_receiver_mode")
+    if intended_receiver_mode is None and legacy_context is not None:
+        intended_receiver_mode = legacy_context.get("intended_receiver_mode")
+    intended_receiver_mode = intended_receiver_mode or "unknown"
+
+    created_at = metadata.get("created_at") or _iso_or_mtime(metadata_path if metadata_path.exists() else args_path)
+    feature_signature = extract_model_feature_signature(args)
+    weights_path = model_path / "best_weights.pt"
+    best_model_path = model_path / "best_model.json"
+    has_weights = weights_path.exists() or best_model_path.exists()
+    status = str(metadata.get("status") or ("completed" if has_weights else "unknown"))
+    is_complete = bool(has_weights and status == "completed")
+
+    return {
+        "model_id": model_id,
+        "task": str(metadata.get("task") or args.get("task") or task),
+        "run_id": str(metadata.get("run_id") or run_id),
+        "model_path": str(model_path),
+        "created_at": created_at,
+        "timestamp": created_at,
+        "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
+        "intended_receiver_mode": intended_receiver_mode,
+        "target_family": target_family,
+        "model_name": str(args.get("model", metadata.get("model", "unknown"))),
+        "feature_signature": feature_signature,
+        "graph_schema": {
+            "edge_in_dim": feature_signature["edge_in_dim"],
+            "add_v_edge_features": feature_signature["add_v_edge_features"],
+        },
+        "status": status,
+        "has_weights": has_weights,
+        "is_complete": is_complete,
+        "args": args,
+        "metadata": metadata,
+        "legacy": bool(metadata.get("legacy", False) or legacy_context is not None),
+    }
+
+
+def get_model_provenance(model_id: str) -> dict[str, Any]:
+    record = get_model_record(model_id)
+    return {
+        key: record[key]
+        for key in [
+            "model_id",
+            "task",
+            "run_id",
+            "model_path",
+            "created_at",
+            "feature_run_id",
+            "intended_receiver_mode",
+            "target_family",
+            "model_name",
+            "feature_signature",
+            "graph_schema",
+            "status",
+            "has_weights",
+            "is_complete",
+            "legacy",
+        ]
+    }
+
+
+def iter_model_records(task: str | None = None) -> list[dict[str, Any]]:
+    tasks = [str(task)] if task else [path.name for path in SAVED_DIR.iterdir() if path.is_dir() and path.name != "bundles"]
+    records: list[dict[str, Any]] = []
+    for task_name in tasks:
+        task_dir = get_task_saved_dir(task_name)
+        if not task_dir.exists():
+            continue
+        for model_dir in sorted(path for path in task_dir.iterdir() if path.is_dir()):
+            model_id = f"{task_name}/{model_dir.name}"
+            args_path = model_dir / "args.json"
+            if not args_path.exists():
+                continue
+            try:
+                records.append(get_model_record(model_id))
+            except Exception:
+                continue
+    return records
+
+
+def resolve_latest_model_id(
+    task: str,
+    intended_receiver_mode: str | None = None,
+    target_family: str | None = None,
+) -> str:
+    candidates = [record for record in iter_model_records(task) if record["task"] == task]
+    candidates = [record for record in candidates if record["is_complete"]]
+    if intended_receiver_mode is not None:
+        candidates = [record for record in candidates if record["intended_receiver_mode"] == intended_receiver_mode]
+    if target_family is not None:
+        candidates = [record for record in candidates if record["target_family"] == target_family]
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No compatible checkpoints were found for "
+            f"task={task!r}, intended_receiver_mode={intended_receiver_mode!r}, target_family={target_family!r}."
+        )
+
+    feature_signatures = {
+        json.dumps(
+            {
+                "model_name": record["model_name"],
+                "feature_signature": record["feature_signature"],
+            },
+            sort_keys=True,
+        )
+        for record in candidates
+    }
+    candidates.sort(key=lambda record: (record["created_at"], record["model_id"]))
+    if len(feature_signatures) > 1:
+        candidate_ids = ", ".join(record["model_id"] for record in candidates)
+        raise ValueError(
+            "Multiple compatible checkpoints were found with different feature signatures. "
+            f"Pass an explicit model id instead. Candidates: {candidate_ids}."
+        )
+    return candidates[-1]["model_id"]
 
 
 def num_trainable_params(model: nn.Module) -> int:
@@ -113,13 +321,17 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         return None
 
     else:
-        model_path = f"saved/{model_id}"
-        with open(f"{model_path}/args.json", "r") as f:
+        model_path = get_model_path(model_id)
+        with open(model_path / "args.json", "r", encoding="utf-8") as f:
             args = json.load(f)
+        args.setdefault("edge_in_dim", 2)
+        args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+        args.setdefault("feature_run_id", None)
+        args.setdefault("model_id", str(model_id))
 
         if args["model"] in ["gcn", "gin", "gat"]:  # GNN models
             model = GNN(args).to(device)
-            weights_path = f"{model_path}/best_weights.pt"
+            weights_path = model_path / "best_weights.pt"
             state_dict = torch.load(weights_path, weights_only=False, map_location=lambda storage, _: storage)
 
             # Backward compatibility for older checkpoints saved with encoder.gat_layers.*
@@ -135,12 +347,89 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
             model.load_state_dict(state_dict)
 
         elif args["model"] in ["xgboost", "catboost"]:  # Gradient boosting models
-            with open(f"{model_path}/best_params.json", "r") as f:
+            with open(model_path / "best_params.json", "r", encoding="utf-8") as f:
                 params = json.load(f)
             model = XGBClassifier(**params) if args["model"] == "xgboost" else CatBoostClassifier(**params)
-            model.load_model(f"{model_path}/best_model.json")
+            model.load_model(str(model_path / "best_model.json"))
 
         return model
+
+
+def resolve_relevant_model_ids(
+    intended_receiver_mode: str,
+    use_xt: bool = False,
+    explicit_model_ids: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    explicit_model_ids = explicit_model_ids or {}
+    target_family = "xt" if use_xt else "xg"
+
+    resolved = {}
+    for task in ["action_intent", "pass_success", "outcome_scoring", "outcome_conceding"]:
+        explicit_model_id = explicit_model_ids.get(task)
+        if explicit_model_id:
+            resolved[task] = str(explicit_model_id)
+            continue
+
+        resolved[task] = resolve_latest_model_id(
+            task,
+            intended_receiver_mode=intended_receiver_mode,
+            target_family=target_family if task.startswith("outcome_") else None,
+        )
+
+    return resolved
+
+
+def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
+    if model is None or not hasattr(model, "args"):
+        return None
+    edge_in_dim = int(model.args.get("edge_in_dim", 2))
+    return {
+        "edge_in_dim": edge_in_dim,
+        "add_v_edge_features": bool(model.args.get("add_v_edge_features", edge_in_dim > 2)),
+    }
+
+
+def validate_model_graph_schemas(models: dict[str, GNN | None]) -> dict[str, int | bool]:
+    schemas = {
+        name: schema
+        for name, schema in ((name, get_model_graph_schema(model)) for name, model in models.items())
+        if schema is not None
+    }
+    if not schemas:
+        return {"edge_in_dim": 2, "add_v_edge_features": False}
+
+    reference_name, reference_schema = next(iter(schemas.items()))
+    mismatches = []
+    for name, schema in list(schemas.items())[1:]:
+        if schema != reference_schema:
+            mismatches.append(f"{name}={schema}")
+
+    if mismatches:
+        raise ValueError(
+            "Loaded model checkpoints use incompatible graph edge schemas. "
+            f"Reference {reference_name}={reference_schema}; mismatches: {', '.join(mismatches)}."
+        )
+    return reference_schema
+
+
+def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]:
+    feature_path = Path(feature_dir)
+    for graph_file in sorted(feature_path.glob("*.pt")):
+        try:
+            graphs = torch.load(graph_file, weights_only=False)
+            if not isinstance(graphs, list):
+                continue
+            first_graph = next((graph for graph in graphs if graph is not None), None)
+            if first_graph is None:
+                continue
+            edge_in_dim = int(first_graph.edge_attr.shape[1]) if getattr(first_graph, "edge_attr", None) is not None else 0
+            return {
+                "edge_in_dim": edge_in_dim,
+                "add_v_edge_features": bool(edge_in_dim > 2),
+            }
+        except Exception:
+            continue
+    raise FileNotFoundError(f"Could not infer graph schema from feature directory {feature_dir}.")
 
 
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01) -> torch.Tensor:

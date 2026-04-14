@@ -18,13 +18,15 @@ from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn
-from models.utils import load_model
+from models.utils import infer_feature_graph_schema, load_model, validate_model_graph_schemas
 from project_config import (
-    ACTION_GRAPH_DIR,
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
+    get_action_graph_dir,
     get_relevant_model_ids,
     get_resolved_action_path,
+    resolve_feature_root,
+    resolve_feature_run_id,
     resolve_intended_receiver_mode,
 )
 
@@ -48,6 +50,7 @@ def parse_args() -> argparse.Namespace:
         help="Original Sportec event id from the original_event_id column.",
     )
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--feature-run-id", default=None)
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--use_xt", action="store_true")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
@@ -60,14 +63,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_match(match_id: str, intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE) -> Match:
+def load_match(
+    match_id: str,
+    intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    feature_root: Path | None = None,
+    add_v_edge_features: bool = False,
+) -> Match:
+    feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(DATA_ROOT / "tracking_processed" / f"{match_id}.parquet")
     lineups = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
-    resolved_action_path = get_resolved_action_path(match_id, intended_receiver_mode=intended_receiver_mode)
+    resolved_action_path = get_resolved_action_path(
+        match_id,
+        intended_receiver_mode=intended_receiver_mode,
+        root=feature_root,
+    )
     if not resolved_action_path.exists():
         raise FileNotFoundError(
             f"Resolved actions not found at {resolved_action_path}. Run scripts/generate_relevant_features.py for this mode first."
@@ -80,11 +93,16 @@ def load_match(match_id: str, intended_receiver_mode: str = DEFAULT_INTENDED_REC
         resolved_actions=resolved_actions,
     )
 
-    graph_path = ACTION_GRAPH_DIR / f"{match_id}.pt"
+    graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
     if graph_path.exists():
         match.graph_features_0 = torch.load(graph_path, weights_only=False)
     else:
-        match.graph_features_0 = construct_graph_features(match, extend=True, post_action=False)
+        match.graph_features_0 = construct_graph_features(
+            match,
+            extend=True,
+            post_action=False,
+            add_v_edge_features=add_v_edge_features,
+        )
 
     return match
 
@@ -229,24 +247,39 @@ def main() -> None:
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
     default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
+    feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
+    feature_root = resolve_feature_root(feature_run_id)
 
-    match = load_match(args.match_id, intended_receiver_mode=intended_receiver_mode)
-    action_index, display_action_id = resolve_action_index(match, args)
-    output_dir = Path(args.output_dir) / args.match_id / display_action_id
-
-    model_specs = {
+    model_ids = {
         "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
         "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
         "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
         "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
     }
+    loaded_models = {name: load_model(model_id, device) for name, model_id in model_ids.items()}
+    missing = [name for name, model in loaded_models.items() if model is None]
+    if missing:
+        raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
+    graph_schema = validate_model_graph_schemas(loaded_models)
+    feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
+    if feature_schema != graph_schema:
+        raise ValueError(
+            "Selected feature artifacts are incompatible with the loaded model checkpoints: "
+            f"features={feature_schema}, models={graph_schema}."
+        )
+
+    match = load_match(
+        args.match_id,
+        intended_receiver_mode=intended_receiver_mode,
+        feature_root=feature_root,
+        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+    )
+    action_index, display_action_id = resolve_action_index(match, args)
+    output_dir = Path(args.output_dir) / args.match_id / display_action_id
+
     component_prob_rows: dict[str, pd.Series] = {}
 
-    for component_name, model_id in model_specs.items():
-        model = load_model(model_id, device)
-        if model is None:
-            raise FileNotFoundError(f"Could not load model checkpoint {model_id}.")
-
+    for component_name, model in loaded_models.items():
         if component_name.startswith("outcome_"):
             failure_probs, success_probs = inference_gnn(
                 match,
