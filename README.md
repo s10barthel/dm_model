@@ -460,14 +460,22 @@ If the model ids are omitted, the script resolves the latest compatible checkpoi
 To visualize one HawkEye situation as MP4s:
 
 ```powershell
-python scripts/visualize_hawkeye.py --situation-id <hawkeye_id>
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 ```
 
 This writes 7 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
 
 Useful option:
 
+- `--component-run-id <component_run_id>` to read a specific versioned Hawkeye component export; otherwise the latest successful Hawkeye component run is used
+- `--component-dir <path>` to point directly at a Hawkeye component-run root
 - `--gif` to write GIFs instead of the default MP4 animations
+
+`scripts/visualize_hawkeye.py` now reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. If you want the old direct-inference behavior, use:
+
+```powershell
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
+```
 
 ### 9. Run frame-level inference on SkillCorner data
 
@@ -763,6 +771,17 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations`.
 
 ### `scripts/visualize_hawkeye.py`
+
+- `--situation-id <id>`: restrict visualization to one or more Hawkeye situation ids from the selected component run. Default: all situations in the selected component run.
+- `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.
+- `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `hawkeye_data/ball_data_selected.csv`.
+- `--component-run-id <component_run_id>`: versioned Hawkeye component run to visualize. Default: latest successful Hawkeye component run.
+- `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
+- `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+- `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations/hawkeye`.
+
+### `scripts/run_and_visualize_hawkeye.py`
 
 - `--situation-id <id>`: Hawkeye situation id to visualize. Default: one of `--situation-id` or `--action-id` is required at runtime.
 - `--action-id <id>`: alias for `--situation-id`. Default: off.

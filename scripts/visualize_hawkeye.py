@@ -10,28 +10,37 @@ if str(ROOT) not in sys.path:
 
 import matplotlib.pyplot as plt
 import pandas as pd
-import torch
 from PIL import Image
 
 from datatools.hawkeye import (
+    COMPONENT_COLUMNS,
+    build_hawkeye_component_tables,
     build_hawkeye_situation,
+    build_hawkeye_visualization_probs,
     clean_hawkeye_ball,
     clean_hawkeye_tracking,
-    infer_hawkeye_components,
     load_hawkeye_ball,
-    load_hawkeye_models,
+    load_hawkeye_component_run,
     load_hawkeye_tracking,
+    resolve_hawkeye_component_situation_ids,
 )
-from models.utils import validate_model_graph_schemas
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
-from project_config import DATA_ROOT, PROJECT_ROOT
+from project_config import (
+    DATA_ROOT,
+    PROJECT_ROOT,
+    get_hawkeye_component_run_root,
+    resolve_named_component_run_id,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--situation-id", default=None, help="Hawkeye situation id to visualize.")
-    parser.add_argument("--action-id", default=None, help="Alias for --situation-id.")
+    parser.add_argument(
+        "--situation-id",
+        action="append",
+        help="Restrict visualization to one or more Hawkeye situation ids.",
+    )
     parser.add_argument(
         "--tracking-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"),
@@ -40,17 +49,11 @@ def parse_args() -> argparse.Namespace:
         "--ball-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"),
     )
-    parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
-    parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
-    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--component-run-id", default=None, help="Optional versioned Hawkeye component run id.")
+    parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
-    parser.add_argument("--action-intent-model-id", default="action_intent/00")
-    parser.add_argument("--pass-success-model-id", default="pass_success/20")
-    parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
-    parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "hawkeye"))
-    parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
 
 
@@ -70,7 +73,11 @@ def render_frame_image(
     if probs is None or probs.empty:
         component_probs = pd.Series(dtype=float)
     else:
-        attack_targets = [player_id for player_id in probs.index if isinstance(player_id, str) and player_id.startswith(attacking_prefix)]
+        attack_targets = [
+            player_id
+            for player_id in probs.index
+            if isinstance(player_id, str) and player_id.startswith(attacking_prefix)
+        ]
         component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
 
     player_annots = component_probs if not component_probs.empty else None
@@ -110,84 +117,95 @@ def render_frame_image(
     return image
 
 
+def _row_for_frame(component_table: pd.DataFrame, frame_id: int) -> pd.Series | None:
+    if component_table.empty or frame_id not in component_table.index:
+        return None
+
+    row = component_table.loc[frame_id]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[-1]
+    return row
+
+
+def _probs_for_component_frame(
+    component_name: str,
+    component_tables: dict[str, pd.DataFrame],
+    frame_id: int,
+) -> pd.Series:
+    if component_name == "pass_score":
+        return compute_pass_score(
+            pass_success=build_hawkeye_visualization_probs(_row_for_frame(component_tables["pass_success"], frame_id)),
+            outcome_scoring_success=build_hawkeye_visualization_probs(
+                _row_for_frame(component_tables["outcome_scoring_success"], frame_id)
+            ),
+            outcome_scoring_failure=build_hawkeye_visualization_probs(
+                _row_for_frame(component_tables["outcome_scoring_failure"], frame_id)
+            ),
+            outcome_conceding_success=build_hawkeye_visualization_probs(
+                _row_for_frame(component_tables["outcome_conceding_success"], frame_id)
+            ),
+            outcome_conceding_failure=build_hawkeye_visualization_probs(
+                _row_for_frame(component_tables["outcome_conceding_failure"], frame_id)
+            ),
+        )
+
+    return build_hawkeye_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
+
+
 def main() -> None:
     args = parse_args()
-    situation_id = args.situation_id or args.action_id
-    if not situation_id:
-        raise ValueError("Please provide --situation-id (or --action-id) for Hawkeye visualization.")
+    if args.component_dir:
+        component_dir = Path(args.component_dir)
+    else:
+        component_run_id = resolve_named_component_run_id("hawkeye_component", args.component_run_id, required=True)
+        component_dir = get_hawkeye_component_run_root(component_run_id)
 
-    device = args.device if torch.cuda.is_available() else "cpu"
-    output_dir = Path(args.output_dir) / str(situation_id)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    component_export, component_metadata = load_hawkeye_component_run(component_dir)
+    situation_ids = resolve_hawkeye_component_situation_ids(
+        component_export,
+        metadata=component_metadata,
+        requested_ids=args.situation_id,
+    )
+    freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", True))
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
-    if situation_tracking.empty:
-        raise KeyError(f"Hawkeye situation id {situation_id} was not found in {args.tracking_csv}.")
+    output_root = Path(args.output_dir)
+    component_names = [*COMPONENT_COLUMNS, "pass_score"]
 
-    model_specs = load_hawkeye_models(
-        action_intent_model_id=args.action_intent_model_id,
-        pass_success_model_id=args.pass_success_model_id,
-        outcome_scoring_model_id=args.outcome_scoring_model_id,
-        outcome_conceding_model_id=args.outcome_conceding_model_id,
-        device=device,
-    )
-    graph_schema = validate_model_graph_schemas(model_specs)
-    situation, _, _ = build_hawkeye_situation(
-        situation_tracking,
-        ball,
-        freeze_ballreceipt=args.freeze_ballreceipt,
-        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
-    )
-    components = infer_hawkeye_components(situation, model_specs, device=device)
+    for situation_id in situation_ids:
+        situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
+        if situation_tracking.empty:
+            raise KeyError(f"Hawkeye situation id {situation_id} was not found in {args.tracking_csv}.")
 
-    component_frames: dict[str, pd.DataFrame | None] = {
-        "action_intent": components.get("action_intent"),
-        "pass_success": components.get("pass_success"),
-        "outcome_scoring_success": components.get("outcome_scoring_success"),
-        "outcome_scoring_failure": components.get("outcome_scoring_failure"),
-        "outcome_conceding_success": components.get("outcome_conceding_success"),
-        "outcome_conceding_failure": components.get("outcome_conceding_failure"),
-    }
-    if all(
-        component_frames[name] is not None
-        for name in [
-            "pass_success",
-            "outcome_scoring_success",
-            "outcome_scoring_failure",
-            "outcome_conceding_success",
-            "outcome_conceding_failure",
-        ]
-    ):
-        component_frames["pass_score"] = compute_pass_score(
-            pass_success=component_frames["pass_success"],
-            outcome_scoring_success=component_frames["outcome_scoring_success"],
-            outcome_scoring_failure=component_frames["outcome_scoring_failure"],
-            outcome_conceding_success=component_frames["outcome_conceding_success"],
-            outcome_conceding_failure=component_frames["outcome_conceding_failure"],
+        situation, _, _ = build_hawkeye_situation(
+            situation_tracking,
+            ball,
+            freeze_ballreceipt=freeze_ballreceipt,
+            build_graphs=False,
         )
-    else:
-        component_frames["pass_score"] = None
+        component_tables = build_hawkeye_component_tables(component_export, situation)
+        frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
+        output_dir = output_root / str(situation_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
-    for component_name, component_table in component_frames.items():
-        def iter_component_images():
-            for frame_id in frame_ids:
-                frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
-                yield render_frame_image(
-                    situation,
-                    frame_id,
-                    component_name,
-                    frame_probs,
-                    show_trajectories=args.show_trajectories,
-                )
+        for component_name in component_names:
+            def iter_component_images():
+                for frame_id in frame_ids:
+                    probs = _probs_for_component_frame(component_name, component_tables, frame_id)
+                    yield render_frame_image(
+                        situation,
+                        frame_id,
+                        component_name,
+                        probs,
+                        show_trajectories=args.show_trajectories,
+                    )
 
-        suffix = "gif" if args.gif else "mp4"
-        output_path = output_dir / f"{component_name}.{suffix}"
-        save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
+            suffix = "gif" if args.gif else "mp4"
+            output_path = output_dir / f"{component_name}.{suffix}"
+            save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
 
-    print(f"Saved Hawkeye animations to {output_dir}")
+        print(f"Saved Hawkeye animations to {output_dir}")
 
 
 if __name__ == "__main__":

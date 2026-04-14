@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -570,6 +571,7 @@ def build_hawkeye_situation(
     ball: pd.DataFrame,
     freeze_ballreceipt: bool = True,
     add_v_edge_features: bool = False,
+    build_graphs: bool = True,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
@@ -611,15 +613,6 @@ def build_hawkeye_situation(
         prefix_to_team=prefix_to_team,
         max_players=20 + 2 + 2,
     )
-    actions, labels, graphs, stats = _build_actions_and_labels(
-        situation,
-        add_v_edge_features=add_v_edge_features,
-    )
-    situation.actions = actions
-    situation.labels = labels
-    situation.graph_features_0 = graphs
-    situation.graph_features_by_dir["action_graphs"] = graphs
-
     attacking_rows = situation_tracking[situation_tracking["team"] == situation_tracking["possession_team"]].copy()
     attacking_rows["uefa_player_id"] = attacking_rows["uefa_player_id"].astype(int)
     attacking_rows["PlayerID"] = attacking_rows["PlayerID"].astype(int)
@@ -632,6 +625,25 @@ def build_hawkeye_situation(
         on=["game_id", "half", "abs_time", "id"],
         how="left",
     )
+
+    if not build_graphs:
+        stats = {
+            "total_frames": int(len(situation.frame_meta)),
+            "valid_frames": 0,
+            "skipped_missing_ball": 0,
+            "skipped_missing_possessor": 0,
+            "skipped_missing_graph": 0,
+        }
+        return situation, attacking_rows, stats
+
+    actions, labels, graphs, stats = _build_actions_and_labels(
+        situation,
+        add_v_edge_features=add_v_edge_features,
+    )
+    situation.actions = actions
+    situation.labels = labels
+    situation.graph_features_0 = graphs
+    situation.graph_features_by_dir["action_graphs"] = graphs
 
     return situation, attacking_rows, stats
 
@@ -757,6 +769,155 @@ def summarize_hawkeye_stats(stats_by_situation: dict[str, dict[str, int]]) -> di
                 continue
             totals[key] += int(stats.get(key, 0))
     return totals
+
+
+def load_hawkeye_component_run(component_dir: str | Path) -> tuple[pd.DataFrame, dict[str, Any]]:
+    component_dir = Path(component_dir)
+    parquet_path = component_dir / "hawkeye_data.parquet"
+    metadata_path = component_dir / "metadata.json"
+    if not parquet_path.exists():
+        raise FileNotFoundError(
+            f"Hawkeye component parquet not found at {parquet_path}. Run scripts/run_hawkeye.py first."
+        )
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Hawkeye component metadata not found at {metadata_path}. Run scripts/run_hawkeye.py first."
+        )
+
+    component_export = pd.read_parquet(parquet_path)
+    if "id" not in component_export.columns:
+        raise KeyError(f"Hawkeye component export at {parquet_path} is missing the required 'id' column.")
+    component_export["id"] = component_export["id"].astype(str)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    return component_export, metadata
+
+
+def resolve_hawkeye_component_situation_ids(
+    component_export: pd.DataFrame,
+    metadata: dict[str, Any] | None = None,
+    requested_ids: list[str] | None = None,
+) -> list[str]:
+    metadata = metadata or {}
+    available_ids = [
+        str(situation_id)
+        for situation_id in metadata.get("processed_situation_ids", [])
+        if str(situation_id)
+    ]
+    if not available_ids:
+        available_ids = component_export["id"].dropna().astype(str).drop_duplicates().tolist()
+    if not available_ids:
+        raise ValueError("No Hawkeye situations were found in the selected component run.")
+
+    if requested_ids:
+        requested = list(dict.fromkeys(str(situation_id) for situation_id in requested_ids))
+        missing = [situation_id for situation_id in requested if situation_id not in set(available_ids)]
+        if missing:
+            raise KeyError(
+                "Requested Hawkeye situation ids are not present in the selected component run: "
+                + ", ".join(missing)
+            )
+        return requested
+
+    return available_ids
+
+
+def _resolve_component_object_id(
+    row: pd.Series,
+    situation: HawkeyeSituation,
+    component_name: str,
+) -> str | None:
+    team = row.get("team")
+    if pd.notna(team):
+        team_str = str(team)
+        if team_str in situation.team_map:
+            return _object_id(situation.team_map[team_str], int(row["uefa_player_id"]))
+
+    if component_name != "action_intent":
+        return None
+
+    possession_team = row.get("possession_team")
+    if pd.notna(possession_team):
+        team_str = str(possession_team)
+        if team_str in situation.team_map:
+            return f"{situation.team_map[team_str]}_goal"
+
+    possession_prefix = row.get("possession_prefix")
+    if isinstance(possession_prefix, str) and possession_prefix in {"home", "away"}:
+        return f"{possession_prefix}_goal"
+    return None
+
+
+def build_hawkeye_component_tables(
+    component_export: pd.DataFrame,
+    situation: HawkeyeSituation,
+) -> dict[str, pd.DataFrame]:
+    situation_rows = component_export.loc[component_export["id"] == str(situation.situation_id)].copy()
+    frame_lookup = (
+        situation.frame_meta.reset_index()[["frame_id", "abs_time", "possession_team", "possession_prefix"]]
+        .drop_duplicates(subset=["frame_id"])
+        .copy()
+    )
+    component_tables: dict[str, pd.DataFrame] = {}
+
+    for component_name in COMPONENT_COLUMNS:
+        if component_name not in situation_rows.columns:
+            component_tables[component_name] = pd.DataFrame()
+            continue
+
+        component_rows = situation_rows.loc[situation_rows[component_name].notna()].copy()
+        if component_rows.empty:
+            component_tables[component_name] = pd.DataFrame()
+            continue
+
+        component_rows = component_rows.merge(
+            frame_lookup,
+            on=["abs_time", "possession_team"],
+            how="left",
+        )
+        missing_frame_rows = component_rows["frame_id"].isna()
+        if missing_frame_rows.any():
+            preview = ", ".join(component_rows.loc[missing_frame_rows, "abs_time"].astype(str).head(5).tolist())
+            raise KeyError(
+                f"Could not map Hawkeye component rows back to frame ids for situation {situation.situation_id}. "
+                f"Missing abs_time values: {preview}"
+            )
+
+        records: list[dict[str, Any]] = []
+        for row in component_rows.itertuples(index=False):
+            row_series = pd.Series(row._asdict())
+            object_id = _resolve_component_object_id(row_series, situation, component_name)
+            if object_id is None:
+                continue
+            records.append(
+                {
+                    "frame_id": int(row_series["frame_id"]),
+                    "object_id": object_id,
+                    "value": float(row_series[component_name]),
+                }
+            )
+
+        if not records:
+            component_tables[component_name] = pd.DataFrame()
+            continue
+
+        component_frame = (
+            pd.DataFrame(records)
+            .drop_duplicates(subset=["frame_id", "object_id"], keep="last")
+            .pivot(index="frame_id", columns="object_id", values="value")
+            .sort_index()
+        )
+        component_frame.columns = component_frame.columns.astype(str)
+        component_tables[component_name] = component_frame
+
+    return component_tables
+
+
+def build_hawkeye_visualization_probs(row: pd.Series | None) -> pd.Series:
+    if row is None:
+        return pd.Series(dtype=float)
+
+    probs = pd.to_numeric(row, errors="coerce").dropna()
+    return probs.astype(float).sort_values(ascending=False)
 
 
 def load_hawkeye_models(
