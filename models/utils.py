@@ -113,7 +113,11 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     legacy_context = infer_legacy_model_context(model_id)
     target_family = metadata.get("target_family")
     if target_family is None and task.startswith("outcome_"):
-        target_family = infer_target_family(bool(args.get("use_xg", False)), bool(args.get("use_xt", False)))
+        target_family = infer_target_family(
+            bool(args.get("use_xg", False)),
+            bool(args.get("use_xt", False)),
+            bool(args.get("use_goal_distance", False)),
+        )
     if target_family is None and legacy_context is not None:
         target_family = legacy_context.get("target_family")
 
@@ -358,10 +362,13 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
 def resolve_relevant_model_ids(
     intended_receiver_mode: str,
     use_xt: bool = False,
+    use_goal_distance: bool = False,
     explicit_model_ids: dict[str, str | None] | None = None,
 ) -> dict[str, str]:
     explicit_model_ids = explicit_model_ids or {}
-    target_family = "xt" if use_xt else "xg"
+    if use_xt and use_goal_distance:
+        raise ValueError("use_xt and use_goal_distance are mutually exclusive.")
+    target_family = "goal_distance" if use_goal_distance else ("xt" if use_xt else "xg")
 
     resolved = {}
     for task in ["action_intent", "pass_success", "outcome_scoring", "outcome_conceding"]:
@@ -483,8 +490,14 @@ def calc_binary_metrics(y, y_hat, threshold=0.5):
 
 
 def validate_target_flags(args) -> None:
-    if getattr(args, "use_xg", False) and getattr(args, "use_xt", False):
-        raise ValueError("--use_xg and --use_xt are mutually exclusive.")
+    enabled_flags = sum(
+        int(
+            bool(getattr(args, name, False))
+        )
+        for name in ["use_xg", "use_xt", "use_goal_distance"]
+    )
+    if enabled_flags > 1:
+        raise ValueError("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
 
 
 def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
@@ -493,6 +506,10 @@ def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
 
 def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor, torch.Tensor]:
     validate_target_flags(args)
+    if getattr(args, "use_goal_distance", False):
+        return get_label_slice(batch_labels, "scores_goal_distance"), get_label_slice(
+            batch_labels, "concedes_goal_distance"
+        )
     if getattr(args, "use_xt", False):
         return get_label_slice(batch_labels, "scores_xt"), get_label_slice(batch_labels, "concedes_xt")
     if getattr(args, "use_xg", False):

@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="Only process the first N selected SkillCorner matches.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--use_xt", action="store_true")
+    parser.add_argument("--use_goal_distance", action="store_true")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
@@ -48,7 +49,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.use_xt and args.use_goal_distance:
+        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    return args
 
 
 def _save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
@@ -70,6 +74,7 @@ def main() -> None:
     resolved_model_ids = resolve_relevant_model_ids(
         intended_receiver_mode=intended_receiver_mode,
         use_xt=args.use_xt,
+        use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_success": args.pass_success_model_id,
@@ -187,6 +192,7 @@ def main() -> None:
         "output_dir": str(output_dir.resolve()),
         "intended_receiver_mode": intended_receiver_mode,
         "use_xt": bool(args.use_xt),
+        "use_goal_distance": bool(args.use_goal_distance),
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
         "processed_matches": processed_matches,

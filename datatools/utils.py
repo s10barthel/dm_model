@@ -218,31 +218,34 @@ def sanitize_expected_goal(events: pd.DataFrame) -> pd.DataFrame:
     return events
 
 
-def label_xt_returns(
+def label_future_max_value(
     events: pd.DataFrame,
+    value_col: str,
+    scores_col: str,
+    concedes_col: str,
     lookahead_len: int = 5,
     eligible_types: tuple[str, ...] | None = None,
 ) -> pd.DataFrame:
     events = events.copy()
     eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
 
-    if "xT" not in events.columns:
-        events["xT"] = np.nan
-    events["xT"] = pd.to_numeric(events["xT"], errors="coerce")
-    events["scores_xT"] = 0.0
-    events["concedes_xT"] = 0.0
+    if value_col not in events.columns:
+        events[value_col] = np.nan
+    events[value_col] = pd.to_numeric(events[value_col], errors="coerce")
+    events[scores_col] = 0.0
+    events[concedes_col] = 0.0
 
     if events.empty or "spadl_type" not in events.columns or "object_id" not in events.columns:
         return events
 
     teams = events["object_id"].astype(str).str[:4]
-    eligible_mask = events["spadl_type"].isin(eligible_types) & events["xT"].notna() & teams.isin(["home", "away"])
+    eligible_mask = events["spadl_type"].isin(eligible_types) & events[value_col].notna() & teams.isin(["home", "away"])
     eligible_positions = np.flatnonzero(eligible_mask.to_numpy())
 
     if len(eligible_positions) == 0:
         return events
 
-    xt_values = events["xT"].to_numpy(dtype=float)
+    value_array = events[value_col].to_numpy(dtype=float)
     team_values = teams.to_numpy(dtype=object)
 
     for row_pos in range(len(events)):
@@ -253,17 +256,47 @@ def label_xt_returns(
 
         team_i = team_values[row_pos]
         future_teams = team_values[future_positions]
-        future_xt = xt_values[future_positions]
+        future_values = value_array[future_positions]
 
-        teammate_xt = future_xt[future_teams == team_i]
-        opponent_xt = future_xt[future_teams != team_i]
+        teammate_values = future_values[future_teams == team_i]
+        opponent_values = future_values[future_teams != team_i]
 
-        if teammate_xt.size:
-            events.iat[row_pos, events.columns.get_loc("scores_xT")] = float(np.nanmax(teammate_xt))
-        if opponent_xt.size:
-            events.iat[row_pos, events.columns.get_loc("concedes_xT")] = float(np.nanmax(opponent_xt))
+        if teammate_values.size:
+            events.iat[row_pos, events.columns.get_loc(scores_col)] = float(np.nanmax(teammate_values))
+        if opponent_values.size:
+            events.iat[row_pos, events.columns.get_loc(concedes_col)] = float(np.nanmax(opponent_values))
 
     return events
+
+
+def label_xt_returns(
+    events: pd.DataFrame,
+    lookahead_len: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_future_max_value(
+        events,
+        value_col="xT",
+        scores_col="scores_xT",
+        concedes_col="concedes_xT",
+        lookahead_len=lookahead_len,
+        eligible_types=eligible_types,
+    )
+
+
+def label_goal_distance_returns(
+    events: pd.DataFrame,
+    lookahead_len: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_future_max_value(
+        events,
+        value_col="goal_distance",
+        scores_col="scores_goal_distance",
+        concedes_col="concedes_goal_distance",
+        lookahead_len=lookahead_len,
+        eligible_types=eligible_types,
+    )
 
 
 def label_intended_receivers(

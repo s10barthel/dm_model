@@ -18,12 +18,16 @@ from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn
-from models.utils import infer_feature_graph_schema, load_model, validate_model_graph_schemas
+from models.utils import (
+    infer_feature_graph_schema,
+    load_model,
+    resolve_relevant_model_ids,
+    validate_model_graph_schemas,
+)
 from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     get_action_graph_dir,
-    get_relevant_model_ids,
     get_resolved_action_path,
     resolve_feature_root,
     resolve_feature_run_id,
@@ -53,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-run-id", default=None)
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--use_xt", action="store_true")
+    parser.add_argument("--use_goal_distance", action="store_true")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
@@ -60,7 +65,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations"))
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.use_xt and args.use_goal_distance:
+        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    return args
 
 
 def load_match(
@@ -246,15 +254,25 @@ def main() -> None:
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
-    default_model_ids = get_relevant_model_ids(intended_receiver_mode=intended_receiver_mode, use_xt=args.use_xt)
+    default_model_ids = resolve_relevant_model_ids(
+        intended_receiver_mode=intended_receiver_mode,
+        use_xt=args.use_xt,
+        use_goal_distance=args.use_goal_distance,
+        explicit_model_ids={
+            "action_intent": args.action_intent_model_id,
+            "pass_success": args.pass_success_model_id,
+            "outcome_scoring": args.outcome_scoring_model_id,
+            "outcome_conceding": args.outcome_conceding_model_id,
+        },
+    )
     feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(feature_run_id)
 
     model_ids = {
-        "action_intent": args.action_intent_model_id or default_model_ids["action_intent"],
-        "pass_success": args.pass_success_model_id or default_model_ids["pass_success"],
-        "outcome_scoring": args.outcome_scoring_model_id or default_model_ids["outcome_scoring"],
-        "outcome_conceding": args.outcome_conceding_model_id or default_model_ids["outcome_conceding"],
+        "action_intent": default_model_ids["action_intent"],
+        "pass_success": default_model_ids["pass_success"],
+        "outcome_scoring": default_model_ids["outcome_scoring"],
+        "outcome_conceding": default_model_ids["outcome_conceding"],
     }
     loaded_models = {name: load_model(model_id, device) for name, model_id in model_ids.items()}
     missing = [name for name, model in loaded_models.items() if model is None]

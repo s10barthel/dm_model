@@ -12,6 +12,8 @@ if str(ROOT) not in sys.path:
 
 from project_config import (
     EVENT_SYNCED_DIR,
+    GOAL_DISTANCE_DIR,
+    GOAL_DISTANCE_MATCH_DIR,
     INTENDED_RECEIVER_MODE_MODEL,
     XT_DIR,
     XT_MATCH_DIR,
@@ -68,10 +70,16 @@ def parse_args() -> argparse.Namespace:
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
     parser.add_argument("--use_xt", action="store_true", help="Use xT for the outcome models instead of xG.")
+    parser.add_argument(
+        "--use_goal_distance",
+        action="store_true",
+        help="Use goal-distance labels for the outcome models instead of xG.",
+    )
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
+    parser.add_argument("--skip-goal-distance", action="store_true", help="Skip scripts/generate_goal_distance.py.")
     parser.add_argument("--skip-features", action="store_true", help="Skip scripts/generate_relevant_features.py.")
     parser.add_argument("--skip-train", action="store_true", help="Skip scripts/train_relevant_models.py.")
     parser.add_argument("--skip-evaluate", action="store_true", help="Skip scripts/evaluate_relevant_models.py.")
@@ -79,7 +87,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-hawkeye", action="store_true", help="Skip scripts/run_hawkeye.py.")
     parser.add_argument("--skip-skillcorner", action="store_true", help="Skip scripts/run_skillcorner.py.")
     parser.add_argument("--add_v_edge_features", action="store_true", help="Append velocity-angle edge features during feature generation.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite supported preprocessing and xT artifacts.")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite supported preprocessing and target-artifact outputs.",
+    )
     parser.add_argument(
         "--relevant-split",
         choices=["train", "test", "all"],
@@ -131,6 +143,8 @@ def parse_args() -> argparse.Namespace:
         "Disable the extended handcrafted node features for downstream training.",
     )
     args = parser.parse_args()
+    if args.use_xt and args.use_goal_distance:
+        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
@@ -199,10 +213,58 @@ def maybe_validate_xt_skip(args: argparse.Namespace) -> None:
     validate_xt_artifacts(require_match_sidecars=require_match_sidecars)
 
 
+def validate_goal_distance_artifacts(require_match_sidecars: bool) -> None:
+    missing_paths = [path for path in [GOAL_DISTANCE_DIR / "goal_distance.csv", GOAL_DISTANCE_DIR / "metadata.json"] if not path.exists()]
+    if missing_paths:
+        missing = ", ".join(str(path.relative_to(ROOT)) for path in missing_paths)
+        raise FileNotFoundError(
+            "Missing required goal-distance artifacts: "
+            f"{missing}. Run scripts/generate_goal_distance.py or rerun without --skip-goal-distance."
+        )
+
+    if not require_match_sidecars:
+        return
+
+    synced_match_ids = sorted(path.stem for path in EVENT_SYNCED_DIR.glob("*.csv"))
+    missing_sidecars = [match_id for match_id in synced_match_ids if not (GOAL_DISTANCE_MATCH_DIR / f"{match_id}.csv").exists()]
+    if missing_sidecars:
+        preview = ", ".join(missing_sidecars[:5])
+        if len(missing_sidecars) > 5:
+            preview += f", ... ({len(missing_sidecars)} total)"
+        raise FileNotFoundError(
+            "Missing per-match goal-distance sidecars for synced events: "
+            f"{preview}. Run scripts/generate_goal_distance.py or rerun without --skip-goal-distance."
+        )
+
+
+def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
+    if not args.use_goal_distance or not args.skip_goal_distance or args.dry_run:
+        return
+
+    needs_goal_distance_artifacts = any(
+        not skipped
+        for skipped in [
+            args.skip_features,
+            args.skip_train,
+            args.skip_evaluate,
+            args.skip_run_relevant,
+            args.skip_hawkeye,
+            args.skip_skillcorner,
+        ]
+    )
+    if not needs_goal_distance_artifacts:
+        return
+
+    require_match_sidecars = not args.skip_features or not args.skip_run_relevant
+    validate_goal_distance_artifacts(require_match_sidecars=require_match_sidecars)
+
+
 def append_mode_flags(command: list[str], args: argparse.Namespace, include_xt: bool = False) -> list[str]:
     command = list(command)
     if include_xt and args.use_xt:
         command.append("--use_xt")
+    if include_xt and args.use_goal_distance:
+        command.append("--use_goal_distance")
     if args.use_original_intended_receiver:
         command.append("--use-original-intended-receiver")
     if args.use_intended_receiver_model:
@@ -249,6 +311,11 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         if args.overwrite:
             xt_command.append("--overwrite")
         commands.append(xt_command)
+    if args.use_goal_distance and not args.skip_goal_distance:
+        goal_distance_command = [python, "scripts/generate_goal_distance.py"]
+        if args.overwrite:
+            goal_distance_command.append("--overwrite")
+        commands.append(goal_distance_command)
 
     if not args.skip_features:
         if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL and not args.skip_train:
@@ -367,6 +434,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
 def main() -> None:
     args = parse_args()
     maybe_validate_xt_skip(args)
+    maybe_validate_goal_distance_skip(args)
     commands = build_commands(args)
 
     if not commands:

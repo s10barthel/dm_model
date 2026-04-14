@@ -31,6 +31,8 @@ ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
 POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
 XT_DIR = DATA_ROOT / "xT"
 XT_MATCH_DIR = XT_DIR / "matches"
+GOAL_DISTANCE_DIR = DATA_ROOT / "goal_distance"
+GOAL_DISTANCE_MATCH_DIR = GOAL_DISTANCE_DIR / "matches"
 SAVED_DIR = PROJECT_ROOT / "saved"
 MODEL_BUNDLES_DIR = SAVED_DIR / "bundles"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
@@ -137,6 +139,8 @@ def ensure_project_dirs() -> None:
         FEATURE_RUNS_DIR,
         XT_DIR,
         XT_MATCH_DIR,
+        GOAL_DISTANCE_DIR,
+        GOAL_DISTANCE_MATCH_DIR,
         COMPONENT_DIR,
         COMPONENT_RUNS_DIR,
         HAWKEYE_COMPONENT_RUNS_DIR,
@@ -388,9 +392,16 @@ def get_component_dir(
     return COMPONENT_DIR.with_name(base_name)
 
 
-def infer_target_family(use_xg: bool = False, use_xt: bool = False) -> str:
-    if use_xg and use_xt:
-        raise ValueError("use_xg and use_xt are mutually exclusive.")
+def infer_target_family(
+    use_xg: bool = False,
+    use_xt: bool = False,
+    use_goal_distance: bool = False,
+) -> str:
+    enabled_flags = int(bool(use_xg)) + int(bool(use_xt)) + int(bool(use_goal_distance))
+    if enabled_flags > 1:
+        raise ValueError("use_xg, use_xt, and use_goal_distance are mutually exclusive.")
+    if use_goal_distance:
+        return "goal_distance"
     if use_xt:
         return "xt"
     if use_xg:

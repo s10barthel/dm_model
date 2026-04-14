@@ -13,6 +13,7 @@ import torch
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.goal_distance import merge_goal_distance_annotations
 from datatools.xt import merge_xt_annotations
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
@@ -45,6 +46,7 @@ class Match(ABC):
         self.graph_features_by_dir: Dict[str, object] = {}
         self.events = utils.sanitize_expected_goal(self.events)
         self.events = merge_xt_annotations(self.events, self.match_id)
+        self.events = merge_goal_distance_annotations(self.events, self.match_id)
 
         self.action_type = action_type
         self.fps = fps
@@ -464,6 +466,13 @@ class Match(ABC):
         self.events = utils.label_xt_returns(self.events, lookahead_len=5, eligible_types=tuple(config.XT_ACTION_TYPES))
         self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
         self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
+        self.events = utils.label_goal_distance_returns(
+            self.events,
+            lookahead_len=5,
+            eligible_types=tuple(config.XT_ACTION_TYPES),
+        )
+        self.actions["scores_goal_distance"] = self.events.loc[self.actions.index, "scores_goal_distance"]
+        self.actions["concedes_goal_distance"] = self.events.loc[self.actions.index, "concedes_goal_distance"]
 
         if discount_xg:
             self.events = utils.label_discounted_returns(self.events, gamma)
@@ -583,6 +592,8 @@ class Match(ABC):
                     self.actions.at[i, "concedes_xg_disc"] if discount_xg else self.actions.at[i, "concedes_xg"],
                     self.actions.at[i, "scores_xt"],
                     self.actions.at[i, "concedes_xt"],
+                    self.actions.at[i, "scores_goal_distance"],
+                    self.actions.at[i, "concedes_goal_distance"],
                 ]
             )
 

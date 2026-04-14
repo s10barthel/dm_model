@@ -23,6 +23,7 @@ from project_config import (
     get_intent_train_label_dir,
     get_model_bundle_root,
     get_success_intent_graph_dir,
+    infer_target_family,
     resolve_feature_run_id,
     resolve_feature_root,
     resolve_intended_receiver_mode,
@@ -84,6 +85,11 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of xG.")
+    parser.add_argument(
+        "--use_goal_distance",
+        action="store_true",
+        help="Train outcome models with goal-distance targets instead of xG.",
+    )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
@@ -148,6 +154,8 @@ def parse_args() -> argparse.Namespace:
         "Disable the extended handcrafted node features during training.",
     )
     args = parser.parse_args()
+    if args.use_xt and args.use_goal_distance:
+        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
     try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
@@ -281,9 +289,13 @@ def outcome_command(
     feature_dir: str,
     label_dir: str,
     use_xt: bool,
+    use_goal_distance: bool,
     intended_receiver_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
+    if use_xt and use_goal_distance:
+        raise ValueError("use_xt and use_goal_distance are mutually exclusive.")
+    target_flag = "--use_goal_distance" if use_goal_distance else ("--use_xt" if use_xt else "--use_xg")
     command = [
         "--task",
         task,
@@ -296,7 +308,7 @@ def outcome_command(
         "0.0002",
         "--min_lr",
         "1e-5",
-        "--use_xt" if use_xt else "--use_xg",
+        target_flag,
     ]
     return append_low_level_feature_flags(command, feature_flags)
 
@@ -428,6 +440,7 @@ def build_training_commands(
                 base_feature_dir,
                 base_label_dir,
                 args.use_xt,
+                args.use_goal_distance,
                 mode,
                 feature_flags,
             ),
@@ -437,6 +450,7 @@ def build_training_commands(
                 base_feature_dir,
                 base_label_dir,
                 args.use_xt,
+                args.use_goal_distance,
                 mode,
                 feature_flags,
             ),
@@ -496,6 +510,12 @@ def main() -> None:
         "intended_receiver_mode": intended_receiver_mode,
         "training_feature_flags": feature_flags,
         "use_xt": bool(cli_args.use_xt),
+        "use_goal_distance": bool(cli_args.use_goal_distance),
+        "target_family": infer_target_family(
+            use_xg=not cli_args.use_xt and not cli_args.use_goal_distance,
+            use_xt=bool(cli_args.use_xt),
+            use_goal_distance=bool(cli_args.use_goal_distance),
+        ),
         "success_intent_only": bool(cli_args.success_intent_only),
         "model_ids": bundle_model_ids,
         "commands": executed_commands,

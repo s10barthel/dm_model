@@ -5,6 +5,7 @@ skillcorner_data/
 data/
 saved/
 .venv/
+.pycache*/
 test*/
 test*/*.csv
 test*/*.png
@@ -14,6 +15,7 @@ test_smoke_2425
 test_smoke_2425_rerun
 
 __pycache__/
+.pycache_tmp/
 *.py[cod]
 .DS_Store
 

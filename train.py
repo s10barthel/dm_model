@@ -71,6 +71,12 @@ parser.add_argument("--dest_sigma", type=float, default=3.0, help="sigma for smo
 
 parser.add_argument("--use_xg", action="store_true", default=False, help="use xG instead of actual goal labels")
 parser.add_argument("--use_xt", action="store_true", default=False, help="use xT instead of xG or actual goal labels")
+parser.add_argument(
+    "--use_goal_distance",
+    action="store_true",
+    default=False,
+    help="use goal-distance labels instead of xG, xT, or actual goal labels",
+)
 parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining return")
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
@@ -219,7 +225,11 @@ if __name__ == "__main__":
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": args.feature_run_id,
         "intended_receiver_mode": args.intended_receiver_mode,
-        "target_family": infer_target_family(bool(args.use_xg), bool(args.use_xt)),
+        "target_family": infer_target_family(
+            bool(args.use_xg),
+            bool(args.use_xt),
+            bool(args.use_goal_distance),
+        ),
         "resolved_dirs": {
             "feature_dir": args.feature_dir,
             "label_dir": args.label_dir,
