@@ -18,6 +18,8 @@ from project_config import (
     XT_DIR,
     XT_MATCH_DIR,
     generate_run_id,
+    infer_target_family,
+    resolve_effective_return_type,
     resolve_intended_receiver_mode,
 )
 
@@ -69,12 +71,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
-    parser.add_argument("--use_xt", action="store_true", help="Use xT for the outcome models instead of xG.")
+    parser.add_argument("--use_xg", action="store_true", help="Use xG for the outcome models instead of binary goals.")
+    parser.add_argument("--use_xt", action="store_true", help="Use xT for the outcome models instead of binary goals.")
     parser.add_argument(
         "--use_goal_distance",
         action="store_true",
-        help="Use goal-distance labels for the outcome models instead of xG.",
+        help="Use goal-distance labels for the outcome models instead of binary goals.",
     )
+    parser.add_argument("--return_type", default=None, help="Resolved return type for generated labels and outcome training.")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
@@ -143,8 +147,15 @@ def parse_args() -> argparse.Namespace:
         "Disable the extended handcrafted node features for downstream training.",
     )
     args = parser.parse_args()
-    if args.use_xt and args.use_goal_distance:
-        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    try:
+        args.target_family = infer_target_family(
+            use_xg=bool(args.use_xg),
+            use_xt=bool(args.use_xt),
+            use_goal_distance=bool(args.use_goal_distance),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.return_type = resolve_effective_return_type(args.target_family, args.return_type)
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
@@ -259,16 +270,25 @@ def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
     validate_goal_distance_artifacts(require_match_sidecars=require_match_sidecars)
 
 
-def append_mode_flags(command: list[str], args: argparse.Namespace, include_xt: bool = False) -> list[str]:
+def append_mode_flags(command: list[str], args: argparse.Namespace, include_target: bool = False) -> list[str]:
     command = list(command)
-    if include_xt and args.use_xt:
+    if include_target and args.use_xg:
+        command.append("--use_xg")
+    if include_target and args.use_xt:
         command.append("--use_xt")
-    if include_xt and args.use_goal_distance:
+    if include_target and args.use_goal_distance:
         command.append("--use_goal_distance")
     if args.use_original_intended_receiver:
         command.append("--use-original-intended-receiver")
     if args.use_intended_receiver_model:
         command.append("--use-intended-receiver-model")
+    return command
+
+
+def append_return_type_flag(command: list[str], args: argparse.Namespace) -> list[str]:
+    command = list(command)
+    if args.return_type:
+        command.extend(["--return_type", args.return_type])
     return command
 
 
@@ -320,14 +340,20 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
     if not args.skip_features:
         if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL and not args.skip_train:
             preparatory_feature_run_id = generate_run_id("feature")
-            feature_command = [python, "scripts/generate_relevant_features.py", "--run-id", preparatory_feature_run_id]
+            feature_command = append_return_type_flag(
+                [python, "scripts/generate_relevant_features.py", "--run-id", preparatory_feature_run_id],
+                args,
+            )
             if args.add_v_edge_features:
                 feature_command.append("--add_v_edge_features")
             commands.append(feature_command)
         else:
             main_feature_run_id = generate_run_id("feature")
-            feature_command = append_mode_flags(
-                [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+            feature_command = append_return_type_flag(
+                append_mode_flags(
+                    [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+                    args,
+                ),
                 args,
             )
             if args.add_v_edge_features:
@@ -339,7 +365,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             commands.append(
                 append_training_feature_flags(
                     append_feature_run_flag(
-                        [python, "scripts/train_relevant_models.py", "--success-intent-only"],
+                        append_return_type_flag([python, "scripts/train_relevant_models.py", "--success-intent-only"], args),
                         preparatory_feature_run_id,
                     ),
                     args,
@@ -347,8 +373,11 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             )
             if not args.skip_features:
                 main_feature_run_id = generate_run_id("feature")
-                feature_command = append_mode_flags(
-                    [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+                feature_command = append_return_type_flag(
+                    append_mode_flags(
+                        [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
+                        args,
+                    ),
                     args,
                 )
                 if args.add_v_edge_features:
@@ -357,7 +386,10 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         commands.append(
             append_training_feature_flags(
                 append_feature_run_flag(
-                    append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_xt=True),
+                    append_return_type_flag(
+                        append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_target=True),
+                        args,
+                    ),
                     main_feature_run_id,
                 ),
                 args,
@@ -375,7 +407,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                     args.device,
                     ],
                     args,
-                    include_xt=True,
+                    include_target=True,
                 ),
                 main_feature_run_id,
             )
@@ -394,7 +426,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                     args.device,
                     ],
                     args,
-                    include_xt=True,
+                    include_target=True,
                 ),
                 main_feature_run_id,
             )
@@ -410,7 +442,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 args.device,
                 ],
                 args,
-                include_xt=True,
+                include_target=True,
             )
         )
 
@@ -424,7 +456,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 args.device,
                 ],
                 args,
-                include_xt=True,
+                include_target=True,
             )
         )
 

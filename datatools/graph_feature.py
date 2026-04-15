@@ -40,6 +40,7 @@ from project_config import (
     get_resolved_action_path,
     get_success_intent_graph_dir,
     load_base_splits,
+    resolve_effective_return_type,
     resolve_intended_receiver_mode,
 )
 
@@ -688,7 +689,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
-    parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining future xG")
+    parser.add_argument("--return_type", type=str, required=False, default=None, help="Way of defining future returns.")
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
     parser.add_argument("--augment_blocks", action="store_true", default=False)
     parser.add_argument(
@@ -707,6 +708,7 @@ if __name__ == "__main__":
     parser.add_argument("--add_v_edge_features", action="store_true", default=False)
     parser.add_argument("--run-id", type=str, default=None)
     args, _ = parser.parse_known_args()
+    args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
     intended_receiver_mode = resolve_intended_receiver_mode(
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
@@ -793,22 +795,11 @@ if __name__ == "__main__":
             match_name = " vs ".join(match_lineup["contestant_name"].unique())
             print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")
 
-            if args.return_type.startswith("disc"):
-                gamma = float(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(
-                    discount_xg=True,
-                    gamma=gamma,
-                    intended_receiver_mode=intended_receiver_mode,
-                    intended_receiver_model_id=args.intended_receiver_model_id,
-                )
-            elif args.return_type.startswith("next"):
-                lookahead_len = int(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(
-                    discount_xg=False,
-                    lookahead_len=lookahead_len,
-                    intended_receiver_mode=intended_receiver_mode,
-                    intended_receiver_model_id=args.intended_receiver_model_id,
-                )
+            match.labels = match.construct_labels(
+                intended_receiver_mode=intended_receiver_mode,
+                intended_receiver_model_id=args.intended_receiver_model_id,
+                return_type=args.return_type,
+            )
             if match.labels.numel() == 0:
                 raise ValueError("No usable labels were constructed for this match.")
 

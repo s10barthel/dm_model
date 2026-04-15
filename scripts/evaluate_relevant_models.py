@@ -15,6 +15,7 @@ from project_config import resolve_intended_receiver_mode
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--use_xg", action="store_true")
     parser.add_argument("--use_xt", action="store_true")
     parser.add_argument("--use_goal_distance", action="store_true")
     parser.add_argument("--feature-run-id", default=None)
@@ -28,8 +29,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-    if args.use_xt and args.use_goal_distance:
-        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    enabled_flags = int(bool(args.use_xg)) + int(bool(args.use_xt)) + int(bool(args.use_goal_distance))
+    if enabled_flags > 1:
+        parser.error("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
     return args
 
 
@@ -41,6 +43,7 @@ def main() -> None:
     )
     default_model_ids = resolve_relevant_model_ids(
         intended_receiver_mode=intended_receiver_mode,
+        use_xg=args.use_xg,
         use_xt=args.use_xt,
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={

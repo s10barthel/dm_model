@@ -269,6 +269,126 @@ def label_future_max_value(
     return events
 
 
+def _should_stop_discount_scan(events: pd.DataFrame, row_pos: int, period_i: Any, goal_array: np.ndarray) -> bool:
+    if bool(goal_array[row_pos]):
+        return True
+    if row_pos + 1 < len(events) and events.iat[row_pos + 1, events.columns.get_loc("period_id")] != period_i:
+        return True
+    if row_pos + 1 < len(events) and events.iat[row_pos + 1, events.columns.get_loc("spadl_type")] == "goalkick":
+        return True
+    return False
+
+
+def label_discounted_goal_returns(events: pd.DataFrame, gamma: float = 0.95) -> pd.DataFrame:
+    events = events.copy()
+
+    expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
+    expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
+    teams = events["object_id"].astype(str).str[:4]
+    goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    team_values = teams.to_numpy(dtype=object)
+
+    events["goal"] = goal_array
+    events["scores"] = 0.0
+    events["concedes"] = 0.0
+
+    if events.empty:
+        return events
+
+    score_loc = events.columns.get_loc("scores")
+    concede_loc = events.columns.get_loc("concedes")
+    period_loc = events.columns.get_loc("period_id")
+
+    for row_pos in range(len(events)):
+        period_i = events.iat[row_pos, period_loc]
+        team_i = team_values[row_pos]
+        best_score = 0.0
+        best_concede = 0.0
+
+        for future_pos in range(row_pos, len(events)):
+            if goal_array[future_pos]:
+                weight = gamma ** (future_pos - row_pos)
+                if team_values[future_pos] == team_i:
+                    best_score = max(best_score, weight)
+                else:
+                    best_concede = max(best_concede, weight)
+
+            if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
+                break
+
+        events.iat[row_pos, score_loc] = float(best_score)
+        events.iat[row_pos, concede_loc] = float(best_concede)
+
+    return events
+
+
+def label_discounted_future_max_value(
+    events: pd.DataFrame,
+    value_col: str,
+    scores_col: str,
+    concedes_col: str,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    events = events.copy()
+    eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
+
+    if value_col not in events.columns:
+        events[value_col] = np.nan
+    events[value_col] = pd.to_numeric(events[value_col], errors="coerce")
+    events[scores_col] = 0.0
+    events[concedes_col] = 0.0
+
+    if events.empty or "spadl_type" not in events.columns or "object_id" not in events.columns:
+        return events
+
+    expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
+    expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
+    teams = events["object_id"].astype(str).str[:4]
+    goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    team_values = teams.to_numpy(dtype=object)
+    value_array = events[value_col].to_numpy(dtype=float)
+    eligible_array = (
+        events["spadl_type"].isin(eligible_types).to_numpy(dtype=bool)
+        & np.isfinite(value_array)
+        & np.isin(team_values, ["home", "away"])
+    )
+
+    score_loc = events.columns.get_loc(scores_col)
+    concede_loc = events.columns.get_loc(concedes_col)
+    period_loc = events.columns.get_loc("period_id")
+
+    for row_pos in range(len(events)):
+        period_i = events.iat[row_pos, period_loc]
+        team_i = team_values[row_pos]
+        best_score = 0.0
+        best_concede = 0.0
+        eligible_rank = 0
+
+        if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
+            events.iat[row_pos, score_loc] = float(best_score)
+            events.iat[row_pos, concede_loc] = float(best_concede)
+            continue
+
+        for future_pos in range(row_pos + 1, len(events)):
+            if eligible_array[future_pos]:
+                weight = gamma ** eligible_rank
+                candidate = weight * value_array[future_pos]
+                if team_values[future_pos] == team_i:
+                    best_score = max(best_score, candidate)
+                else:
+                    best_concede = max(best_concede, candidate)
+                eligible_rank += 1
+
+            if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
+                break
+
+        events.iat[row_pos, score_loc] = float(best_score)
+        events.iat[row_pos, concede_loc] = float(best_concede)
+
+    return events
+
+
 def label_xt_returns(
     events: pd.DataFrame,
     lookahead_len: int = 5,
@@ -284,6 +404,21 @@ def label_xt_returns(
     )
 
 
+def label_discounted_xt_returns(
+    events: pd.DataFrame,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_discounted_future_max_value(
+        events,
+        value_col="xT",
+        scores_col="scores_xT",
+        concedes_col="concedes_xT",
+        gamma=gamma,
+        eligible_types=eligible_types,
+    )
+
+
 def label_goal_distance_returns(
     events: pd.DataFrame,
     lookahead_len: int = 5,
@@ -295,6 +430,21 @@ def label_goal_distance_returns(
         scores_col="scores_goal_distance",
         concedes_col="concedes_goal_distance",
         lookahead_len=lookahead_len,
+        eligible_types=eligible_types,
+    )
+
+
+def label_discounted_goal_distance_returns(
+    events: pd.DataFrame,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_discounted_future_max_value(
+        events,
+        value_col="goal_distance",
+        scores_col="scores_goal_distance",
+        concedes_col="concedes_goal_distance",
+        gamma=gamma,
         eligible_types=eligible_types,
     )
 
@@ -499,34 +649,32 @@ def label_returns(events: pd.DataFrame, lookahead_len: int = 10) -> pd.DataFrame
 def label_discounted_returns(events: pd.DataFrame, gamma: float = 0.95) -> pd.DataFrame:
     events = events.copy()
 
-    expected_goals = events["expected_goal"].copy().fillna(0)
-    events["goal"] = (expected_goals > 0) & events["success"]
+    expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
+    expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
+    goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    events["goal"] = goal_array
     events["scores_xg_disc"] = 0.0
     events["concedes_xg_disc"] = 0.0
     n_events = len(events)
 
-    for i in events.index:
-        period_i = events.at[i, "period_id"]
-        team_i = events.at[i, "object_id"][:4]
+    for i in range(n_events):
+        period_i = events.iat[i, events.columns.get_loc("period_id")]
+        team_i = str(events.iat[i, events.columns.get_loc("object_id")])[:4]
 
         prob_not_scoring = 1.0
         prob_not_conceding = 1.0
 
         for j in range(i, n_events):
-            if events.at[j, "object_id"][:4] == team_i:  # future shot by a teammate
-                prob_not_scoring *= 1 - gamma ** (j - i) * expected_goals.at[j]
+            if str(events.iat[j, events.columns.get_loc("object_id")])[:4] == team_i:  # future shot by a teammate
+                prob_not_scoring *= 1 - gamma ** (j - i) * expected_goals.iat[j]
             else:  # future shot by an opponent
-                prob_not_conceding *= 1 - gamma ** (j - i) * expected_goals.at[j]
+                prob_not_conceding *= 1 - gamma ** (j - i) * expected_goals.iat[j]
 
-            if events.at[j, "goal"]:
-                break
-            if j + 1 < n_events and events.at[j + 1, "period_id"] != period_i:
-                break
-            if j + 1 < n_events and events.at[j + 1, "spadl_type"] == "goalkick":
+            if _should_stop_discount_scan(events, j, period_i, goal_array):
                 break
 
-        events.at[i, "scores_xg_disc"] = 1 - prob_not_scoring
-        events.at[i, "concedes_xg_disc"] = 1 - prob_not_conceding
+        events.iat[i, events.columns.get_loc("scores_xg_disc")] = 1 - prob_not_scoring
+        events.iat[i, events.columns.get_loc("concedes_xg_disc")] = 1 - prob_not_conceding
 
     return events
 

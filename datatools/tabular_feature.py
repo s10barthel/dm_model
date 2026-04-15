@@ -16,6 +16,7 @@ import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.event_xg import EventXGModel
 from datatools.match import Match
+from project_config import resolve_effective_return_type
 
 
 def calculate_event_features(
@@ -240,9 +241,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--action_type", type=str, choices=["pass", "pass_dribble", "shot"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
-    parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining future xG")
+    parser.add_argument("--return_type", type=str, required=False, default=None, help="Way of defining future returns.")
     parser.add_argument("--augment", action="store_true", default=False, help="augment failed shots by far passes")
     args, _ = parser.parse_known_args()
+    args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
 
     feature_dir = f"data/ajax/features/{args.action_type}_tabular"
     label_dir = f"data/ajax/features/{args.action_type}_labels"
@@ -295,12 +297,7 @@ if __name__ == "__main__":
             labels.append(match.actions.loc[action_indices])
 
         else:
-            if args.return_type.startswith("disc"):
-                gamma = float(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(discount_xg=True, gamma=gamma)
-            elif args.return_type.startswith("next"):
-                lookahead_len = int(args.return_type.split("_")[-1])
-                match.labels = match.construct_labels(discount_xg=False, lookahead_len=lookahead_len)
+            match.labels = match.construct_labels(return_type=args.return_type)
 
             action_indices = match.labels[:, 0].numpy().astype(int)
             assert match.tabular_features_0.shape[0] == match.labels.shape[0]

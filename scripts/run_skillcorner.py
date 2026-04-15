@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more SkillCorner match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N selected SkillCorner matches.")
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--use_xg", action="store_true")
     parser.add_argument("--use_xt", action="store_true")
     parser.add_argument("--use_goal_distance", action="store_true")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
@@ -51,8 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
     args = parser.parse_args()
-    if args.use_xt and args.use_goal_distance:
-        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    enabled_flags = int(bool(args.use_xg)) + int(bool(args.use_xt)) + int(bool(args.use_goal_distance))
+    if enabled_flags > 1:
+        parser.error("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
     return args
 
 
@@ -74,6 +76,7 @@ def main() -> None:
     )
     resolved_model_ids = resolve_relevant_model_ids(
         intended_receiver_mode=intended_receiver_mode,
+        use_xg=args.use_xg,
         use_xt=args.use_xt,
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
@@ -195,8 +198,10 @@ def main() -> None:
         "output_parent": str(output_parent),
         "output_dir": str(output_dir.resolve()),
         "intended_receiver_mode": intended_receiver_mode,
+        "use_xg": bool(args.use_xg),
         "use_xt": bool(args.use_xt),
         "use_goal_distance": bool(args.use_goal_distance),
+        "target_family": "goal_distance" if args.use_goal_distance else ("xt" if args.use_xt else ("xg" if args.use_xg else "goal")),
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
         "processed_matches": processed_matches,

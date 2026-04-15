@@ -24,6 +24,7 @@ from project_config import (
     get_model_bundle_root,
     get_success_intent_graph_dir,
     infer_target_family,
+    resolve_effective_return_type,
     resolve_feature_run_id,
     resolve_feature_root,
     resolve_intended_receiver_mode,
@@ -84,12 +85,14 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of xG.")
+    parser.add_argument("--use_xg", action="store_true", help="Train outcome models with xG targets instead of binary goals.")
+    parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of binary goals.")
     parser.add_argument(
         "--use_goal_distance",
         action="store_true",
-        help="Train outcome models with goal-distance targets instead of xG.",
+        help="Train outcome models with goal-distance targets instead of binary goals.",
     )
+    parser.add_argument("--return_type", default=None, help="Resolved outcome return type to use for label generation.")
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
@@ -154,8 +157,14 @@ def parse_args() -> argparse.Namespace:
         "Disable the extended handcrafted node features during training.",
     )
     args = parser.parse_args()
-    if args.use_xt and args.use_goal_distance:
-        parser.error("--use_xt and --use_goal_distance are mutually exclusive.")
+    try:
+        infer_target_family(
+            use_xg=bool(args.use_xg),
+            use_xt=bool(args.use_xt),
+            use_goal_distance=bool(args.use_goal_distance),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
@@ -288,28 +297,30 @@ def outcome_command(
     model_id: str,
     feature_dir: str,
     label_dir: str,
-    use_xt: bool,
-    use_goal_distance: bool,
+    target_family: str,
+    return_type: str,
     intended_receiver_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
-    if use_xt and use_goal_distance:
-        raise ValueError("use_xt and use_goal_distance are mutually exclusive.")
-    target_flag = "--use_goal_distance" if use_goal_distance else ("--use_xt" if use_xt else "--use_xg")
     command = [
         "--task",
         task,
         *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
         "--return_type",
-        "disc_0.9",
+        return_type,
         "--lambda_l1",
         "1e-6",
         "--start_lr",
         "0.0002",
         "--min_lr",
         "1e-5",
-        target_flag,
     ]
+    if target_family == "goal_distance":
+        command.append("--use_goal_distance")
+    elif target_family == "xt":
+        command.append("--use_xt")
+    elif target_family == "xg":
+        command.append("--use_xg")
     return append_low_level_feature_flags(command, feature_flags)
 
 
@@ -364,6 +375,12 @@ def build_training_commands(
         use_original_intended_receiver=args.use_original_intended_receiver,
         use_intended_receiver_model=args.use_intended_receiver_model,
     )
+    target_family = infer_target_family(
+        use_xg=bool(args.use_xg),
+        use_xt=bool(args.use_xt),
+        use_goal_distance=bool(args.use_goal_distance),
+    )
+    effective_return_type = resolve_effective_return_type(target_family, args.return_type)
     feature_flags = resolve_wrapper_feature_flags(args)
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
@@ -376,10 +393,16 @@ def build_training_commands(
         else mode
     )
     base_label_dir = str(
-        get_action_label_dir("disc_0.9", intended_receiver_mode=success_intent_label_mode, root=feature_root)
+        get_action_label_dir(
+            effective_return_type,
+            intended_receiver_mode=success_intent_label_mode,
+            root=feature_root,
+        )
     )
     intent_train_feature_dir = str(get_action_graph_intent_train_dir(feature_root))
-    intent_train_label_dir = str(get_intent_train_label_dir("disc_0.9", intended_receiver_mode=mode, root=feature_root))
+    intent_train_label_dir = str(
+        get_intent_train_label_dir(effective_return_type, intended_receiver_mode=mode, root=feature_root)
+    )
     success_intent_feature_dir = str(get_success_intent_graph_dir(feature_root))
     augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
     augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
@@ -439,8 +462,8 @@ def build_training_commands(
                 model_ids["outcome_scoring"],
                 base_feature_dir,
                 base_label_dir,
-                args.use_xt,
-                args.use_goal_distance,
+                target_family,
+                effective_return_type,
                 mode,
                 feature_flags,
             ),
@@ -449,8 +472,8 @@ def build_training_commands(
                 model_ids["outcome_conceding"],
                 base_feature_dir,
                 base_label_dir,
-                args.use_xt,
-                args.use_goal_distance,
+                target_family,
+                effective_return_type,
                 mode,
                 feature_flags,
             ),
@@ -509,12 +532,21 @@ def main() -> None:
         "feature_run_id": resolved_feature_run_id,
         "intended_receiver_mode": intended_receiver_mode,
         "training_feature_flags": feature_flags,
+        "use_xg": bool(cli_args.use_xg),
         "use_xt": bool(cli_args.use_xt),
         "use_goal_distance": bool(cli_args.use_goal_distance),
         "target_family": infer_target_family(
-            use_xg=not cli_args.use_xt and not cli_args.use_goal_distance,
+            use_xg=bool(cli_args.use_xg),
             use_xt=bool(cli_args.use_xt),
             use_goal_distance=bool(cli_args.use_goal_distance),
+        ),
+        "return_type": resolve_effective_return_type(
+            infer_target_family(
+                use_xg=bool(cli_args.use_xg),
+                use_xt=bool(cli_args.use_xt),
+                use_goal_distance=bool(cli_args.use_goal_distance),
+            ),
+            cli_args.return_type,
         ),
         "success_intent_only": bool(cli_args.success_intent_only),
         "model_ids": bundle_model_ids,

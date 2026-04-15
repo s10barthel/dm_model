@@ -39,6 +39,7 @@ from project_config import (
     get_augmented_label_dir,
     get_model_run_root,
     infer_target_family,
+    resolve_effective_return_type,
     resolve_feature_root,
     resolve_feature_run_id,
     write_run_metadata,
@@ -77,7 +78,7 @@ parser.add_argument(
     default=False,
     help="use goal-distance labels instead of xG, xT, or actual goal labels",
 )
-parser.add_argument("--return_type", type=str, required=False, default="disc_0.9", help="way of defining return")
+parser.add_argument("--return_type", type=str, required=False, default=None, help="way of defining return")
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
@@ -163,6 +164,12 @@ if __name__ == "__main__":
         device = "cpu"
 
     validate_target_flags(args)
+    args.target_family = infer_target_family(
+        bool(args.use_xg),
+        bool(args.use_xt),
+        bool(args.use_goal_distance),
+    )
+    args.return_type = resolve_effective_return_type(args.target_family, args.return_type)
 
     args.gnn_task = config.TASK_CONFIG.at[args.task, "gnn_task"]
     args.condition = config.TASK_CONFIG.at[args.task, "condition"]
@@ -225,11 +232,7 @@ if __name__ == "__main__":
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": args.feature_run_id,
         "intended_receiver_mode": args.intended_receiver_mode,
-        "target_family": infer_target_family(
-            bool(args.use_xg),
-            bool(args.use_xt),
-            bool(args.use_goal_distance),
-        ),
+        "target_family": args.target_family,
         "resolved_dirs": {
             "feature_dir": args.feature_dir,
             "label_dir": args.label_dir,

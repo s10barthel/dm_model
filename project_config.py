@@ -409,6 +409,59 @@ def infer_target_family(
     return "goal"
 
 
+RETURN_TYPE_DEFAULTS = {
+    "goal": "next_10",
+    "xg": "disc_0.9",
+    "xt": "next_5",
+    "goal_distance": "next_5",
+}
+
+
+def validate_return_type(return_type: str) -> str:
+    value = str(return_type).strip()
+    if not value:
+        raise ValueError("return_type must be a non-empty string.")
+
+    if value.startswith("disc_"):
+        try:
+            gamma = float(value.split("_", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Invalid discounted return type: {return_type!r}.") from exc
+        if not (0.0 < gamma <= 1.0):
+            raise ValueError(f"Discount factor must satisfy 0 < gamma <= 1, got {gamma}.")
+        return value
+
+    if value.startswith("next_"):
+        try:
+            lookahead_len = int(value.split("_", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Invalid lookahead return type: {return_type!r}.") from exc
+        if lookahead_len < 1:
+            raise ValueError(f"Lookahead length must be >= 1, got {lookahead_len}.")
+        return value
+
+    raise ValueError(f"Unsupported return_type {return_type!r}. Expected disc_<gamma> or next_<N>.")
+
+
+def parse_return_type(return_type: str) -> tuple[str, float | int]:
+    value = validate_return_type(return_type)
+    kind, raw = value.split("_", 1)
+    return kind, float(raw) if kind == "disc" else int(raw)
+
+
+def resolve_effective_return_type(
+    target_family: str | None = None,
+    requested_return_type: str | None = None,
+) -> str:
+    if requested_return_type is not None and str(requested_return_type).strip():
+        return validate_return_type(str(requested_return_type))
+
+    family = str(target_family or "xg")
+    if family not in RETURN_TYPE_DEFAULTS:
+        raise ValueError(f"Unsupported target family for return_type resolution: {family!r}.")
+    return RETURN_TYPE_DEFAULTS[family]
+
+
 def infer_legacy_model_context(model_id: str) -> dict[str, Any] | None:
     model_id = str(model_id)
     for intended_receiver_mode, by_target in RELEVANT_MODEL_IDS.items():

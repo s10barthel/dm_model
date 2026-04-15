@@ -361,6 +361,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
 
 def resolve_relevant_model_ids(
     intended_receiver_mode: str,
+    use_xg: bool = False,
     use_xt: bool = False,
     use_goal_distance: bool = False,
     explicit_model_ids: dict[str, str | None] | None = None,
@@ -368,9 +369,11 @@ def resolve_relevant_model_ids(
     include_success_intent: bool = False,
 ) -> dict[str, str]:
     explicit_model_ids = explicit_model_ids or {}
-    if use_xt and use_goal_distance:
-        raise ValueError("use_xt and use_goal_distance are mutually exclusive.")
-    target_family = "goal_distance" if use_goal_distance else ("xt" if use_xt else "xg")
+    target_family = infer_target_family(
+        use_xg=bool(use_xg),
+        use_xt=bool(use_xt),
+        use_goal_distance=bool(use_goal_distance),
+    )
 
     resolved = {}
     tasks = ["action_intent", "pass_success", "outcome_scoring", "outcome_conceding"]

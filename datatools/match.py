@@ -21,6 +21,7 @@ from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODEL_ID,
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
     INTENDED_RECEIVER_MODE_MODEL,
+    parse_return_type,
 )
 
 
@@ -437,7 +438,12 @@ class Match(ABC):
         intended_receiver_model_id: str = DEFAULT_INTENDED_RECEIVER_MODEL_ID,
         relabel_intended_receivers: bool = True,
         resolved_actions: pd.DataFrame | None = None,
+        return_type: str | None = None,
     ) -> torch.Tensor:
+        if return_type is None:
+            return_type = f"disc_{gamma}" if discount_xg else f"next_{lookahead_len}"
+        return_kind, return_value = parse_return_type(return_type)
+
         if resolved_actions is not None:
             self.actions = resolved_actions.copy()
         elif relabel_intended_receivers:
@@ -458,26 +464,46 @@ class Match(ABC):
 
         self.intended_receiver_stats = dict(self.actions.attrs.get("intended_receiver_stats", {}))
 
-        self.events = utils.label_returns(self.events, lookahead_len)
+        if return_kind == "next":
+            lookahead_len = int(return_value)
+            self.events = utils.label_returns(self.events, lookahead_len)
+            self.events = utils.label_xt_returns(
+                self.events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            self.events = utils.label_goal_distance_returns(
+                self.events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+        else:
+            gamma = float(return_value)
+            self.events = utils.label_discounted_goal_returns(self.events, gamma)
+            self.events = utils.label_discounted_returns(self.events, gamma)
+            self.events = utils.label_discounted_xt_returns(
+                self.events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            self.events = utils.label_discounted_goal_distance_returns(
+                self.events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
-        self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg"]
-        self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg"]
-        self.events = utils.label_xt_returns(self.events, lookahead_len=5, eligible_types=tuple(config.XT_ACTION_TYPES))
-        self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
-        self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
-        self.events = utils.label_goal_distance_returns(
-            self.events,
-            lookahead_len=5,
-            eligible_types=tuple(config.XT_ACTION_TYPES),
-        )
+        if return_kind == "disc":
+            self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg_disc"]
+            self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg_disc"]
+        else:
+            self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg"]
+            self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg"]
         self.actions["scores_goal_distance"] = self.events.loc[self.actions.index, "scores_goal_distance"]
         self.actions["concedes_goal_distance"] = self.events.loc[self.actions.index, "concedes_goal_distance"]
-
-        if discount_xg:
-            self.events = utils.label_discounted_returns(self.events, gamma)
-            self.actions["scores_xg_disc"] = self.events.loc[self.actions.index, "scores_xg_disc"]
-            self.actions["concedes_xg_disc"] = self.events.loc[self.actions.index, "concedes_xg_disc"]
+        self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
+        self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
 
         labels_list = []
 
@@ -587,9 +613,9 @@ class Match(ABC):
                     int(self.actions.at[i, "blocked"]),
                     int(self.actions.at[i, "success"]),
                     self.actions.at[i, "scores"],
-                    self.actions.at[i, "scores_xg_disc"] if discount_xg else self.actions.at[i, "scores_xg"],
+                    self.actions.at[i, "scores_xg"],
                     self.actions.at[i, "concedes"],
-                    self.actions.at[i, "concedes_xg_disc"] if discount_xg else self.actions.at[i, "concedes_xg"],
+                    self.actions.at[i, "concedes_xg"],
                     self.actions.at[i, "scores_xt"],
                     self.actions.at[i, "concedes_xt"],
                     self.actions.at[i, "scores_goal_distance"],

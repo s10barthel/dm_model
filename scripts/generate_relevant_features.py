@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from project_config import (
     generate_run_id,
     get_feature_run_root,
+    resolve_effective_return_type,
     resolve_intended_receiver_mode,
     write_latest_run,
     write_run_metadata,
@@ -21,12 +22,15 @@ from project_config import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--return_type", default=None, help="Resolved return type for generated action labels.")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--intended-receiver-model-id", default="success_intent/00")
     parser.add_argument("--add_v_edge_features", action="store_true")
     parser.add_argument("--run-id", default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
+    return args
 
 
 def run_command(args: list[str]) -> None:
@@ -36,6 +40,8 @@ def run_command(args: list[str]) -> None:
 
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
+    if args.return_type:
+        command.extend(["--return_type", args.return_type])
     if args.use_original_intended_receiver:
         command.append("--use-original-intended-receiver")
     if args.use_intended_receiver_model:
@@ -120,7 +126,7 @@ def main() -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "add_v_edge_features": bool(args.add_v_edge_features),
         "splits": ["train", "test"],
-        "return_type": "disc_0.9",
+        "return_type": args.return_type,
         "commands": [with_mode_flags(command, args) for command in commands],
         "status": "completed",
     }

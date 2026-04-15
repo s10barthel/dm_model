@@ -26,7 +26,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
   - [8. Run frame-level inference on HawkEye data](#8-run-frame-level-inference-on-hawkeye-data)
   - [9. Run frame-level inference on SkillCorner data](#9-run-frame-level-inference-on-skillcorner-data)
 - [Outcome Target Selection](#outcome-target-selection)
-  - [`--return_type` is xG-only](#return_type-is-xg-only)
+  - [`--return_type` Applies To All Outcome Target Families](#return_type-applies-to-all-outcome-target-families)
   - [Where to switch targets](#where-to-switch-targets)
 - [Notes](#notes)
 - [CLI Reference](#cli-reference)
@@ -144,8 +144,8 @@ The feature run root mirrors the old flat layout, but inside one dedicated run f
 - `data/ajax/features/runs/<feature_run_id>/post_action_graphs/*.pt`
 - `data/ajax/features/runs/<feature_run_id>/action_graphs_intent_train/*.pt`
 - `data/ajax/features/runs/<feature_run_id>/action_graphs_success_intent/*.pt`
-- `data/ajax/features/runs/<feature_run_id>/action_labels_disc_0.9*.pt`
-- `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_disc_0.9*.pt`
+- `data/ajax/features/runs/<feature_run_id>/action_labels_<return_type>*.pt`
+- `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt`
 - `data/ajax/features/runs/<feature_run_id>/resolved_actions*.parquet`
 - `data/ajax/features/runs/<feature_run_id>/metadata.json`
 
@@ -305,13 +305,14 @@ python scripts/generate_relevant_features.py --run-id feature_20260414T123456_ab
 python scripts/generate_relevant_features.py --add_v_edge_features
 ```
 
-Run this again after `scripts/generate_xt.py` or `scripts/generate_goal_distance.py` whenever you want to train outcome models with `--use_xt` or `--use_goal_distance`. The soft-target exports alone are not enough; the label tensors under `data/ajax/features` must be regenerated so they include the corresponding target columns.
+Run this again after `scripts/generate_xt.py` or `scripts/generate_goal_distance.py` whenever you want to train outcome models with `--use_xt` or `--use_goal_distance`. Also rerun it whenever you change `--return_type`, because the label tensors under `data/ajax/features` are versioned by the resolved return semantics.
 
 Each invocation creates a new feature-artifact run under `data/ajax/features/runs/<feature_run_id>/` and updates `data/ajax/features/runs/latest.json`.
 
 Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
+- `--return_type <disc_gamma|next_N>` to choose which resolved outcome-return labels are written into the run
 - `--add_v_edge_features` to append the optional velocity-angle edge features
 - `--use-original-intended-receiver` and `--use-intended-receiver-model` to choose intended-receiver resolution mode
 
@@ -319,9 +320,9 @@ This writes, inside the run root:
 
 - `action_graphs/*.pt`
 - `post_action_graphs/*.pt`
-- `action_labels_disc_0.9*.pt`
+- `action_labels_<return_type>*.pt`
 - `action_graphs_intent_train/*.pt`
-- `action_labels_intent_train_disc_0.9*.pt`
+- `action_labels_intent_train_<return_type>*.pt`
 - `action_graphs_success_intent/*.pt`
 - `resolved_actions*.parquet`
 - `metadata.json`
@@ -347,10 +348,12 @@ The wrapper also writes one bundle manifest under `saved/bundles/<bundle_id>/met
 
 Wrapper behavior:
 
-- `python scripts/train_relevant_models.py` keeps the current retained default, which trains the outcome models with `--use_xg`
+- `python scripts/train_relevant_models.py` now defaults the outcome models to binary `scores` / `concedes`
+- `python scripts/train_relevant_models.py --use_xg` switches only `outcome_scoring` and `outcome_conceding` to xG targets
 - `python scripts/train_relevant_models.py --use_xt` switches only `outcome_scoring` and `outcome_conceding` to xT targets while keeping separate xT checkpoints
 - `python scripts/train_relevant_models.py --use_goal_distance` switches only `outcome_scoring` and `outcome_conceding` to goal-distance targets
-- `action_intent`, `pass_intent`, and `pass_success` are unchanged by the xT toggle
+- omitted `--return_type` resolves dynamically by target family: `next_10` for binary goals, `disc_0.9` for xG, and `next_5` for xT / goal_distance
+- `action_intent`, `pass_intent`, and `pass_success` stay on the same resolved `action_labels_<return_type>` directory chosen for the wrapper run
 - unless you override them explicitly, all wrapper-trained models now use the same feature defaults: `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on; `extend_features` and `xy_only` off
 - the wrapper exposes `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features`
 - `--extend-features` requires possessor-aware features; `scripts/train_relevant_models.py` and `scripts/main.py` fail early if you request `--no-possessor-aware --extend-features`
@@ -522,44 +525,55 @@ Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 
 - Binary goals:
   - use neither `--use_xg`, `--use_xt`, nor `--use_goal_distance`
-  - this is available through the low-level `train.py` entrypoint
+  - this is now the default for both `train.py` and `scripts/train_relevant_models.py`
 - xG:
   - pass `--use_xg`
-  - `--return_type` controls which xG target family is used
+  - `--return_type` controls which xG return family is written into the `scores_xg` / `concedes_xg` tensor columns
 - xT:
   - pass `--use_xt`
-  - `--return_type` is ignored for xT semantics
+  - `--return_type` controls whether xT uses `next_N` or `disc_gamma` semantics in `scores_xt` / `concedes_xt`
 - goal_distance:
   - pass `--use_goal_distance`
-  - `--return_type` is ignored for goal-distance semantics
+  - `--return_type` controls whether goal-distance uses `next_N` or `disc_gamma` semantics in `scores_goal_distance` / `concedes_goal_distance`
 
 `--use_xg`, `--use_xt`, and `--use_goal_distance` are mutually exclusive.
 
-### `--return_type` is xG-only
+### `--return_type` Applies To All Outcome Target Families
 
-`--return_type` only changes how xG-based soft targets are constructed:
+`--return_type` accepts the same two forms for all four outcome target families:
 
-- `disc_<gamma>` uses discounted xG returns
-- `next_<N>` uses non-discounted xG returns over the next `N` actions
+- `disc_<gamma>` uses discounted returns
+- `next_<N>` uses non-discounted lookahead returns
 
 Example:
 
 ```powershell
+python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123450_abcdef12 --model gat --return_type next_10 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123456_abcdef12 --model gat --use_xg --return_type disc_0.9 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123500_bcdef123 --model gat --use_xg --return_type next_10 ...
+python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123510_cdef1234 --model gat --use_xt --return_type disc_0.9 ...
+python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123520_def12345 --model gat --use_goal_distance --return_type next_7 ...
 ```
 
-For xT, the target is fixed by the xT module:
+- Binary goals:
+  - `next_<N>` uses the current `scores` / `concedes` logic over the next `N` events, including the current event
+  - `disc_<gamma>` writes discounted goal occurrence into `scores` / `concedes`
+- xG:
+  - `next_<N>` uses non-discounted xG returns over the next `N` events
+  - `disc_<gamma>` keeps the existing discounted xG-probability logic
+- xT:
+  - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `disc_<gamma>` uses `max(gamma^k * xT)` over future eligible actions until the stop condition
+- goal_distance:
+  - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
 
-- event-level `xT` is the zone value at `start_x,start_y`
-- `scores_xT` / `concedes_xT` are the maximum future teammate/opponent xT values over the next 5 eligible `pass`/`cross`/`shot` actions
+When `--return_type` is omitted, the default depends on the resolved target family:
 
-For goal_distance, the target is fixed by the goal-distance module:
-
-- event-level `goal_distance` is the inverted normalized distance-to-goal score at `start_x,start_y`, scaled to `[0, 100]`
-- `scores_goal_distance` / `concedes_goal_distance` are the maximum future teammate/opponent goal-distance values over the next 5 eligible `pass`/`cross`/`shot` actions
-
-So `--return_type` does not change xT or goal-distance behavior.
+- binary goals: `next_10`
+- xG: `disc_0.9`
+- xT: `next_5`
+- goal_distance: `next_5`
 
 ### Where to switch targets
 
@@ -567,6 +581,7 @@ Use `scripts/train_relevant_models.py` when you want the retained default setup:
 
 ```powershell
 python scripts/train_relevant_models.py
+python scripts/train_relevant_models.py --use_xg
 python scripts/train_relevant_models.py --use_xt
 python scripts/train_relevant_models.py --use_goal_distance
 ```
@@ -576,8 +591,8 @@ Use `train.py` directly when you need explicit low-level control, especially for
 ```powershell
 python train.py --task outcome_scoring --model gat ...
 python train.py --task outcome_scoring --model gat --use_xg --return_type disc_0.9 ...
-python train.py --task outcome_scoring --model gat --use_xt ...
-python train.py --task outcome_scoring --model gat --use_goal_distance ...
+python train.py --task outcome_scoring --model gat --use_xt --return_type next_5 ...
+python train.py --task outcome_scoring --model gat --use_goal_distance --return_type disc_0.9 ...
 python train.py --task outcome_scoring --model gat --feature_run_id <feature_run_id> ...
 ```
 
@@ -616,8 +631,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/main.py`
 
-- `--use_xt`: use xT-backed outcome models instead of xG-backed outcome models. Default: off.
-- `--use_goal_distance`: use goal-distance-backed outcome models instead of xG-backed outcome models. Default: off.
+- `--use_xg`: use xG-backed outcome models instead of the binary-goal default. Default: off.
+- `--use_xt`: use xT-backed outcome models instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: use goal-distance-backed outcome models instead of the binary-goal default. Default: off.
+- `--return_type <disc_gamma|next_N>`: resolved return semantics passed to feature generation and outcome training. Default: family-specific (`next_10` for binary, `disc_0.9` for xG, `next_5` for xT / goal_distance).
 - `--use-original-intended-receiver`: use the original intended-receiver labels. Default: off.
 - `--use-intended-receiver-model`: use the learned intended-receiver model workflow. Default: off.
 - `--skip-preprocess`: skip `scripts/preprocess_sportec.py`. Default: off.
@@ -663,6 +680,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
+- `--return_type <disc_gamma|next_N>`: write labels for the chosen return semantics. Default: `disc_0.9` when run directly; wrappers pass an explicit resolved value.
 - `--use-original-intended-receiver`: build features/labels with the original intended-receiver labels. Default: off.
 - `--use-intended-receiver-model`: build features/labels for the learned intended-receiver workflow. Default: off.
 - `--intended-receiver-model-id <model_id>`: success-intent checkpoint used by the learned intended-receiver workflow. Default: `success_intent/00`.
@@ -671,8 +689,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/train_relevant_models.py`
 
-- `--use_xt`: train the outcome models against xT targets instead of xG targets. Default: off.
-- `--use_goal_distance`: train the outcome models against goal-distance targets instead of xG targets. Default: off.
+- `--use_xg`: train the outcome models against xG targets instead of binary goals. Default: off.
+- `--use_xt`: train the outcome models against xT targets instead of binary goals. Default: off.
+- `--use_goal_distance`: train the outcome models against goal-distance targets instead of binary goals. Default: off.
+- `--return_type <disc_gamma|next_N>`: resolved return semantics for the wrapper-selected label directory and outcome training. Default: family-specific (`next_10` for binary, `disc_0.9` for xG, `next_5` for xT / goal_distance).
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Default: latest successful feature run.
 - `--use-original-intended-receiver`: train with original intended-receiver labels. Default: off.
 - `--use-intended-receiver-model`: train in learned intended-receiver mode. Default: off.
@@ -689,8 +709,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/evaluate_relevant_models.py`
 
-- `--use_xt`: resolve xT-compatible outcome checkpoints by default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints by default. Default: off.
+- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for evaluation. Default: latest successful feature run.
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
@@ -707,8 +728,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--split {train,test,all}`: choose which Sportec split to export. Default: `test`.
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xt`: resolve xT-compatible outcome checkpoints by default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints by default. Default: off.
+- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
 - `--feature-run-id <feature_run_id>`: pin the Sportec feature run used for inference. Default: latest successful feature run.
 - `--run-id <component_run_id>`: pin the created component export run id. Default: auto-generate a new component run id.
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
@@ -729,8 +751,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--freeze-ballreceipt`: freeze possessor and ball state after `BallReceipt`. Default: on.
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xt`: resolve xT-compatible outcome checkpoints by default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints by default. Default: off.
+- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -747,8 +770,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--match-id <id>`: restrict inference to one or more specific SkillCorner match ids. Default: all discoverable valid matches.
 - `--limit <N>`: process only the first `N` selected matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xt`: resolve xT-compatible outcome checkpoints by default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints by default. Default: off.
+- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -767,6 +791,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--feature-run-id <feature_run_id>`: feature run used for visualization-time inference. Default: latest successful feature run.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--use_xg`: switch the default outcome-checkpoint resolution to xG-compatible checkpoints instead of binary goals. Default: off.
 - `--use_xt`: switch the default outcome-checkpoint resolution to xT-compatible checkpoints. Default: off.
 - `--use_goal_distance`: switch the default outcome-checkpoint resolution to goal-distance-compatible checkpoints. Default: off.
 - `--use-original-intended-receiver`: switch the default legacy checkpoint family to original intended-receiver mode. Default: off.

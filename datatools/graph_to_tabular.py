@@ -5,6 +5,8 @@ from typing import List, Optional
 import torch
 from torch_geometric.data import Data
 
+from project_config import resolve_effective_return_type
+
 
 def graph_to_tabular(
     graphs: List[Optional[Data]],
@@ -55,8 +57,9 @@ def graph_to_tabular(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert saved graph features to tabular features.")
     parser.add_argument("--action_type", type=str, default="action", choices=["action", "augmented_shot"])
-    parser.add_argument("--return_type", type=str, default="disc_0.9", help="Way of defining future xG.")
+    parser.add_argument("--return_type", type=str, default=None, help="Way of defining future returns.")
     args = parser.parse_args()
+    args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
 
     feature_dir = Path(f"data/ajax/features/{args.action_type}_graphs")
     output_dir = Path(f"data/ajax/features/{args.action_type}_tabular")
