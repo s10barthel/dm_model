@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
@@ -77,10 +78,12 @@ def main() -> None:
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
+            "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        include_pass_intent=True,
     )
     component_run_id = args.run_id or generate_run_id("skillcorner_component")
     output_parent = Path(args.output_dir) if args.output_dir else SKILLCORNER_COMPONENT_RUNS_DIR
@@ -97,6 +100,7 @@ def main() -> None:
 
     model_specs = load_skillcorner_models(
         action_intent_model_id=resolved_model_ids["action_intent"],
+        pass_intent_model_id=resolved_model_ids["pass_intent"],
         pass_success_model_id=resolved_model_ids["pass_success"],
         outcome_scoring_model_id=resolved_model_ids["outcome_scoring"],
         outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],

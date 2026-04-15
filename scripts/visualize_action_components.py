@@ -9,11 +9,12 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 
 from datatools import config
-from datatools.graph_feature import construct_graph_features
+from datatools.graph_feature import construct_graph_features, summarize_ball_trajectory
 from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
@@ -61,6 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-intent-model-id")
+    parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
@@ -197,6 +200,48 @@ def resolve_action_index(match: Match, args: argparse.Namespace) -> tuple[int, s
     return event_index, str(int(match.actions.at[event_index, "action_id"]))
 
 
+def resolve_highlight_players(
+    snapshot: pd.DataFrame,
+    action: pd.Series,
+    component_name: str,
+) -> dict[str, str] | None:
+    highlight_players: dict[str, str] = {}
+    object_id = action.get("object_id")
+    if isinstance(object_id, str):
+        highlight_players[object_id] = "#ffd400"
+
+    if component_name == "intended_recipient":
+        intent_id = action.get("intent_id")
+        if (
+            isinstance(intent_id, str)
+            and intent_id != object_id
+            and intent_id.startswith(("home_", "away_"))
+            and f"{intent_id}_x" in snapshot.columns
+            and f"{intent_id}_y" in snapshot.columns
+            and not pd.isna(snapshot[f"{intent_id}_x"].iloc[-1])
+            and not pd.isna(snapshot[f"{intent_id}_y"].iloc[-1])
+        ):
+            highlight_players[intent_id] = "#00b050"
+
+    return highlight_players or None
+
+
+def resolve_ball_velocity_xy(match: Match, action_index: int, component_name: str) -> tuple[float, float] | None:
+    action = match.actions.loc[action_index]
+    if component_name != "intended_recipient" or action.get("action_type") != "pass":
+        return None
+
+    summary = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=False)
+    if summary.shape[0] < 3:
+        return None
+
+    ball_velocity_xy = np.asarray([summary[0] * summary[1], summary[0] * summary[2]], dtype=float)
+    if not np.isfinite(ball_velocity_xy).all() or np.linalg.norm(ball_velocity_xy) <= 1e-6:
+        return None
+
+    return float(ball_velocity_xy[0]), float(ball_velocity_xy[1])
+
+
 def render_component(
     match: Match,
     action_index: int,
@@ -215,12 +260,14 @@ def render_component(
     attack_targets = [player_id for player_id in probs.index if player_id.startswith(attacking_prefix)]
     component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
     player_annots = component_probs if not component_probs.empty else None
-    highlight_players = {action["object_id"]: "#ffd400"} if isinstance(action["object_id"], str) else None
+    highlight_players = resolve_highlight_players(snapshot, action, component_name)
+    ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name)
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
         player_annots=player_annots,
+        ball_velocity_xy=ball_velocity_xy,
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
@@ -260,16 +307,22 @@ def main() -> None:
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
+            "pass_intent": args.pass_intent_model_id,
+            "success_intent": args.success_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        include_pass_intent=True,
+        include_success_intent=True,
     )
     feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(feature_run_id)
 
     model_ids = {
         "action_intent": default_model_ids["action_intent"],
+        "pass_intent": default_model_ids["pass_intent"],
+        "intended_recipient": default_model_ids["success_intent"],
         "pass_success": default_model_ids["pass_success"],
         "outcome_scoring": default_model_ids["outcome_scoring"],
         "outcome_conceding": default_model_ids["outcome_conceding"],
@@ -322,6 +375,8 @@ def main() -> None:
 
     component_order = [
         "action_intent",
+        "pass_intent",
+        "intended_recipient",
         "pass_success",
         "outcome_scoring_success",
         "outcome_scoring_failure",

@@ -30,6 +30,7 @@ REQUIRED_EVENT_COLUMNS = [
 PLAYER_COL_RE = re.compile(r"^(?P<player_id>\d+)_(?P<feature>x|y)$")
 COMPONENT_COLUMNS = [
     "action_intent",
+    "pass_intent",
     "pass_success",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -582,6 +583,7 @@ def infer_skillcorner_components(
         return components
 
     action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False)
+    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False)
     pass_success, _ = inference_gnn(possession, model_specs["pass_success"], device=device, post_action=False)
     scoring_failure, scoring_success = inference_gnn(
         possession,
@@ -597,6 +599,7 @@ def infer_skillcorner_components(
     )
 
     components["action_intent"] = action_intent
+    components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
@@ -684,6 +687,7 @@ def summarize_skillcorner_stats(
 
 def load_skillcorner_models(
     action_intent_model_id: str,
+    pass_intent_model_id: str,
     pass_success_model_id: str,
     outcome_scoring_model_id: str,
     outcome_conceding_model_id: str,
@@ -693,6 +697,7 @@ def load_skillcorner_models(
 
     model_specs = {
         "action_intent": load_model(action_intent_model_id, device),
+        "pass_intent": load_model(pass_intent_model_id, device),
         "pass_success": load_model(pass_success_model_id, device),
         "outcome_scoring": load_model(outcome_scoring_model_id, device),
         "outcome_conceding": load_model(outcome_conceding_model_id, device),

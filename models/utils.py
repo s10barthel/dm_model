@@ -364,6 +364,8 @@ def resolve_relevant_model_ids(
     use_xt: bool = False,
     use_goal_distance: bool = False,
     explicit_model_ids: dict[str, str | None] | None = None,
+    include_pass_intent: bool = False,
+    include_success_intent: bool = False,
 ) -> dict[str, str]:
     explicit_model_ids = explicit_model_ids or {}
     if use_xt and use_goal_distance:
@@ -371,7 +373,13 @@ def resolve_relevant_model_ids(
     target_family = "goal_distance" if use_goal_distance else ("xt" if use_xt else "xg")
 
     resolved = {}
-    for task in ["action_intent", "pass_success", "outcome_scoring", "outcome_conceding"]:
+    tasks = ["action_intent", "pass_success", "outcome_scoring", "outcome_conceding"]
+    if include_pass_intent:
+        tasks.insert(1, "pass_intent")
+    if include_success_intent:
+        tasks.insert(3 if include_pass_intent else 2, "success_intent")
+
+    for task in tasks:
         explicit_model_id = explicit_model_ids.get(task)
         if explicit_model_id:
             resolved[task] = str(explicit_model_id)
@@ -379,7 +387,7 @@ def resolve_relevant_model_ids(
 
         resolved[task] = resolve_latest_model_id(
             task,
-            intended_receiver_mode=intended_receiver_mode,
+            intended_receiver_mode=intended_receiver_mode if task != "success_intent" else None,
             target_family=target_family if task.startswith("outcome_") else None,
         )
 

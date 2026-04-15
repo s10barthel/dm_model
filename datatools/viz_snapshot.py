@@ -21,6 +21,8 @@ COMPONENT_CMAP = mpl.colors.LinearSegmentedColormap.from_list(
 )
 COMPONENT_ANNOT_TYPES = (
     "action_intent",
+    "pass_intent",
+    "intended_recipient",
     "pass_success",
     "outcome_scoring",
     "outcome_conceding",
@@ -52,6 +54,7 @@ class SnapshotVisualizer:
         player_marks: pd.DataFrame | Dict[str, List[str]] = None,
         edges: np.ndarray = None,
         arrows: List[Tuple[str, str]] = None,
+        ball_velocity_xy: Tuple[float, float] | np.ndarray = None,
         heatmap: np.ndarray = None,
         show_velocities=True,
         show_trajectories=False,
@@ -69,6 +72,9 @@ class SnapshotVisualizer:
         self.ball_xy = ball_xy
         self.edges = edges
         self.arrows = arrows
+        self.ball_velocity_xy = (
+            np.asarray(ball_velocity_xy, dtype=float).copy() if ball_velocity_xy is not None else None
+        )
         self.heatmap = heatmap
         self.show_velocities = show_velocities
         self.show_trajectories = show_trajectories
@@ -544,6 +550,7 @@ class SnapshotVisualizer:
 
         snapshot = self.snapshot.dropna(axis=1, how="all").copy()
         ball_xy = self.ball_xy.copy() if self.ball_xy is not None else None
+        ball_velocity_xy = self.ball_velocity_xy.copy() if self.ball_velocity_xy is not None else None
 
         x_cols = [c for c in snapshot.columns if c.endswith("_x")]
         y_cols = [c for c in snapshot.columns if c.endswith("_y")]
@@ -558,6 +565,8 @@ class SnapshotVisualizer:
             if ball_xy is not None:
                 ball_xy["ball_x"] = config.FIELD_SIZE[0] - ball_xy["ball_x"]
                 ball_xy["ball_y"] = config.FIELD_SIZE[1] - ball_xy["ball_y"]
+            if ball_velocity_xy is not None:
+                ball_velocity_xy *= -1
 
         player_cols = [
             c
@@ -701,12 +710,14 @@ class SnapshotVisualizer:
         if len(away_xy.columns) > 0:
             self.plot_team_players(ax, away_xy, away_sizes, away_colors, profile, anonymize, annotate)
 
+        ball_position = None
         if ball_xy is not None:
             ball_x = ball_xy["ball_x"].values
             ball_y = ball_xy["ball_y"].values
+            ball_position = (ball_x[-1], ball_y[-1])
             ax.scatter(
-                ball_x[-1],
-                ball_y[-1],
+                ball_position[0],
+                ball_position[1],
                 s=profile["ball_size"],
                 c=profile["ball_facecolor"],
                 edgecolors=profile["ball_edgecolor"],
@@ -718,15 +729,33 @@ class SnapshotVisualizer:
         elif "ball_x" in snapshot.columns:
             ball_x = snapshot["ball_x"].values
             ball_y = snapshot["ball_y"].values
+            ball_position = (ball_x[-1], ball_y[-1])
             ax.scatter(
-                ball_x[-1],
-                ball_y[-1],
+                ball_position[0],
+                ball_position[1],
                 s=profile["ball_size"],
                 c=profile["ball_facecolor"],
                 edgecolors=profile["ball_edgecolor"],
                 linewidths=profile["ball_linewidth"],
                 marker="o",
                 zorder=5,
+            )
+
+        if ball_position is not None and ball_velocity_xy is not None:
+            ax.quiver(
+                ball_position[0],
+                ball_position[1],
+                ball_velocity_xy[0] * profile["velocity_scale"],
+                ball_velocity_xy[1] * profile["velocity_scale"],
+                angles="xy",
+                scale_units="xy",
+                scale=1,
+                color=self._resolve_velocity_colors(profile["ball_facecolor"], profile),
+                width=profile["velocity_width"],
+                headwidth=profile["velocity_headwidth"],
+                headlength=profile["velocity_headlength"],
+                headaxislength=profile["velocity_headaxislength"],
+                zorder=6,
             )
 
         if show:

@@ -21,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-intent-model-id")
+    parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
@@ -43,15 +45,21 @@ def main() -> None:
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
+            "pass_intent": args.pass_intent_model_id,
+            "success_intent": args.success_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        include_pass_intent=True,
+        include_success_intent=True,
     )
     python = sys.executable
     model_ids = [
         default_model_ids["action_intent"],
+        default_model_ids["pass_intent"],
         default_model_ids["pass_success"],
+        default_model_ids["success_intent"],
         default_model_ids["outcome_scoring"],
         default_model_ids["outcome_conceding"],
     ]

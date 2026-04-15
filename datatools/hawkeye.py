@@ -34,6 +34,7 @@ BALL_REQUIRED_COLUMNS = ["game_id", "half", "abs_time", "ball_x", "ball_y", "bal
 BALLRECEIPT_ATOL = 1e-9
 COMPONENT_COLUMNS = [
     "action_intent",
+    "pass_intent",
     "pass_success",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -658,6 +659,7 @@ def infer_hawkeye_components(
         return components
 
     action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
+    pass_intent, _ = inference_gnn(situation, model_specs["pass_intent"], device=device, post_action=False)
     pass_success, _ = inference_gnn(situation, model_specs["pass_success"], device=device, post_action=False)
     scoring_failure, scoring_success = inference_gnn(
         situation,
@@ -673,6 +675,7 @@ def infer_hawkeye_components(
     )
 
     components["action_intent"] = action_intent
+    components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
@@ -922,6 +925,7 @@ def build_hawkeye_visualization_probs(row: pd.Series | None) -> pd.Series:
 
 def load_hawkeye_models(
     action_intent_model_id: str,
+    pass_intent_model_id: str,
     pass_success_model_id: str,
     outcome_scoring_model_id: str,
     outcome_conceding_model_id: str,
@@ -931,6 +935,7 @@ def load_hawkeye_models(
 
     model_specs = {
         "action_intent": load_model(action_intent_model_id, device),
+        "pass_intent": load_model(pass_intent_model_id, device),
         "pass_success": load_model(pass_success_model_id, device),
         "outcome_scoring": load_model(outcome_scoring_model_id, device),
         "outcome_conceding": load_model(outcome_conceding_model_id, device),

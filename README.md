@@ -152,6 +152,7 @@ The feature run root mirrors the old flat layout, but inside one dedicated run f
 The component run root contains one folder per processed match:
 
 - `data/ajax/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
+- `data/ajax/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
 - `data/ajax/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
 - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
 - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
@@ -399,6 +400,7 @@ Useful options:
 For each processed match, this writes:
 
 - `action_intent.parquet`
+- `pass_intent.parquet`
 - `pass_success.parquet`
 - `outcome_scoring_success.parquet`
 - `outcome_scoring_failure.parquet`
@@ -418,9 +420,10 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 
 `--action-id` refers to the `action_id` column in `data/ajax/event_synced/<match_id>.csv`.
 
-The script always writes 7 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
+The script always writes 8 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
 
 - `action_intent.png`
+- `pass_intent.png`
 - `pass_success.png`
 - `outcome_scoring_success.png`
 - `outcome_scoring_failure.png`
@@ -463,7 +466,7 @@ To visualize one HawkEye situation as MP4s:
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 ```
 
-This writes 7 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
+This writes 8 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
 
 Useful option:
 
@@ -489,7 +492,7 @@ This reads synchronized SkillCorner files from `skillcorner_data/` and writes ve
 - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/`
 - `data/ajax/component_runs/skillcorner/<component_run_id>/metadata.json`
 
-The SkillCorner adapter processes `player_possession` events frame by frame and exports the same 6 retained DEFCON components.
+The SkillCorner adapter processes `player_possession` events frame by frame and exports the same retained DEFCON components as the Sportec and HawkEye adapters, including `pass_intent`.
 
 Useful options:
 
@@ -506,7 +509,7 @@ python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_po
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 ```
 
-This writes 7 MP4s under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
+This writes 8 MP4s under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
 
 Useful option:
 
@@ -692,6 +695,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--success-intent-model-id <model_id>`: explicit `success_intent` checkpoint id. Default: auto-resolve the latest compatible `success_intent` checkpoint.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -709,6 +714,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -728,6 +734,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -764,10 +771,11 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use_goal_distance`: switch the default outcome-checkpoint resolution to goal-distance-compatible checkpoints. Default: off.
 - `--use-original-intended-receiver`: switch the default legacy checkpoint family to original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: switch the default legacy checkpoint family to learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: legacy checkpoint id for the resolved intended-receiver mode.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: legacy checkpoint id for the resolved intended-receiver mode.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: legacy checkpoint id for the resolved intended-receiver mode and `--use_xt` setting.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: legacy checkpoint id for the resolved intended-receiver mode and `--use_xt` setting.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations`.
 
 ### `scripts/visualize_hawkeye.py`
@@ -793,6 +801,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: `action_intent/00`.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: `pass_intent/20`.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: `pass_success/20`.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: `outcome_scoring/20`.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: `outcome_conceding/20`.

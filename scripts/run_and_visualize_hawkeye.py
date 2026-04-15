@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     parser.add_argument("--action-intent-model-id", default="action_intent/00")
+    parser.add_argument("--pass-intent-model-id", default="pass_intent/20")
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
     parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
@@ -128,6 +129,7 @@ def main() -> None:
 
     model_specs = load_hawkeye_models(
         action_intent_model_id=args.action_intent_model_id,
+        pass_intent_model_id=args.pass_intent_model_id,
         pass_success_model_id=args.pass_success_model_id,
         outcome_scoring_model_id=args.outcome_scoring_model_id,
         outcome_conceding_model_id=args.outcome_conceding_model_id,
@@ -144,6 +146,7 @@ def main() -> None:
 
     component_frames: dict[str, pd.DataFrame | None] = {
         "action_intent": components.get("action_intent"),
+        "pass_intent": components.get("pass_intent"),
         "pass_success": components.get("pass_success"),
         "outcome_scoring_success": components.get("outcome_scoring_success"),
         "outcome_scoring_failure": components.get("outcome_scoring_failure"),

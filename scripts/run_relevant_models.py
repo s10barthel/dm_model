@@ -51,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
@@ -175,10 +176,12 @@ def main() -> None:
         use_goal_distance=args.use_goal_distance,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
+            "pass_intent": args.pass_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        include_pass_intent=True,
     )
     feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(feature_run_id)
@@ -188,6 +191,7 @@ def main() -> None:
 
     model_specs = {
         "action_intent": load_model(resolved_model_ids["action_intent"], device),
+        "pass_intent": load_model(resolved_model_ids["pass_intent"], device),
         "pass_success": load_model(resolved_model_ids["pass_success"], device),
         "outcome_scoring": load_model(resolved_model_ids["outcome_scoring"], device),
         "outcome_conceding": load_model(
@@ -225,6 +229,7 @@ def main() -> None:
         "graph_schema": graph_schema,
         "models": {
             "action_intent": resolved_model_ids["action_intent"],
+            "pass_intent": resolved_model_ids["pass_intent"],
             "pass_success": resolved_model_ids["pass_success"],
             "outcome_scoring": resolved_model_ids["outcome_scoring"],
             "outcome_conceding": resolved_model_ids["outcome_conceding"],
@@ -249,6 +254,7 @@ def main() -> None:
             match_output_dir = output_dir / match_id
 
             action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
+            pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
             pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
             scoring_failure, scoring_success = inference_gnn(
                 match,
@@ -266,6 +272,7 @@ def main() -> None:
                 raise ValueError("No usable inference rows were produced for this match.")
 
             save_component_table(action_intent, match_output_dir / "action_intent.parquet")
+            save_component_table(pass_intent, match_output_dir / "pass_intent.parquet")
             save_component_table(pass_success, match_output_dir / "pass_success.parquet")
             save_component_table(scoring_success, match_output_dir / "outcome_scoring_success.parquet")
             save_component_table(scoring_failure, match_output_dir / "outcome_scoring_failure.parquet")
