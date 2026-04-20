@@ -48,6 +48,8 @@ except ImportError as exc:  # pragma: no cover - validated at runtime once depen
 FIELD_LENGTH = 105.0
 FIELD_WIDTH = 68.0
 SYNC_SOURCES = ("sportec_kpi", "elastic")
+DEFAULT_PERIOD_TOTAL_MS = 45 * 60 * 1000
+KLOPPY_METADATA_CACHE_DIR = EVENT_SYNCED_DIR.parent / "_kloppy_metadata_cache"
 KPI_RECEIVE_TYPES = {
     "pass",
     "cross",
@@ -366,6 +368,99 @@ def load_match_raw_events(match_files: MatchFiles) -> pd.DataFrame:
     return raw_events
 
 
+def derive_period_totals_ms(
+    raw_events: pd.DataFrame,
+    fallback_period_totals_ms: dict[int, int] | None = None,
+    kickoff_time: pd.Timestamp | None = None,
+) -> dict[int, int]:
+    fallback_period_totals_ms = fallback_period_totals_ms or {}
+    raw_events = raw_events.sort_values("utc_timestamp", ignore_index=True)
+    kickoff_events = raw_events[raw_events["set_piece_type"] == "KickOff"].copy()
+    final_events = raw_events[raw_events["event_type"] == "FinalWhistle"].copy()
+
+    derived: dict[int, int] = {}
+    for period_id in [1, 2]:
+        fallback_ms = int(fallback_period_totals_ms.get(period_id, 0) or 0)
+        period_events = raw_events[raw_events["period_id"] == period_id]
+        period_kickoffs = kickoff_events[kickoff_events["period_id"] == period_id]
+        period_finals = final_events[final_events["period_id"] == period_id]
+
+        start_time: pd.Timestamp | None = None
+        end_time: pd.Timestamp | None = None
+
+        if not period_kickoffs.empty:
+            start_time = period_kickoffs["utc_timestamp"].iloc[0]
+        elif period_id == 1 and kickoff_time is not None:
+            start_time = kickoff_time
+        elif not period_events.empty:
+            start_time = period_events["utc_timestamp"].iloc[0]
+
+        if not period_finals.empty:
+            end_time = period_finals["utc_timestamp"].iloc[-1]
+        elif not period_events.empty:
+            end_time = period_events["utc_timestamp"].iloc[-1]
+
+        derived_ms = 0
+        if start_time is not None and end_time is not None:
+            derived_ms = max(int(round((end_time - start_time).total_seconds() * 1000)), 0)
+
+        derived[period_id] = derived_ms or fallback_ms or DEFAULT_PERIOD_TOTAL_MS
+
+    return derived
+
+
+def ensure_kloppy_compatible_metadata(
+    match_files: MatchFiles,
+    raw_events: pd.DataFrame,
+    metadata: dict[str, object],
+) -> Path:
+    period_totals_ms = derive_period_totals_ms(
+        raw_events,
+        fallback_period_totals_ms=metadata.get("period_totals_ms"),
+        kickoff_time=metadata.get("kickoff_time"),
+    )
+    metadata["period_totals_ms"] = period_totals_ms
+
+    tree = ET.parse(match_files.meta_path)
+    root = tree.getroot()
+    match_info = root if root.tag == "MatchInformation" else root.find(".//MatchInformation")
+    if match_info is None:
+        raise ValueError(f"Missing MatchInformation section in {match_files.meta_path}")
+
+    other_info = match_info.find("OtherGameInformation")
+    required_attrs = {
+        "TotalTimeFirstHalf": str(period_totals_ms[1]),
+        "TotalTimeSecondHalf": str(period_totals_ms[2]),
+    }
+
+    needs_normalization = other_info is None
+    if other_info is not None:
+        for attr in required_attrs:
+            try:
+                needs_normalization = int(other_info.attrib.get(attr, "0") or 0) <= 0
+            except ValueError:
+                needs_normalization = True
+            if needs_normalization:
+                break
+
+    if not needs_normalization:
+        return match_files.meta_path
+
+    if other_info is None:
+        other_info = ET.SubElement(match_info, "OtherGameInformation")
+    for attr, value in required_attrs.items():
+        other_info.attrib[attr] = value
+
+    KLOPPY_METADATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    normalized_path = KLOPPY_METADATA_CACHE_DIR / f"{match_files.match_id}.xml"
+    tree.write(normalized_path, encoding="utf-8", xml_declaration=True)
+    print(
+        f"  Warning: normalized metadata for {match_files.match_id} because "
+        "OtherGameInformation was missing or incomplete."
+    )
+    return normalized_path
+
+
 def compute_period_bounds(raw_events: pd.DataFrame, metadata: dict[str, object]) -> tuple[dict[int, pd.Timestamp], dict[int, float]]:
     kickoff_events = raw_events[raw_events["set_piece_type"] == "KickOff"].copy()
     final_events = raw_events[raw_events["event_type"] == "FinalWhistle"].copy()
@@ -452,11 +547,16 @@ def build_pitch_dimensions() -> MetricPitchDimensions:
     )
 
 
-def load_kloppy_tracking(match_files: MatchFiles, lineup: pd.DataFrame) -> tuple[object, pd.DataFrame, float]:
+def load_kloppy_tracking(
+    match_files: MatchFiles,
+    lineup: pd.DataFrame,
+    meta_path: Path | None = None,
+) -> tuple[object, pd.DataFrame, float]:
     sync_lineup = lineup[["player_id", "object_id"]].copy()
+    metadata_source = meta_path or match_files.meta_path
     tracking_ds, tracking = SportecData.load_tracking_data(
         str(match_files.tracking_path),
-        str(match_files.meta_path),
+        str(metadata_source),
         sync_lineup,
     )
     fps = float(tracking_ds.frame_rate)
@@ -479,6 +579,7 @@ def build_tracking_outputs(
     lineup: pd.DataFrame,
     raw_events: pd.DataFrame,
     overwrite: bool,
+    meta_path: Path | None = None,
 ) -> tuple[pd.DataFrame, float]:
     raw_output = TRACKING_DIR / f"{match_files.match_id}.parquet"
     processed_output = TRACKING_PROCESSED_DIR / f"{match_files.match_id}.parquet"
@@ -492,7 +593,7 @@ def build_tracking_outputs(
         except Exception as exc:
             print(f"  Rebuilding cached tracking outputs after read failure: {summarize_exception(exc)}")
 
-    _, tracking, fps = load_kloppy_tracking(match_files, lineup)
+    _, tracking, fps = load_kloppy_tracking(match_files, lineup, meta_path=meta_path)
     tracking.to_parquet(raw_output, index=False)
 
     tracking_processed = tracking.copy()
@@ -515,10 +616,11 @@ def build_tracking_outputs(
     return tracking, fps
 
 
-def build_kloppy_event_dataset(match_files: MatchFiles) -> object:
+def build_kloppy_event_dataset(match_files: MatchFiles, meta_path: Path | None = None) -> object:
+    metadata_source = meta_path or match_files.meta_path
     event_ds = sportec.load_event(
         event_data=str(match_files.event_path),
-        meta_data=str(match_files.meta_path),
+        meta_data=str(metadata_source),
         coordinates="sportec",
     )
     return event_ds.transform(
@@ -1099,10 +1201,17 @@ def main() -> None:
         try:
             lineup, metadata = parse_match_information(match_files)
             raw_events = load_match_raw_events(match_files)
+            kloppy_meta_path = ensure_kloppy_compatible_metadata(match_files, raw_events, metadata)
             finalized_lineup = finalize_lineup(lineup, raw_events, metadata)
-            tracking, fps = build_tracking_outputs(match_files, finalized_lineup, raw_events, overwrite=args.overwrite)
+            tracking, fps = build_tracking_outputs(
+                match_files,
+                finalized_lineup,
+                raw_events,
+                overwrite=args.overwrite,
+                meta_path=kloppy_meta_path,
+            )
 
-            event_ds = build_kloppy_event_dataset(match_files)
+            event_ds = build_kloppy_event_dataset(match_files, meta_path=kloppy_meta_path)
             kloppy_events = build_kloppy_event_table(event_ds)
             actions, spadl_audit = build_spadl_actions(
                 match_files,

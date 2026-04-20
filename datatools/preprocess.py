@@ -125,11 +125,25 @@ def calc_physical_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
 
     if "episode_id" not in tracking.columns:
         tracking = label_frames_and_episodes(tracking)
+    else:
+        tracking = tracking.copy()
+
+    if "ball_owning_home_away" not in tracking.columns:
+        tracking["ball_owning_home_away"] = pd.Series(np.nan, index=tracking.index, dtype="object")
+
+    duplicate_frame_ids = int(tracking.index.duplicated().sum())
+    if duplicate_frame_ids:
+        index_name = tracking.index.name or "index"
+        print(
+            f"Warning: detected {duplicate_frame_ids} duplicate {index_name} values; "
+            "using row-wise physical feature assignment."
+        )
 
     home_players = [c[:-2] for c in tracking.dropna(axis=1, how="all").columns if re.match(r"home_.*_x", c)]
     away_players = [c[:-2] for c in tracking.dropna(axis=1, how="all").columns if re.match(r"away_.*_x", c)]
     objects = home_players + away_players + ["ball"]
     physical_features = ["x", "y", "vx", "vy", "speed", "accel"]
+    period_ids = tracking["period_id"].dropna().unique()
 
     tqdm_desc = "Calculating physical features"
     bar_format = "{l_bar}{bar:20}{r_bar}{bar:-20b}"
@@ -140,41 +154,64 @@ def calc_physical_features(tracking: pd.DataFrame, fps=25) -> pd.DataFrame:
             new_features = pd.DataFrame(np.nan, index=tracking.index, columns=missing_features)
             tracking = pd.concat([tracking, new_features], axis=1)
 
-        for i in tracking["period_id"].unique():
-            coord_cols = [f"{p}_x", f"{p}_y"]
-            coords = tracking.loc[tracking["period_id"] == i, coord_cols].dropna()
-            if len(coords) < 2:
+        x_col = tracking.columns.get_loc(f"{p}_x")
+        y_col = tracking.columns.get_loc(f"{p}_y")
+        vx_col = tracking.columns.get_loc(f"{p}_vx")
+        vy_col = tracking.columns.get_loc(f"{p}_vy")
+        speed_col = tracking.columns.get_loc(f"{p}_speed")
+        accel_col = tracking.columns.get_loc(f"{p}_accel")
+
+        for i in period_ids:
+            period_positions = np.flatnonzero(tracking["period_id"].to_numpy() == i)
+            if len(period_positions) < 2:
                 continue
 
-            x = coords[f"{p}_x"].astype(float)
-            y = coords[f"{p}_y"].astype(float)
-            vx = smooth(np.diff(x.values) * fps, window_length=15, polyorder=2)
-            vy = smooth(np.diff(y.values) * fps, window_length=15, polyorder=2)
+            coord_cols = [f"{p}_x", f"{p}_y"]
+            period_coords = tracking.iloc[period_positions][coord_cols]
+            valid_coord_mask = period_coords.notna().all(axis=1).to_numpy()
+            coord_positions = period_positions[valid_coord_mask]
+            if len(coord_positions) < 2:
+                continue
+
+            x = tracking.iloc[coord_positions, x_col].astype(float).to_numpy()
+            y = tracking.iloc[coord_positions, y_col].astype(float).to_numpy()
+            vx = smooth(np.diff(x) * fps, window_length=15, polyorder=2)
+            vy = smooth(np.diff(y) * fps, window_length=15, polyorder=2)
             ax = smooth(np.diff(vx) * fps, window_length=9, polyorder=2)
             ay = smooth(np.diff(vy) * fps, window_length=9, polyorder=2)
 
-            tracking.loc[coords.index[1:], f"{p}_vx"] = vx
-            tracking.loc[coords.index[1:], f"{p}_vy"] = vy
-            tracking.loc[coords.index[1:], f"{p}_speed"] = np.sqrt(vx**2 + vy**2)
-            if len(coords) > 2:
-                tracking.loc[coords.index[1:-1], f"{p}_accel"] = np.sqrt(ax**2 + ay**2)
+            speed = np.sqrt(vx**2 + vy**2)
+            tracking.iloc[coord_positions[1:], vx_col] = vx
+            tracking.iloc[coord_positions[1:], vy_col] = vy
+            tracking.iloc[coord_positions[1:], speed_col] = speed
+            if len(coord_positions) > 2:
+                tracking.iloc[coord_positions[1:-1], accel_col] = np.sqrt(ax**2 + ay**2)
 
-            tracking.at[coords.index[0], f"{p}_vx"] = tracking.at[coords.index[1], f"{p}_vx"]
-            tracking.at[coords.index[0], f"{p}_vy"] = tracking.at[coords.index[1], f"{p}_vy"]
-            tracking.at[coords.index[0], f"{p}_speed"] = tracking.at[coords.index[1], f"{p}_speed"]
-            tracking.loc[[coords.index[0], coords.index[-1]], f"{p}_accel"] = 0
+            tracking.iloc[coord_positions[0], vx_col] = tracking.iloc[coord_positions[1], vx_col]
+            tracking.iloc[coord_positions[0], vy_col] = tracking.iloc[coord_positions[1], vy_col]
+            tracking.iloc[coord_positions[0], speed_col] = tracking.iloc[coord_positions[1], speed_col]
+            tracking.iloc[[coord_positions[0], coord_positions[-1]], accel_col] = 0
 
     if "ball_vz" not in tracking.columns:
         tracking["ball_vz"] = np.nan
     if "ball_z" in tracking.columns:
-        for i in tracking["period_id"].unique():
-            z = tracking.loc[tracking["period_id"] == i, "ball_z"].dropna().astype(float)
-            if len(z) < 2:
+        ball_z_col = tracking.columns.get_loc("ball_z")
+        ball_vz_col = tracking.columns.get_loc("ball_vz")
+        for i in period_ids:
+            period_positions = np.flatnonzero(tracking["period_id"].to_numpy() == i)
+            if len(period_positions) < 2:
                 continue
 
-            vz = smooth(np.diff(z.values) * fps, window_length=15, polyorder=2)
-            tracking.loc[z.index[1:], "ball_vz"] = vz
-            tracking.at[z.index[0], "ball_vz"] = tracking.at[z.index[1], "ball_vz"]
+            period_z = tracking.iloc[period_positions, ball_z_col]
+            valid_z_mask = period_z.notna().to_numpy()
+            z_positions = period_positions[valid_z_mask]
+            if len(z_positions) < 2:
+                continue
+
+            z = tracking.iloc[z_positions, ball_z_col].astype(float).to_numpy()
+            vz = smooth(np.diff(z) * fps, window_length=15, polyorder=2)
+            tracking.iloc[z_positions[1:], ball_vz_col] = vz
+            tracking.iloc[z_positions[0], ball_vz_col] = tracking.iloc[z_positions[1], ball_vz_col]
 
     state_cols = ["period_id", "timestamp", "episode_id", "ball_state", "ball_owning_home_away"]
     if "phase_id" in tracking.columns:
