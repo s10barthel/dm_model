@@ -296,9 +296,10 @@ if __name__ == "__main__":
         pos_weight = n_negatives / n_positives
     else:
         pos_weight = 1
-
-    loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 16, "pin_memory": True}
-
+    #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
+    #Adjust as needed for your environment.
+    #loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 16, "pin_memory": True}
+    loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": True}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
         ipw_train_dataset = ActionDataset(

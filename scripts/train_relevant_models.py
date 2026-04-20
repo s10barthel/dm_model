@@ -197,7 +197,7 @@ def base_gnn_args(feature_dir: str, label_dir: str, model_id: str, intended_rece
         "--n_epochs",
         "100",
         "--batch_size",
-        "512",
+        "256", #originally 512, reduced due to memory constraints on GPU; adjust as needed
         "--print_freq",
         "50",
         "--seed",

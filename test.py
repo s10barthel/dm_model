@@ -86,8 +86,11 @@ if __name__ == "__main__":
     print_skipped_matches("test", test_dataset)
     if len(test_dataset) == 0:
         raise ValueError("No usable test samples remained after loading graph and label artifacts.")
-    test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
-
+    
+    #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
+    #Adjust as needed for your environment.
+    #test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
     print(f"Evaluating {args.model_id} on {len(test_match_ids)} matches with {len(test_dataset)} samples")
     test_metrics = run_epoch(model_args, model, test_loader, device=device, train=False)
     print("Test:\t" + get_losses_str(test_metrics))
