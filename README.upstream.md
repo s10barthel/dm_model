@@ -34,9 +34,9 @@ This codebase requires tracking data in the [Kloppy](https://kloppy.pysport.org)
 The dataset used in this project cannot be publicly released, as it is an internal asset of AFC Ajax. However, users can apply DEFCON to their own datasets by following the same data format.
 
 The current implementation assumes the following directory structure:
-- Tracking data: per-match Parquet files in `data/ajax/tracking/`
-- Event data: Per-match Parquet files at `data/ajax/event_synced/`
-- Match lineups: A single parquet file at `data/ajax/lineup/line_up.parquet`
+- Tracking data: per-match Parquet files in `data/tracking/`
+- Event data: Per-match Parquet files at `data/event_synced/`
+- Match lineups: A single parquet file at `data/lineup/line_up.parquet`
 
 <details>
 <summary>
@@ -49,7 +49,7 @@ Running the following command performs preprocessing on the raw Kloppy-format tr
 ```
 python datatools/preprocess.py
 ```
-This step includes basic cleaning as well as the computation of kinematic features such as player velocity and acceleration. The processed tracking data are saved to `data/ajax/tracking_processed/` and are used for subsequent feature extraction.
+This step includes basic cleaning as well as the computation of kinematic features such as player velocity and acceleration. The processed tracking data are saved to `data/tracking_processed/` and are used for subsequent feature extraction.
 </details>
 
 <details>
@@ -59,7 +59,7 @@ This step includes basic cleaning as well as the computation of kinematic featur
   </strong>
 </summary>
 
-For event data, we recommend synchronizing event timestamps with tracking data using [ELASTIC (Kim et al., 2025)](https://arxiv.org/abs/2508.09238) before use. This ensures frame-level alignment between event annotations and tracking data, which is crucial for accurately estimating component values. The synchronized event data should be stored in `data/ajax/event_synced/`.
+For event data, we recommend synchronizing event timestamps with tracking data using [ELASTIC (Kim et al., 2025)](https://arxiv.org/abs/2508.09238) before use. This ensures frame-level alignment between event annotations and tracking data, which is crucial for accurately estimating component values. The synchronized event data should be stored in `data/event_synced/`.
 </details>
 
 <details>
@@ -102,7 +102,7 @@ The specific commands for generating training features and labels are:
 - Defender responsbility: `python datatools/graph_feature.py --action_type all --split train --augment_blocks`
 - Other components: `python datatools/graph_feature.py --action_type all --split train`
 
-The resulting features and labels are saved to `data/ajax/features/`.
+The resulting features and labels are saved to `data/features/`.
 
 For test data generation, replace `--split train` with `--split test --post_action` in the above commands. The `--post_action` flag is required to extract features **after** each action in the test data, which are later used for computing defensive scores.
 </details>

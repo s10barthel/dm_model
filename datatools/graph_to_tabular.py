@@ -61,14 +61,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
 
-    feature_dir = Path(f"data/ajax/features/{args.action_type}_graphs")
-    output_dir = Path(f"data/ajax/features/{args.action_type}_tabular")
+    feature_dir = Path(f"data/features/{args.action_type}_graphs")
+    output_dir = Path(f"data/features/{args.action_type}_tabular")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.action_type == "all":
-        label_dir = Path(f"data/ajax/features/action_labels_{args.return_type}")
+        label_dir = Path(f"data/features/action_labels_{args.return_type}")
     else:
-        label_dir = Path(f"data/ajax/features/{args.action_type}_labels")
+        label_dir = Path(f"data/features/{args.action_type}_labels")
 
     label_paths = sorted(label_dir.glob("*.pt"))
     if not label_paths:

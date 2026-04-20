@@ -17,7 +17,7 @@ RAW_SEASON_ROOTS = {
 TRAIN_SEASONS = ("23_24",)
 TEST_SEASONS = ("24_25",)
 
-DATA_ROOT = PROJECT_ROOT / "data" / "ajax"
+DATA_ROOT = PROJECT_ROOT / "data"
 LINEUP_DIR = DATA_ROOT / "lineup"
 LINEUP_PATH = LINEUP_DIR / "line_up.parquet"
 EVENT_DIR = DATA_ROOT / "event"

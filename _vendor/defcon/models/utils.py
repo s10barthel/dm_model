@@ -100,8 +100,8 @@ def encode_onehot(labels, classes=None):
 
 
 def load_splits(
-    lineup_path="data/ajax/lineup/line_up.parquet",
-    feature_dir: str = "data/ajax/features/action_graphs",
+    lineup_path="data/lineup/line_up.parquet",
+    feature_dir: str = "data/features/action_graphs",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     from datetime import datetime
 

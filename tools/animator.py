@@ -393,7 +393,7 @@ if __name__ == "__main__":
     parser.add_argument("--step_size", type=int, default=1)
 
     args = parser.parse_known_args()[0]
-    trace_files = np.sort([f for f in os.listdir("data/ajax/tracking") if f.endswith(".parquet")])
+    trace_files = np.sort([f for f in os.listdir("data/tracking") if f.endswith(".parquet")])
 
     if args.file_index is None:
         assert args.match_id is not None
@@ -406,8 +406,8 @@ if __name__ == "__main__":
         match_id = trace_files[file_index].split(".")[0]
 
     if args.load_preprocessed:
-        match_events = pd.read_csv(f"data/ajax/event_processed/{match_id}.csv", header=0)
-        tracking = pd.read_parquet(f"data/ajax/tracking_processed/{match_id}.parquet")
+        match_events = pd.read_csv(f"data/event_processed/{match_id}.csv", header=0)
+        tracking = pd.read_parquet(f"data/tracking_processed/{match_id}.parquet")
 
         print("1. Load the preprocessed event data and merge it with the tracking data")
         receive_events = []
@@ -443,8 +443,8 @@ if __name__ == "__main__":
         merged_df[aug_events.columns[2:]] = merged_df[aug_events.columns[2:]].ffill()
 
     else:
-        lineups = pd.read_parquet("data/ajax/lineup/line_up.parquet")
-        events = pd.read_parquet("data/ajax/event/event.parquet")
+        lineups = pd.read_parquet("data/lineup/line_up.parquet")
+        events = pd.read_parquet("data/event/event.parquet")
         events["utc_timestamp"] = pd.to_datetime(events["utc_timestamp"])
         events = events.sort_values(["stats_perform_match_id", "utc_timestamp"], ignore_index=True)
 
@@ -452,7 +452,7 @@ if __name__ == "__main__":
         events = find_spadl_event_types(events)
         match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].set_index("player_id")
         match_events = events[(events["stats_perform_match_id"] == match_id) & (events["spadl_type"].notna())].copy()
-        tracking = pd.read_parquet(f"data/ajax/tracking/{match_id}.parquet")
+        tracking = pd.read_parquet(f"data/tracking/{match_id}.parquet")
 
         match = StatsPerformData(match_lineup, match_events, tracking)
         match.refine_events()

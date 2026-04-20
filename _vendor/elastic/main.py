@@ -12,9 +12,9 @@ from sync import config, elastic
 from tools.stats_perform_data import StatsPerformData, find_spadl_event_types
 
 if __name__ == "__main__":
-    LINEUP_PATH = "data/ajax/lineup/line_up_v3.parquet"
-    EVENT_PATH = "data/ajax/event/event_v3.parquet"
-    TRACKING_DIR = "data/ajax/tracking_v3"
+    LINEUP_PATH = "data/lineup/line_up_v3.parquet"
+    EVENT_PATH = "data/event/event_v3.parquet"
+    TRACKING_DIR = "data/tracking_v3"
 
     lineups = pd.read_parquet(LINEUP_PATH)
     events = pd.read_parquet(EVENT_PATH)

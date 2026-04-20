@@ -43,15 +43,15 @@ if __name__ == "__main__":
     resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
     if resolved_feature_run_id:
         feature_root = resolve_feature_root(resolved_feature_run_id)
-        feature_name = Path(getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")).name
+        feature_name = Path(getattr(model_args, "feature_dir", "data/features/action_graphs")).name
         label_name = Path(
-            getattr(model_args, "label_dir", f"data/ajax/features/action_labels_{model_args.return_type}")
+            getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
         ).name
         feature_dir = args.feature_dir or str(feature_root / feature_name)
         label_dir = str(feature_root / label_name)
     else:
-        feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/ajax/features/action_graphs")
-        label_dir = getattr(model_args, "label_dir", f"data/ajax/features/action_labels_{model_args.return_type}")
+        feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/features/action_graphs")
+        label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
     feature_schema = infer_feature_graph_schema(feature_dir)
     model_schema = {
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),

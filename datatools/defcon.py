@@ -765,7 +765,7 @@ class DEFCON:
 
         return values.round(4) if isinstance(values, pd.DataFrame) else None
 
-    def load_components(self, result_dir="data/ajax/defcon_components"):
+    def load_components(self, result_dir="data/defcon_components"):
         match_id = self.match.lineup["stats_perform_match_id"].iloc[0]
 
         self.select_probs_0 = pd.read_parquet(f"{result_dir}/{match_id}/select_probs_0.parquet")
@@ -784,7 +784,7 @@ class DEFCON:
 
         self.posteriors = pd.read_parquet(f"{result_dir}/{match_id}/posteriors.parquet")
 
-    def save_components(self, result_dir="data/ajax/defcon_components"):
+    def save_components(self, result_dir="data/defcon_components"):
         match_id = self.match.lineup["stats_perform_match_id"].iloc[0]
         os.makedirs(f"{result_dir}/{match_id}", exist_ok=True)
 

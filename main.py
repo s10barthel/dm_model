@@ -30,7 +30,7 @@ if __name__ == "__main__":
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--component_path", type=str, required=False, default=None)
-    parser.add_argument("--result_path", type=str, required=False, default="data/ajax/player_scores.parquet")
+    parser.add_argument("--result_path", type=str, required=False, default="data/player_scores.parquet")
     args, _ = parser.parse_known_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -58,10 +58,10 @@ if __name__ == "__main__":
     else:  # args.shot_success in ["goal", "on_target"]
         defcon_args["shot_xg_model_id"] = "shot_success/01"
 
-    event_files = np.sort(os.listdir("data/ajax/event_synced"))
+    event_files = np.sort(os.listdir("data/event_synced"))
     match_ids = np.sort([f.split(".")[0] for f in event_files if f.endswith(".csv")])
 
-    lineups = pd.read_parquet("data/ajax/lineup/line_up.parquet").sort_values("game_date", ignore_index=True)
+    lineups = pd.read_parquet("data/lineup/line_up.parquet").sort_values("game_date", ignore_index=True)
     lineups["game_id"] = lineups["stats_perform_match_id"]
     lineups["game_date"] = pd.to_datetime(lineups["game_date"])
     match_dates = lineups[["game_id", "game_date"]].drop_duplicates().set_index("game_id")["game_date"]
@@ -70,8 +70,8 @@ if __name__ == "__main__":
     n_test_matches = len(test_match_ids)
 
     for i, match_id in enumerate(test_match_ids):
-        events = pd.read_csv(f"data/ajax/event_synced/{match_id}.csv", header=0, parse_dates=["utc_timestamp"])
-        tracking = pd.read_parquet(f"data/ajax/tracking_processed/{match_id}.parquet")
+        events = pd.read_csv(f"data/event_synced/{match_id}.csv", header=0, parse_dates=["utc_timestamp"])
+        tracking = pd.read_parquet(f"data/tracking_processed/{match_id}.parquet")
         match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id]
 
         match_date = match_lineup["game_date"].iloc[0].date()

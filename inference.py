@@ -23,7 +23,7 @@ from models.gnn import GNN
 
 
 def resolve_graph_feature_dir(model: GNN, post_action: bool = False) -> str:
-    feature_dir = model.args.get("feature_dir", "data/ajax/features/action_graphs")
+    feature_dir = model.args.get("feature_dir", "data/features/action_graphs")
     feature_path = Path(feature_dir)
     feature_name = feature_path.name
 

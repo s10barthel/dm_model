@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     identifier_group.add_argument(
         "--action-id",
         type=int,
-        help="Action id from data/ajax/event_synced/<match_id>.csv.",
+        help="Action id from data/event_synced/<match_id>.csv.",
     )
     identifier_group.add_argument(
         "--row-index",
