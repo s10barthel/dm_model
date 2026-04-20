@@ -137,13 +137,12 @@ Feature and component runs use explicit `latest.json` pointers:
 - `data/ajax/component_runs/benchmark/latest.json`
 - `data/ajax/component_runs/skillcorner/latest.json`
 
-Checkpoint runs are resolved from checkpoint metadata instead of one global pointer. The wrappers scan `saved/<task>/*/metadata.json` and choose the latest compatible checkpoint for the requested task/context.
+Checkpoint runs are referenced explicitly as `model_id = <task>/<model_run_id>`. The retained wrappers now prefer one of these two explicit handoff styles:
 
-The default behavior is `latest + pin`:
+- `feature_run_id` for training
+- `bundle_id` or explicit per-task model ids for evaluation and inference
 
-- if you do not pass a run id or model id, downstream scripts resolve the latest compatible artifact automatically
-- if reproducibility matters, pass explicit run ids and explicit model ids
-- if multiple compatible checkpoints exist but differ in feature signature, the wrapper fails and requires explicit model ids instead of guessing
+`data/ajax/features/runs/latest.json` is still written for convenience and manual exploration, but the retained wrappers no longer depend on wrapper-level latest-compatible checkpoint resolution.
 
 The feature run root mirrors the old flat layout, but inside one dedicated run folder:
 
@@ -185,7 +184,19 @@ Checkpoint runs also write metadata:
 - `saved/<task>/<model_run_id>/best_weights.pt`
 - `saved/bundles/<bundle_id>/metadata.json`
 
-The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures, so settings such as `poss_vel_aware`, `ball_z_aware`, `extend_features`, and `add_v_edge_features` are visible in the saved metadata.
+The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `ball_z_aware`, `extend_features`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
+
+## Current Artifact Contract
+
+The current pipeline now follows an explicit-artifact contract:
+
+- `scripts/generate_relevant_features.py` can include multiple `--return_type` values in one feature run and always writes the full velocity-angle edge-feature schema.
+- Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
+- `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` for full retained-model training, plus explicit `--target-family`, `--return_type`, and `--intended-receiver-mode`.
+- Training decides whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
+- `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. They no longer rely on wrapper-level “latest compatible” resolution or separate `--feature-run-id` selection.
+- `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
+
 
 ## Split Definition
 
@@ -218,18 +229,18 @@ Then install PyTorch and PyTorch Geometric for the machine that will actually ru
 
 ## Main Pipeline Runner
 
-Use `scripts/main.py` when you want the scoped end-to-end runner described in this README without any visualization steps.
+Use `scripts/main.py` when you want the scoped end-to-end runner without any visualization steps.
 
 ```powershell
-python scripts/main.py
-python scripts/main.py --use_xt
-python scripts/main.py --use_goal_distance
+python scripts/main.py --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
+python scripts/main.py --target-family xt --return_type next_5 --intended-receiver-mode angle_only
+python scripts/main.py --target-family goal_distance --return_type next_3 --intended-receiver-mode original
 ```
 
 The runner executes these stages in order:
 
 1. `scripts/preprocess_sportec.py`
-2. `scripts/generate_xt.py` only when `--use_xt` is enabled, or `scripts/generate_goal_distance.py` only when `--use_goal_distance` is enabled
+2. `scripts/generate_xt.py` only when `--target-family xt` is selected, or `scripts/generate_goal_distance.py` only when `--target-family goal_distance` is selected
 3. `scripts/generate_relevant_features.py`
 4. `scripts/train_relevant_models.py`
 5. `scripts/evaluate_relevant_models.py`
@@ -240,17 +251,19 @@ The runner executes these stages in order:
 
 Useful options:
 
-- `--skip-preprocess`, `--skip-xt`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`
-- `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout; default: `benchmark`
-- `--add_v_edge_features` to append the optional velocity-angle edge features during feature generation
+- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`
+- `--feature-run-id <feature_run_id>` to pin or reuse a feature run id
+- `--bundle-id <bundle_id>` to pin or reuse a model bundle id
+- `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
+- `--v-edge-features` / `--no-v-edge-features` to control whether training uses the stored velocity-angle edge features; default: on
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
-- `--overwrite` to rebuild supported preprocessing and xT outputs
+- `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
+- `--overwrite` to rebuild supported preprocessing and target-artifact outputs
 - `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
 - `--device cuda:0|cpu` for evaluation and inference scripts
 - `--dry-run` to print the resolved commands without running them
 
-When `scripts/main.py` triggers feature generation itself, it creates fresh feature run ids and passes them through to downstream train/evaluate/inference steps automatically.
-Checkpoint selection inside the downstream training/evaluation/inference scripts still follows the metadata-based latest-compatible resolution described above.
+When `scripts/main.py` runs feature generation and training itself, it creates fresh `feature_run_id` and `bundle_id` values and passes them forward automatically. If you skip training but keep downstream evaluation or inference stages enabled, you must supply `--bundle-id`. If you skip feature generation but keep training enabled, you must supply `--feature-run-id`.
 
 ## End-to-End Workflow
 
@@ -283,7 +296,7 @@ Useful options:
 - `--overwrite` to rebuild existing outputs
 - `--skip-sync` to stop before ELASTIC synchronization
 
-This step does all custom work that DEFCON does not provide:
+This step does the Sportec-specific work that DEFCON does not provide:
 
 - Sportec XML discovery
 - lineup reconstruction
@@ -319,33 +332,18 @@ Outputs:
 
 Useful options:
 
-- `--match-id DFL-MAT-...` to export only selected matches into `data/ajax/xT`
-- `--limit N` to restrict xT export generation to the first `N` available synced matches
-- `--overwrite` to rebuild existing xT outputs
+- `--match-id DFL-MAT-...` to export only selected matches
+- `--limit N` to restrict export generation to the first `N` available synced matches
+- `--overwrite` to rebuild existing outputs
 
-This is a separate post-preprocessing step. It:
-
-- reads canonical synced event CSVs from `data/ajax/event_synced`
-- fits the xT surface on the train split only
-- uses only `pass`, `cross`, and `shot` actions for xT fitting/export
-- writes:
-  - `data/ajax/xT/xT.csv`
-  - `data/ajax/xT/xT_grid.csv`
-  - `data/ajax/xT/fit_metadata.json`
-  - per-match sidecar files under `data/ajax/xT/matches/`
-  - `data/ajax/goal_distance/goal_distance.csv`
-  - `data/ajax/goal_distance/metadata.json`
-  - per-match sidecar files under `data/ajax/goal_distance/matches/`
-
-The aggregate `xT.csv` contains only `pass`, `cross`, and `shot` rows, with both `xG` and xT-derived target columns.
-The aggregate `goal_distance.csv` contains only `pass`, `cross`, and `shot` rows, with `goal_distance`, `scores_goal_distance`, and `concedes_goal_distance`.
+This is a separate post-preprocessing step. It reads canonical synced event CSVs, fits or exports the sidecar targets, and writes per-match artifacts used later during feature generation.
 
 ### 3. Generate graph features and labels
 
 ```powershell
-python scripts/generate_relevant_features.py
-python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12
-python scripts/generate_relevant_features.py --add_v_edge_features
+python scripts/generate_relevant_features.py --return_type disc_0.9
+python scripts/generate_relevant_features.py --return_type disc_0.9 --return_type next_5 --return_type next_3
+python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
 ```
 
 Inputs:
@@ -354,48 +352,46 @@ Inputs:
 - `data/ajax/event_synced/*.csv`
 - `data/ajax/lineup/line_up.parquet`
 - `data/ajax/splits/match_splits.json`
-- optional sidecars from:
-  - `data/ajax/xT/matches/*.csv`
-  - `data/ajax/goal_distance/matches/*.csv`
-- when `--use-intended-receiver-model` is enabled:
-  - a trained `success_intent/<model_run_id>` checkpoint referenced by `--intended-receiver-model-id`
-
-Run this again after `scripts/generate_xt.py` or `scripts/generate_goal_distance.py` whenever you want to train outcome models with `--use_xt` or `--use_goal_distance`. Also rerun it whenever you change `--return_type`, because the label tensors under `data/ajax/features` are versioned by the resolved return semantics.
+- optional sidecars from `data/ajax/xT/matches/*.csv` and `data/ajax/goal_distance/matches/*.csv`
+- optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
 Each invocation creates a new feature-artifact run under `data/ajax/features/runs/<feature_run_id>/` and updates `data/ajax/features/runs/latest.json`.
+
+Behavior:
+
+- every feature run always includes the `original` and `angle_only` intended-receiver variants
+- `model` is included only when `--intended-receiver-model-id` is supplied
+- graphs are written once per run and always include the full velocity-angle edge-feature schema
+- labels are written for every requested `--return_type`
 
 Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
-- `--return_type <disc_gamma|next_N>` to choose which resolved outcome-return labels are written into the run
-- `--add_v_edge_features` to append the optional velocity-angle edge features
-- `--use-original-intended-receiver` and `--use-intended-receiver-model` to choose intended-receiver resolution mode
-
-`generate_relevant_features.py` does not choose between binary goals, xG, xT, and goal-distance. It writes label tensors that already contain all supported outcome families for the selected `--return_type`, and the later training/evaluation/inference step chooses which label slice to use via `--use_xg`, `--use_xt`, or `--use_goal_distance`.
+- repeat `--return_type <disc_gamma|next_N>` to include multiple resolved return semantics in one feature run
+- `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 
 This writes, inside the run root:
 
 - `action_graphs/*.pt`
 - `post_action_graphs/*.pt`
-- `action_labels_<return_type>*.pt`
 - `action_graphs_intent_train/*.pt`
-- `action_labels_intent_train_<return_type>*.pt`
 - `action_graphs_success_intent/*.pt`
-- `resolved_actions*.parquet`
+- `action_labels_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+- `action_labels_intent_train_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+- `resolved_actions*.parquet` for each intended-receiver mode
 - `metadata.json`
 
 ### 4. Train the retained models
 
 ```powershell
-python scripts/train_relevant_models.py
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id>
-python scripts/train_relevant_models.py --bundle-id model_bundle_20260414T123456_abcdef12
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type next_5 --intended-receiver-mode original --bundle-id model_bundle_20260414T123456_abcdef12
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-v-edge-features
 ```
 
 Inputs:
 
 - `data/ajax/features/runs/<feature_run_id>/...`
-- optional existing checkpoints when you pass explicit model ids or legacy trial ids
 
 Outputs:
 
@@ -404,51 +400,31 @@ Outputs:
 - `saved/pass_success/<model_run_id>/...`
 - `saved/outcome_scoring/<model_run_id>/...`
 - `saved/outcome_conceding/<model_run_id>/...`
-- `saved/success_intent/<model_run_id>/...` when training the learned intended-receiver stage
-- `saved/failure_receiver/<model_run_id>/...` when training the learned intended-receiver auxiliary failure model
+- `saved/failure_receiver/<model_run_id>/...`
 - `saved/bundles/<bundle_id>/metadata.json`
+- `saved/success_intent/<model_run_id>/...` only when using `--success-intent-only`
 
-This trains the four retained models and the auxiliary upstream-compatible models needed by the retained wrapper. New checkpoints get auto-generated model ids of the form:
+Behavior:
 
-- `pass_intent/<model_run_id>`
-- `action_intent/<model_run_id>`
-- `pass_success/<model_run_id>`
-- `outcome_scoring/<model_run_id>`
-- `outcome_conceding/<model_run_id>`
-- `failure_receiver/<model_run_id>`
+- full retained-model training requires `--feature-run-id`, `--target-family`, `--return_type`, and `--intended-receiver-mode`
+- `--success-intent-only` is still supported for bootstrap training and always uses the `angle_only` label variant
+- the wrapper writes one bundle manifest under `saved/bundles/<bundle_id>/metadata.json` so later stages can reuse the exact produced model ids
+- training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
+- unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on, with `extend_features` and `xy_only` off
 
-The wrapper also writes one bundle manifest under `saved/bundles/<bundle_id>/metadata.json` so later steps can reuse the exact produced model ids without relying on ambient "latest" behavior.
-
-In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. `failure_receiver` is a separate auxiliary model that scores opponent receivers for failed-pass situations.
-
-Wrapper behavior:
-
-- `python scripts/train_relevant_models.py` now defaults the outcome models to binary `scores` / `concedes`
-- `python scripts/train_relevant_models.py --use_xg` switches only `outcome_scoring` and `outcome_conceding` to xG targets
-- `python scripts/train_relevant_models.py --use_xt` switches only `outcome_scoring` and `outcome_conceding` to xT targets while keeping separate xT checkpoints
-- `python scripts/train_relevant_models.py --use_goal_distance` switches only `outcome_scoring` and `outcome_conceding` to goal-distance targets
-- omitted `--return_type` resolves dynamically by target family: `next_10` for binary goals, `disc_0.9` for xG, and `next_5` for xT / goal_distance
-- `action_intent`, `pass_intent`, and `pass_success` stay on the same resolved `action_labels_<return_type>` directory chosen for the wrapper run
-- unless you override them explicitly, all wrapper-trained models now use the same feature defaults: `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on; `extend_features` and `xy_only` off
-- the wrapper exposes `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features`
-- `--extend-features` requires possessor-aware features; `scripts/train_relevant_models.py` and `scripts/main.py` fail early if you request `--no-possessor-aware --extend-features`
-- if `--feature-run-id` is omitted, the wrapper resolves the latest successful feature run automatically
-- if you pass `--bundle-id`, that manifest id is pinned instead of auto-generated
-- legacy numeric checkpoint ids still load, but newly trained checkpoints now default to auto-generated model run ids
-
-Model checkpoints are saved under `saved/<task>/<model_run_id>/`, with `args.json`, `metadata.json`, and the saved weights in each run folder.
+In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
 
 ### 5. Evaluate the retained models on the test set
 
 ```powershell
-python scripts/evaluate_relevant_models.py
-python scripts/evaluate_relevant_models.py --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
-python scripts/evaluate_relevant_models.py --feature-run-id <feature_run_id>
+python scripts/evaluate_relevant_models.py --bundle-id <bundle_id>
+python scripts/evaluate_relevant_models.py --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
+python scripts/evaluate_relevant_models.py --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
 ```
 
 Inputs:
 
-- `data/ajax/features/runs/<feature_run_id>/...`
+- feature artifacts referenced by the selected checkpoint metadata
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 
 Outputs:
@@ -456,32 +432,19 @@ Outputs:
 - no dedicated output files
 - metrics are printed to stdout by `test.py`
 
-This runs the original `test.py` flow for the retained model family:
-
-- `action_intent/<model_run_id>`
-- `pass_intent/<model_run_id>`
-- `pass_success/<model_run_id>`
-- `success_intent/<model_run_id>`
-- `outcome_scoring/<model_run_id>`
-- `outcome_conceding/<model_run_id>`
-
-`test.py` uses the target configuration saved inside the checkpoint. There is no separate `--use_xg` / `--use_xt` / `--use_goal_distance` switch at evaluation time for an already trained model.
-
-If `--feature-run-id` is omitted, evaluation resolves the latest successful feature run automatically.
-
-If the model ids are omitted, the wrapper resolves the latest compatible checkpoints automatically. If multiple compatible checkpoints exist with different feature signatures, it fails and asks for explicit model ids instead of guessing.
+`test.py` uses the target configuration and graph schema saved inside each checkpoint. The wrapper now prefers `--bundle-id` for the main retained-model set. `success_intent` is optional and can be supplied explicitly if you want it evaluated too.
 
 ### 6. Export per-match component predictions
 
 ```powershell
-python scripts/run_relevant_models.py --split test
-python scripts/run_relevant_models.py --split test --feature-run-id <feature_run_id>
-python scripts/run_relevant_models.py --split test --feature-run-id <feature_run_id> --run-id component_20260414T123456_abcdef12
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id>
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --run-id component_20260414T123456_abcdef12
+python scripts/run_relevant_models.py --split test --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
 ```
 
 Inputs:
 
-- `data/ajax/features/runs/<feature_run_id>/...`
+- feature artifacts referenced by the selected model metadata
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/ajax/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
@@ -489,36 +452,22 @@ Each invocation creates a new component run under `data/ajax/component_runs/<com
 
 Useful options:
 
-- `--feature-run-id <feature_run_id>` to pin the feature artifacts used for inference
+- `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--run-id <component_run_id>` to pin the created component run id instead of auto-generating one
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
-
-For each processed match, this writes:
-
-- `action_intent.parquet`
-- `pass_intent.parquet`
-- `pass_success.parquet`
-- `outcome_scoring_success.parquet`
-- `outcome_scoring_failure.parquet`
-- `outcome_conceding_success.parquet`
-- `outcome_conceding_failure.parquet`
-
-under `data/ajax/component_runs/<component_run_id>/<match_id>/`, together with `data/ajax/component_runs/<component_run_id>/metadata.json`.
-
-If the model ids are omitted, the wrapper resolves the latest compatible checkpoints automatically. The component-run metadata records the resolved model ids and their feature signatures.
 
 ### 7. Visualize one action at a time
 
 ```powershell
-python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123
-python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --feature-run-id <feature_run_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 ```
 
 `--action-id` refers to the `action_id` column in `data/ajax/event_synced/<match_id>.csv`.
 
 Inputs:
 
-- `data/ajax/features/runs/<feature_run_id>/...`
+- feature artifacts referenced by the selected model metadata
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/ajax/event_synced/<match_id>.csv`
 
@@ -532,30 +481,20 @@ Outputs:
 - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
 - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
 - `data/ajax/visualizations/<match_id>/<action_id>/pass_score.png`
+- optionally `intended_recipient.png` when a `success_intent` checkpoint is supplied
 
-The script always writes 8 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
+Useful options:
 
-- `action_intent.png`
-- `pass_intent.png`
-- `pass_success.png`
-- `outcome_scoring_success.png`
-- `outcome_scoring_failure.png`
-- `outcome_conceding_success.png`
-- `outcome_conceding_failure.png`
-- `pass_score.png`
-
-Useful option:
-
+- `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--show-trajectories` to render dashed recent player trajectories
-- `--feature-run-id <feature_run_id>` to use a specific versioned feature run; otherwise the latest successful feature run is used
 - `--row-index <index>` to use the legacy internal modeled-action row index instead of the CSV `action_id`
 - `--original-event-id <sportec_event_id>` to look up the action by the raw Sportec event id
 
 ### 8. Run frame-level inference on HawkEye data
 
 ```powershell
-python scripts/run_hawkeye.py
-python scripts/run_hawkeye.py --run-id hawkeye_component_20260414T123456_abcdef12
+python scripts/run_hawkeye.py --bundle-id <bundle_id>
+python scripts/run_hawkeye.py --bundle-id <bundle_id> --run-id hawkeye_component_20260414T123456_abcdef12
 ```
 
 Inputs:
@@ -564,7 +503,7 @@ Inputs:
 - `hawkeye_data/ball_data_selected.csv`
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 
-This processes `hawkeye_data/centroid_data_team.csv` and `hawkeye_data/ball_data_selected.csv` and writes versioned consolidated component outputs to:
+This writes versioned consolidated component outputs to:
 
 - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
 - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.csv`
@@ -572,12 +511,11 @@ This processes `hawkeye_data/centroid_data_team.csv` and `hawkeye_data/ball_data
 
 Useful options:
 
+- `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--situation-id ...` to restrict inference to selected situations
 - `--limit N` to smoke-test on the first `N` situations
 - `--run-id <component_run_id>` to pin the created HawkEye export run id instead of auto-generating one
 - `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
-
-If the model ids are omitted, the script resolves the latest compatible checkpoints automatically. The saved metadata records the resolved model ids and their feature signatures.
 
 To visualize one HawkEye situation as MP4s:
 
@@ -585,46 +523,18 @@ To visualize one HawkEye situation as MP4s:
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 ```
 
-Inputs:
-
-- `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
-- `data/ajax/component_runs/hawkeye/<component_run_id>/metadata.json`
-- `hawkeye_data/centroid_data_team.csv`
-- `hawkeye_data/ball_data_selected.csv`
-
-Outputs:
-
-- `data/ajax/visualizations/hawkeye/<situation_id>/action_intent.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/pass_intent.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/pass_success.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_scoring_success.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_scoring_failure.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_conceding_success.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_conceding_failure.mp4|gif`
-- `data/ajax/visualizations/hawkeye/<situation_id>/pass_score.mp4|gif`
-
-This writes 8 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
-
-Useful option:
-
-- `--component-run-id <component_run_id>` to read a specific versioned Hawkeye component export; otherwise the latest successful Hawkeye component run is used
-- `--component-dir <path>` to point directly at a Hawkeye component-run root
-- `--gif` to write GIFs instead of the default MP4 animations
-
-`scripts/visualize_hawkeye.py` now reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. If you want the old direct-inference behavior, use:
+`scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. If you want the old direct-inference behavior, use:
 
 ```powershell
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
 ```
 
-`scripts/run_and_visualize_hawkeye.py` uses the raw HawkEye CSVs plus checkpoint runs under `saved/<task>/<model_run_id>/...` and writes the same 8 visualization files directly, without reading a precomputed HawkEye component run.
-
 ### 9. Run benchmark inference on local benchmark data
 
 ```powershell
-python scripts/run_benchmark.py
-python scripts/run_benchmark.py --modification 1 --use-original-intended-receiver --use_xg
-python scripts/run_benchmark.py --run-id benchmark_component_20260420T123456_abcdef12
+python scripts/run_benchmark.py --bundle-id <bundle_id>
+python scripts/run_benchmark.py --bundle-id <bundle_id> --modification 1
+python scripts/run_benchmark.py --bundle-id <bundle_id> --run-id benchmark_component_20260420T123456_abcdef12
 ```
 
 Inputs:
@@ -634,22 +544,19 @@ Inputs:
 - `benchmark/modification_<n>/modification.csv`
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 
-This reads paired one-state benchmark snapshots from the local `benchmark/` checkout and writes one consolidated benchmark export run to:
+This writes one consolidated benchmark export run to:
 
 - `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
 - `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.csv`
 - `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
 
-The export preserves the original long-format benchmark rows, appends one synthetic shot row per game state for the attacking-goal `action_intent` probability, and records the selected modifications plus resolved model metadata in `metadata.json`.
-
 Useful options:
 
+- `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--input-dir <path>` to point at a different local benchmark checkout
 - `--modification ...` to restrict inference to selected benchmark modifications
 - `--limit N` to smoke-test on the first `N` selected modifications
 - `--run-id <component_run_id>` to pin the created benchmark export run id instead of auto-generating one
-
-If the model ids are omitted, the script resolves the latest compatible checkpoints automatically. The saved metadata records the resolved model ids, their feature signatures, and the graph schema used for the run.
 
 To visualize one benchmark state as PNGs:
 
@@ -658,38 +565,11 @@ python scripts/visualize_benchmark.py --modification 1 --game-state 1
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id>
 ```
 
-Inputs:
-
-- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
-- `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
-- `benchmark/modification_<n>/game_state_1.csv`
-- `benchmark/modification_<n>/game_state_2.csv`
-- `benchmark/modification_<n>/modification.csv`
-
-Outputs:
-
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/action_intent.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_intent.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_success.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_scoring_success.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_scoring_failure.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_conceding_success.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_conceding_failure.png`
-- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_score.png`
-
-This writes 8 PNGs under `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/` using the same pitch-control snapshot style as the HawkEye visualizer.
-
-Useful option:
-
-- `--component-run-id <component_run_id>` to read a specific versioned benchmark component export; otherwise the latest successful benchmark component run is used
-- `--component-dir <path>` to point directly at a benchmark component-run root
-- `--show-trajectories` to render dashed recent player trajectories, even though benchmark states contain only one snapshot
-
 ### 10. Run frame-level inference on SkillCorner data
 
 ```powershell
-python scripts/run_skillcorner.py
-python scripts/run_skillcorner.py --run-id skillcorner_component_20260414T123456_abcdef12
+python scripts/run_skillcorner.py --bundle-id <bundle_id>
+python scripts/run_skillcorner.py --bundle-id <bundle_id> --run-id skillcorner_component_20260414T123456_abcdef12
 ```
 
 Inputs:
@@ -699,20 +579,17 @@ Inputs:
 - `skillcorner_data/<match_id>_dynamic_events.csv`
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 
-This reads synchronized SkillCorner files from `skillcorner_data/` and writes versioned per-match parquet outputs under:
+This writes versioned per-match parquet outputs under:
 
 - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/`
 - `data/ajax/component_runs/skillcorner/<component_run_id>/metadata.json`
 
-The SkillCorner adapter processes `player_possession` events frame by frame and exports the same retained DEFCON components as the Sportec and HawkEye adapters, including `pass_intent`.
-
 Useful options:
 
+- `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--match-id ...` to restrict inference to selected matches
 - `--limit N` to smoke-test on the first `N` selected matches
 - `--run-id <component_run_id>` to pin the created SkillCorner export run id instead of auto-generating one
-
-If the model ids are omitted, the script resolves the latest compatible checkpoints automatically. The saved metadata records the resolved model ids and their feature signatures.
 
 To visualize one SkillCorner possession as MP4s:
 
@@ -721,49 +598,13 @@ python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_po
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 ```
 
-Inputs:
-
-- `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/*.parquet`
-- `skillcorner_data/<match_id>_tracking.jsonl`
-- `skillcorner_data/<match_id>_match.json`
-- `skillcorner_data/<match_id>_dynamic_events.csv`
-
-Outputs:
-
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/action_intent.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_intent.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_success.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_scoring_success.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_scoring_failure.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_conceding_success.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_conceding_failure.mp4|gif`
-- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_score.mp4|gif`
-
-This writes 8 MP4s under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
-
-Useful option:
-
-- `--gif` to write GIFs instead of the default MP4 animations
-- `--component-run-id <component_run_id>` to read a specific versioned SkillCorner component export; otherwise the latest successful SkillCorner component run is used
-
 ## Outcome Target Selection
 
 Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 
-- Binary goals:
-  - use neither `--use_xg`, `--use_xt`, nor `--use_goal_distance`
-  - this is now the default for both `train.py` and `scripts/train_relevant_models.py`
-- xG:
-  - pass `--use_xg`
-  - `--return_type` controls which xG return family is written into the `scores_xg` / `concedes_xg` tensor columns
-- xT:
-  - pass `--use_xt`
-  - `--return_type` controls whether xT uses `next_N` or `disc_gamma` semantics in `scores_xt` / `concedes_xt`
-- goal_distance:
-  - pass `--use_goal_distance`
-  - `--return_type` controls whether goal-distance uses `next_N` or `disc_gamma` semantics in `scores_goal_distance` / `concedes_goal_distance`
-
-`--use_xg`, `--use_xt`, and `--use_goal_distance` are mutually exclusive.
+- In the low-level `train.py`, select the outcome family with `--use_xg`, `--use_xt`, or `--use_goal_distance`, or omit all three for binary goals.
+- In `scripts/train_relevant_models.py` and `scripts/main.py`, select the outcome family with `--target-family {goal,xg,xt,goal_distance}`.
+- `--return_type` controls the return semantics for all outcome families and for the shared action-label directories in the selected feature run.
 
 ### `--return_type` Applies To All Outcome Target Families
 
@@ -777,9 +618,9 @@ Example:
 ```powershell
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123450_abcdef12 --model gat --return_type next_10 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123456_abcdef12 --model gat --use_xg --return_type disc_0.9 ...
-python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123500_bcdef123 --model gat --use_xg --return_type next_10 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123510_cdef1234 --model gat --use_xt --return_type disc_0.9 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123520_def12345 --model gat --use_goal_distance --return_type next_7 ...
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
 ```
 
 - Binary goals:
@@ -795,25 +636,18 @@ python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123520_
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
   - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
 
-When `--return_type` is omitted, the default depends on the resolved target family:
-
-- binary goals: `next_10`
-- xG: `disc_0.9`
-- xT: `next_5`
-- goal_distance: `next_5`
-
 ### Where to switch targets
 
 Use `scripts/train_relevant_models.py` when you want the retained default setup:
 
 ```powershell
-python scripts/train_relevant_models.py
-python scripts/train_relevant_models.py --use_xg
-python scripts/train_relevant_models.py --use_xt
-python scripts/train_relevant_models.py --use_goal_distance
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type next_5 --intended-receiver-mode angle_only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode original
 ```
 
-Use `train.py` directly when you need explicit low-level control, especially for binary-goal outcome training:
+Use `train.py` directly when you need explicit low-level control:
 
 ```powershell
 python train.py --task outcome_scoring --model gat ...
@@ -832,7 +666,7 @@ The existing low-level feature toggles on `train.py` are:
 - `--poss_vel_aware`
 - `--extend_features`
 
-These same controls are now exposed in the wrappers as hyphenated flags on `scripts/train_relevant_models.py` and `scripts/main.py`. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth. Evaluation and inference wrappers do not repeat these flags because the trained checkpoint already stores them in `args.json`, and inference replays them from checkpoint metadata.
+These same controls are exposed in the wrappers as hyphenated flags on `scripts/train_relevant_models.py` and `scripts/main.py`. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
 
 If you need to preserve the old numeric naming convention for a one-off run, `train.py` still accepts `--trial <n>` and writes `saved/<task>/<nn>/` for backward compatibility.
 
@@ -842,7 +676,7 @@ Note: the low-level entrypoints do not use the same spelling here:
 - `test.py` uses `--feature-run-id`
 - the wrapper scripts use `--feature-run-id`
 
-If you generate or rebuild xT or goal-distance artifacts, rerun `scripts/generate_relevant_features.py` before any `--use_xt` or `--use_goal_distance` training run so the feature label tensors are refreshed.
+If you generate or rebuild xT or goal-distance artifacts, rerun `scripts/generate_relevant_features.py` before any xT or goal-distance training run so the feature label tensors are refreshed.
 
 ## Intended-Receiver Workflow
 
@@ -852,14 +686,16 @@ There are three intended-receiver modes in the codebase:
 - `angle_only`: use the heuristic relabeling flow without a learned receiver model
 - `model`: use a learned intended-receiver checkpoint
 
-The learned workflow is two-stage:
+Every feature run now includes `original` and `angle_only` automatically. The `model` variant is included only when feature generation is given a pinned `--intended-receiver-model-id`.
 
-1. generate a preparatory feature run without relying on a learned intended-receiver checkpoint yet
-2. train `success_intent`, which is the teammate-selection intended-receiver model
-3. generate the main feature run with `--use-intended-receiver-model --intended-receiver-model-id success_intent/<model_run_id>`
-4. train the retained models on that main feature run
+The learned workflow is now explicit:
 
-`scripts/main.py` already automates this bootstrap sequence when you enable `--use-intended-receiver-model` and do not skip training. In that flow, `success_intent` is the model that predicts the intended teammate for pass-like actions. `failure_receiver` is a separate auxiliary model used only inside the same workflow for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
+1. generate a feature run without `--intended-receiver-model-id`
+2. train `success_intent` with `scripts/train_relevant_models.py --success-intent-only --feature-run-id <feature_run_id>`
+3. generate a new feature run with `--intended-receiver-model-id success_intent/<model_run_id>`
+4. train the retained models on that new feature run with `--intended-receiver-mode model`
+
+`success_intent` is the teammate-selection intended-receiver model. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
 
 ## Notes
 
@@ -875,34 +711,21 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/main.py`
 
-- `--use_xg`: use xG-backed outcome models instead of the binary-goal default. Default: off.
-- `--use_xt`: use xT-backed outcome models instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: use goal-distance-backed outcome models instead of the binary-goal default. Default: off.
-- `--return_type <disc_gamma|next_N>`: resolved return semantics passed to feature generation and outcome training. Default: family-specific (`next_10` for binary, `disc_0.9` for xG, `next_5` for xT / goal_distance).
-- `--use-original-intended-receiver`: use the original intended-receiver labels. Default: off.
-- `--use-intended-receiver-model`: use the learned intended-receiver model workflow. Default: off.
-- `--skip-preprocess`: skip `scripts/preprocess_sportec.py`. Default: off.
-- `--skip-xt`: skip `scripts/generate_xt.py`. Default: off.
-- `--skip-goal-distance`: skip `scripts/generate_goal_distance.py`. Default: off.
-- `--skip-features`: skip `scripts/generate_relevant_features.py`. Default: off.
-- `--skip-train`: skip `scripts/train_relevant_models.py`. Default: off.
-- `--skip-evaluate`: skip `scripts/evaluate_relevant_models.py`. Default: off.
-- `--skip-run-relevant`: skip `scripts/run_relevant_models.py`. Default: off.
-- `--skip-hawkeye`: skip `scripts/run_hawkeye.py`. Default: off.
-- `--skip-benchmark`: skip `scripts/run_benchmark.py`. Default: off.
-- `--skip-skillcorner`: skip `scripts/run_skillcorner.py`. Default: off.
-- `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`. Default: `benchmark`.
-- `--add_v_edge_features`: add the optional velocity-angle edge features during feature generation. Default: off.
-- `--xy-only` / `--no-xy-only`: override the training wrapper's xy-only setting for this pipeline run. Default: no override, so `scripts/train_relevant_models.py` keeps `xy_only` off.
-- `--possessor-aware` / `--no-possessor-aware`: override the training wrapper's possessor-awareness setting for this pipeline run. Default: no override, so possessor-aware stays on.
-- `--keeper-aware` / `--no-keeper-aware`: override the training wrapper's keeper-awareness setting for this pipeline run. Default: no override, so keeper-aware stays on.
-- `--ball-z-aware` / `--no-ball-z-aware`: override the training wrapper's ball-height setting for this pipeline run. Default: no override, so ball-height stays on.
-- `--poss-vel-aware` / `--no-poss-vel-aware`: override the training wrapper's possessor-velocity setting for this pipeline run. Default: no override, so possessor-velocity awareness stays on.
-- `--extend-features` / `--no-extend-features`: override the training wrapper's extended handcrafted node-feature setting for this pipeline run. Default: no override, so extended features stay off.
-- `--overwrite`: allow supported preprocessing and xT outputs to be rebuilt. Default: off.
-- `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`. Default: `test`.
-- `--device <device>`: device passed to evaluation and inference stages. Default: `cuda:0`.
-- `--dry-run`: print the resolved commands without executing them. Default: off.
+- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family passed to training. Required unless `--skip-train` is set.
+- `--return_type <disc_gamma|next_N>`: resolved return semantics passed to feature generation and training. Required when feature generation or training is enabled.
+- `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
+- `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
+- `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
+- `--bundle-id <bundle_id>`: explicit model bundle id to reuse or assign.
+- `--success-intent-model-id <model_id>`: optional `success_intent` checkpoint forwarded to evaluation.
+- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
+- `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
+- `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the training feature profile.
+- `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
+- `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
+- `--device <device>`: device passed to evaluation and inference stages.
+- `--dry-run`: print the resolved commands without executing them.
 
 ### `scripts/preprocess_sportec.py`
 
@@ -926,48 +749,31 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
-- `--return_type <disc_gamma|next_N>`: write labels for the chosen return semantics. Default: `disc_0.9` when run directly; wrappers pass an explicit resolved value.
-- `--use-original-intended-receiver`: build features/labels with the original intended-receiver labels. Default: off.
-- `--use-intended-receiver-model`: build features/labels for the learned intended-receiver workflow. Default: off.
-- `--intended-receiver-model-id <model_id>`: success-intent checkpoint used by the learned intended-receiver workflow. Default: `success_intent/00`.
-- `--add_v_edge_features`: append cosine/sine velocity-angle edge features. Default: off.
-  Exported graph artifacts follow this flag. When `--use-intended-receiver-model` is enabled, the transient `success_intent` graphs used to relabel failed passes instead follow the referenced checkpoint's edge schema.
-- `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one. Default: auto-generate a new feature run id.
+- repeat `--return_type <disc_gamma|next_N>`: write labels for one or more return semantics in the same feature run.
+- `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
+- `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 
 ### `scripts/train_relevant_models.py`
 
-- `--use_xg`: train the outcome models against xG targets instead of binary goals. Default: off.
-- `--use_xt`: train the outcome models against xT targets instead of binary goals. Default: off.
-- `--use_goal_distance`: train the outcome models against goal-distance targets instead of binary goals. Default: off.
-- `--return_type <disc_gamma|next_N>`: resolved return semantics for the wrapper-selected label directory and outcome training. Default: family-specific (`next_10` for binary, `disc_0.9` for xG, `next_5` for xT / goal_distance).
-- `--feature-run-id <feature_run_id>`: pin the feature run used for training. Default: latest successful feature run.
-- `--use-original-intended-receiver`: train with original intended-receiver labels. Default: off.
-- `--use-intended-receiver-model`: train in learned intended-receiver mode. Default: off.
-- `--success-intent-only`: train only the `success_intent` model. Default: off.
-- `--xy-only` / `--no-xy-only`: override the wrapper default for `xy_only`. Default wrapper behavior: `xy_only` off.
-- `--possessor-aware` / `--no-possessor-aware`: override the wrapper default for possessor-awareness features. Default wrapper behavior: on.
-- `--keeper-aware` / `--no-keeper-aware`: override the wrapper default for keeper-awareness features. Default wrapper behavior: on.
-- `--ball-z-aware` / `--no-ball-z-aware`: override the wrapper default for ball-height features. Default wrapper behavior: on.
-- `--poss-vel-aware` / `--no-poss-vel-aware`: override the wrapper default for possessor-velocity relation features. Default wrapper behavior: on.
-- `--extend-features` / `--no-extend-features`: override the wrapper default for extended handcrafted node features. Default wrapper behavior: off.
-- `--outcome-scoring-trial <n>`: override the auto-generated run id for `outcome_scoring` with a legacy numeric id. Default: none.
-- `--outcome-conceding-trial <n>`: override the auto-generated run id for `outcome_conceding` with a legacy numeric id. Default: none.
-- `--bundle-id <bundle_id>`: pin the training bundle manifest id. Default: auto-generate a new bundle id.
+- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required unless `--success-intent-only` is set.
+- `--return_type <disc_gamma|next_N>`: resolved return semantics for the selected label directory. Required unless `--success-intent-only` is set.
+- `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required for full retained-model training.
+- `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required unless `--success-intent-only` is set.
+- `--success-intent-only`: train only the `success_intent` model.
+- `--bundle-id <bundle_id>`: pin the training bundle manifest id.
+- `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
+- `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
 
 ### `scripts/evaluate_relevant_models.py`
 
-- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--feature-run-id <feature_run_id>`: pin the feature run used for evaluation. Default: latest successful feature run.
-- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--success-intent-model-id <model_id>`: explicit `success_intent` checkpoint id. Default: auto-resolve the latest compatible `success_intent` checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to evaluate.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--device <device>`: device passed to `test.py`. Default: `cuda:0`.
 
 ### `scripts/run_relevant_models.py`
@@ -975,18 +781,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--split {train,test,all}`: choose which Sportec split to export. Default: `test`.
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--feature-run-id <feature_run_id>`: pin the Sportec feature run used for inference. Default: latest successful feature run.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--run-id <component_run_id>`: pin the created component export run id. Default: auto-generate a new component run id.
-- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--output-dir <path>`: parent directory for the created component run folder. Default: `data/ajax/component_runs`.
 
 ### `scripts/run_hawkeye.py`
@@ -998,16 +799,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--freeze-ballreceipt`: freeze possessor and ball state after `BallReceipt`. Default: on.
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/ajax/component_runs/hawkeye`.
 
@@ -1017,16 +814,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--modification <id>`: restrict inference to one or more specific benchmark modifications. Default: all valid modifications.
 - `--limit <N>`: process only the first `N` selected modifications. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/ajax/component_runs/benchmark`.
 
@@ -1036,16 +829,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--match-id <id>`: restrict inference to one or more specific SkillCorner match ids. Default: all discoverable valid matches.
 - `--limit <N>`: process only the first `N` selected matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
-- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/ajax/component_runs/skillcorner`.
 
@@ -1056,19 +845,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--row-index <index>`: legacy modeled-action row index. Default: off.
 - `--original-event-id <id>`: raw Sportec event id lookup. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
-- `--feature-run-id <feature_run_id>`: feature run used for visualization-time inference. Default: latest successful feature run.
+- `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--use_xg`: switch the default outcome-checkpoint resolution to xG-compatible checkpoints instead of binary goals. Default: off.
-- `--use_xt`: switch the default outcome-checkpoint resolution to xT-compatible checkpoints. Default: off.
-- `--use_goal_distance`: switch the default outcome-checkpoint resolution to goal-distance-compatible checkpoints. Default: off.
-- `--use-original-intended-receiver`: switch the default legacy checkpoint family to original intended-receiver mode. Default: off.
-- `--use-intended-receiver-model`: switch the default legacy checkpoint family to learned intended-receiver mode. Default: off.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--success-intent-model-id <model_id>`: explicit `success_intent` checkpoint id used for intended-recipient overlays. Default: auto-resolve latest compatible checkpoint.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for intended-recipient overlays.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations`.
 
 ### `scripts/visualize_hawkeye.py`
@@ -1127,7 +911,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 
 ### `scripts/main.py`
 
-- Inputs: the inputs of the enabled downstream stages, typically raw Sportec season folders plus optional HawkEye and SkillCorner raw directories.
+- Inputs: the inputs of the enabled downstream stages, typically raw Sportec season folders plus optional HawkEye and SkillCorner raw directories, plus explicit `feature_run_id` or `bundle_id` values when prerequisite stages are skipped.
 - Outputs: no unique files of its own; it orchestrates the outputs of the enabled downstream scripts.
 
 ### `scripts/preprocess_sportec.py`
@@ -1184,9 +968,9 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/ajax/features/runs/<feature_run_id>/post_action_graphs/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/action_graphs_intent_train/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/action_graphs_success_intent/*.pt`
-  - `data/ajax/features/runs/<feature_run_id>/action_labels_<return_type>*.pt`
-  - `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt`
-  - `data/ajax/features/runs/<feature_run_id>/resolved_actions*.parquet`
+  - `data/ajax/features/runs/<feature_run_id>/action_labels_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+  - `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+  - `data/ajax/features/runs/<feature_run_id>/resolved_actions*.parquet` for each intended-receiver mode
   - `data/ajax/features/runs/<feature_run_id>/metadata.json`
 
 ### `scripts/train_relevant_models.py`
@@ -1199,14 +983,14 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `saved/pass_success/<model_run_id>/...`
   - `saved/outcome_scoring/<model_run_id>/...`
   - `saved/outcome_conceding/<model_run_id>/...`
-  - `saved/success_intent/<model_run_id>/...` when the learned intended-receiver stage is trained
-  - `saved/failure_receiver/<model_run_id>/...` when the learned intended-receiver auxiliary model is trained
+  - `saved/success_intent/<model_run_id>/...` when `--success-intent-only` is used
+  - `saved/failure_receiver/<model_run_id>/...`
   - `saved/bundles/<bundle_id>/metadata.json`
 
 ### `scripts/evaluate_relevant_models.py`
 
 - Inputs:
-  - `data/ajax/features/runs/<feature_run_id>/...`
+  - feature artifacts resolved from the selected checkpoint metadata
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
   - no dedicated files; metrics are printed to stdout by `test.py`
@@ -1214,7 +998,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/run_relevant_models.py`
 
 - Inputs:
-  - `data/ajax/features/runs/<feature_run_id>/...`
+  - feature artifacts resolved from the selected model metadata
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
   - `data/ajax/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
@@ -1229,7 +1013,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/visualize_action_components.py`
 
 - Inputs:
-  - `data/ajax/features/runs/<feature_run_id>/...`
+  - feature artifacts resolved from the selected model metadata
   - `data/ajax/event_synced/<match_id>.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
@@ -1241,6 +1025,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
   - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
   - `data/ajax/visualizations/<match_id>/<action_id>/pass_score.png`
+  - optionally `data/ajax/visualizations/<match_id>/<action_id>/intended_recipient.png`
 
 ### `scripts/run_hawkeye.py`
 

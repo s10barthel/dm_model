@@ -14,14 +14,10 @@ from project_config import (
     EVENT_SYNCED_DIR,
     GOAL_DISTANCE_DIR,
     GOAL_DISTANCE_MATCH_DIR,
-    INTENDED_RECEIVER_MODE_MODEL,
     PROJECT_ROOT,
     XT_DIR,
     XT_MATCH_DIR,
     generate_run_id,
-    infer_target_family,
-    resolve_effective_return_type,
-    resolve_intended_receiver_mode,
 )
 
 TRAINING_WRAPPER_FEATURE_DEFAULTS = {
@@ -72,16 +68,35 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
-    parser.add_argument("--use_xg", action="store_true", help="Use xG for the outcome models instead of binary goals.")
-    parser.add_argument("--use_xt", action="store_true", help="Use xT for the outcome models instead of binary goals.")
     parser.add_argument(
-        "--use_goal_distance",
-        action="store_true",
-        help="Use goal-distance labels for the outcome models instead of binary goals.",
+        "--target-family",
+        choices=["goal", "xg", "xt", "goal_distance"],
+        default=None,
+        help="Outcome target family for retained outcome models.",
     )
-    parser.add_argument("--return_type", default=None, help="Resolved return type for generated labels and outcome training.")
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument(
+        "--return_type",
+        default=None,
+        help="Resolved return type to generate and train against.",
+    )
+    parser.add_argument(
+        "--intended-receiver-mode",
+        choices=["original", "angle_only", "model"],
+        default=None,
+        help="Intended-receiver variant for retained-model training.",
+    )
+    parser.add_argument(
+        "--intended-receiver-model-id",
+        default=None,
+        help="Pinned success_intent checkpoint used to add the model-backed intended-receiver variant during feature generation.",
+    )
+    parser.add_argument("--feature-run-id", default=None, help="Explicit feature-run id to reuse or assign.")
+    parser.add_argument("--bundle-id", default=None, help="Explicit model bundle id to reuse or assign.")
+    parser.add_argument(
+        "--success-intent-model-id",
+        default=None,
+        help="Optional success_intent checkpoint for evaluation; defaults to --intended-receiver-model-id when present.",
+    )
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
     parser.add_argument("--skip-goal-distance", action="store_true", help="Skip scripts/generate_goal_distance.py.")
@@ -97,7 +112,19 @@ def parse_args() -> argparse.Namespace:
         default=str(PROJECT_ROOT / "benchmark"),
         help="Benchmark data root passed to scripts/run_benchmark.py.",
     )
-    parser.add_argument("--add_v_edge_features", action="store_true", help="Append velocity-angle edge features during feature generation.")
+    edge_feature_group = parser.add_mutually_exclusive_group()
+    edge_feature_group.add_argument(
+        "--v-edge-features",
+        dest="use_v_edge_features",
+        action="store_true",
+        help="Use the stored velocity-angle edge features during training.",
+    )
+    edge_feature_group.add_argument(
+        "--no-v-edge-features",
+        dest="use_v_edge_features",
+        action="store_false",
+        help="Ignore the stored velocity-angle edge features during training.",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -153,21 +180,52 @@ def parse_args() -> argparse.Namespace:
         "Enable the extended handcrafted node features for downstream training.",
         "Disable the extended handcrafted node features for downstream training.",
     )
+    parser.set_defaults(use_v_edge_features=True)
     args = parser.parse_args()
-    try:
-        args.target_family = infer_target_family(
-            use_xg=bool(args.use_xg),
-            use_xt=bool(args.use_xt),
-            use_goal_distance=bool(args.use_goal_distance),
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
-    args.return_type = resolve_effective_return_type(args.target_family, args.return_type)
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
         except ValueError as exc:
             parser.error(str(exc))
+
+    args.success_intent_model_id = args.success_intent_model_id or args.intended_receiver_model_id
+    needs_training_config = not args.skip_train
+    needs_feature_generation = not args.skip_features
+    needs_bundle = args.skip_train and any(
+        not skipped
+        for skipped in [
+            args.skip_evaluate,
+            args.skip_run_relevant,
+            args.skip_hawkeye,
+            args.skip_benchmark,
+            args.skip_skillcorner,
+        ]
+    )
+
+    if needs_training_config:
+        if not args.target_family:
+            parser.error("--target-family is required unless --skip-train is set.")
+        if not args.return_type:
+            parser.error("--return_type is required unless --skip-train is set.")
+        if not args.intended_receiver_mode:
+            parser.error("--intended-receiver-mode is required unless --skip-train is set.")
+
+    if needs_feature_generation and not args.return_type:
+        parser.error("--return_type is required when scripts/main.py generates feature artifacts.")
+
+    if args.skip_features and not args.skip_train and not args.feature_run_id:
+        parser.error("--feature-run-id is required when --skip-features is set and training is still enabled.")
+
+    if args.intended_receiver_mode == "model" and needs_feature_generation and not args.intended_receiver_model_id:
+        parser.error(
+            "--intended-receiver-model-id is required to generate a feature run with intended_receiver_mode=model."
+        )
+
+    if needs_bundle and not args.bundle_id:
+        parser.error(
+            "--bundle-id is required when --skip-train is set but downstream evaluation or inference stages are enabled."
+        )
+
     return args
 
 
@@ -210,7 +268,7 @@ def validate_xt_artifacts(require_match_sidecars: bool) -> None:
 
 
 def maybe_validate_xt_skip(args: argparse.Namespace) -> None:
-    if not args.use_xt or not args.skip_xt or args.dry_run:
+    if args.target_family != "xt" or not args.skip_xt or args.dry_run:
         return
 
     needs_xt_artifacts = any(
@@ -256,7 +314,7 @@ def validate_goal_distance_artifacts(require_match_sidecars: bool) -> None:
 
 
 def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
-    if not args.use_goal_distance or not args.skip_goal_distance or args.dry_run:
+    if args.target_family != "goal_distance" or not args.skip_goal_distance or args.dry_run:
         return
 
     needs_goal_distance_artifacts = any(
@@ -277,18 +335,12 @@ def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
     validate_goal_distance_artifacts(require_match_sidecars=require_match_sidecars)
 
 
-def append_mode_flags(command: list[str], args: argparse.Namespace, include_target: bool = False) -> list[str]:
+def append_training_target_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
-    if include_target and args.use_xg:
-        command.append("--use_xg")
-    if include_target and args.use_xt:
-        command.append("--use_xt")
-    if include_target and args.use_goal_distance:
-        command.append("--use_goal_distance")
-    if args.use_original_intended_receiver:
-        command.append("--use-original-intended-receiver")
-    if args.use_intended_receiver_model:
-        command.append("--use-intended-receiver-model")
+    if args.target_family:
+        command.extend(["--target-family", args.target_family])
+    if args.intended_receiver_mode:
+        command.extend(["--intended-receiver-mode", args.intended_receiver_mode])
     return command
 
 
@@ -306,6 +358,13 @@ def append_feature_run_flag(command: list[str], feature_run_id: str | None) -> l
     return command
 
 
+def append_bundle_flag(command: list[str], bundle_id: str | None) -> list[str]:
+    command = list(command)
+    if bundle_id:
+        command.extend(["--bundle-id", bundle_id])
+    return command
+
+
 def append_training_feature_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
     for name, (enabled_flag, disabled_flag) in WRAPPER_OVERRIDE_FLAGS.items():
@@ -317,15 +376,17 @@ def append_training_feature_flags(command: list[str], args: argparse.Namespace) 
     return command
 
 
+def append_edge_feature_flag(command: list[str], args: argparse.Namespace) -> list[str]:
+    command = list(command)
+    command.append("--v-edge-features" if args.use_v_edge_features else "--no-v-edge-features")
+    return command
+
+
 def build_commands(args: argparse.Namespace) -> list[list[str]]:
     python = sys.executable
-    intended_receiver_mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
     commands: list[list[str]] = []
-    preparatory_feature_run_id: str | None = None
-    main_feature_run_id: str | None = None
+    feature_run_id = args.feature_run_id if args.skip_features else (args.feature_run_id or generate_run_id("feature"))
+    bundle_id = args.bundle_id if args.skip_train else (args.bundle_id or generate_run_id("model_bundle"))
 
     if not args.skip_preprocess:
         preprocess_command = [python, "scripts/preprocess_sportec.py"]
@@ -333,152 +394,107 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             preprocess_command.append("--overwrite")
         commands.append(preprocess_command)
 
-    if args.use_xt and not args.skip_xt:
+    if args.target_family == "xt" and not args.skip_xt:
         xt_command = [python, "scripts/generate_xt.py"]
         if args.overwrite:
             xt_command.append("--overwrite")
         commands.append(xt_command)
-    if args.use_goal_distance and not args.skip_goal_distance:
+    if args.target_family == "goal_distance" and not args.skip_goal_distance:
         goal_distance_command = [python, "scripts/generate_goal_distance.py"]
         if args.overwrite:
             goal_distance_command.append("--overwrite")
         commands.append(goal_distance_command)
 
     if not args.skip_features:
-        if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL and not args.skip_train:
-            preparatory_feature_run_id = generate_run_id("feature")
-            feature_command = append_return_type_flag(
-                [python, "scripts/generate_relevant_features.py", "--run-id", preparatory_feature_run_id],
-                args,
-            )
-            if args.add_v_edge_features:
-                feature_command.append("--add_v_edge_features")
-            commands.append(feature_command)
-        else:
-            main_feature_run_id = generate_run_id("feature")
-            feature_command = append_return_type_flag(
-                append_mode_flags(
-                    [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
-                    args,
-                ),
-                args,
-            )
-            if args.add_v_edge_features:
-                feature_command.append("--add_v_edge_features")
-            commands.append(feature_command)
+        feature_command = append_return_type_flag(
+            [python, "scripts/generate_relevant_features.py", "--run-id", feature_run_id],
+            args,
+        )
+        if args.intended_receiver_model_id:
+            feature_command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
+        commands.append(feature_command)
 
     if not args.skip_train:
-        if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:
-            commands.append(
-                append_training_feature_flags(
-                    append_feature_run_flag(
-                        append_return_type_flag([python, "scripts/train_relevant_models.py", "--success-intent-only"], args),
-                        preparatory_feature_run_id,
-                    ),
-                    args,
-                )
-            )
-            if not args.skip_features:
-                main_feature_run_id = generate_run_id("feature")
-                feature_command = append_return_type_flag(
-                    append_mode_flags(
-                        [python, "scripts/generate_relevant_features.py", "--run-id", main_feature_run_id],
-                        args,
-                    ),
-                    args,
-                )
-                if args.add_v_edge_features:
-                    feature_command.append("--add_v_edge_features")
-                commands.append(feature_command)
-        commands.append(
-            append_training_feature_flags(
-                append_feature_run_flag(
-                    append_return_type_flag(
-                        append_mode_flags([python, "scripts/train_relevant_models.py"], args, include_target=True),
-                        args,
-                    ),
-                    main_feature_run_id,
-                ),
-                args,
-            )
-        )
+        train_command = [
+            python,
+            "scripts/train_relevant_models.py",
+            "--bundle-id",
+            bundle_id,
+            "--feature-run-id",
+            feature_run_id,
+        ]
+        train_command = append_training_target_flags(train_command, args)
+        train_command = append_return_type_flag(train_command, args)
+        train_command = append_edge_feature_flag(train_command, args)
+        train_command = append_training_feature_flags(train_command, args)
+        commands.append(train_command)
 
     if not args.skip_evaluate:
-        commands.append(
-            append_feature_run_flag(
-                append_mode_flags(
-                    [
-                    python,
-                    "scripts/evaluate_relevant_models.py",
-                    "--device",
-                    args.device,
-                    ],
-                    args,
-                    include_target=True,
-                ),
-                main_feature_run_id,
-            )
+        evaluate_command = append_bundle_flag(
+            [
+                python,
+                "scripts/evaluate_relevant_models.py",
+                "--device",
+                args.device,
+            ],
+            bundle_id,
         )
+        if args.success_intent_model_id:
+            evaluate_command.extend(["--success-intent-model-id", args.success_intent_model_id])
+        commands.append(evaluate_command)
 
     if not args.skip_run_relevant:
         commands.append(
-            append_feature_run_flag(
-                append_mode_flags(
-                    [
+            append_bundle_flag(
+                [
                     python,
                     "scripts/run_relevant_models.py",
                     "--split",
                     args.relevant_split,
                     "--device",
                     args.device,
-                    ],
-                    args,
-                    include_target=True,
-                ),
-                main_feature_run_id,
+                ],
+                bundle_id,
             )
         )
 
     if not args.skip_hawkeye:
         commands.append(
-            append_mode_flags(
+            append_bundle_flag(
                 [
-                python,
-                "scripts/run_hawkeye.py",
-                "--device",
-                args.device,
+                    python,
+                    "scripts/run_hawkeye.py",
+                    "--device",
+                    args.device,
                 ],
-                args,
-                include_target=True,
+                bundle_id,
             )
         )
 
     if not args.skip_benchmark:
-        benchmark_command = append_mode_flags(
+        benchmark_command = append_bundle_flag(
             [
-            python,
-            "scripts/run_benchmark.py",
-            "--input-dir",
-            args.benchmark_input_dir,
-            "--device",
-            args.device,
+                python,
+                "scripts/run_benchmark.py",
+                "--input-dir",
+                args.benchmark_input_dir,
+                "--device",
+                args.device,
             ],
-            args,
-            include_target=True,
+            bundle_id,
         )
         commands.append(benchmark_command)
 
     if not args.skip_skillcorner:
         commands.append(
-            append_mode_flags(
+            append_bundle_flag(
                 [
-                python,
-                "scripts/run_skillcorner.py",
-                "--device",
-                args.device,
+                    python,
+                    "scripts/run_skillcorner.py",
+                    "--device",
+                    args.device,
                 ],
-                args,
-                include_target=True,
+                bundle_id,
             )
         )
 

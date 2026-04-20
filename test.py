@@ -12,6 +12,7 @@ from torch_geometric.loader import DataLoader
 from dataset import ActionDataset
 from models import utils
 from models.utils import get_losses_str, infer_feature_graph_schema, load_splits, run_epoch
+from models.utils import validate_feature_graph_schema
 from project_config import resolve_feature_root
 
 
@@ -56,11 +57,7 @@ if __name__ == "__main__":
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
         "add_v_edge_features": bool(getattr(model_args, "add_v_edge_features", getattr(model_args, "edge_in_dim", 2) > 2)),
     }
-    if feature_schema != model_schema:
-        raise ValueError(
-            "Selected feature artifacts are incompatible with the loaded model checkpoint: "
-            f"features={feature_schema}, model={model_schema}."
-        )
+    validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
 
     _, _, test_match_ids = load_splits(feature_dir=feature_dir)
 
@@ -80,6 +77,7 @@ if __name__ == "__main__":
         "drop_non_blockers": model_args.filter_blockers,
         "sparsify": model_args.sparsify,
         "max_edge_dist": model_args.max_edge_dist,
+        "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
         "train": False,
     }
     test_dataset = ActionDataset(test_match_ids, **dataset_args)

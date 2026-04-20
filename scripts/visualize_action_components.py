@@ -22,7 +22,8 @@ from inference import inference_gnn
 from models.utils import (
     infer_feature_graph_schema,
     load_model,
-    resolve_relevant_model_ids,
+    resolve_model_selection,
+    validate_feature_graph_schema,
     validate_model_graph_schemas,
 )
 from project_config import (
@@ -31,8 +32,6 @@ from project_config import (
     get_action_graph_dir,
     get_resolved_action_path,
     resolve_feature_root,
-    resolve_feature_run_id,
-    resolve_intended_receiver_mode,
 )
 
 
@@ -55,13 +54,8 @@ def parse_args() -> argparse.Namespace:
         help="Original Sportec event id from the original_event_id column.",
     )
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--feature-run-id", default=None)
+    parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--show-trajectories", action="store_true")
-    parser.add_argument("--use_xg", action="store_true")
-    parser.add_argument("--use_xt", action="store_true")
-    parser.add_argument("--use_goal_distance", action="store_true")
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
@@ -69,16 +63,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations"))
-    args = parser.parse_args()
-    enabled_flags = int(bool(args.use_xg)) + int(bool(args.use_xt)) + int(bool(args.use_goal_distance))
-    if enabled_flags > 1:
-        parser.error("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
-    return args
+    return parser.parse_args()
 
 
 def load_match(
     match_id: str,
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
+    return_type: str | None = None,
     feature_root: Path | None = None,
     add_v_edge_features: bool = False,
 ) -> Match:
@@ -104,6 +95,7 @@ def load_match(
         intended_receiver_mode=intended_receiver_mode,
         relabel_intended_receivers=False,
         resolved_actions=resolved_actions,
+        return_type=return_type,
     )
 
     graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
@@ -299,52 +291,51 @@ def render_component(
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    intended_receiver_mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
-    default_model_ids = resolve_relevant_model_ids(
-        intended_receiver_mode=intended_receiver_mode,
-        use_xg=args.use_xg,
-        use_xt=args.use_xt,
-        use_goal_distance=args.use_goal_distance,
+    resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        required_tasks=[
+            "action_intent",
+            "pass_intent",
+            "pass_success",
+            "outcome_scoring",
+            "outcome_conceding",
+        ],
+        bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
-            "success_intent": args.success_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
-        include_pass_intent=True,
-        include_success_intent=True,
     )
-    feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
+    intended_receiver_mode = shared_context["intended_receiver_mode"]
+    success_intent_model_id = args.success_intent_model_id
+    if not success_intent_model_id and bundle is not None:
+        success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
+    feature_run_id = shared_context["feature_run_id"]
     feature_root = resolve_feature_root(feature_run_id)
 
     model_ids = {
-        "action_intent": default_model_ids["action_intent"],
-        "pass_intent": default_model_ids["pass_intent"],
-        "intended_recipient": default_model_ids["success_intent"],
-        "pass_success": default_model_ids["pass_success"],
-        "outcome_scoring": default_model_ids["outcome_scoring"],
-        "outcome_conceding": default_model_ids["outcome_conceding"],
+        "action_intent": resolved_model_ids["action_intent"],
+        "pass_intent": resolved_model_ids["pass_intent"],
+        "pass_success": resolved_model_ids["pass_success"],
+        "outcome_scoring": resolved_model_ids["outcome_scoring"],
+        "outcome_conceding": resolved_model_ids["outcome_conceding"],
     }
+    if success_intent_model_id:
+        model_ids["intended_recipient"] = str(success_intent_model_id)
     loaded_models = {name: load_model(model_id, device) for name, model_id in model_ids.items()}
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
     graph_schema = validate_model_graph_schemas(loaded_models)
     feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
-    if feature_schema != graph_schema:
-        raise ValueError(
-            "Selected feature artifacts are incompatible with the loaded model checkpoints: "
-            f"features={feature_schema}, models={graph_schema}."
-        )
+    validate_feature_graph_schema(feature_schema, graph_schema, context="Selected feature artifacts")
 
     match = load_match(
         args.match_id,
         intended_receiver_mode=intended_receiver_mode,
+        return_type=shared_context["return_type"],
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
     )
@@ -376,17 +367,19 @@ def main() -> None:
         outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
     )
 
-    component_order = [
-        "action_intent",
-        "pass_intent",
-        "intended_recipient",
-        "pass_success",
-        "outcome_scoring_success",
-        "outcome_scoring_failure",
-        "outcome_conceding_success",
-        "outcome_conceding_failure",
-        "pass_score",
-    ]
+    component_order = ["action_intent", "pass_intent"]
+    if "intended_recipient" in component_prob_rows:
+        component_order.append("intended_recipient")
+    component_order.extend(
+        [
+            "pass_success",
+            "outcome_scoring_success",
+            "outcome_scoring_failure",
+            "outcome_conceding_success",
+            "outcome_conceding_failure",
+            "pass_score",
+        ]
+    )
     for component_name in component_order:
         render_component(
             match=match,

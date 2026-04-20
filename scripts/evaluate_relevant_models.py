@@ -9,18 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from models.utils import resolve_relevant_model_ids
-from project_config import resolve_intended_receiver_mode
+from models.utils import resolve_model_selection
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_xg", action="store_true")
-    parser.add_argument("--use_xt", action="store_true")
-    parser.add_argument("--use_goal_distance", action="store_true")
-    parser.add_argument("--feature-run-id", default=None)
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
@@ -28,48 +22,45 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--device", default="cuda:0")
-    args = parser.parse_args()
-    enabled_flags = int(bool(args.use_xg)) + int(bool(args.use_xt)) + int(bool(args.use_goal_distance))
-    if enabled_flags > 1:
-        parser.error("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
-    return args
+    return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    intended_receiver_mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
-    default_model_ids = resolve_relevant_model_ids(
-        intended_receiver_mode=intended_receiver_mode,
-        use_xg=args.use_xg,
-        use_xt=args.use_xt,
-        use_goal_distance=args.use_goal_distance,
+    required_tasks = [
+        "action_intent",
+        "pass_intent",
+        "pass_success",
+        "outcome_scoring",
+        "outcome_conceding",
+    ]
+    resolved_model_ids, _, bundle = resolve_model_selection(
+        required_tasks=required_tasks,
+        bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
-            "success_intent": args.success_intent_model_id,
             "pass_success": args.pass_success_model_id,
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
-        include_pass_intent=True,
-        include_success_intent=True,
     )
     python = sys.executable
     model_ids = [
-        default_model_ids["action_intent"],
-        default_model_ids["pass_intent"],
-        default_model_ids["pass_success"],
-        default_model_ids["success_intent"],
-        default_model_ids["outcome_scoring"],
-        default_model_ids["outcome_conceding"],
+        resolved_model_ids["action_intent"],
+        resolved_model_ids["pass_intent"],
+        resolved_model_ids["pass_success"],
+        resolved_model_ids["outcome_scoring"],
+        resolved_model_ids["outcome_conceding"],
     ]
+    success_intent_model_id = args.success_intent_model_id
+    if not success_intent_model_id and bundle is not None:
+        success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
+    if success_intent_model_id:
+        model_ids.insert(3, str(success_intent_model_id))
+
     for model_id in model_ids:
         command = [python, "test.py", "--model_id", model_id, "--device", args.device]
-        if args.feature_run_id:
-            command.extend(["--feature-run-id", str(args.feature_run_id)])
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
 

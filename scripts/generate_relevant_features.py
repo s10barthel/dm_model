@@ -13,8 +13,8 @@ if str(ROOT) not in sys.path:
 from project_config import (
     generate_run_id,
     get_feature_run_root,
-    resolve_effective_return_type,
-    resolve_intended_receiver_mode,
+    resolve_generation_intended_receiver_modes,
+    resolve_requested_return_types,
     write_latest_run,
     write_run_metadata,
 )
@@ -22,14 +22,21 @@ from project_config import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--return_type", default=None, help="Resolved return type for generated action labels.")
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
-    parser.add_argument("--intended-receiver-model-id", default="success_intent/00")
-    parser.add_argument("--add_v_edge_features", action="store_true")
+    parser.add_argument(
+        "--return_type",
+        action="append",
+        default=None,
+        help="Resolved return type for generated action labels. Repeat the flag to include multiple return types.",
+    )
+    parser.add_argument(
+        "--intended-receiver-model-id",
+        default=None,
+        help="Optional success_intent checkpoint used to add the model-backed intended-receiver variant.",
+    )
     parser.add_argument("--run-id", default=None)
     args = parser.parse_args()
-    args.return_type = resolve_effective_return_type(requested_return_type=args.return_type)
+    args.return_types = resolve_requested_return_types(args.return_type)
+    args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     return args
 
 
@@ -40,16 +47,10 @@ def run_command(args: list[str]) -> None:
 
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
-    if args.return_type:
-        command.extend(["--return_type", args.return_type])
-    if args.use_original_intended_receiver:
-        command.append("--use-original-intended-receiver")
-    if args.use_intended_receiver_model:
-        command.append("--use-intended-receiver-model")
+    for return_type in args.return_types:
+        command.extend(["--return_type", return_type])
     if args.intended_receiver_model_id:
         command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
-    if args.add_v_edge_features:
-        command.append("--add_v_edge_features")
     if args.run_id:
         command.extend(["--run-id", args.run_id])
     return command
@@ -113,20 +114,17 @@ def main() -> None:
     for command in commands:
         run_command(with_mode_flags(command, args))
 
-    intended_receiver_mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
     run_root = get_feature_run_root(args.run_id)
     metadata = {
         "run_id": args.run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
-        "intended_receiver_mode": intended_receiver_mode,
+        "intended_receiver_modes": args.intended_receiver_modes,
         "intended_receiver_model_id": args.intended_receiver_model_id,
-        "add_v_edge_features": bool(args.add_v_edge_features),
+        "graph_schema": {"edge_in_dim": 4, "add_v_edge_features": True},
         "splits": ["train", "test"],
-        "return_type": args.return_type,
+        "return_types": args.return_types,
+        "return_type": args.return_types[0] if len(args.return_types) == 1 else None,
         "commands": [with_mode_flags(command, args) for command in commands],
         "status": "completed",
     }

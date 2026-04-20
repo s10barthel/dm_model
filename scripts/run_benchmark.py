@@ -21,12 +21,11 @@ from datatools.benchmark import (
     load_benchmark_modification_data,
     summarize_benchmark_stats,
 )
-from models.utils import get_model_provenance, resolve_relevant_model_ids, validate_model_graph_schemas
+from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from project_config import (
     BENCHMARK_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
     generate_run_id,
-    resolve_intended_receiver_mode,
     write_latest_run,
     write_run_metadata,
 )
@@ -38,11 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--modification", action="append", type=int, help="Restrict inference to one or more benchmark modifications.")
     parser.add_argument("--limit", type=int, help="Only process the first N selected benchmark modifications.")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--use_xg", action="store_true")
-    parser.add_argument("--use_xt", action="store_true")
-    parser.add_argument("--use_goal_distance", action="store_true")
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument("--bundle-id")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
@@ -50,11 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
-    args = parser.parse_args()
-    enabled_flags = int(bool(args.use_xg)) + int(bool(args.use_xt)) + int(bool(args.use_goal_distance))
-    if enabled_flags > 1:
-        parser.error("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
-    return args
+    return parser.parse_args()
 
 
 def summarize_exception(exc: Exception) -> str:
@@ -68,15 +59,15 @@ def _compact_skips(skipped: dict[str, list[int]]) -> dict[str, list[int]]:
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    intended_receiver_mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
-    resolved_model_ids = resolve_relevant_model_ids(
-        intended_receiver_mode=intended_receiver_mode,
-        use_xg=args.use_xg,
-        use_xt=args.use_xt,
-        use_goal_distance=args.use_goal_distance,
+    resolved_model_ids, shared_context, _ = resolve_model_selection(
+        required_tasks=[
+            "action_intent",
+            "pass_intent",
+            "pass_success",
+            "outcome_scoring",
+            "outcome_conceding",
+        ],
+        bundle_id=args.bundle_id,
         explicit_model_ids={
             "action_intent": args.action_intent_model_id,
             "pass_intent": args.pass_intent_model_id,
@@ -84,7 +75,6 @@ def main() -> None:
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
-        include_pass_intent=True,
     )
     component_run_id = args.run_id or generate_run_id("benchmark_component")
     output_parent = Path(args.output_dir) if args.output_dir else BENCHMARK_COMPONENT_RUNS_DIR
@@ -176,11 +166,9 @@ def main() -> None:
         "input_dir": str(Path(args.input_dir).resolve()),
         "output_parent": str(output_parent),
         "output_dir": str(output_dir.resolve()),
-        "intended_receiver_mode": intended_receiver_mode,
-        "use_xg": bool(args.use_xg),
-        "use_xt": bool(args.use_xt),
-        "use_goal_distance": bool(args.use_goal_distance),
-        "target_family": "goal_distance" if args.use_goal_distance else ("xt" if args.use_xt else ("xg" if args.use_xg else "goal")),
+        "intended_receiver_mode": shared_context["intended_receiver_mode"],
+        "return_type": shared_context["return_type"],
+        "target_family": shared_context["target_family"],
         "requested_modifications": [int(value) for value in (args.modification or [])],
         "limit": args.limit,
         "selected_modifications": [int(value) for value in selected_modifications],

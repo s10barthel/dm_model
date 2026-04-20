@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from project_config import (
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
     INTENDED_RECEIVER_MODE_MODEL,
+    INTENDED_RECEIVER_MODE_ORIGINAL,
     generate_model_run_id,
     generate_run_id,
     get_action_label_dir,
@@ -23,11 +24,13 @@ from project_config import (
     get_intent_train_label_dir,
     get_model_bundle_root,
     get_success_intent_graph_dir,
-    infer_target_family,
-    resolve_effective_return_type,
+    infer_feature_run_intended_receiver_modes,
+    infer_feature_run_return_types,
+    load_feature_run_metadata,
     resolve_feature_run_id,
     resolve_feature_root,
-    resolve_intended_receiver_mode,
+    validate_intended_receiver_mode,
+    validate_return_type,
     write_run_metadata,
 )
 
@@ -83,19 +86,28 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     return command
 
 
+def append_edge_feature_flag(command: list[str], use_v_edge_features: bool) -> list[str]:
+    command = list(command)
+    command.append("--v-edge-features" if use_v_edge_features else "--no-v-edge-features")
+    return command
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--use_xg", action="store_true", help="Train outcome models with xG targets instead of binary goals.")
-    parser.add_argument("--use_xt", action="store_true", help="Train outcome models with xT targets instead of binary goals.")
     parser.add_argument(
-        "--use_goal_distance",
-        action="store_true",
-        help="Train outcome models with goal-distance targets instead of binary goals.",
+        "--target-family",
+        choices=["goal", "xg", "xt", "goal_distance"],
+        default=None,
+        help="Outcome target family for the retained outcome models.",
     )
     parser.add_argument("--return_type", default=None, help="Resolved outcome return type to use for label generation.")
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
-    parser.add_argument("--use-original-intended-receiver", action="store_true")
-    parser.add_argument("--use-intended-receiver-model", action="store_true")
+    parser.add_argument(
+        "--intended-receiver-mode",
+        choices=["original", "angle_only", "model"],
+        default=None,
+        help="Intended-receiver variant to train against.",
+    )
     parser.add_argument(
         "--success-intent-only",
         action="store_true",
@@ -114,6 +126,20 @@ def parse_args() -> argparse.Namespace:
         help="Optional override for the outcome_conceding checkpoint trial.",
     )
     parser.add_argument("--bundle-id", default=None, help="Optional manifest id for the produced model bundle.")
+    edge_feature_group = parser.add_mutually_exclusive_group()
+    edge_feature_group.add_argument(
+        "--v-edge-features",
+        dest="use_v_edge_features",
+        action="store_true",
+        help="Use the stored velocity-angle edge features during training.",
+    )
+    edge_feature_group.add_argument(
+        "--no-v-edge-features",
+        dest="use_v_edge_features",
+        action="store_false",
+        help="Ignore the stored velocity-angle edge features during training.",
+    )
+    parser.set_defaults(use_v_edge_features=True)
     add_bool_override(
         parser,
         "xy-only",
@@ -158,23 +184,65 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     try:
-        infer_target_family(
-            use_xg=bool(args.use_xg),
-            use_xt=bool(args.use_xt),
-            use_goal_distance=bool(args.use_goal_distance),
-        )
-    except ValueError as exc:
-        parser.error(str(exc))
-    try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+
+    available_modes = infer_feature_run_intended_receiver_modes(args.feature_run_id)
+    available_return_types = infer_feature_run_return_types(args.feature_run_id)
+
+    if args.success_intent_only:
+        if args.intended_receiver_mode and args.intended_receiver_mode != INTENDED_RECEIVER_MODE_ANGLE_ONLY:
+            parser.error("--success-intent-only can only train against intended_receiver_mode=angle_only.")
+        args.intended_receiver_mode = INTENDED_RECEIVER_MODE_ANGLE_ONLY
+        if args.target_family is not None:
+            parser.error("--success-intent-only does not accept --target-family.")
+        if args.return_type is not None:
+            args.return_type = validate_return_type(args.return_type)
+        elif available_return_types:
+            args.return_type = available_return_types[0]
+        else:
+            parser.error(f"Feature run {args.feature_run_id} does not expose any return types.")
+    else:
+        if not args.intended_receiver_mode:
+            parser.error("--intended-receiver-mode is required.")
+        args.intended_receiver_mode = validate_intended_receiver_mode(args.intended_receiver_mode)
+        if not args.target_family:
+            parser.error("--target-family is required unless --success-intent-only is set.")
+        if not args.return_type:
+            parser.error("--return_type is required unless --success-intent-only is set.")
+        args.return_type = validate_return_type(args.return_type)
+
+    if args.intended_receiver_mode not in available_modes:
+        parser.error(
+            f"Feature run {args.feature_run_id} does not expose intended_receiver_mode={args.intended_receiver_mode!r}. "
+            f"Available: {', '.join(available_modes) or 'none'}."
+        )
+    if args.return_type not in available_return_types:
+        parser.error(
+            f"Feature run {args.feature_run_id} does not expose return_type={args.return_type!r}. "
+            f"Available: {', '.join(available_return_types) or 'none'}."
+        )
+
+    args.available_return_types = available_return_types
+    args.available_intended_receiver_modes = available_modes
     return args
 
 
-def base_gnn_args(feature_dir: str, label_dir: str, model_id: str, intended_receiver_mode: str) -> list[str]:
+def base_gnn_args(
+    feature_dir: str,
+    label_dir: str,
+    model_id: str,
+    intended_receiver_mode: str,
+    return_type: str,
+    use_v_edge_features: bool,
+) -> list[str]:
     _, run_id = str(model_id).split("/", 1)
-    return [
+    command = [
         "--run-id",
         run_id,
         "--model",
@@ -208,7 +276,10 @@ def base_gnn_args(feature_dir: str, label_dir: str, model_id: str, intended_rece
         feature_dir,
         "--label_dir",
         label_dir,
+        "--return_type",
+        return_type,
     ]
+    return append_edge_feature_flag(command, use_v_edge_features)
 
 
 def intent_command(
@@ -219,12 +290,14 @@ def intent_command(
     train_feature_dir: str,
     train_label_dir: str,
     intended_receiver_mode: str,
+    return_type: str,
+    use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -247,12 +320,14 @@ def success_intent_command(
     feature_dir: str,
     label_dir: str,
     intended_receiver_mode: str,
+    return_type: str,
+    use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -272,12 +347,14 @@ def pass_success_command(
     label_dir: str,
     ipw_model_id: str,
     intended_receiver_mode: str,
+    return_type: str,
+    use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
         "--ipw_model_id",
         ipw_model_id,
         "--min_pass_dur",
@@ -300,14 +377,13 @@ def outcome_command(
     target_family: str,
     return_type: str,
     intended_receiver_mode: str,
+    use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
-        "--return_type",
-        return_type,
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
         "--lambda_l1",
         "1e-6",
         "--start_lr",
@@ -330,12 +406,14 @@ def failure_receiver_command(
     feature_dir: str,
     label_dir: str,
     intended_receiver_mode: str,
+    return_type: str,
+    use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
         "--augment_blocks",
         "--shot_success",
         "unblocked",
@@ -371,28 +449,24 @@ def build_model_ids(args: argparse.Namespace, mode: str) -> dict[str, str]:
 def build_training_commands(
     args: argparse.Namespace,
 ) -> tuple[list[list[str]], dict[str, str], str, str | None, dict[str, bool]]:
-    mode = resolve_intended_receiver_mode(
-        use_original_intended_receiver=args.use_original_intended_receiver,
-        use_intended_receiver_model=args.use_intended_receiver_model,
-    )
-    target_family = infer_target_family(
-        use_xg=bool(args.use_xg),
-        use_xt=bool(args.use_xt),
-        use_goal_distance=bool(args.use_goal_distance),
-    )
-    effective_return_type = resolve_effective_return_type(target_family, args.return_type)
+    mode = args.intended_receiver_mode
+    target_family = args.target_family
+    effective_return_type = args.return_type
     feature_flags = resolve_wrapper_feature_flags(args)
-    resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
+    resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
     model_ids = build_model_ids(args, mode)
 
     base_feature_dir = str(get_action_graph_dir(feature_root))
-    success_intent_label_mode = (
-        INTENDED_RECEIVER_MODE_ANGLE_ONLY
-        if args.success_intent_only and mode == INTENDED_RECEIVER_MODE_MODEL
-        else mode
-    )
+    success_intent_label_mode = INTENDED_RECEIVER_MODE_ANGLE_ONLY
     base_label_dir = str(
+        get_action_label_dir(
+            effective_return_type,
+            intended_receiver_mode=mode,
+            root=feature_root,
+        )
+    )
+    success_intent_label_dir = str(
         get_action_label_dir(
             effective_return_type,
             intended_receiver_mode=success_intent_label_mode,
@@ -415,13 +489,15 @@ def build_training_commands(
                     "success_intent",
                     model_ids["success_intent"],
                     success_intent_feature_dir,
-                    base_label_dir,
+                    success_intent_label_dir,
                     success_intent_label_mode,
+                    effective_return_type,
+                    bool(args.use_v_edge_features),
                     feature_flags,
                 )
             ],
             {"success_intent": model_ids["success_intent"]},
-            mode,
+            success_intent_label_mode,
             resolved_feature_run_id,
             feature_flags,
         )
@@ -436,6 +512,8 @@ def build_training_commands(
                 intent_train_feature_dir,
                 intent_train_label_dir,
                 mode,
+                effective_return_type,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
             intent_command(
@@ -446,6 +524,8 @@ def build_training_commands(
                 intent_train_feature_dir,
                 intent_train_label_dir,
                 mode,
+                effective_return_type,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
             pass_success_command(
@@ -455,6 +535,8 @@ def build_training_commands(
                 base_label_dir,
                 model_ids["pass_intent"],
                 mode,
+                effective_return_type,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
             outcome_command(
@@ -465,6 +547,7 @@ def build_training_commands(
                 target_family,
                 effective_return_type,
                 mode,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
             outcome_command(
@@ -475,6 +558,7 @@ def build_training_commands(
                 target_family,
                 effective_return_type,
                 mode,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
             failure_receiver_command(
@@ -483,6 +567,8 @@ def build_training_commands(
                 augmented_feature_dir,
                 augmented_label_dir,
                 mode,
+                effective_return_type,
+                bool(args.use_v_edge_features),
                 feature_flags,
             ),
         ]
@@ -525,29 +611,24 @@ def main() -> None:
         subprocess.run(command, cwd=ROOT, check=True)
         executed_commands.append(command)
 
+    feature_run_metadata = load_feature_run_metadata(resolved_feature_run_id, required=False) or {}
     metadata = {
         "bundle_id": bundle_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": resolved_feature_run_id,
         "intended_receiver_mode": intended_receiver_mode,
+        "feature_run_intended_receiver_modes": cli_args.available_intended_receiver_modes,
+        "feature_run_return_types": cli_args.available_return_types,
+        "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
         "training_feature_flags": feature_flags,
-        "use_xg": bool(cli_args.use_xg),
-        "use_xt": bool(cli_args.use_xt),
-        "use_goal_distance": bool(cli_args.use_goal_distance),
-        "target_family": infer_target_family(
-            use_xg=bool(cli_args.use_xg),
-            use_xt=bool(cli_args.use_xt),
-            use_goal_distance=bool(cli_args.use_goal_distance),
-        ),
-        "return_type": resolve_effective_return_type(
-            infer_target_family(
-                use_xg=bool(cli_args.use_xg),
-                use_xt=bool(cli_args.use_xt),
-                use_goal_distance=bool(cli_args.use_goal_distance),
-            ),
-            cli_args.return_type,
-        ),
+        "target_family": cli_args.target_family,
+        "return_type": cli_args.return_type,
+        "use_v_edge_features": bool(cli_args.use_v_edge_features),
+        "graph_schema": {
+            "edge_in_dim": 4 if cli_args.use_v_edge_features else 2,
+            "add_v_edge_features": bool(cli_args.use_v_edge_features),
+        },
         "success_intent_only": bool(cli_args.success_intent_only),
         "model_ids": bundle_model_ids,
         "commands": executed_commands,

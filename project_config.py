@@ -177,9 +177,26 @@ def resolve_intended_receiver_mode(
     return DEFAULT_INTENDED_RECEIVER_MODE
 
 
+def validate_intended_receiver_mode(mode: str) -> str:
+    value = str(mode).strip()
+    if value not in INTENDED_RECEIVER_MODES:
+        raise ValueError(
+            f"Unsupported intended receiver mode {mode!r}. Expected one of: {', '.join(INTENDED_RECEIVER_MODES)}."
+        )
+    return value
+
+
+def resolve_generation_intended_receiver_modes(
+    intended_receiver_model_id: str | None = None,
+) -> list[str]:
+    modes = [INTENDED_RECEIVER_MODE_ORIGINAL, INTENDED_RECEIVER_MODE_ANGLE_ONLY]
+    if intended_receiver_model_id:
+        modes.append(INTENDED_RECEIVER_MODE_MODEL)
+    return modes
+
+
 def intended_receiver_suffix(mode: str, include_original: bool = False) -> str:
-    if mode not in INTENDED_RECEIVER_MODES:
-        raise ValueError(f"Unsupported intended receiver mode: {mode}")
+    mode = validate_intended_receiver_mode(mode)
     if mode == INTENDED_RECEIVER_MODE_ORIGINAL and not include_original:
         return ""
     return f"_{mode}"
@@ -329,13 +346,19 @@ def load_latest_run_id(kind: str) -> str | None:
     return str(run_id) if run_id else None
 
 
-def resolve_feature_run_id(run_id: str | None = None, required: bool = False) -> str | None:
-    resolved = str(run_id) if run_id else load_latest_run_id("feature")
+def resolve_feature_run_id(
+    run_id: str | None = None,
+    required: bool = False,
+    allow_latest: bool = True,
+) -> str | None:
+    resolved = str(run_id) if run_id else (load_latest_run_id("feature") if allow_latest else None)
     if resolved is None:
         if required:
-            raise FileNotFoundError(
-                f"No feature run id was provided and no latest feature run is registered at {FEATURE_LATEST_PATH}."
-            )
+            if allow_latest:
+                raise FileNotFoundError(
+                    f"No feature run id was provided and no latest feature run is registered at {FEATURE_LATEST_PATH}."
+                )
+            raise FileNotFoundError("No feature run id was provided.")
         return None
     run_root = get_feature_run_root(resolved)
     if not run_root.exists():
@@ -391,6 +414,23 @@ def write_run_metadata(run_root: Path, payload: dict[str, Any]) -> Path:
     metadata_path = run_root / "metadata.json"
     metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return metadata_path
+
+
+def load_run_metadata(run_root: Path, required: bool = True) -> dict[str, Any] | None:
+    metadata_path = Path(run_root) / "metadata.json"
+    if not metadata_path.exists():
+        if required:
+            raise FileNotFoundError(f"Run metadata not found at {metadata_path}.")
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def load_feature_run_metadata(feature_run_id: str, required: bool = True) -> dict[str, Any] | None:
+    return load_run_metadata(get_feature_run_root(feature_run_id), required=required)
+
+
+def load_model_bundle_metadata(bundle_id: str, required: bool = True) -> dict[str, Any] | None:
+    return load_run_metadata(get_model_bundle_root(bundle_id), required=required)
 
 
 def get_component_dir(
@@ -452,6 +492,73 @@ def validate_return_type(return_type: str) -> str:
         return value
 
     raise ValueError(f"Unsupported return_type {return_type!r}. Expected disc_<gamma> or next_<N>.")
+
+
+def resolve_requested_return_types(
+    requested_return_types: list[str] | tuple[str, ...] | str | None = None,
+    target_family: str | None = None,
+) -> list[str]:
+    if requested_return_types is None:
+        requested_values: list[str] = []
+    elif isinstance(requested_return_types, str):
+        requested_values = [requested_return_types]
+    else:
+        requested_values = [str(value) for value in requested_return_types]
+
+    if not requested_values:
+        return [resolve_effective_return_type(target_family=target_family, requested_return_type=None)]
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for value in requested_values:
+        normalized = validate_return_type(value)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        resolved.append(normalized)
+    return resolved
+
+
+def infer_feature_run_return_types(feature_run_id: str) -> list[str]:
+    metadata = load_feature_run_metadata(feature_run_id, required=False) or {}
+    values = metadata.get("return_types")
+    if isinstance(values, list) and values:
+        return resolve_requested_return_types(values)
+
+    legacy_value = metadata.get("return_type")
+    if legacy_value:
+        return resolve_requested_return_types([str(legacy_value)])
+
+    run_root = get_feature_run_root(feature_run_id)
+    values: set[str] = set()
+    for path in run_root.glob("action_labels_*"):
+        if not path.is_dir():
+            continue
+        if path.name.startswith("action_labels_intent_train_"):
+            continue
+        suffix = path.name[len("action_labels_") :]
+        parts = suffix.split("_", 2)
+        if len(parts) < 2:
+            continue
+        values.add(f"{parts[0]}_{parts[1]}")
+    if not values:
+        return []
+    return resolve_requested_return_types(sorted(values))
+
+
+def infer_feature_run_intended_receiver_modes(feature_run_id: str) -> list[str]:
+    metadata = load_feature_run_metadata(feature_run_id, required=False) or {}
+    values = metadata.get("intended_receiver_modes")
+    if isinstance(values, list) and values:
+        return [validate_intended_receiver_mode(value) for value in values]
+
+    run_root = get_feature_run_root(feature_run_id)
+    modes: set[str] = set()
+    for mode in INTENDED_RECEIVER_MODES:
+        resolved_dir = get_resolved_action_dir(mode, root=run_root)
+        if resolved_dir.exists():
+            modes.add(mode)
+    return [mode for mode in INTENDED_RECEIVER_MODES if mode in modes]
 
 
 def parse_return_type(return_type: str) -> tuple[str, float | int]:

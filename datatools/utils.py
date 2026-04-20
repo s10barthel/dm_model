@@ -883,6 +883,24 @@ def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max
     return graph
 
 
+def adapt_graph_edge_features(graph: Data, edge_in_dim: int | None = None) -> Data:
+    if graph is None or edge_in_dim is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
+        return graph
+
+    edge_in_dim = int(edge_in_dim)
+    actual_edge_dim = int(graph.edge_attr.shape[1])
+    if actual_edge_dim < edge_in_dim:
+        raise ValueError(
+            f"Graph edge schema is incompatible with the requested model schema: "
+            f"graph_edge_dim={actual_edge_dim}, required_edge_dim={edge_in_dim}."
+        )
+    if actual_edge_dim == edge_in_dim:
+        return graph
+
+    graph.edge_attr = graph.edge_attr[:, :edge_in_dim]
+    return graph
+
+
 def filter_features_and_labels(
     features: List[Data],
     labels: torch.Tensor,
@@ -904,6 +922,7 @@ def filter_features_and_labels(
             continue
         else:
             graph = graph.clone()
+            graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
 
         try:
             possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()

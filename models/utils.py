@@ -29,9 +29,11 @@ from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from project_config import (
     SAVED_DIR,
+    get_model_bundle_root,
     get_task_saved_dir,
     infer_legacy_model_context,
     infer_target_family,
+    load_model_bundle_metadata,
     load_model_splits,
 )
 
@@ -125,6 +127,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     if intended_receiver_mode is None and legacy_context is not None:
         intended_receiver_mode = legacy_context.get("intended_receiver_mode")
     intended_receiver_mode = intended_receiver_mode or "unknown"
+    return_type = metadata.get("return_type", args.get("return_type"))
 
     created_at = metadata.get("created_at") or _iso_or_mtime(metadata_path if metadata_path.exists() else args_path)
     feature_signature = extract_model_feature_signature(args)
@@ -144,6 +147,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
+        "return_type": return_type,
         "model_name": str(args.get("model", metadata.get("model", "unknown"))),
         "feature_signature": feature_signature,
         "graph_schema": {
@@ -172,6 +176,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "feature_run_id",
             "intended_receiver_mode",
             "target_family",
+            "return_type",
             "model_name",
             "feature_signature",
             "graph_schema",
@@ -395,6 +400,223 @@ def resolve_relevant_model_ids(
         )
 
     return resolved
+
+
+def load_bundle_record(bundle_id: str) -> dict[str, Any]:
+    metadata = load_model_bundle_metadata(bundle_id, required=True)
+    if metadata is None:
+        raise FileNotFoundError(f"Model bundle metadata not found for {bundle_id}.")
+    metadata.setdefault("bundle_id", str(bundle_id))
+    metadata.setdefault("model_ids", {})
+    metadata.setdefault("bundle_root", str(get_model_bundle_root(bundle_id)))
+    return metadata
+
+
+def resolve_bundle_model_ids(
+    bundle_id: str,
+    required_tasks: list[str],
+    explicit_model_ids: dict[str, str | None] | None = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    bundle = load_bundle_record(bundle_id)
+    explicit_model_ids = explicit_model_ids or {}
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+
+    for task in required_tasks:
+        if explicit_model_ids.get(task):
+            resolved[task] = str(explicit_model_ids[task])
+            continue
+        model_id = bundle.get("model_ids", {}).get(task)
+        if model_id:
+            resolved[task] = str(model_id)
+            continue
+        missing.append(task)
+
+    if missing:
+        raise ValueError(
+            f"Bundle {bundle_id!r} does not contain required model ids for: {', '.join(missing)}. "
+            "Pass them explicitly."
+        )
+
+    return resolved, bundle
+
+
+def require_explicit_model_ids(required_tasks: list[str], explicit_model_ids: dict[str, str | None]) -> dict[str, str]:
+    missing = [task for task in required_tasks if not explicit_model_ids.get(task)]
+    if missing:
+        raise ValueError(
+            "Missing explicit model ids for: "
+            f"{', '.join(missing)}."
+        )
+    return {task: str(explicit_model_ids[task]) for task in required_tasks}
+
+
+def is_feature_graph_schema_compatible(
+    feature_schema: dict[str, int | bool],
+    required_schema: dict[str, int | bool],
+) -> bool:
+    feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
+    required_edge_dim = int(required_schema.get("edge_in_dim", 0))
+    return feature_edge_dim >= required_edge_dim
+
+
+def validate_feature_graph_schema(
+    feature_schema: dict[str, int | bool],
+    required_schema: dict[str, int | bool],
+    context: str = "Selected feature artifacts",
+) -> None:
+    if is_feature_graph_schema_compatible(feature_schema, required_schema):
+        return
+    raise ValueError(
+        f"{context} are incompatible with the loaded model checkpoints: "
+        f"features={feature_schema}, models={required_schema}."
+    )
+
+
+def infer_training_edge_schema(
+    feature_schema: dict[str, int | bool],
+    use_v_edge_features: bool,
+) -> dict[str, int | bool]:
+    feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
+    required_edge_dim = 4 if use_v_edge_features else 2
+    if feature_edge_dim < required_edge_dim:
+        raise ValueError(
+            "Selected feature artifacts do not provide the requested edge-feature schema: "
+            f"features={feature_schema}, required_edge_dim={required_edge_dim}."
+        )
+    return {
+        "edge_in_dim": required_edge_dim,
+        "add_v_edge_features": bool(use_v_edge_features),
+    }
+
+
+def get_model_records(model_ids: dict[str, str]) -> dict[str, dict[str, Any]]:
+    return {task: get_model_record(model_id) for task, model_id in model_ids.items()}
+
+
+def validate_model_record_consistency(
+    model_records: dict[str, dict[str, Any]],
+    require_feature_run_id: bool = True,
+    require_intended_receiver_mode: bool = True,
+    require_return_type: bool = True,
+    outcome_tasks: tuple[str, ...] = ("outcome_scoring", "outcome_conceding"),
+) -> dict[str, Any]:
+    if not model_records:
+        raise ValueError("No model records were provided for consistency validation.")
+
+    shared: dict[str, Any] = {}
+
+    feature_run_ids = {record.get("feature_run_id") for record in model_records.values()}
+    feature_run_ids.discard(None)
+    if require_feature_run_id and len(feature_run_ids) != 1:
+        details = ", ".join(f"{task}={record.get('feature_run_id')}" for task, record in model_records.items())
+        raise ValueError(
+            "Selected model checkpoints do not agree on feature_run_id: "
+            f"{details}."
+        )
+    shared["feature_run_id"] = next(iter(feature_run_ids)) if feature_run_ids else None
+
+    intended_modes = {record.get("intended_receiver_mode") for record in model_records.values()}
+    intended_modes.discard(None)
+    intended_modes.discard("unknown")
+    if require_intended_receiver_mode and len(intended_modes) != 1:
+        details = ", ".join(f"{task}={record.get('intended_receiver_mode')}" for task, record in model_records.items())
+        raise ValueError(
+            "Selected model checkpoints do not agree on intended_receiver_mode: "
+            f"{details}."
+        )
+    shared["intended_receiver_mode"] = next(iter(intended_modes)) if intended_modes else None
+
+    return_types = {record.get("return_type") for record in model_records.values()}
+    return_types.discard(None)
+    if require_return_type and len(return_types) != 1:
+        details = ", ".join(f"{task}={record.get('return_type')}" for task, record in model_records.items())
+        raise ValueError(
+            "Selected model checkpoints do not agree on return_type: "
+            f"{details}."
+        )
+    shared["return_type"] = next(iter(return_types)) if return_types else None
+
+    graph_schemas = {json.dumps(record["graph_schema"], sort_keys=True) for record in model_records.values()}
+    if len(graph_schemas) != 1:
+        details = ", ".join(f"{task}={record.get('graph_schema')}" for task, record in model_records.items())
+        raise ValueError(
+            "Selected model checkpoints do not agree on graph schema: "
+            f"{details}."
+        )
+    shared["graph_schema"] = next(iter(model_records.values()))["graph_schema"]
+
+    outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
+    target_families = {record.get("target_family") for record in outcome_records.values()}
+    target_families.discard(None)
+    if len(target_families) > 1:
+        details = ", ".join(f"{task}={record.get('target_family')}" for task, record in outcome_records.items())
+        raise ValueError(
+            "Selected outcome checkpoints do not agree on target_family: "
+            f"{details}."
+        )
+    shared["target_family"] = next(iter(target_families)) if target_families else None
+
+    return shared
+
+
+def resolve_model_selection(
+    required_tasks: list[str],
+    bundle_id: str | None = None,
+    explicit_model_ids: dict[str, str | None] | None = None,
+    require_feature_run_id: bool = True,
+    require_intended_receiver_mode: bool = True,
+    require_return_type: bool = True,
+) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
+    explicit_model_ids = explicit_model_ids or {}
+
+    if bundle_id:
+        resolved_model_ids, bundle = resolve_bundle_model_ids(
+            bundle_id,
+            required_tasks=required_tasks,
+            explicit_model_ids=explicit_model_ids,
+        )
+    else:
+        resolved_model_ids = require_explicit_model_ids(required_tasks, explicit_model_ids)
+        bundle = None
+
+    model_records = get_model_records(resolved_model_ids)
+    shared = validate_model_record_consistency(
+        model_records,
+        require_feature_run_id=require_feature_run_id,
+        require_intended_receiver_mode=require_intended_receiver_mode,
+        require_return_type=require_return_type,
+    )
+    shared["model_records"] = model_records
+
+    if bundle is not None:
+        if bundle.get("feature_run_id") and shared.get("feature_run_id") and bundle["feature_run_id"] != shared["feature_run_id"]:
+            raise ValueError(
+                f"Bundle {bundle_id!r} feature_run_id={bundle['feature_run_id']!r} does not match the selected model ids "
+                f"(feature_run_id={shared['feature_run_id']!r})."
+            )
+        if bundle.get("intended_receiver_mode") and shared.get("intended_receiver_mode") and bundle["intended_receiver_mode"] != shared["intended_receiver_mode"]:
+            raise ValueError(
+                f"Bundle {bundle_id!r} intended_receiver_mode={bundle['intended_receiver_mode']!r} does not match the "
+                f"selected model ids (intended_receiver_mode={shared['intended_receiver_mode']!r})."
+            )
+        if bundle.get("return_type") and shared.get("return_type") and bundle["return_type"] != shared["return_type"]:
+            raise ValueError(
+                f"Bundle {bundle_id!r} return_type={bundle['return_type']!r} does not match the selected model ids "
+                f"(return_type={shared['return_type']!r})."
+            )
+        if bundle.get("target_family") and shared.get("target_family") and bundle["target_family"] != shared["target_family"]:
+            raise ValueError(
+                f"Bundle {bundle_id!r} target_family={bundle['target_family']!r} does not match the selected model ids "
+                f"(target_family={shared['target_family']!r})."
+            )
+
+        shared["feature_run_id"] = shared.get("feature_run_id") or bundle.get("feature_run_id")
+        shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or bundle.get("intended_receiver_mode")
+        shared["return_type"] = shared.get("return_type") or bundle.get("return_type")
+        shared["target_family"] = shared.get("target_family") or bundle.get("target_family")
+
+    return resolved_model_ids, shared, bundle
 
 
 def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:

@@ -21,14 +21,15 @@ from datatools.config import LABEL_INDEX
 from models.gnn import GNN
 from models.utils import (
     extract_model_feature_signature,
-    validate_target_flags,
-    load_splits,
-    estimate_propensity,
     get_args_str,
     get_losses_str,
+    infer_training_edge_schema,
+    estimate_propensity,
+    load_splits,
     num_trainable_params,
     printlog,
     run_epoch,
+    validate_target_flags,
 )
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -92,6 +93,20 @@ parser.add_argument("--train_label_dir", type=str, default=None, help="label dir
 parser.add_argument("--valid_feature_dir", type=str, default=None, help="feature directory used for validation")
 parser.add_argument("--valid_label_dir", type=str, default=None, help="label directory used for validation")
 parser.add_argument("--ipw_feature_dir", type=str, default=None, help="feature directory used for IPW estimation")
+edge_feature_group = parser.add_mutually_exclusive_group()
+edge_feature_group.add_argument(
+    "--v-edge-features",
+    dest="use_v_edge_features",
+    action="store_true",
+    help="Use the stored velocity-angle edge features during training.",
+)
+edge_feature_group.add_argument(
+    "--no-v-edge-features",
+    dest="use_v_edge_features",
+    action="store_false",
+    help="Ignore the stored velocity-angle edge features and use only the base edge features.",
+)
+parser.set_defaults(use_v_edge_features=True)
 
 parser.add_argument("--node_emb_dim", type=int, required=False, default=128, help="node embedding dim")
 parser.add_argument("--graph_emb_dim", type=int, required=False, default=128, help="graph embedding dim")
@@ -206,8 +221,14 @@ if __name__ == "__main__":
     args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
     args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task)
-    _, args.edge_in_dim = infer_graph_input_dims(args.train_feature_dir)
-    args.add_v_edge_features = bool(args.edge_in_dim > 2)
+    _, feature_edge_dim = infer_graph_input_dims(args.train_feature_dir)
+    feature_schema = {
+        "edge_in_dim": int(feature_edge_dim),
+        "add_v_edge_features": bool(feature_edge_dim > 2),
+    }
+    training_schema = infer_training_edge_schema(feature_schema, use_v_edge_features=bool(args.use_v_edge_features))
+    args.edge_in_dim = int(training_schema["edge_in_dim"])
+    args.add_v_edge_features = bool(training_schema["add_v_edge_features"])
 
     # Load model
     args_dict = vars(args)
@@ -270,6 +291,7 @@ if __name__ == "__main__":
         "drop_non_blockers": args.filter_blockers,
         "sparsify": args.sparsify,
         "max_edge_dist": args.max_edge_dist,
+        "edge_in_dim": args.edge_in_dim,
     }
     train_dataset = ActionDataset(
         train_match_ids,

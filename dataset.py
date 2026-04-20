@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
+    adapt_graph_edge_features,
     drop_goal_nodes,
     drop_non_blocker_nodes,
     drop_opponent_nodes,
@@ -33,6 +34,7 @@ class ActionDataset(Dataset):
         drop_non_blockers=False,
         sparsify="none",
         max_edge_dist=10.0,
+        edge_in_dim=None,
         train=True,
     ):
         feature_root = Path(feature_dir)
@@ -40,6 +42,7 @@ class ActionDataset(Dataset):
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
+        self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
 
         features = []
         label_tensors: list[torch.Tensor] = []
@@ -154,6 +157,7 @@ class ActionDataset(Dataset):
 
             if graph is None:
                 continue
+            graph = adapt_graph_edge_features(graph, getattr(self, "edge_in_dim", None))
 
             try:
                 possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
