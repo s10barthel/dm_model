@@ -10,10 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
-    INTENDED_RECEIVER_MODE_ANGLE_ONLY,
-    INTENDED_RECEIVER_MODE_MODEL,
-    INTENDED_RECEIVER_MODE_ORIGINAL,
     generate_model_run_id,
     generate_run_id,
     get_action_label_dir,
@@ -24,6 +22,7 @@ from project_config import (
     get_intent_train_label_dir,
     get_model_bundle_root,
     get_success_intent_graph_dir,
+    get_success_intent_label_dir,
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
     load_feature_run_metadata,
@@ -92,7 +91,7 @@ def append_edge_feature_flag(command: list[str], use_v_edge_features: bool) -> l
     return command
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--target-family",
@@ -106,12 +105,12 @@ def parse_args() -> argparse.Namespace:
         "--intended-receiver-mode",
         choices=["original", "angle_only", "model"],
         default=None,
-        help="Intended-receiver variant to train against.",
+        help="Intended-receiver variant to train against. Not used with --success-intent-only.",
     )
     parser.add_argument(
         "--success-intent-only",
         action="store_true",
-        help="Only train the success_intent model. Useful for the first stage of learned intended-receiver mode.",
+        help="Only train the mode-independent success_intent model from observed successful-pass receivers.",
     )
     parser.add_argument(
         "--outcome-scoring-trial",
@@ -182,7 +181,7 @@ def parse_args() -> argparse.Namespace:
         "Enable the extended handcrafted node features during training.",
         "Disable the extended handcrafted node features during training.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
@@ -196,9 +195,9 @@ def parse_args() -> argparse.Namespace:
     available_return_types = infer_feature_run_return_types(args.feature_run_id)
 
     if args.success_intent_only:
-        if args.intended_receiver_mode and args.intended_receiver_mode != INTENDED_RECEIVER_MODE_ANGLE_ONLY:
-            parser.error("--success-intent-only can only train against intended_receiver_mode=angle_only.")
-        args.intended_receiver_mode = INTENDED_RECEIVER_MODE_ANGLE_ONLY
+        if args.intended_receiver_mode:
+            parser.error("--success-intent-only is mode-independent and does not accept --intended-receiver-mode.")
+        args.intended_receiver_mode = None
         if args.target_family is not None:
             parser.error("--success-intent-only does not accept --target-family.")
         if args.return_type is not None:
@@ -217,7 +216,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("--return_type is required unless --success-intent-only is set.")
         args.return_type = validate_return_type(args.return_type)
 
-    if args.intended_receiver_mode not in available_modes:
+    if not args.success_intent_only and args.intended_receiver_mode not in available_modes:
         parser.error(
             f"Feature run {args.feature_run_id} does not expose intended_receiver_mode={args.intended_receiver_mode!r}. "
             f"Available: {', '.join(available_modes) or 'none'}."
@@ -237,7 +236,7 @@ def base_gnn_args(
     feature_dir: str,
     label_dir: str,
     model_id: str,
-    intended_receiver_mode: str,
+    intended_receiver_mode: str | None,
     return_type: str,
     use_v_edge_features: bool,
 ) -> list[str]:
@@ -270,8 +269,6 @@ def base_gnn_args(
         "50",
         "--seed",
         "100",
-        "--intended-receiver-mode",
-        intended_receiver_mode,
         "--feature_dir",
         feature_dir,
         "--label_dir",
@@ -279,6 +276,8 @@ def base_gnn_args(
         "--return_type",
         return_type,
     ]
+    if intended_receiver_mode:
+        command.extend(["--intended-receiver-mode", intended_receiver_mode])
     return append_edge_feature_flag(command, use_v_edge_features)
 
 
@@ -319,7 +318,6 @@ def success_intent_command(
     model_id: str,
     feature_dir: str,
     label_dir: str,
-    intended_receiver_mode: str,
     return_type: str,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
@@ -327,7 +325,7 @@ def success_intent_command(
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, use_v_edge_features),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -336,6 +334,10 @@ def success_intent_command(
         "0.002",
         "--min_lr",
         "1e-5",
+        "--label-source",
+        SUCCESS_INTENT_LABEL_SOURCE,
+        "--training-filter",
+        SUCCESS_INTENT_TRAINING_FILTER,
     ]
     return append_low_level_feature_flags(command, feature_flags)
 
@@ -427,7 +429,7 @@ def failure_receiver_command(
     return append_low_level_feature_flags(command, feature_flags)
 
 
-def build_model_ids(args: argparse.Namespace, mode: str) -> dict[str, str]:
+def build_model_ids(args: argparse.Namespace, mode: str | None) -> dict[str, str]:
     model_ids = {
         "success_intent": f"success_intent/{generate_model_run_id('success_intent')}",
         "pass_intent": f"pass_intent/{generate_model_run_id('pass_intent')}",
@@ -441,14 +443,12 @@ def build_model_ids(args: argparse.Namespace, mode: str) -> dict[str, str]:
         model_ids["outcome_scoring"] = f"outcome_scoring/{int(args.outcome_scoring_trial):02d}"
     if args.outcome_conceding_trial is not None:
         model_ids["outcome_conceding"] = f"outcome_conceding/{int(args.outcome_conceding_trial):02d}"
-    if args.success_intent_only and mode != INTENDED_RECEIVER_MODE_MODEL:
-        model_ids["success_intent"] = f"success_intent/{generate_model_run_id('success_intent')}"
     return model_ids
 
 
 def build_training_commands(
     args: argparse.Namespace,
-) -> tuple[list[list[str]], dict[str, str], str, str | None, dict[str, bool]]:
+) -> tuple[list[list[str]], dict[str, str], str | None, str | None, dict[str, bool]]:
     mode = args.intended_receiver_mode
     target_family = args.target_family
     effective_return_type = args.return_type
@@ -456,32 +456,9 @@ def build_training_commands(
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
     model_ids = build_model_ids(args, mode)
-
-    base_feature_dir = str(get_action_graph_dir(feature_root))
-    success_intent_label_mode = INTENDED_RECEIVER_MODE_ANGLE_ONLY
-    base_label_dir = str(
-        get_action_label_dir(
-            effective_return_type,
-            intended_receiver_mode=mode,
-            root=feature_root,
-        )
-    )
-    success_intent_label_dir = str(
-        get_action_label_dir(
-            effective_return_type,
-            intended_receiver_mode=success_intent_label_mode,
-            root=feature_root,
-        )
-    )
-    intent_train_feature_dir = str(get_action_graph_intent_train_dir(feature_root))
-    intent_train_label_dir = str(
-        get_intent_train_label_dir(effective_return_type, intended_receiver_mode=mode, root=feature_root)
-    )
     success_intent_feature_dir = str(get_success_intent_graph_dir(feature_root))
-    augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
-    augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
+    success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
 
-    commands = []
     if args.success_intent_only:
         return (
             [
@@ -490,18 +467,33 @@ def build_training_commands(
                     model_ids["success_intent"],
                     success_intent_feature_dir,
                     success_intent_label_dir,
-                    success_intent_label_mode,
                     effective_return_type,
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
             ],
             {"success_intent": model_ids["success_intent"]},
-            success_intent_label_mode,
+            None,
             resolved_feature_run_id,
             feature_flags,
         )
 
+    base_feature_dir = str(get_action_graph_dir(feature_root))
+    base_label_dir = str(
+        get_action_label_dir(
+            effective_return_type,
+            intended_receiver_mode=mode,
+            root=feature_root,
+        )
+    )
+    intent_train_feature_dir = str(get_action_graph_intent_train_dir(feature_root))
+    intent_train_label_dir = str(
+        get_intent_train_label_dir(effective_return_type, intended_receiver_mode=mode, root=feature_root)
+    )
+    augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
+    augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
+
+    commands = []
     commands.extend(
         [
             intent_command(
@@ -630,6 +622,8 @@ def main() -> None:
             "add_v_edge_features": bool(cli_args.use_v_edge_features),
         },
         "success_intent_only": bool(cli_args.success_intent_only),
+        "success_intent_label_source": SUCCESS_INTENT_LABEL_SOURCE if cli_args.success_intent_only else None,
+        "success_intent_training_filter": SUCCESS_INTENT_TRAINING_FILTER if cli_args.success_intent_only else None,
         "model_ids": bundle_model_ids,
         "commands": executed_commands,
         "status": "completed",

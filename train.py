@@ -39,6 +39,8 @@ from project_config import (
     get_augmented_feature_dir,
     get_augmented_label_dir,
     get_model_run_root,
+    get_success_intent_graph_dir,
+    get_success_intent_label_dir,
     infer_target_family,
     resolve_effective_return_type,
     resolve_feature_root,
@@ -86,6 +88,8 @@ parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "no
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
 parser.add_argument("--feature_run_id", "--feature-run-id", dest="feature_run_id", type=str, default=None, help="Pinned feature-artifact run id.")
 parser.add_argument("--intended-receiver-mode", type=str, default="unknown", help="Resolved intended-receiver mode.")
+parser.add_argument("--label-source", type=str, default=None, help="Optional label provenance descriptor saved with the checkpoint.")
+parser.add_argument("--training-filter", type=str, default=None, help="Optional training-filter descriptor saved with the checkpoint.")
 parser.add_argument("--feature_dir", type=str, default=None, help="override graph feature directory")
 parser.add_argument("--label_dir", type=str, default=None, help="override label directory for evaluation/inference")
 parser.add_argument("--train_feature_dir", type=str, default=None, help="feature directory used for training")
@@ -197,6 +201,9 @@ if __name__ == "__main__":
     if args.task == "shot_blocking":
         feature_dir = getattr(args, "feature_dir", None) or str(feature_root / "augmented_shot_graphs")
         label_dir = getattr(args, "label_dir", None) or str(feature_root / "augmented_shot_labels")
+    elif args.task == "success_intent":
+        feature_dir = getattr(args, "feature_dir", None) or str(get_success_intent_graph_dir(feature_root))
+        label_dir = getattr(args, "label_dir", None) or str(get_success_intent_label_dir(root=feature_root))
     elif args.task == "failure_receiver" and args.augment_blocks:
         feature_dir = getattr(args, "feature_dir", None) or str(
             get_augmented_feature_dir(DEFAULT_INTENDED_RECEIVER_MODE, root=feature_root)
@@ -252,8 +259,10 @@ if __name__ == "__main__":
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": args.feature_run_id,
-        "intended_receiver_mode": args.intended_receiver_mode,
+        "intended_receiver_mode": None if args.task == "success_intent" and args.intended_receiver_mode == "unknown" else args.intended_receiver_mode,
         "target_family": args.target_family,
+        "label_source": args.label_source,
+        "training_filter": args.training_filter,
         "resolved_dirs": {
             "feature_dir": args.feature_dir,
             "label_dir": args.label_dir,

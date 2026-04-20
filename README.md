@@ -377,6 +377,7 @@ This writes, inside the run root:
 - `action_graphs_intent_train/*.pt`
 - `action_graphs_success_intent/*.pt`
 - `action_labels_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+- `success_intent_labels/*.pt`
 - `action_labels_intent_train_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
 - `resolved_actions*.parquet` for each intended-receiver mode
 - `metadata.json`
@@ -407,12 +408,13 @@ Outputs:
 Behavior:
 
 - full retained-model training requires `--feature-run-id`, `--target-family`, `--return_type`, and `--intended-receiver-mode`
-- `--success-intent-only` is still supported for bootstrap training and always uses the `angle_only` label variant
+- `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
+- `--success-intent-only` is mode-independent and does not accept `--intended-receiver-mode`
 - the wrapper writes one bundle manifest under `saved/bundles/<bundle_id>/metadata.json` so later stages can reuse the exact produced model ids
 - training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
 - unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on, with `extend_features` and `xy_only` off
 
-In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
+In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. It is trained independently of the `original` / `angle_only` / `model` intended-receiver modes. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
 
 ### 5. Evaluate the retained models on the test set
 
@@ -695,7 +697,7 @@ The learned workflow is now explicit:
 3. generate a new feature run with `--intended-receiver-model-id success_intent/<model_run_id>`
 4. train the retained models on that new feature run with `--intended-receiver-mode model`
 
-`success_intent` is the teammate-selection intended-receiver model. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
+`success_intent` is the teammate-selection intended-receiver model. It is trained from observed successful-pass receivers (`receiver_id`) and does not belong to any intended-receiver mode. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
 
 ## Notes
 
@@ -759,7 +761,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--return_type <disc_gamma|next_N>`: resolved return semantics for the selected label directory. Required unless `--success-intent-only` is set.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required for full retained-model training.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required unless `--success-intent-only` is set.
-- `--success-intent-only`: train only the `success_intent` model.
+- `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
@@ -969,6 +971,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/ajax/features/runs/<feature_run_id>/action_graphs_intent_train/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/action_graphs_success_intent/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/action_labels_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
+  - `data/ajax/features/runs/<feature_run_id>/success_intent_labels/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt` for each requested `return_type` and intended-receiver mode
   - `data/ajax/features/runs/<feature_run_id>/resolved_actions*.parquet` for each intended-receiver mode
   - `data/ajax/features/runs/<feature_run_id>/metadata.json`

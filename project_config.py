@@ -225,6 +225,11 @@ def get_action_label_dir(
     return root / f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
 
 
+def get_success_intent_label_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / "success_intent_labels"
+
+
 def get_resolved_action_dir(
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,

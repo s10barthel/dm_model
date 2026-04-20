@@ -21,6 +21,7 @@ import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.config import LABEL_INDEX
 from datatools.match import Match
+from datatools.success_intent import build_success_intent_resolved_actions
 from project_config import (
     ACTION_GRAPH_DIR,
     ACTION_GRAPH_INTENT_TRAIN_DIR,
@@ -39,6 +40,7 @@ from project_config import (
     get_post_action_graph_dir,
     get_resolved_action_path,
     get_success_intent_graph_dir,
+    get_success_intent_label_dir,
     load_base_splits,
     resolve_generation_intended_receiver_modes,
     resolve_requested_return_types,
@@ -582,6 +584,35 @@ def build_labels_by_mode_and_return(
     return resolved_actions_by_mode, labels_by_key, stats_by_mode
 
 
+def build_success_intent_labels_by_return(
+    match: Match,
+    return_types: list[str],
+) -> tuple[pd.DataFrame, dict[str, torch.Tensor]]:
+    if not return_types:
+        raise ValueError("At least one return_type must be requested.")
+
+    resolved_actions = build_success_intent_resolved_actions(match.actions)
+    labels_by_return: dict[str, torch.Tensor] = {}
+    primary_return_type = return_types[0]
+    labels = match.construct_labels(
+        relabel_intended_receivers=False,
+        resolved_actions=resolved_actions,
+        return_type=primary_return_type,
+    )
+    if labels.numel() == 0:
+        raise ValueError("No usable labels were constructed for success_intent.")
+    labels_by_return[primary_return_type] = labels.clone()
+
+    for return_type in return_types[1:]:
+        labels_by_return[return_type] = match.construct_labels(
+            relabel_intended_receivers=False,
+            resolved_actions=resolved_actions,
+            return_type=return_type,
+        ).clone()
+
+    return resolved_actions, labels_by_return
+
+
 def construct_intent_training_samples(
     match: Match,
     offsets: Tuple[int, ...] = INTENT_TRAIN_OFFSETS,
@@ -790,20 +821,23 @@ if __name__ == "__main__":
             label_dir_builder = get_intent_train_label_dir
         elif args.feature_variant == "success_intent":
             feature_dir = get_success_intent_graph_dir(feature_root)
-            label_dir_builder = get_action_label_dir
+            label_dir_builder = None
         else:
             feature_dir = get_action_graph_dir(feature_root)
             label_dir_builder = get_action_label_dir
         Path(feature_dir).mkdir(parents=True, exist_ok=True)
-        for intended_receiver_mode in args.intended_receiver_modes:
-            for return_type in args.return_types:
-                Path(
-                    label_dir_builder(
-                        return_type,
-                        intended_receiver_mode=intended_receiver_mode,
-                        root=feature_root,
-                    )
-                ).mkdir(parents=True, exist_ok=True)
+        if args.feature_variant == "success_intent":
+            Path(get_success_intent_label_dir(root=feature_root)).mkdir(parents=True, exist_ok=True)
+        else:
+            for intended_receiver_mode in args.intended_receiver_modes:
+                for return_type in args.return_types:
+                    Path(
+                        label_dir_builder(
+                            return_type,
+                            intended_receiver_mode=intended_receiver_mode,
+                            root=feature_root,
+                        )
+                    ).mkdir(parents=True, exist_ok=True)
 
         if args.post_action:
             if args.feature_variant != "base":
@@ -856,69 +890,16 @@ if __name__ == "__main__":
             print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")
 
             if args.action_type == "all":
-                resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
-                    match,
-                    intended_receiver_modes=args.intended_receiver_modes,
-                    return_types=args.return_types,
-                    intended_receiver_model_id=args.intended_receiver_model_id,
-                )
-                for mode, mode_stats in stats_by_mode.items():
-                    for key in aggregate_stats[mode]:
-                        aggregate_stats[mode][key] += int(mode_stats.get(key, 0) or 0)
-                    if mode == INTENDED_RECEIVER_MODE_MODEL and mode_stats.get("model_failed_passes_total", 0):
-                        print(
-                            "  Intended-receiver model fallback: "
-                            f"{int(mode_stats.get('model_angle_only_fallbacks', 0))} / "
-                            f"{int(mode_stats.get('model_failed_passes_total', 0))} failed passes used angle_only."
-                        )
+                if args.feature_variant == "success_intent":
+                    resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, args.return_types)
+                    for labels in success_intent_labels.values():
+                        action_indices = labels[:, 0].numpy().astype(int)
+                        if not np.all(np.sort(action_indices) == action_indices):
+                            raise ValueError("Action labels are not sorted by action index.")
 
-                for mode, resolved_actions in resolved_actions_by_mode.items():
-                    resolved_action_path = get_resolved_action_path(
-                        match_id,
-                        intended_receiver_mode=mode,
-                        root=feature_root,
-                    )
-                    resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
-                    resolved_actions.to_parquet(resolved_action_path)
-
-                for labels in labels_by_key.values():
-                    action_indices = labels[:, 0].numpy().astype(int)
-                    if not np.all(np.sort(action_indices) == action_indices):
-                        raise ValueError("Action labels are not sorted by action index.")
-
-                if args.feature_variant == "intent_train_augmented":
-                    print("Constructing intent-training augmentation graphs...")
-                    primary_mode = args.intended_receiver_modes[0]
                     primary_return_type = args.return_types[0]
-                    match.actions = resolved_actions_by_mode[primary_mode].copy()
-                    match.labels = labels_by_key[(primary_mode, primary_return_type)]
-                    augmented_graphs, _, augmented_action_indices = construct_intent_training_samples(
-                        match,
-                        extend=True,
-                        add_v_edge_features=True,
-                        return_action_indices=True,
-                    )
-                    if not augmented_graphs:
-                        raise ValueError("No usable intent-training samples were constructed for this match.")
-                    torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
-                    for mode in args.intended_receiver_modes:
-                        for return_type in args.return_types:
-                            label_lookup = {
-                                int(label[0].item()): label.clone()
-                                for label in labels_by_key[(mode, return_type)]
-                            }
-                            augmented_labels = torch.stack(
-                                [label_lookup[action_index] for action_index in augmented_action_indices],
-                                dim=0,
-                            )
-                            label_dir = get_intent_train_label_dir(
-                                return_type,
-                                intended_receiver_mode=mode,
-                                root=feature_root,
-                            )
-                            torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
-                    print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
-                elif args.feature_variant == "success_intent":
+                    match.actions = resolved_actions.copy()
+                    match.labels = success_intent_labels[primary_return_type]
                     print("Constructing success-intent graph features for actions...")
                     success_graphs = construct_graph_features(
                         match,
@@ -934,66 +915,123 @@ if __name__ == "__main__":
                     invalid_graphs = count_invalid_graphs(success_graphs)
                     if invalid_graphs:
                         print(f"  Skipped {invalid_graphs} corrupted action frames while building success-intent graphs.")
-                    for mode in args.intended_receiver_modes:
-                        for return_type in args.return_types:
-                            label_dir = get_action_label_dir(
-                                return_type,
-                                intended_receiver_mode=mode,
-                                root=feature_root,
-                            )
-                            torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
-                    print(f"Successfully saved success-intent graphs for {success_graphs.__len__()} events.")
+                    label_dir = get_success_intent_label_dir(root=feature_root)
+                    torch.save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
+                    print(f"Successfully saved success-intent graphs for {len(success_graphs)} events.")
                 else:
-                    print("Constructing base graph features for actions...")
-                    match.graph_features_0 = construct_graph_features(
+                    resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
                         match,
-                        extend=True,
-                        post_action=False,
-                        feature_variant="base",
-                        add_v_edge_features=True,
+                        intended_receiver_modes=args.intended_receiver_modes,
+                        return_types=args.return_types,
+                        intended_receiver_model_id=args.intended_receiver_model_id,
                     )
-                    valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
-                    if valid_graphs == 0:
-                        raise ValueError("No usable action graphs were constructed for this match.")
-                    torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
-                    invalid_graphs = count_invalid_graphs(match.graph_features_0)
-                    if invalid_graphs:
-                        print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
+                    for mode, mode_stats in stats_by_mode.items():
+                        for key in aggregate_stats[mode]:
+                            aggregate_stats[mode][key] += int(mode_stats.get(key, 0) or 0)
+                        if mode == INTENDED_RECEIVER_MODE_MODEL and mode_stats.get("model_failed_passes_total", 0):
+                            print(
+                                "  Intended-receiver model fallback: "
+                                f"{int(mode_stats.get('model_angle_only_fallbacks', 0))} / "
+                                f"{int(mode_stats.get('model_failed_passes_total', 0))} failed passes used angle_only."
+                            )
 
-                    if args.post_action:
-                        print("Constructing base graph features for post-actions...")
-                        match.graph_features_1 = construct_graph_features(
+                    for mode, resolved_actions in resolved_actions_by_mode.items():
+                        resolved_action_path = get_resolved_action_path(
+                            match_id,
+                            intended_receiver_mode=mode,
+                            root=feature_root,
+                        )
+                        resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
+                        resolved_actions.to_parquet(resolved_action_path)
+
+                    for labels in labels_by_key.values():
+                        action_indices = labels[:, 0].numpy().astype(int)
+                        if not np.all(np.sort(action_indices) == action_indices):
+                            raise ValueError("Action labels are not sorted by action index.")
+
+                    if args.feature_variant == "intent_train_augmented":
+                        print("Constructing intent-training augmentation graphs...")
+                        primary_mode = args.intended_receiver_modes[0]
+                        primary_return_type = args.return_types[0]
+                        match.actions = resolved_actions_by_mode[primary_mode].copy()
+                        match.labels = labels_by_key[(primary_mode, primary_return_type)]
+                        augmented_graphs, _, augmented_action_indices = construct_intent_training_samples(
                             match,
                             extend=True,
-                            post_action=True,
+                            add_v_edge_features=True,
+                            return_action_indices=True,
+                        )
+                        if not augmented_graphs:
+                            raise ValueError("No usable intent-training samples were constructed for this match.")
+                        torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
+                        for mode in args.intended_receiver_modes:
+                            for return_type in args.return_types:
+                                label_lookup = {
+                                    int(label[0].item()): label.clone()
+                                    for label in labels_by_key[(mode, return_type)]
+                                }
+                                augmented_labels = torch.stack(
+                                    [label_lookup[action_index] for action_index in augmented_action_indices],
+                                    dim=0,
+                                )
+                                label_dir = get_intent_train_label_dir(
+                                    return_type,
+                                    intended_receiver_mode=mode,
+                                    root=feature_root,
+                                )
+                                torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
+                        print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
+                    else:
+                        print("Constructing base graph features for actions...")
+                        match.graph_features_0 = construct_graph_features(
+                            match,
+                            extend=True,
+                            post_action=False,
                             feature_variant="base",
                             add_v_edge_features=True,
                         )
-                        torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
+                        valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
+                        if valid_graphs == 0:
+                            raise ValueError("No usable action graphs were constructed for this match.")
+                        torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
+                        invalid_graphs = count_invalid_graphs(match.graph_features_0)
+                        if invalid_graphs:
+                            print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
 
-                    for mode in args.intended_receiver_modes:
-                        for return_type in args.return_types:
-                            label_dir = get_action_label_dir(
-                                return_type,
-                                intended_receiver_mode=mode,
-                                root=feature_root,
+                        if args.post_action:
+                            print("Constructing base graph features for post-actions...")
+                            match.graph_features_1 = construct_graph_features(
+                                match,
+                                extend=True,
+                                post_action=True,
+                                feature_variant="base",
+                                add_v_edge_features=True,
                             )
-                            torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
+                            torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
 
-                    if args.augment_blocks:
                         for mode in args.intended_receiver_modes:
-                            match.actions = resolved_actions_by_mode[mode].copy()
-                            match.labels = labels_by_key[(mode, args.return_types[0])]
-                            augmented_graph_features, augmented_labels = augment_blocked_actions(match)
-                            augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
-                            augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
-                            torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
-                            torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
-                            print(
-                                f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}."
-                            )
+                            for return_type in args.return_types:
+                                label_dir = get_action_label_dir(
+                                    return_type,
+                                    intended_receiver_mode=mode,
+                                    root=feature_root,
+                                )
+                                torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
 
-                    print(f"Successfully saved for {len(match.graph_features_0)} events.")
+                        if args.augment_blocks:
+                            for mode in args.intended_receiver_modes:
+                                match.actions = resolved_actions_by_mode[mode].copy()
+                                match.labels = labels_by_key[(mode, args.return_types[0])]
+                                augmented_graph_features, augmented_labels = augment_blocked_actions(match)
+                                augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
+                                augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
+                                torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
+                                torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
+                                print(
+                                    f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}."
+                                )
+
+                        print(f"Successfully saved for {len(match.graph_features_0)} events.")
             else:
                 primary_return_type = args.return_types[0]
                 match.labels = match.construct_labels(return_type=primary_return_type)
