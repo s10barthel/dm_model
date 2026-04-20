@@ -296,6 +296,13 @@ Useful options:
 - `--overwrite` to rebuild existing outputs
 - `--skip-sync` to stop before ELASTIC synchronization
 
+Subset-safe aggregate behavior:
+
+- when you run a subset with `--match-id` or `--limit`, the per-match files for the selected matches are still processed as usual
+- `data/lineup/line_up.parquet` and `data/splits/match_splits.json` are rebuilt from the currently processed match universe, so subset runs no longer shrink those global files to only the selected matches
+- `data/event/event.parquet` is merged incrementally in subset mode, so reprocessed matches are refreshed without dropping untouched matches
+- full runs without subset filters still rebuild the aggregate files from the full successful run
+
 This step does the Sportec-specific work that DEFCON does not provide:
 
 - Sportec XML discovery

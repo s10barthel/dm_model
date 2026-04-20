@@ -21,11 +21,13 @@ from project_config import (
     EVENT_SYNCED_DIR,
     LINEUP_PATH,
     RAW_SEASON_ROOTS,
+    SPLIT_PATH,
     TEST_SEASONS,
     TRACKING_DIR,
     TRACKING_PROCESSED_DIR,
     TRAIN_SEASONS,
     ensure_project_dirs,
+    load_split_manifest,
     save_split_manifest,
 )
 from sync import config as sync_config
@@ -1252,13 +1254,13 @@ def sync_events(
     return output_events
 
 
-def build_split_manifest(metadata_records: pd.DataFrame) -> None:
+def build_split_manifest(metadata_records: pd.DataFrame, require_both_seasons: bool = True) -> None:
     ordered = metadata_records.sort_values(["kickoff_time", "match_id"], ignore_index=True)
     train_ids = ordered.loc[ordered["season"].isin(TRAIN_SEASONS), "match_id"].tolist()
     test_ids = ordered.loc[ordered["season"].isin(TEST_SEASONS), "match_id"].tolist()
-    if not train_ids:
+    if require_both_seasons and not train_ids:
         raise ValueError(f"No training-season matches were available for seasons: {', '.join(TRAIN_SEASONS)}")
-    if not test_ids:
+    if require_both_seasons and not test_ids:
         raise ValueError(f"No test-season matches were available for seasons: {', '.join(TEST_SEASONS)}")
 
     save_split_manifest(
@@ -1271,6 +1273,7 @@ def build_split_manifest(metadata_records: pd.DataFrame) -> None:
             "test_seasons": list(TEST_SEASONS),
             "season_counts": ordered["season"].value_counts().sort_index().to_dict(),
             "split_rule": "season-based; matches ordered by kickoff_time, then match_id",
+            "allow_partial": not require_both_seasons,
         },
     )
 
@@ -1282,6 +1285,98 @@ def filter_matches(matches: list[MatchFiles], requested_ids: Iterable[str] | Non
     if limit is not None:
         matches = matches[:limit]
     return matches
+
+
+def is_subset_mode(args: argparse.Namespace) -> bool:
+    return bool(args.match_id) or args.limit is not None
+
+
+def has_processed_match_outputs(match_id: str) -> bool:
+    return (TRACKING_PROCESSED_DIR / f"{match_id}.parquet").exists() and (EVENT_SYNCED_DIR / f"{match_id}.csv").exists()
+
+
+def rebuild_processed_universe_lineups(
+    all_matches: list[MatchFiles],
+    current_lineups: dict[str, pd.DataFrame],
+    current_metadata: dict[str, dict[str, object]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    lineup_frames: list[pd.DataFrame] = []
+    metadata_records: list[dict[str, object]] = []
+
+    for match_files in all_matches:
+        if not has_processed_match_outputs(match_files.match_id):
+            continue
+
+        if match_files.match_id in current_lineups and match_files.match_id in current_metadata:
+            lineup_frames.append(current_lineups[match_files.match_id])
+            metadata = current_metadata[match_files.match_id]
+        else:
+            lineup, metadata = parse_match_information(match_files)
+            raw_events = load_match_raw_events(match_files)
+            lineup_frames.append(export_lineup_table(finalize_lineup(lineup, raw_events, metadata)))
+
+        metadata_records.append(
+            {
+                "match_id": match_files.match_id,
+                "kickoff_time": metadata["kickoff_time"],
+                "season": metadata["season"],
+            }
+        )
+
+    if not lineup_frames or not metadata_records:
+        raise RuntimeError(
+            "Subset-safe aggregate rebuild requires at least one fully processed match with "
+            "data/tracking_processed/<match_id>.parquet and data/event_synced/<match_id>.csv."
+        )
+
+    lineups = pd.concat(lineup_frames, ignore_index=True)
+    metadata_df = pd.DataFrame(metadata_records).sort_values(["kickoff_time", "match_id"], ignore_index=True)
+    return lineups, metadata_df
+
+
+def merge_unsynced_event_aggregate(
+    current_events: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    if not current_events:
+        raise RuntimeError("No unsynced events were produced in the current preprocessing run.")
+
+    current_match_ids = list(current_events)
+    current_frame = pd.concat([current_events[match_id] for match_id in current_match_ids], ignore_index=True)
+    if EVENT_PATH.exists():
+        existing_events = pd.read_parquet(EVENT_PATH)
+        existing_events = existing_events.loc[~existing_events["stats_perform_match_id"].isin(current_match_ids)].copy()
+        return pd.concat([existing_events, current_frame], ignore_index=True)
+    return current_frame
+
+
+def validate_aggregate_integrity(skip_synced_check: bool = False) -> None:
+    manifest = load_split_manifest()
+    split_ids = [str(match_id) for match_id in manifest.get("train", [])] + [str(match_id) for match_id in manifest.get("test", [])]
+    lineups = pd.read_parquet(LINEUP_PATH)
+
+    missing_tracking = [match_id for match_id in split_ids if not (TRACKING_PROCESSED_DIR / f"{match_id}.parquet").exists()]
+    missing_synced = (
+        []
+        if skip_synced_check
+        else [match_id for match_id in split_ids if not (EVENT_SYNCED_DIR / f"{match_id}.csv").exists()]
+    )
+    missing_lineup = [
+        match_id
+        for match_id in split_ids
+        if lineups.loc[lineups["stats_perform_match_id"] == match_id].empty
+    ]
+
+    errors: list[str] = []
+    if missing_tracking:
+        errors.append(f"missing tracking_processed for {len(missing_tracking)} match(es): {missing_tracking[:5]}")
+    if missing_synced:
+        errors.append(f"missing event_synced for {len(missing_synced)} match(es): {missing_synced[:5]}")
+    if missing_lineup:
+        errors.append(f"missing lineup rows for {len(missing_lineup)} match(es): {missing_lineup[:5]}")
+    if errors:
+        raise RuntimeError(
+            f"Aggregate preprocessing outputs failed integrity validation against {SPLIT_PATH}: " + "; ".join(errors)
+        )
 
 
 def main() -> None:
@@ -1304,7 +1399,11 @@ def main() -> None:
     processed_lineups: list[pd.DataFrame] = []
     processed_events: list[pd.DataFrame] = []
     successful_metadata: list[dict[str, object]] = []
+    current_lineups_by_match: dict[str, pd.DataFrame] = {}
+    current_events_by_match: dict[str, pd.DataFrame] = {}
+    current_metadata_by_match: dict[str, dict[str, object]] = {}
     skipped_matches: list[dict[str, str]] = []
+    subset_mode = is_subset_mode(args)
 
     selected_matches = filter_matches(all_matches, args.match_id, args.limit)
     if not selected_matches:
@@ -1370,15 +1469,18 @@ def main() -> None:
                     f"elastic_receive_fallbacks={sync_audit.get('elastic_receive_fallbacks', 0)}",
                 )
 
-            processed_lineups.append(export_lineup_table(finalized_lineup))
+            exported_lineup = export_lineup_table(finalized_lineup)
+            metadata_record = {
+                "match_id": match_files.match_id,
+                "kickoff_time": metadata["kickoff_time"],
+                "season": metadata["season"],
+            }
+            processed_lineups.append(exported_lineup)
             processed_events.append(defcon_events)
-            successful_metadata.append(
-                {
-                    "match_id": match_files.match_id,
-                    "kickoff_time": metadata["kickoff_time"],
-                    "season": metadata["season"],
-                }
-            )
+            successful_metadata.append(metadata_record)
+            current_lineups_by_match[match_files.match_id] = exported_lineup
+            current_events_by_match[match_files.match_id] = defcon_events
+            current_metadata_by_match[match_files.match_id] = metadata
         except Exception as exc:
             error_summary = summarize_exception(exc)
             skipped_matches.append({"match_id": match_files.match_id, "error": error_summary})
@@ -1388,14 +1490,22 @@ def main() -> None:
     if not processed_lineups or not processed_events:
         raise RuntimeError("Preprocessing did not produce any usable matches.")
 
-    successful_metadata_df = pd.DataFrame(successful_metadata)
-    build_split_manifest(successful_metadata_df)
+    if subset_mode:
+        all_lineups, aggregate_metadata_df = rebuild_processed_universe_lineups(
+            all_matches,
+            current_lineups_by_match,
+            current_metadata_by_match,
+        )
+        all_events = merge_unsynced_event_aggregate(current_events_by_match)
+    else:
+        aggregate_metadata_df = pd.DataFrame(successful_metadata)
+        all_lineups = pd.concat(processed_lineups, ignore_index=True)
+        all_events = pd.concat(processed_events, ignore_index=True)
 
-    all_lineups = pd.concat(processed_lineups, ignore_index=True)
+    build_split_manifest(aggregate_metadata_df, require_both_seasons=not subset_mode)
     all_lineups.to_parquet(LINEUP_PATH, index=False)
-
-    all_events = pd.concat(processed_events, ignore_index=True)
     all_events.to_parquet(EVENT_PATH, index=False)
+    validate_aggregate_integrity(skip_synced_check=bool(args.skip_sync))
 
     print(f"Saved lineup parquet to {LINEUP_PATH}")
     print(f"Saved unsynced event parquet to {EVENT_PATH}")
