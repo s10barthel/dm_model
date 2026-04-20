@@ -24,12 +24,15 @@ The model structure is copied from DEFCON, the upstream source code for the pape
   - [6. Export per-match component predictions](#6-export-per-match-component-predictions)
   - [7. Visualize one action at a time](#7-visualize-one-action-at-a-time)
   - [8. Run frame-level inference on HawkEye data](#8-run-frame-level-inference-on-hawkeye-data)
-  - [9. Run frame-level inference on SkillCorner data](#9-run-frame-level-inference-on-skillcorner-data)
+  - [9. Run benchmark inference on local benchmark data](#9-run-benchmark-inference-on-local-benchmark-data)
+  - [10. Run frame-level inference on SkillCorner data](#10-run-frame-level-inference-on-skillcorner-data)
 - [Outcome Target Selection](#outcome-target-selection)
   - [`--return_type` Applies To All Outcome Target Families](#return_type-applies-to-all-outcome-target-families)
   - [Where to switch targets](#where-to-switch-targets)
+- [Intended-Receiver Workflow](#intended-receiver-workflow)
 - [Notes](#notes)
 - [CLI Reference](#cli-reference)
+- [Script I/O Reference](#script-io-reference)
 
 ## Changes From Upstream DEFCON
 
@@ -40,6 +43,7 @@ The main adaptations in this repository are:
 - temporal `t0 / t-12 / t-25` augmentation for `action_intent` and `pass_intent` training data
 - narrowed modeled pass family: only `pass` and `cross` are treated as pass-like actions, so set pieces are excluded from the modeled pass category
 - a HawkEye inference/visualization pipeline for frame-level external data
+- a local benchmark inference/visualization pipeline for paired one-frame game-state comparisons
 - a SkillCorner inference/visualization pipeline for synchronized external tracking+event data
 - a HawkEye BallReceipt freeze option that can freeze the possessor and ball state after the receipt frame
 
@@ -99,6 +103,7 @@ After preprocessing, the project writes DEFCON-style files under `data/ajax`:
 - `component_runs/<component_run_id>/...`
 - `component_runs/latest.json`
 - `component_runs/hawkeye/<component_run_id>/...`
+- `component_runs/benchmark/<component_run_id>/...`
 - `component_runs/skillcorner/<component_run_id>/...`
 - `splits/match_splits.json`
 
@@ -111,6 +116,7 @@ The main output directories are:
 - `data/ajax/features/runs/<feature_run_id>` for versioned graph tensors and label tensors used by training/evaluation
 - `data/ajax/component_runs/<component_run_id>` for versioned per-match component prediction exports from `scripts/run_relevant_models.py`
 - `data/ajax/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
+- `data/ajax/component_runs/benchmark/<component_run_id>` for versioned benchmark exports
 - `data/ajax/component_runs/skillcorner/<component_run_id>` for versioned SkillCorner exports
 - `saved/<task>/<model_run_id>` for trained checkpoint runs
 - `saved/bundles/<bundle_id>` for machine-readable training bundle manifests
@@ -128,6 +134,7 @@ Feature and component runs use explicit `latest.json` pointers:
 - `data/ajax/features/runs/latest.json`
 - `data/ajax/component_runs/latest.json`
 - `data/ajax/component_runs/hawkeye/latest.json`
+- `data/ajax/component_runs/benchmark/latest.json`
 - `data/ajax/component_runs/skillcorner/latest.json`
 
 Checkpoint runs are resolved from checkpoint metadata instead of one global pointer. The wrappers scan `saved/<task>/*/metadata.json` and choose the latest compatible checkpoint for the requested task/context.
@@ -165,6 +172,9 @@ The external-data adapters follow the same pattern:
 - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
 - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.csv`
 - `data/ajax/component_runs/hawkeye/<component_run_id>/metadata.json`
+- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
+- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.csv`
+- `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
 - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/*.parquet`
 - `data/ajax/component_runs/skillcorner/<component_run_id>/metadata.json`
 
@@ -225,11 +235,13 @@ The runner executes these stages in order:
 5. `scripts/evaluate_relevant_models.py`
 6. `scripts/run_relevant_models.py`
 7. `scripts/run_hawkeye.py`
-8. `scripts/run_skillcorner.py`
+8. `scripts/run_benchmark.py`
+9. `scripts/run_skillcorner.py`
 
 Useful options:
 
-- `--skip-preprocess`, `--skip-xt`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-skillcorner`
+- `--skip-preprocess`, `--skip-xt`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`
+- `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout; default: `benchmark`
 - `--add_v_edge_features` to append the optional velocity-angle edge features during feature generation
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
 - `--overwrite` to rebuild supported preprocessing and xT outputs
@@ -242,13 +254,27 @@ Checkpoint selection inside the downstream training/evaluation/inference scripts
 
 ## End-to-End Workflow
 
-The sections below describe each stage individually. `scripts/main.py` wraps steps 1-6, 8, and 9, and intentionally excludes the visualization scripts.
+The sections below describe each stage individually. `scripts/main.py` wraps steps 1-6, 8, 9, and 10, and intentionally excludes the visualization scripts.
 
 ### 1. Preprocess Sportec data
 
 ```powershell
 python scripts/preprocess_sportec.py
 ```
+
+Inputs:
+
+- raw Sportec season folders under `Bundesliga_season_23_24/...` and `Bundesliga_season_24_25/...`
+- for `24_25`, the split metadata layout under `match_information/master`, `match_information/starting_players`, and `KPI_Merged`
+
+Outputs:
+
+- `data/ajax/tracking/*.parquet`
+- `data/ajax/tracking_processed/*.parquet`
+- `data/ajax/event/event.parquet`
+- `data/ajax/event_synced/*.csv`
+- `data/ajax/lineup/line_up.parquet`
+- `data/ajax/splits/match_splits.json`
 
 Useful options:
 
@@ -273,6 +299,23 @@ This step does all custom work that DEFCON does not provide:
 python scripts/generate_xt.py
 python scripts/generate_goal_distance.py
 ```
+
+Inputs:
+
+- `data/ajax/event_synced/*.csv`
+- `data/ajax/splits/match_splits.json`
+
+Outputs:
+
+- for xT:
+  - `data/ajax/xT/xT.csv`
+  - `data/ajax/xT/xT_grid.csv`
+  - `data/ajax/xT/fit_metadata.json`
+  - `data/ajax/xT/matches/*.csv`
+- for goal-distance:
+  - `data/ajax/goal_distance/goal_distance.csv`
+  - `data/ajax/goal_distance/metadata.json`
+  - `data/ajax/goal_distance/matches/*.csv`
 
 Useful options:
 
@@ -305,6 +348,18 @@ python scripts/generate_relevant_features.py --run-id feature_20260414T123456_ab
 python scripts/generate_relevant_features.py --add_v_edge_features
 ```
 
+Inputs:
+
+- `data/ajax/tracking_processed/*.parquet`
+- `data/ajax/event_synced/*.csv`
+- `data/ajax/lineup/line_up.parquet`
+- `data/ajax/splits/match_splits.json`
+- optional sidecars from:
+  - `data/ajax/xT/matches/*.csv`
+  - `data/ajax/goal_distance/matches/*.csv`
+- when `--use-intended-receiver-model` is enabled:
+  - a trained `success_intent/<model_run_id>` checkpoint referenced by `--intended-receiver-model-id`
+
 Run this again after `scripts/generate_xt.py` or `scripts/generate_goal_distance.py` whenever you want to train outcome models with `--use_xt` or `--use_goal_distance`. Also rerun it whenever you change `--return_type`, because the label tensors under `data/ajax/features` are versioned by the resolved return semantics.
 
 Each invocation creates a new feature-artifact run under `data/ajax/features/runs/<feature_run_id>/` and updates `data/ajax/features/runs/latest.json`.
@@ -315,6 +370,8 @@ Useful options:
 - `--return_type <disc_gamma|next_N>` to choose which resolved outcome-return labels are written into the run
 - `--add_v_edge_features` to append the optional velocity-angle edge features
 - `--use-original-intended-receiver` and `--use-intended-receiver-model` to choose intended-receiver resolution mode
+
+`generate_relevant_features.py` does not choose between binary goals, xG, xT, and goal-distance. It writes label tensors that already contain all supported outcome families for the selected `--return_type`, and the later training/evaluation/inference step chooses which label slice to use via `--use_xg`, `--use_xt`, or `--use_goal_distance`.
 
 This writes, inside the run root:
 
@@ -335,6 +392,22 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id>
 python scripts/train_relevant_models.py --bundle-id model_bundle_20260414T123456_abcdef12
 ```
 
+Inputs:
+
+- `data/ajax/features/runs/<feature_run_id>/...`
+- optional existing checkpoints when you pass explicit model ids or legacy trial ids
+
+Outputs:
+
+- `saved/pass_intent/<model_run_id>/...`
+- `saved/action_intent/<model_run_id>/...`
+- `saved/pass_success/<model_run_id>/...`
+- `saved/outcome_scoring/<model_run_id>/...`
+- `saved/outcome_conceding/<model_run_id>/...`
+- `saved/success_intent/<model_run_id>/...` when training the learned intended-receiver stage
+- `saved/failure_receiver/<model_run_id>/...` when training the learned intended-receiver auxiliary failure model
+- `saved/bundles/<bundle_id>/metadata.json`
+
 This trains the four retained models and the auxiliary upstream-compatible models needed by the retained wrapper. New checkpoints get auto-generated model ids of the form:
 
 - `pass_intent/<model_run_id>`
@@ -345,6 +418,8 @@ This trains the four retained models and the auxiliary upstream-compatible model
 - `failure_receiver/<model_run_id>`
 
 The wrapper also writes one bundle manifest under `saved/bundles/<bundle_id>/metadata.json` so later steps can reuse the exact produced model ids without relying on ambient "latest" behavior.
+
+In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. `failure_receiver` is a separate auxiliary model that scores opponent receivers for failed-pass situations.
 
 Wrapper behavior:
 
@@ -371,10 +446,22 @@ python scripts/evaluate_relevant_models.py --outcome-scoring-model-id outcome_sc
 python scripts/evaluate_relevant_models.py --feature-run-id <feature_run_id>
 ```
 
+Inputs:
+
+- `data/ajax/features/runs/<feature_run_id>/...`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
+
+Outputs:
+
+- no dedicated output files
+- metrics are printed to stdout by `test.py`
+
 This runs the original `test.py` flow for the retained model family:
 
 - `action_intent/<model_run_id>`
+- `pass_intent/<model_run_id>`
 - `pass_success/<model_run_id>`
+- `success_intent/<model_run_id>`
 - `outcome_scoring/<model_run_id>`
 - `outcome_conceding/<model_run_id>`
 
@@ -391,6 +478,12 @@ python scripts/run_relevant_models.py --split test
 python scripts/run_relevant_models.py --split test --feature-run-id <feature_run_id>
 python scripts/run_relevant_models.py --split test --feature-run-id <feature_run_id> --run-id component_20260414T123456_abcdef12
 ```
+
+Inputs:
+
+- `data/ajax/features/runs/<feature_run_id>/...`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
+- `data/ajax/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
 Each invocation creates a new component run under `data/ajax/component_runs/<component_run_id>/` and updates `data/ajax/component_runs/latest.json`.
 
@@ -423,6 +516,23 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 
 `--action-id` refers to the `action_id` column in `data/ajax/event_synced/<match_id>.csv`.
 
+Inputs:
+
+- `data/ajax/features/runs/<feature_run_id>/...`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
+- `data/ajax/event_synced/<match_id>.csv`
+
+Outputs:
+
+- `data/ajax/visualizations/<match_id>/<action_id>/action_intent.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/pass_intent.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/pass_success.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/outcome_scoring_success.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/outcome_scoring_failure.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
+- `data/ajax/visualizations/<match_id>/<action_id>/pass_score.png`
+
 The script always writes 8 PNGs under `data/ajax/visualizations/<match_id>/<action_id>/`:
 
 - `action_intent.png`
@@ -448,6 +558,12 @@ python scripts/run_hawkeye.py
 python scripts/run_hawkeye.py --run-id hawkeye_component_20260414T123456_abcdef12
 ```
 
+Inputs:
+
+- `hawkeye_data/centroid_data_team.csv`
+- `hawkeye_data/ball_data_selected.csv`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
+
 This processes `hawkeye_data/centroid_data_team.csv` and `hawkeye_data/ball_data_selected.csv` and writes versioned consolidated component outputs to:
 
 - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
@@ -469,6 +585,24 @@ To visualize one HawkEye situation as MP4s:
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 ```
 
+Inputs:
+
+- `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
+- `data/ajax/component_runs/hawkeye/<component_run_id>/metadata.json`
+- `hawkeye_data/centroid_data_team.csv`
+- `hawkeye_data/ball_data_selected.csv`
+
+Outputs:
+
+- `data/ajax/visualizations/hawkeye/<situation_id>/action_intent.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/pass_intent.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/pass_success.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_scoring_success.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_scoring_failure.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_conceding_success.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/outcome_conceding_failure.mp4|gif`
+- `data/ajax/visualizations/hawkeye/<situation_id>/pass_score.mp4|gif`
+
 This writes 8 MP4s under `data/ajax/visualizations/hawkeye/<situation_id>/`.
 
 Useful option:
@@ -483,12 +617,87 @@ Useful option:
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
 ```
 
-### 9. Run frame-level inference on SkillCorner data
+`scripts/run_and_visualize_hawkeye.py` uses the raw HawkEye CSVs plus checkpoint runs under `saved/<task>/<model_run_id>/...` and writes the same 8 visualization files directly, without reading a precomputed HawkEye component run.
+
+### 9. Run benchmark inference on local benchmark data
+
+```powershell
+python scripts/run_benchmark.py
+python scripts/run_benchmark.py --modification 1 --use-original-intended-receiver --use_xg
+python scripts/run_benchmark.py --run-id benchmark_component_20260420T123456_abcdef12
+```
+
+Inputs:
+
+- `benchmark/modification_<n>/game_state_1.csv`
+- `benchmark/modification_<n>/game_state_2.csv`
+- `benchmark/modification_<n>/modification.csv`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
+
+This reads paired one-state benchmark snapshots from the local `benchmark/` checkout and writes one consolidated benchmark export run to:
+
+- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
+- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.csv`
+- `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
+
+The export preserves the original long-format benchmark rows, appends one synthetic shot row per game state for the attacking-goal `action_intent` probability, and records the selected modifications plus resolved model metadata in `metadata.json`.
+
+Useful options:
+
+- `--input-dir <path>` to point at a different local benchmark checkout
+- `--modification ...` to restrict inference to selected benchmark modifications
+- `--limit N` to smoke-test on the first `N` selected modifications
+- `--run-id <component_run_id>` to pin the created benchmark export run id instead of auto-generating one
+
+If the model ids are omitted, the script resolves the latest compatible checkpoints automatically. The saved metadata records the resolved model ids, their feature signatures, and the graph schema used for the run.
+
+To visualize one benchmark state as PNGs:
+
+```powershell
+python scripts/visualize_benchmark.py --modification 1 --game-state 1
+python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id>
+```
+
+Inputs:
+
+- `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
+- `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
+- `benchmark/modification_<n>/game_state_1.csv`
+- `benchmark/modification_<n>/game_state_2.csv`
+- `benchmark/modification_<n>/modification.csv`
+
+Outputs:
+
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/action_intent.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_intent.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_success.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_scoring_success.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_scoring_failure.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_conceding_success.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/outcome_conceding_failure.png`
+- `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/pass_score.png`
+
+This writes 8 PNGs under `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/` using the same pitch-control snapshot style as the HawkEye visualizer.
+
+Useful option:
+
+- `--component-run-id <component_run_id>` to read a specific versioned benchmark component export; otherwise the latest successful benchmark component run is used
+- `--component-dir <path>` to point directly at a benchmark component-run root
+- `--show-trajectories` to render dashed recent player trajectories, even though benchmark states contain only one snapshot
+
+### 10. Run frame-level inference on SkillCorner data
 
 ```powershell
 python scripts/run_skillcorner.py
 python scripts/run_skillcorner.py --run-id skillcorner_component_20260414T123456_abcdef12
 ```
+
+Inputs:
+
+- `skillcorner_data/<match_id>_tracking.jsonl`
+- `skillcorner_data/<match_id>_match.json`
+- `skillcorner_data/<match_id>_dynamic_events.csv`
+- checkpoint runs under `saved/<task>/<model_run_id>/...`
 
 This reads synchronized SkillCorner files from `skillcorner_data/` and writes versioned per-match parquet outputs under:
 
@@ -511,6 +720,24 @@ To visualize one SkillCorner possession as MP4s:
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 ```
+
+Inputs:
+
+- `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/*.parquet`
+- `skillcorner_data/<match_id>_tracking.jsonl`
+- `skillcorner_data/<match_id>_match.json`
+- `skillcorner_data/<match_id>_dynamic_events.csv`
+
+Outputs:
+
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/action_intent.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_intent.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_success.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_scoring_success.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_scoring_failure.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_conceding_success.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/outcome_conceding_failure.mp4|gif`
+- `data/ajax/visualizations/skillcorner/<match_id>/<index>/pass_score.mp4|gif`
 
 This writes 8 MP4s under `data/ajax/visualizations/skillcorner/<match_id>/<index>/`.
 
@@ -617,6 +844,23 @@ Note: the low-level entrypoints do not use the same spelling here:
 
 If you generate or rebuild xT or goal-distance artifacts, rerun `scripts/generate_relevant_features.py` before any `--use_xt` or `--use_goal_distance` training run so the feature label tensors are refreshed.
 
+## Intended-Receiver Workflow
+
+There are three intended-receiver modes in the codebase:
+
+- `original`: use the original labels from the synced event data
+- `angle_only`: use the heuristic relabeling flow without a learned receiver model
+- `model`: use a learned intended-receiver checkpoint
+
+The learned workflow is two-stage:
+
+1. generate a preparatory feature run without relying on a learned intended-receiver checkpoint yet
+2. train `success_intent`, which is the teammate-selection intended-receiver model
+3. generate the main feature run with `--use-intended-receiver-model --intended-receiver-model-id success_intent/<model_run_id>`
+4. train the retained models on that main feature run
+
+`scripts/main.py` already automates this bootstrap sequence when you enable `--use-intended-receiver-model` and do not skip training. In that flow, `success_intent` is the model that predicts the intended teammate for pass-like actions. `failure_receiver` is a separate auxiliary model used only inside the same workflow for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
+
 ## Notes
 
 - `scripts/main.py` is the scoped pipeline runner for this repository.
@@ -645,7 +889,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--skip-evaluate`: skip `scripts/evaluate_relevant_models.py`. Default: off.
 - `--skip-run-relevant`: skip `scripts/run_relevant_models.py`. Default: off.
 - `--skip-hawkeye`: skip `scripts/run_hawkeye.py`. Default: off.
+- `--skip-benchmark`: skip `scripts/run_benchmark.py`. Default: off.
 - `--skip-skillcorner`: skip `scripts/run_skillcorner.py`. Default: off.
+- `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`. Default: `benchmark`.
 - `--add_v_edge_features`: add the optional velocity-angle edge features during feature generation. Default: off.
 - `--xy-only` / `--no-xy-only`: override the training wrapper's xy-only setting for this pipeline run. Default: no override, so `scripts/train_relevant_models.py` keeps `xy_only` off.
 - `--possessor-aware` / `--no-possessor-aware`: override the training wrapper's possessor-awareness setting for this pipeline run. Default: no override, so possessor-aware stays on.
@@ -764,6 +1010,25 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/ajax/component_runs/hawkeye`.
 
+### `scripts/run_benchmark.py`
+
+- `--input-dir <path>`: local benchmark data root. Default: `benchmark`.
+- `--modification <id>`: restrict inference to one or more specific benchmark modifications. Default: all valid modifications.
+- `--limit <N>`: process only the first `N` selected modifications. Default: no limit.
+- `--device <device>`: inference device. Default: `cuda:0`.
+- `--use_xg`: resolve xG-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_xt`: resolve xT-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use_goal_distance`: resolve goal-distance-compatible outcome checkpoints instead of the binary-goal default. Default: off.
+- `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
+- `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
+- `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/ajax/component_runs/benchmark`.
+
 ### `scripts/run_skillcorner.py`
 
 - `--input-dir <path>`: SkillCorner data root. Default: `skillcorner_data`.
@@ -776,6 +1041,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-original-intended-receiver`: resolve checkpoints in original intended-receiver mode. Default: off.
 - `--use-intended-receiver-model`: resolve checkpoints in learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -798,6 +1064,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-intended-receiver-model`: switch the default legacy checkpoint family to learned intended-receiver mode. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: auto-resolve latest compatible checkpoint.
+- `--success-intent-model-id <model_id>`: explicit `success_intent` checkpoint id used for intended-recipient overlays. Default: auto-resolve latest compatible checkpoint.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: auto-resolve latest compatible checkpoint.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: auto-resolve latest compatible checkpoint.
@@ -813,6 +1080,16 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
 - `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations/hawkeye`.
+
+### `scripts/visualize_benchmark.py`
+
+- `--input-dir <path>`: local benchmark data root. Default: `benchmark`.
+- `--modification <id>`: restrict visualization to one or more benchmark modifications from the selected component run. Default: all available modifications in the selected run.
+- `--game-state {1,2}`: restrict visualization to one or more game states. Default: both game states present in the selected run.
+- `--component-run-id <component_run_id>`: versioned benchmark component run to visualize. Default: latest successful benchmark component run.
+- `--component-dir <path>`: explicit benchmark component-run root override. Default: none; when set it overrides `--component-run-id`.
+- `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations/benchmark`.
+- `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 
 ### `scripts/run_and_visualize_hawkeye.py`
 
@@ -842,3 +1119,206 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: visualization root directory. Default: `data/ajax/visualizations/skillcorner`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+
+## Script I/O Reference
+
+This appendix summarizes the primary input and output files for each `scripts/*.py` entrypoint. Paths below are code-level defaults and conventions, not a snapshot of whatever files happen to be present on a given device.
+
+### `scripts/main.py`
+
+- Inputs: the inputs of the enabled downstream stages, typically raw Sportec season folders plus optional HawkEye and SkillCorner raw directories.
+- Outputs: no unique files of its own; it orchestrates the outputs of the enabled downstream scripts.
+
+### `scripts/preprocess_sportec.py`
+
+- Inputs:
+  - `Bundesliga_season_23_24/tracking_data/*`
+  - `Bundesliga_season_23_24/event_data/*`
+  - `Bundesliga_season_23_24/match_information/*`
+  - `Bundesliga_season_24_25/tracking_data/*`
+  - `Bundesliga_season_24_25/event_data/*`
+  - `Bundesliga_season_24_25/match_information/master/*`
+  - `Bundesliga_season_24_25/match_information/starting_players/*`
+  - `Bundesliga_season_24_25/KPI_Merged/*`
+- Outputs:
+  - `data/ajax/tracking/*.parquet`
+  - `data/ajax/tracking_processed/*.parquet`
+  - `data/ajax/event/event.parquet`
+  - `data/ajax/event_synced/*.csv`
+  - `data/ajax/lineup/line_up.parquet`
+  - `data/ajax/splits/match_splits.json`
+
+### `scripts/generate_xt.py`
+
+- Inputs:
+  - `data/ajax/event_synced/*.csv`
+  - `data/ajax/splits/match_splits.json`
+- Outputs:
+  - `data/ajax/xT/xT.csv`
+  - `data/ajax/xT/xT_grid.csv`
+  - `data/ajax/xT/fit_metadata.json`
+  - `data/ajax/xT/matches/*.csv`
+
+### `scripts/generate_goal_distance.py`
+
+- Inputs:
+  - `data/ajax/event_synced/*.csv`
+- Outputs:
+  - `data/ajax/goal_distance/goal_distance.csv`
+  - `data/ajax/goal_distance/metadata.json`
+  - `data/ajax/goal_distance/matches/*.csv`
+
+### `scripts/generate_relevant_features.py`
+
+- Inputs:
+  - `data/ajax/tracking_processed/*.parquet`
+  - `data/ajax/event_synced/*.csv`
+  - `data/ajax/lineup/line_up.parquet`
+  - `data/ajax/splits/match_splits.json`
+  - optional target sidecars under `data/ajax/xT/matches/*.csv` and `data/ajax/goal_distance/matches/*.csv`
+  - optional learned intended-receiver checkpoint `saved/success_intent/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/features/runs/<feature_run_id>/action_graphs/*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/post_action_graphs/*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/action_graphs_intent_train/*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/action_graphs_success_intent/*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/action_labels_<return_type>*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt`
+  - `data/ajax/features/runs/<feature_run_id>/resolved_actions*.parquet`
+  - `data/ajax/features/runs/<feature_run_id>/metadata.json`
+
+### `scripts/train_relevant_models.py`
+
+- Inputs:
+  - `data/ajax/features/runs/<feature_run_id>/...`
+- Outputs:
+  - `saved/pass_intent/<model_run_id>/...`
+  - `saved/action_intent/<model_run_id>/...`
+  - `saved/pass_success/<model_run_id>/...`
+  - `saved/outcome_scoring/<model_run_id>/...`
+  - `saved/outcome_conceding/<model_run_id>/...`
+  - `saved/success_intent/<model_run_id>/...` when the learned intended-receiver stage is trained
+  - `saved/failure_receiver/<model_run_id>/...` when the learned intended-receiver auxiliary model is trained
+  - `saved/bundles/<bundle_id>/metadata.json`
+
+### `scripts/evaluate_relevant_models.py`
+
+- Inputs:
+  - `data/ajax/features/runs/<feature_run_id>/...`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - no dedicated files; metrics are printed to stdout by `test.py`
+
+### `scripts/run_relevant_models.py`
+
+- Inputs:
+  - `data/ajax/features/runs/<feature_run_id>/...`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
+  - `data/ajax/component_runs/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
+  - `data/ajax/component_runs/<component_run_id>/metadata.json`
+
+### `scripts/visualize_action_components.py`
+
+- Inputs:
+  - `data/ajax/features/runs/<feature_run_id>/...`
+  - `data/ajax/event_synced/<match_id>.csv`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/visualizations/<match_id>/<action_id>/action_intent.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/pass_intent.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/pass_success.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/outcome_scoring_success.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/outcome_scoring_failure.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
+  - `data/ajax/visualizations/<match_id>/<action_id>/pass_score.png`
+
+### `scripts/run_hawkeye.py`
+
+- Inputs:
+  - `hawkeye_data/centroid_data_team.csv`
+  - `hawkeye_data/ball_data_selected.csv`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
+  - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.csv`
+  - `data/ajax/component_runs/hawkeye/<component_run_id>/metadata.json`
+
+### `scripts/visualize_hawkeye.py`
+
+- Inputs:
+  - `data/ajax/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
+  - `data/ajax/component_runs/hawkeye/<component_run_id>/metadata.json`
+  - `hawkeye_data/centroid_data_team.csv`
+  - `hawkeye_data/ball_data_selected.csv`
+- Outputs:
+  - `data/ajax/visualizations/hawkeye/<situation_id>/*.mp4`
+  - or `data/ajax/visualizations/hawkeye/<situation_id>/*.gif`
+
+### `scripts/run_benchmark.py`
+
+- Inputs:
+  - `benchmark/modification_<n>/game_state_1.csv`
+  - `benchmark/modification_<n>/game_state_2.csv`
+  - `benchmark/modification_<n>/modification.csv`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
+  - `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.csv`
+  - `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
+
+### `scripts/visualize_benchmark.py`
+
+- Inputs:
+  - `data/ajax/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
+  - `data/ajax/component_runs/benchmark/<component_run_id>/metadata.json`
+  - `benchmark/modification_<n>/game_state_1.csv`
+  - `benchmark/modification_<n>/game_state_2.csv`
+  - `benchmark/modification_<n>/modification.csv`
+- Outputs:
+  - `data/ajax/visualizations/benchmark/modification_<n>/game_state_<m>/*.png`
+
+### `scripts/run_and_visualize_hawkeye.py`
+
+- Inputs:
+  - `hawkeye_data/centroid_data_team.csv`
+  - `hawkeye_data/ball_data_selected.csv`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/visualizations/hawkeye/<situation_id>/*.mp4`
+  - or `data/ajax/visualizations/hawkeye/<situation_id>/*.gif`
+
+### `scripts/run_skillcorner.py`
+
+- Inputs:
+  - `skillcorner_data/<match_id>_tracking.jsonl`
+  - `skillcorner_data/<match_id>_match.json`
+  - `skillcorner_data/<match_id>_dynamic_events.csv`
+  - `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/action_intent.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/pass_intent.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/pass_success.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/metadata.json`
+
+### `scripts/visualize_skillcorner.py`
+
+- Inputs:
+  - `data/ajax/component_runs/skillcorner/<component_run_id>/<match_id>/*.parquet`
+  - `skillcorner_data/<match_id>_tracking.jsonl`
+  - `skillcorner_data/<match_id>_match.json`
+  - `skillcorner_data/<match_id>_dynamic_events.csv`
+- Outputs:
+  - `data/ajax/visualizations/skillcorner/<match_id>/<index>/*.mp4`
+  - or `data/ajax/visualizations/skillcorner/<match_id>/<index>/*.gif`

@@ -15,6 +15,7 @@ from project_config import (
     GOAL_DISTANCE_DIR,
     GOAL_DISTANCE_MATCH_DIR,
     INTENDED_RECEIVER_MODE_MODEL,
+    PROJECT_ROOT,
     XT_DIR,
     XT_MATCH_DIR,
     generate_run_id,
@@ -89,7 +90,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-evaluate", action="store_true", help="Skip scripts/evaluate_relevant_models.py.")
     parser.add_argument("--skip-run-relevant", action="store_true", help="Skip scripts/run_relevant_models.py.")
     parser.add_argument("--skip-hawkeye", action="store_true", help="Skip scripts/run_hawkeye.py.")
+    parser.add_argument("--skip-benchmark", action="store_true", help="Skip scripts/run_benchmark.py.")
     parser.add_argument("--skip-skillcorner", action="store_true", help="Skip scripts/run_skillcorner.py.")
+    parser.add_argument(
+        "--benchmark-input-dir",
+        default=str(PROJECT_ROOT / "benchmark"),
+        help="Benchmark data root passed to scripts/run_benchmark.py.",
+    )
     parser.add_argument("--add_v_edge_features", action="store_true", help="Append velocity-angle edge features during feature generation.")
     parser.add_argument(
         "--overwrite",
@@ -445,6 +452,21 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                 include_target=True,
             )
         )
+
+    if not args.skip_benchmark:
+        benchmark_command = append_mode_flags(
+            [
+            python,
+            "scripts/run_benchmark.py",
+            "--input-dir",
+            args.benchmark_input_dir,
+            "--device",
+            args.device,
+            ],
+            args,
+            include_target=True,
+        )
+        commands.append(benchmark_command)
 
     if not args.skip_skillcorner:
         commands.append(

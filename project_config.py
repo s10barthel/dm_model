@@ -39,12 +39,14 @@ COMPONENT_DIR = DATA_ROOT / "defcon_components"
 FEATURE_RUNS_DIR = FEATURE_DIR / "runs"
 COMPONENT_RUNS_DIR = DATA_ROOT / "component_runs"
 HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
+BENCHMARK_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "benchmark"
 SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
 SPLIT_DIR = DATA_ROOT / "splits"
 SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 FEATURE_LATEST_PATH = FEATURE_RUNS_DIR / "latest.json"
 COMPONENT_LATEST_PATH = COMPONENT_RUNS_DIR / "latest.json"
 HAWKEYE_COMPONENT_LATEST_PATH = HAWKEYE_COMPONENT_RUNS_DIR / "latest.json"
+BENCHMARK_COMPONENT_LATEST_PATH = BENCHMARK_COMPONENT_RUNS_DIR / "latest.json"
 SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.json"
 
 MODEL_TRAIN_FRACTION = 0.8
@@ -144,6 +146,7 @@ def ensure_project_dirs() -> None:
         COMPONENT_DIR,
         COMPONENT_RUNS_DIR,
         HAWKEYE_COMPONENT_RUNS_DIR,
+        BENCHMARK_COMPONENT_RUNS_DIR,
         SKILLCORNER_COMPONENT_RUNS_DIR,
         SUCCESS_INTENT_GRAPH_DIR,
         SAVED_DIR,
@@ -269,6 +272,10 @@ def get_hawkeye_component_run_root(run_id: str) -> Path:
     return HAWKEYE_COMPONENT_RUNS_DIR / str(run_id)
 
 
+def get_benchmark_component_run_root(run_id: str) -> Path:
+    return BENCHMARK_COMPONENT_RUNS_DIR / str(run_id)
+
+
 def get_skillcorner_component_run_root(run_id: str) -> Path:
     return SKILLCORNER_COMPONENT_RUNS_DIR / str(run_id)
 
@@ -296,6 +303,8 @@ def _latest_path(kind: str) -> Path:
         return COMPONENT_LATEST_PATH
     if kind == "hawkeye_component":
         return HAWKEYE_COMPONENT_LATEST_PATH
+    if kind == "benchmark_component":
+        return BENCHMARK_COMPONENT_LATEST_PATH
     if kind == "skillcorner_component":
         return SKILLCORNER_COMPONENT_LATEST_PATH
     raise ValueError(f"Unsupported run kind: {kind}")
@@ -356,6 +365,8 @@ def resolve_named_component_run_id(kind: str, run_id: str | None = None, require
         return None
     if kind == "hawkeye_component":
         run_root = get_hawkeye_component_run_root(resolved)
+    elif kind == "benchmark_component":
+        run_root = get_benchmark_component_run_root(resolved)
     elif kind == "skillcorner_component":
         run_root = get_skillcorner_component_run_root(resolved)
     else:
