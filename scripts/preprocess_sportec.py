@@ -547,6 +547,86 @@ def build_pitch_dimensions() -> MetricPitchDimensions:
     )
 
 
+def count_overlapping_frame_ids(tracking: pd.DataFrame, frame_col: str = "frame_id") -> int:
+    if frame_col not in tracking.columns or "period_id" not in tracking.columns:
+        return 0
+
+    frame_pairs = tracking[["period_id", frame_col]].dropna().copy()
+    if frame_pairs.empty:
+        return 0
+
+    frame_pairs["period_id"] = pd.to_numeric(frame_pairs["period_id"], errors="coerce").astype("Int64")
+    frame_pairs[frame_col] = pd.to_numeric(frame_pairs[frame_col], errors="coerce").astype("Int64")
+    unique_frames = frame_pairs.drop_duplicates()
+    return int(unique_frames[frame_col].duplicated().sum())
+
+
+def normalize_tracking_frame_ids(
+    tracking: pd.DataFrame,
+    match_id: str,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    if "frame_id" not in tracking.columns or "period_id" not in tracking.columns:
+        return tracking.copy(), {"normalized": False, "overlap_count": 0, "period_offsets": {}}
+
+    unique_frames = tracking[["period_id", "frame_id"]].dropna().copy()
+    if unique_frames.empty:
+        return tracking.copy(), {"normalized": False, "overlap_count": 0, "period_offsets": {}}
+
+    unique_frames["period_id"] = pd.to_numeric(unique_frames["period_id"], errors="coerce").astype("Int64")
+    unique_frames["raw_frame_id"] = pd.to_numeric(unique_frames["frame_id"], errors="coerce").astype("Int64")
+    unique_frames = (
+        unique_frames[["period_id", "raw_frame_id"]]
+        .drop_duplicates()
+        .sort_values(["period_id", "raw_frame_id"], ignore_index=True)
+    )
+
+    overlap_count = int(unique_frames["raw_frame_id"].duplicated().sum())
+    if overlap_count == 0:
+        return tracking.copy(), {"normalized": False, "overlap_count": 0, "period_offsets": {}}
+
+    normalized_parts: list[pd.DataFrame] = []
+    period_offsets: dict[int, int] = {}
+    previous_max_frame: int | None = None
+
+    for period_id, period_frames in unique_frames.groupby("period_id", sort=True):
+        period_frames = period_frames.copy()
+        raw_frame_ids = period_frames["raw_frame_id"].astype(int)
+        period_min_frame = int(raw_frame_ids.min())
+        offset = 0 if previous_max_frame is None else max(previous_max_frame + 1 - period_min_frame, 0)
+
+        period_frames["frame_id"] = raw_frame_ids + offset
+        period_offsets[int(period_id)] = int(offset)
+        previous_max_frame = int(period_frames["frame_id"].max())
+        normalized_parts.append(period_frames)
+
+    frame_mapping = pd.concat(normalized_parts, ignore_index=True).rename(columns={"frame_id": "normalized_frame_id"})
+    normalized_tracking = tracking.copy()
+    normalized_tracking["period_id"] = pd.to_numeric(normalized_tracking["period_id"], errors="coerce").astype("Int64")
+    normalized_tracking["raw_frame_id"] = pd.to_numeric(normalized_tracking["frame_id"], errors="coerce").astype("Int64")
+    normalized_tracking = normalized_tracking.merge(
+        frame_mapping,
+        on=["period_id", "raw_frame_id"],
+        how="left",
+        validate="m:1",
+    )
+    normalized_tracking["frame_id"] = (
+        normalized_tracking["normalized_frame_id"].fillna(normalized_tracking["raw_frame_id"]).astype(int)
+    )
+    normalized_tracking["period_id"] = normalized_tracking["period_id"].astype(int)
+    normalized_tracking["raw_frame_id"] = normalized_tracking["raw_frame_id"].astype(int)
+    normalized_tracking = normalized_tracking.drop(columns=["normalized_frame_id"])
+
+    print(
+        f"  Warning: normalized {overlap_count} overlapping frame_id values across periods for {match_id}; "
+        f"offsets={period_offsets}"
+    )
+    return normalized_tracking, {
+        "normalized": True,
+        "overlap_count": overlap_count,
+        "period_offsets": period_offsets,
+    }
+
+
 def load_kloppy_tracking(
     match_files: MatchFiles,
     lineup: pd.DataFrame,
@@ -588,12 +668,15 @@ def build_tracking_outputs(
         try:
             tracking = pd.read_parquet(raw_output)
             pd.read_parquet(processed_output)
+            if count_overlapping_frame_ids(tracking) > 0:
+                raise ValueError("cached tracking still contains overlapping frame_id values across periods")
             fps = 25.0
             return tracking, fps
         except Exception as exc:
             print(f"  Rebuilding cached tracking outputs after read failure: {summarize_exception(exc)}")
 
     _, tracking, fps = load_kloppy_tracking(match_files, lineup, meta_path=meta_path)
+    tracking, _ = normalize_tracking_frame_ids(tracking, match_files.match_id)
     tracking.to_parquet(raw_output, index=False)
 
     tracking_processed = tracking.copy()
@@ -889,8 +972,12 @@ def load_kpi_merged_table(match_files: MatchFiles) -> pd.DataFrame:
 
 def build_tracking_frame_table(events: pd.DataFrame, tracking: pd.DataFrame, fps: float) -> pd.DataFrame:
     tracking_frames = MatchData.calculate_tracking_datetimes(events, tracking, fps=int(round(fps))).copy()
-    tracking_frames = tracking_frames[["frame_id", "period_id", "timestamp", "utc_timestamp"]].drop_duplicates("frame_id")
+    if "raw_frame_id" not in tracking_frames.columns:
+        tracking_frames["raw_frame_id"] = tracking_frames["frame_id"]
+    tracking_frames = tracking_frames[["frame_id", "raw_frame_id", "period_id", "timestamp", "utc_timestamp"]]
+    tracking_frames = tracking_frames.drop_duplicates(["period_id", "frame_id"])
     tracking_frames["frame_id"] = pd.to_numeric(tracking_frames["frame_id"], errors="coerce").astype("Int64")
+    tracking_frames["raw_frame_id"] = pd.to_numeric(tracking_frames["raw_frame_id"], errors="coerce").astype("Int64")
     tracking_frames["timestamp"] = tracking_frames["timestamp"].astype(float)
     tracking_frames["utc_timestamp"] = pd.to_datetime(tracking_frames["utc_timestamp"], errors="coerce")
     tracking_frames["synced_ts"] = tracking_frames["timestamp"].apply(sync_utils.seconds_to_timestamp)
@@ -898,6 +985,27 @@ def build_tracking_frame_table(events: pd.DataFrame, tracking: pd.DataFrame, fps
         tracking_frames["utc_timestamp"].dt.tz_localize("UTC").dt.tz_convert("Europe/Berlin").dt.tz_localize(None)
     )
     return tracking_frames.sort_values("frame_id", ignore_index=True)
+
+
+def map_period_raw_frames_to_tracking_ids(
+    frame_table: pd.DataFrame,
+    period_ids: pd.Series,
+    raw_frame_ids: pd.Series,
+) -> pd.Series:
+    lookup = (
+        frame_table[["period_id", "raw_frame_id", "frame_id"]]
+        .dropna(subset=["period_id", "raw_frame_id"])
+        .drop_duplicates(["period_id", "raw_frame_id"])
+    )
+    frame_keys = pd.DataFrame(
+        {
+            "_row_id": np.arange(len(raw_frame_ids)),
+            "period_id": pd.to_numeric(period_ids, errors="coerce").astype("Int64"),
+            "raw_frame_id": pd.to_numeric(raw_frame_ids, errors="coerce").astype("Int64"),
+        }
+    )
+    mapped = frame_keys.merge(lookup, on=["period_id", "raw_frame_id"], how="left").sort_values("_row_id")
+    return mapped["frame_id"].astype("Int64").reset_index(drop=True)
 
 
 def initialize_synced_output(events: pd.DataFrame) -> pd.DataFrame:
@@ -1007,7 +1115,6 @@ def run_kpi_synchronization(
     output_events = initialize_synced_output(events)
     frame_table = build_tracking_frame_table(events, tracking, fps)
     frame_lookup = frame_table.set_index("frame_id")
-    valid_frames = set(frame_lookup.index.dropna().tolist())
     lineup_lookup = lineup[["player_id", "object_id"]].drop_duplicates().set_index("player_id")["object_id"].to_dict()
     kpi = load_kpi_merged_table(match_files)
 
@@ -1018,11 +1125,18 @@ def run_kpi_synchronization(
         how="left",
     )
 
-    frame_candidates = merged["FRAME_NUMBER"].where(merged["FRAME_NUMBER"].isin(valid_frames))
-    output_events["frame_id"] = frame_candidates.astype("Int64")
+    output_events["frame_id"] = map_period_raw_frames_to_tracking_ids(
+        frame_table,
+        output_events["period_id"],
+        merged["FRAME_NUMBER"],
+    )
 
     pass_like_mask = output_events["spadl_type"].isin(KPI_RECEIVE_TYPES)
-    receive_candidates = merged["RECFRM"].where(merged["RECFRM"].isin(valid_frames))
+    receive_candidates = map_period_raw_frames_to_tracking_ids(
+        frame_table,
+        output_events["period_id"],
+        merged["RECFRM"],
+    )
     output_events.loc[pass_like_mask, "receive_frame_id"] = receive_candidates.loc[pass_like_mask].astype("Int64")
 
     kpi_receiver_ids = merged["PUID2"].map(lineup_lookup)

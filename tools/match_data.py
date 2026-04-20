@@ -59,6 +59,17 @@ class MatchData(ABC):
         pass
 
     def format_tracking_for_syncer(self) -> pd.DataFrame:
+        def smooth(values: np.ndarray, window_length: int, polyorder: int) -> np.ndarray:
+            n_values = len(values)
+            if n_values == 0:
+                return values
+
+            window = min(window_length, n_values if n_values % 2 == 1 else n_values - 1)
+            if window <= polyorder or window < 3:
+                return values
+
+            return savgol_filter(values, window_length=window, polyorder=min(polyorder, window - 1))
+
         tracking = self.tracking.copy()
 
         if "frame_id" not in tracking.columns or "utc_timestamp" not in tracking.columns:
@@ -84,23 +95,32 @@ class MatchData(ABC):
             object_tracking["z"] = tracking["ball_z"].values.round(2) if p == "ball" else np.nan
 
             for i in object_tracking["period_id"].unique():
-                period_tracking = object_tracking[object_tracking["period_id"] == i].dropna(subset=["x"]).copy()
-                if not period_tracking.empty:
-                    vx = savgol_filter(np.diff(period_tracking["x"].values) * self.fps, window_length=15, polyorder=2)
-                    vy = savgol_filter(np.diff(period_tracking["y"].values) * self.fps, window_length=15, polyorder=2)
+                period_tracking = object_tracking[object_tracking["period_id"] == i].dropna(subset=["x", "y"]).copy()
+                if period_tracking.empty:
+                    continue
+
+                period_tracking["speed"] = 0.0
+                period_tracking["accel_s"] = 0.0
+                period_tracking["accel_v"] = 0.0
+
+                if len(period_tracking.index) >= 2:
+                    vx = smooth(np.diff(period_tracking["x"].values) * self.fps, window_length=15, polyorder=2)
+                    vy = smooth(np.diff(period_tracking["y"].values) * self.fps, window_length=15, polyorder=2)
                     speed = np.sqrt(vx**2 + vy**2)
                     period_tracking.loc[period_tracking.index[1:], "speed"] = speed
                     period_tracking["speed"] = period_tracking["speed"].bfill()
 
-                    accel = savgol_filter(np.diff(speed) * self.fps, window_length=9, polyorder=2)
-                    period_tracking.loc[period_tracking.index[1:-1], "accel_s"] = accel
-                    period_tracking["accel_s"] = period_tracking["accel_s"].bfill().ffill()
+                    if len(speed) >= 2:
+                        accel = smooth(np.diff(speed) * self.fps, window_length=9, polyorder=2)
+                        period_tracking.loc[period_tracking.index[1:-1], "accel_s"] = accel
+                        period_tracking["accel_s"] = period_tracking["accel_s"].bfill().ffill()
 
-                    ax = savgol_filter(np.diff(vx) * self.fps, window_length=9, polyorder=2)
-                    ay = savgol_filter(np.diff(vy) * self.fps, window_length=9, polyorder=2)
-                    period_tracking.loc[period_tracking.index[1:-1], "accel_v"] = np.sqrt(ax**2 + ay**2)
-                    period_tracking["accel_v"] = period_tracking["accel_v"].bfill().ffill()
-                    tracking_list.append(period_tracking)
+                        ax = smooth(np.diff(vx) * self.fps, window_length=9, polyorder=2)
+                        ay = smooth(np.diff(vy) * self.fps, window_length=9, polyorder=2)
+                        period_tracking.loc[period_tracking.index[1:-1], "accel_v"] = np.sqrt(ax**2 + ay**2)
+                        period_tracking["accel_v"] = period_tracking["accel_v"].bfill().ffill()
+
+                tracking_list.append(period_tracking)
 
         out = pd.concat(tracking_list, ignore_index=True)
         out = out[out["ball_state"] == "alive"].drop("ball_state", axis=1).reset_index(drop=True)
