@@ -948,6 +948,9 @@ def filter_features_and_labels(
         if not args["ball_z_aware"]:
             graph.x[:, 12] = 0
 
+        if not args.get("accel_aware", True):
+            graph.x[:, 8] = 0
+
         if not args["extend_features"] and args.get("task") != "success_intent":
             graph.x[:, 19:] = 0
 

@@ -30,6 +30,7 @@ class ActionDataset(Dataset):
         keeper_aware=True,
         ball_z_aware=True,
         poss_vel_aware=True,
+        accel_aware=True,
         extend_features=True,
         drop_non_blockers=False,
         sparsify="none",
@@ -191,6 +192,9 @@ class ActionDataset(Dataset):
 
             if not ball_z_aware:  # Set the ball height for every action as 0
                 graph.x[:, 12] = 0
+
+            if not accel_aware:  # Ignore player-acceleration features without changing graph width
+                graph.x[:, 8] = 0
 
             if not extend_features and task != "success_intent":
                 graph.x[:, 19:] = 0

@@ -44,6 +44,7 @@ FEATURE_SIGNATURE_KEYS = (
     "keeper_aware",
     "ball_z_aware",
     "poss_vel_aware",
+    "accel_aware",
     "extend_features",
     "filter_blockers",
     "sparsify",
@@ -61,6 +62,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "keeper_aware": bool(args.get("keeper_aware", False)),
         "ball_z_aware": bool(args.get("ball_z_aware", False)),
         "poss_vel_aware": bool(args.get("poss_vel_aware", False)),
+        "accel_aware": True if args.get("accel_aware") is None else bool(args.get("accel_aware")),
         "extend_features": bool(args.get("extend_features", False)),
         "filter_blockers": bool(args.get("filter_blockers", False)),
         "sparsify": args.get("sparsify", "none"),
@@ -110,6 +112,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
 
     args.setdefault("edge_in_dim", 2)
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+    args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
 
     legacy_context = infer_legacy_model_context(model_id)
@@ -335,6 +338,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
             args = json.load(f)
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+        args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
 

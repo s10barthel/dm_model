@@ -39,6 +39,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "keeper_aware": True,
     "ball_z_aware": True,
     "poss_vel_aware": True,
+    "accel_aware": True,
     "extend_features": False,
 }
 
@@ -49,6 +50,10 @@ LOW_LEVEL_FEATURE_FLAGS = {
     "ball_z_aware": "--ball_z_aware",
     "poss_vel_aware": "--poss_vel_aware",
     "extend_features": "--extend_features",
+}
+
+LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
+    "accel_aware": ("--accel", "--no-accel"),
 }
 
 
@@ -82,6 +87,8 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     for name, cli_flag in LOW_LEVEL_FEATURE_FLAGS.items():
         if feature_flags[name]:
             command.append(cli_flag)
+    for name, (enabled_flag, disabled_flag) in LOW_LEVEL_BOOL_OVERRIDE_FLAGS.items():
+        command.append(enabled_flag if feature_flags[name] else disabled_flag)
     return command
 
 
@@ -173,6 +180,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "poss_vel_aware",
         "Include possessor-velocity relation features during training.",
         "Disable possessor-velocity relation features during training.",
+    )
+    add_bool_override(
+        parser,
+        "accel",
+        "accel_aware",
+        "Include player-acceleration node features during training.",
+        "Disable player-acceleration node features during training.",
     )
     add_bool_override(
         parser,

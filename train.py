@@ -65,6 +65,20 @@ parser.add_argument("--possessor_aware", action="store_true", default=False, hel
 parser.add_argument("--keeper_aware", action="store_true", default=False, help="distinguish keeper & goal nodes")
 parser.add_argument("--ball_z_aware", action="store_true", default=False, help="consider the ball height")
 parser.add_argument("--poss_vel_aware", action="store_true", default=False, help="consider possessor's velocity")
+accel_group = parser.add_mutually_exclusive_group()
+accel_group.add_argument(
+    "--accel",
+    dest="accel_aware",
+    action="store_true",
+    help="Include player-acceleration node features.",
+)
+accel_group.add_argument(
+    "--no-accel",
+    dest="accel_aware",
+    action="store_false",
+    help="Ignore player-acceleration node features and zero that feature slot.",
+)
+parser.set_defaults(accel_aware=True)
 parser.add_argument("--extend_features", action="store_true", default=False, help="handcraft more node features")
 
 parser.add_argument("--more_dest_features", action="store_true", default=False, help="handcraft more dest features")
@@ -296,6 +310,7 @@ if __name__ == "__main__":
         "keeper_aware": args.keeper_aware,
         "ball_z_aware": args.ball_z_aware,
         "poss_vel_aware": args.poss_vel_aware,
+        "accel_aware": args.accel_aware,
         "extend_features": args.extend_features,
         "drop_non_blockers": args.filter_blockers,
         "sparsify": args.sparsify,

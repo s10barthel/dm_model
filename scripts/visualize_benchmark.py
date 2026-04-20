@@ -52,12 +52,6 @@ def render_state_image(
     frame_id = int(state.frame_meta.index.min())
     snapshot = state.tracking.loc[frame_id:frame_id].copy()
     ball_xy = snapshot[["ball_x", "ball_y"]].copy()
-    ball_velocity_xy = None
-    if {"ball_vx", "ball_vy"} <= set(snapshot.columns):
-        ball_vx = float(snapshot["ball_vx"].iloc[-1])
-        ball_vy = float(snapshot["ball_vy"].iloc[-1])
-        if pd.notna(ball_vx) and pd.notna(ball_vy):
-            ball_velocity_xy = (ball_vx, ball_vy)
 
     if probs is None or probs.empty:
         component_probs = pd.Series(dtype=float)
@@ -74,7 +68,6 @@ def render_state_image(
         snapshot=snapshot,
         ball_xy=ball_xy,
         player_annots=component_probs if not component_probs.empty else None,
-        ball_velocity_xy=ball_velocity_xy,
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={possessor_object_id: "#ffd400"},
