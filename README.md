@@ -931,6 +931,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-intended-receiver-model`: build features/labels for the learned intended-receiver workflow. Default: off.
 - `--intended-receiver-model-id <model_id>`: success-intent checkpoint used by the learned intended-receiver workflow. Default: `success_intent/00`.
 - `--add_v_edge_features`: append cosine/sine velocity-angle edge features. Default: off.
+  Exported graph artifacts follow this flag. When `--use-intended-receiver-model` is enabled, the transient `success_intent` graphs used to relabel failed passes instead follow the referenced checkpoint's edge schema.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one. Default: auto-generate a new feature run id.
 
 ### `scripts/train_relevant_models.py`
@@ -1177,6 +1178,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/ajax/splits/match_splits.json`
   - optional target sidecars under `data/ajax/xT/matches/*.csv` and `data/ajax/goal_distance/matches/*.csv`
   - optional learned intended-receiver checkpoint `saved/success_intent/<model_run_id>/...`
+    That checkpoint also determines the edge schema of the transient failed-pass relabeling graphs used during feature generation.
 - Outputs:
   - `data/ajax/features/runs/<feature_run_id>/action_graphs/*.pt`
   - `data/ajax/features/runs/<feature_run_id>/post_action_graphs/*.pt`

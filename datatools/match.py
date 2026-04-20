@@ -157,7 +157,7 @@ class Match(ABC):
         from torch_geometric.data import Batch
 
         from datatools.graph_feature import construct_graph_for_action
-        from models.utils import load_model
+        from models.utils import get_model_graph_schema, load_model
 
         failed_pass_indices = actions.index[
             (actions["action_type"] == "pass")
@@ -179,6 +179,9 @@ class Match(ABC):
         if model is None:
             raise FileNotFoundError(f"Could not load intended receiver model checkpoint {intended_receiver_model_id}.")
         model.eval()
+        graph_schema = get_model_graph_schema(model) or {"edge_in_dim": 2, "add_v_edge_features": False}
+        expected_edge_dim = int(graph_schema["edge_in_dim"])
+        add_v_edge_features = bool(graph_schema["add_v_edge_features"])
 
         graphs = []
         graph_action_indices: list[int] = []
@@ -193,6 +196,7 @@ class Match(ABC):
                     feature_variant="success_intent",
                     extend=False,
                     post_action=False,
+                    add_v_edge_features=add_v_edge_features,
                 )
                 if graph is None:
                     continue
@@ -213,6 +217,19 @@ class Match(ABC):
             self.actions = previous_actions
 
         if graphs:
+            actual_edge_dims = sorted(
+                {
+                    int(graph.edge_attr.shape[1]) if getattr(graph, "edge_attr", None) is not None else 0
+                    for graph in graphs
+                }
+            )
+            if actual_edge_dims != [expected_edge_dim]:
+                raise ValueError(
+                    "Intended receiver model graph schema mismatch for "
+                    f"{intended_receiver_model_id}: expected edge_attr dim {expected_edge_dim}, "
+                    f"got {actual_edge_dims}."
+                )
+
             batch_graphs = Batch.from_data_list(graphs).to("cpu")
             batch_graphs.x = batch_graphs.x[:, : model.args["node_in_dim"]]
 
