@@ -531,10 +531,12 @@ def validate_model_record_consistency(
         )
     shared["intended_receiver_mode"] = next(iter(intended_modes)) if intended_modes else None
 
-    return_types = {record.get("return_type") for record in model_records.values()}
+    outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
+    return_type_records = outcome_records if outcome_records else model_records
+    return_types = {record.get("return_type") for record in return_type_records.values()}
     return_types.discard(None)
     if require_return_type and len(return_types) != 1:
-        details = ", ".join(f"{task}={record.get('return_type')}" for task, record in model_records.items())
+        details = ", ".join(f"{task}={record.get('return_type')}" for task, record in return_type_records.items())
         raise ValueError(
             "Selected model checkpoints do not agree on return_type: "
             f"{details}."
@@ -550,7 +552,6 @@ def validate_model_record_consistency(
         )
     shared["graph_schema"] = next(iter(model_records.values()))["graph_schema"]
 
-    outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
     target_families = {record.get("target_family") for record in outcome_records.values()}
     target_families.discard(None)
     if len(target_families) > 1:

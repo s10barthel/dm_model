@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from models.utils import get_model_records, validate_model_record_consistency
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
     generate_model_run_id,
@@ -26,6 +28,7 @@ from project_config import (
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
     load_feature_run_metadata,
+    load_model_bundle_metadata,
     resolve_feature_run_id,
     resolve_feature_root,
     validate_intended_receiver_mode,
@@ -56,6 +59,67 @@ LOW_LEVEL_FEATURE_FLAGS = {
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
     "accel_aware": ("--accel", "--no-accel"),
 }
+
+MODEL_TOGGLE_SPECS = (
+    (
+        "action_intent",
+        "action-intent",
+        "Train the action_intent checkpoint.",
+        "Skip training the action_intent checkpoint.",
+    ),
+    (
+        "pass_intent",
+        "pass-intent",
+        "Train the pass_intent checkpoint.",
+        "Skip training the pass_intent checkpoint.",
+    ),
+    (
+        "success_intent",
+        "success-intent",
+        "Train the mode-independent success_intent checkpoint.",
+        "Skip training the success_intent checkpoint.",
+    ),
+    (
+        "pass_success",
+        "pass-success",
+        "Train the pass_success checkpoint.",
+        "Skip training the pass_success checkpoint.",
+    ),
+    (
+        "outcome_scoring",
+        "outcome-scoring",
+        "Train the outcome_scoring checkpoint.",
+        "Skip training the outcome_scoring checkpoint.",
+    ),
+    (
+        "outcome_conceding",
+        "outcome-conceding",
+        "Train the outcome_conceding checkpoint.",
+        "Skip training the outcome_conceding checkpoint.",
+    ),
+    (
+        "failure_receiver",
+        "failure-receiver",
+        "Train the failure_receiver checkpoint.",
+        "Skip training the failure_receiver checkpoint.",
+    ),
+)
+MODE_DEPENDENT_TASKS = {
+    "action_intent",
+    "pass_intent",
+    "pass_success",
+    "outcome_scoring",
+    "outcome_conceding",
+    "failure_receiver",
+}
+OUTCOME_TASKS = {"outcome_scoring", "outcome_conceding"}
+RETAINED_BUNDLE_TASKS = (
+    "action_intent",
+    "pass_intent",
+    "pass_success",
+    "outcome_scoring",
+    "outcome_conceding",
+)
 
 
 def add_bool_override(
@@ -99,6 +163,76 @@ def append_edge_feature_flag(command: list[str], use_v_edge_features: bool) -> l
     return command
 
 
+def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
+    explicit_toggles = [
+        (
+            task,
+            f"--{option_name}" if getattr(args, task) else f"--no-{option_name}",
+        )
+        for task, option_name, _, _ in MODEL_TOGGLE_SPECS
+        if getattr(args, task) is not None
+    ]
+    if args.success_intent_only:
+        if explicit_toggles:
+            toggles = ", ".join(flag for _, flag in explicit_toggles)
+            raise ValueError(f"--success-intent-only cannot be combined with explicit per-model toggles: {toggles}.")
+        return OrderedDict((task, task == "success_intent") for task, _, _, _ in MODEL_TOGGLE_SPECS)
+
+    enabled_tasks = OrderedDict(
+        (task, True if getattr(args, task) is None else bool(getattr(args, task)))
+        for task, _, _, _ in MODEL_TOGGLE_SPECS
+    )
+    if not any(enabled_tasks.values()):
+        raise ValueError("At least one model must be enabled.")
+    if enabled_tasks["pass_success"] and not enabled_tasks["pass_intent"]:
+        raise ValueError("--pass-success requires --pass-intent in the same wrapper run.")
+    if args.outcome_scoring_trial is not None and not enabled_tasks["outcome_scoring"]:
+        raise ValueError("--outcome-scoring-trial requires --outcome-scoring.")
+    if args.outcome_conceding_trial is not None and not enabled_tasks["outcome_conceding"]:
+        raise ValueError("--outcome-conceding-trial requires --outcome-conceding.")
+    return enabled_tasks
+
+
+def retained_bundle_model_ids(model_ids: dict[str, str]) -> dict[str, str]:
+    return {task: model_ids[task] for task in RETAINED_BUNDLE_TASKS if task in model_ids}
+
+
+def derive_bundle_shared_context(
+    final_model_ids: dict[str, str],
+    cli_args: argparse.Namespace,
+    resolved_feature_run_id: str | None,
+) -> dict[str, object]:
+    retained_model_ids = retained_bundle_model_ids(final_model_ids)
+    if retained_model_ids:
+        shared = validate_model_record_consistency(
+            get_model_records(retained_model_ids),
+            require_feature_run_id=True,
+            require_intended_receiver_mode=True,
+            require_return_type=True,
+        )
+        graph_schema = dict(shared["graph_schema"])
+        return {
+            "feature_run_id": shared.get("feature_run_id") or resolved_feature_run_id,
+            "intended_receiver_mode": shared.get("intended_receiver_mode"),
+            "return_type": shared.get("return_type") or cli_args.return_type,
+            "target_family": shared.get("target_family"),
+            "graph_schema": graph_schema,
+            "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
+        }
+
+    return {
+        "feature_run_id": resolved_feature_run_id,
+        "intended_receiver_mode": None,
+        "return_type": cli_args.return_type,
+        "target_family": cli_args.target_family,
+        "graph_schema": {
+            "edge_in_dim": 4 if cli_args.use_v_edge_features else 2,
+            "add_v_edge_features": bool(cli_args.use_v_edge_features),
+        },
+        "use_v_edge_features": bool(cli_args.use_v_edge_features),
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -124,6 +258,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Only train the mode-independent success_intent model from observed successful-pass receivers.",
     )
+    for task, option_name, enable_help, disable_help in MODEL_TOGGLE_SPECS:
+        add_bool_override(parser, option_name, task, enable_help, disable_help)
     parser.add_argument(
         "--outcome-scoring-trial",
         type=int,
@@ -213,32 +349,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     available_modes = infer_feature_run_intended_receiver_modes(args.feature_run_id)
     available_return_types = infer_feature_run_return_types(args.feature_run_id)
 
+    try:
+        args.enabled_tasks = resolve_enabled_tasks(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    requires_mode = any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS)
+    requires_outcome_config = any(args.enabled_tasks[task] for task in OUTCOME_TASKS)
+
     if args.success_intent_only:
         if args.intended_receiver_mode:
             parser.error("--success-intent-only is mode-independent and does not accept --intended-receiver-mode.")
-        args.intended_receiver_mode = None
         if args.target_family is not None:
             parser.error("--success-intent-only does not accept --target-family.")
+        args.intended_receiver_mode = None
+        args.target_family = None
+    elif requires_mode:
+        if not args.intended_receiver_mode:
+            parser.error("--intended-receiver-mode is required when any retained model is enabled.")
+        args.intended_receiver_mode = validate_intended_receiver_mode(args.intended_receiver_mode)
+    else:
+        args.intended_receiver_mode = None
+
+    if requires_outcome_config:
+        if not args.target_family:
+            parser.error("--target-family is required when outcome models are enabled.")
+        if not args.return_type:
+            parser.error("--return_type is required when outcome models are enabled.")
+        try:
+            args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
+        except ValueError as exc:
+            parser.error(str(exc))
+    else:
+        args.target_family = None
         if args.return_type is not None:
             args.return_type = validate_return_type(args.return_type)
         elif available_return_types:
             args.return_type = available_return_types[0]
         else:
             parser.error(f"Feature run {args.feature_run_id} does not expose any return types.")
-    else:
-        if not args.intended_receiver_mode:
-            parser.error("--intended-receiver-mode is required.")
-        args.intended_receiver_mode = validate_intended_receiver_mode(args.intended_receiver_mode)
-        if not args.target_family:
-            parser.error("--target-family is required unless --success-intent-only is set.")
-        if not args.return_type:
-            parser.error("--return_type is required unless --success-intent-only is set.")
-        try:
-            args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
-        except ValueError as exc:
-            parser.error(str(exc))
 
-    if not args.success_intent_only and args.intended_receiver_mode not in available_modes:
+    if args.intended_receiver_mode is not None and args.intended_receiver_mode not in available_modes:
         parser.error(
             f"Feature run {args.feature_run_id} does not expose intended_receiver_mode={args.intended_receiver_mode!r}. "
             f"Available: {', '.join(available_modes) or 'none'}."
@@ -251,6 +402,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args.available_return_types = available_return_types
     args.available_intended_receiver_modes = available_modes
+    args.trained_tasks = [task for task, enabled in args.enabled_tasks.items() if enabled]
     return args
 
 
@@ -451,19 +603,15 @@ def failure_receiver_command(
     return append_low_level_feature_flags(command, feature_flags)
 
 
-def build_model_ids(args: argparse.Namespace, mode: str | None) -> dict[str, str]:
+def build_model_ids(args: argparse.Namespace, enabled_tasks: dict[str, bool]) -> dict[str, str]:
     model_ids = {
-        "success_intent": f"success_intent/{generate_model_run_id('success_intent')}",
-        "pass_intent": f"pass_intent/{generate_model_run_id('pass_intent')}",
-        "action_intent": f"action_intent/{generate_model_run_id('action_intent')}",
-        "pass_success": f"pass_success/{generate_model_run_id('pass_success')}",
-        "outcome_scoring": f"outcome_scoring/{generate_model_run_id('outcome_scoring')}",
-        "outcome_conceding": f"outcome_conceding/{generate_model_run_id('outcome_conceding')}",
-        "failure_receiver": f"failure_receiver/{generate_model_run_id('failure_receiver')}",
+        task: f"{task}/{generate_model_run_id(task)}"
+        for task, enabled in enabled_tasks.items()
+        if enabled
     }
-    if args.outcome_scoring_trial is not None:
+    if enabled_tasks.get("outcome_scoring") and args.outcome_scoring_trial is not None:
         model_ids["outcome_scoring"] = f"outcome_scoring/{int(args.outcome_scoring_trial):02d}"
-    if args.outcome_conceding_trial is not None:
+    if enabled_tasks.get("outcome_conceding") and args.outcome_conceding_trial is not None:
         model_ids["outcome_conceding"] = f"outcome_conceding/{int(args.outcome_conceding_trial):02d}"
     return model_ids
 
@@ -471,135 +619,148 @@ def build_model_ids(args: argparse.Namespace, mode: str | None) -> dict[str, str
 def build_training_commands(
     args: argparse.Namespace,
 ) -> tuple[list[list[str]], dict[str, str], str | None, str | None, dict[str, bool]]:
-    mode = args.intended_receiver_mode
-    target_family = args.target_family
+    mode = args.intended_receiver_mode if any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS) else None
+    target_family = args.target_family if any(args.enabled_tasks[task] for task in OUTCOME_TASKS) else None
     effective_return_type = args.return_type
     feature_flags = resolve_wrapper_feature_flags(args)
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
-    model_ids = build_model_ids(args, mode)
+    model_ids = build_model_ids(args, args.enabled_tasks)
     success_intent_feature_dir = str(get_success_intent_graph_dir(feature_root))
     success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
+    commands = []
+    trained_model_ids: dict[str, str] = {}
 
-    if args.success_intent_only:
-        return (
-            [
-                success_intent_command(
-                    "success_intent",
-                    model_ids["success_intent"],
-                    success_intent_feature_dir,
-                    success_intent_label_dir,
+    if args.enabled_tasks["success_intent"]:
+        commands.append(
+            success_intent_command(
+                "success_intent",
+                model_ids["success_intent"],
+                success_intent_feature_dir,
+                success_intent_label_dir,
+                effective_return_type,
+                bool(args.use_v_edge_features),
+                feature_flags,
+            )
+        )
+        trained_model_ids["success_intent"] = model_ids["success_intent"]
+
+    if any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS):
+        base_feature_dir = str(get_action_graph_dir(feature_root))
+        base_label_dir = str(
+            get_action_label_dir(
+                effective_return_type,
+                intended_receiver_mode=mode,
+                root=feature_root,
+            )
+        )
+        intent_train_feature_dir = str(get_action_graph_intent_train_dir(feature_root))
+        intent_train_label_dir = str(
+            get_intent_train_label_dir(effective_return_type, intended_receiver_mode=mode, root=feature_root)
+        )
+        augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
+        augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
+
+        if args.enabled_tasks["pass_intent"]:
+            commands.append(
+                intent_command(
+                    "pass_intent",
+                    model_ids["pass_intent"],
+                    base_feature_dir,
+                    base_label_dir,
+                    intent_train_feature_dir,
+                    intent_train_label_dir,
+                    mode,
                     effective_return_type,
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
-            ],
-            {"success_intent": model_ids["success_intent"]},
-            None,
-            resolved_feature_run_id,
-            feature_flags,
-        )
+            )
+            trained_model_ids["pass_intent"] = model_ids["pass_intent"]
 
-    base_feature_dir = str(get_action_graph_dir(feature_root))
-    base_label_dir = str(
-        get_action_label_dir(
-            effective_return_type,
-            intended_receiver_mode=mode,
-            root=feature_root,
-        )
-    )
-    intent_train_feature_dir = str(get_action_graph_intent_train_dir(feature_root))
-    intent_train_label_dir = str(
-        get_intent_train_label_dir(effective_return_type, intended_receiver_mode=mode, root=feature_root)
-    )
-    augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
-    augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
+        if args.enabled_tasks["action_intent"]:
+            commands.append(
+                intent_command(
+                    "action_intent",
+                    model_ids["action_intent"],
+                    base_feature_dir,
+                    base_label_dir,
+                    intent_train_feature_dir,
+                    intent_train_label_dir,
+                    mode,
+                    effective_return_type,
+                    bool(args.use_v_edge_features),
+                    feature_flags,
+                )
+            )
+            trained_model_ids["action_intent"] = model_ids["action_intent"]
 
-    commands = []
-    commands.extend(
-        [
-            intent_command(
-                "pass_intent",
-                model_ids["pass_intent"],
-                base_feature_dir,
-                base_label_dir,
-                intent_train_feature_dir,
-                intent_train_label_dir,
-                mode,
-                effective_return_type,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-            intent_command(
-                "action_intent",
-                model_ids["action_intent"],
-                base_feature_dir,
-                base_label_dir,
-                intent_train_feature_dir,
-                intent_train_label_dir,
-                mode,
-                effective_return_type,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-            pass_success_command(
-                "pass_success",
-                model_ids["pass_success"],
-                base_feature_dir,
-                base_label_dir,
-                model_ids["pass_intent"],
-                mode,
-                effective_return_type,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-            outcome_command(
-                "outcome_scoring",
-                model_ids["outcome_scoring"],
-                base_feature_dir,
-                base_label_dir,
-                target_family,
-                effective_return_type,
-                mode,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-            outcome_command(
-                "outcome_conceding",
-                model_ids["outcome_conceding"],
-                base_feature_dir,
-                base_label_dir,
-                target_family,
-                effective_return_type,
-                mode,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-            failure_receiver_command(
-                "failure_receiver",
-                model_ids["failure_receiver"],
-                augmented_feature_dir,
-                augmented_label_dir,
-                mode,
-                effective_return_type,
-                bool(args.use_v_edge_features),
-                feature_flags,
-            ),
-        ]
-    )
+        if args.enabled_tasks["pass_success"]:
+            commands.append(
+                pass_success_command(
+                    "pass_success",
+                    model_ids["pass_success"],
+                    base_feature_dir,
+                    base_label_dir,
+                    model_ids["pass_intent"],
+                    mode,
+                    effective_return_type,
+                    bool(args.use_v_edge_features),
+                    feature_flags,
+                )
+            )
+            trained_model_ids["pass_success"] = model_ids["pass_success"]
+
+        if args.enabled_tasks["outcome_scoring"]:
+            commands.append(
+                outcome_command(
+                    "outcome_scoring",
+                    model_ids["outcome_scoring"],
+                    base_feature_dir,
+                    base_label_dir,
+                    target_family,
+                    effective_return_type,
+                    mode,
+                    bool(args.use_v_edge_features),
+                    feature_flags,
+                )
+            )
+            trained_model_ids["outcome_scoring"] = model_ids["outcome_scoring"]
+
+        if args.enabled_tasks["outcome_conceding"]:
+            commands.append(
+                outcome_command(
+                    "outcome_conceding",
+                    model_ids["outcome_conceding"],
+                    base_feature_dir,
+                    base_label_dir,
+                    target_family,
+                    effective_return_type,
+                    mode,
+                    bool(args.use_v_edge_features),
+                    feature_flags,
+                )
+            )
+            trained_model_ids["outcome_conceding"] = model_ids["outcome_conceding"]
+
+        if args.enabled_tasks["failure_receiver"]:
+            commands.append(
+                failure_receiver_command(
+                    "failure_receiver",
+                    model_ids["failure_receiver"],
+                    augmented_feature_dir,
+                    augmented_label_dir,
+                    mode,
+                    effective_return_type,
+                    bool(args.use_v_edge_features),
+                    feature_flags,
+                )
+            )
+            trained_model_ids["failure_receiver"] = model_ids["failure_receiver"]
+
     return (
         commands,
-        {
-            key: model_ids[key]
-            for key in [
-                "pass_intent",
-                "action_intent",
-                "pass_success",
-                "outcome_scoring",
-                "outcome_conceding",
-                "failure_receiver",
-            ]
-        },
+        trained_model_ids,
         mode,
         resolved_feature_run_id,
         feature_flags,
@@ -611,7 +772,7 @@ def main() -> None:
     python = sys.executable
     bundle_id = cli_args.bundle_id or generate_run_id("model_bundle")
     bundle_root = get_model_bundle_root(bundle_id)
-    commands, bundle_model_ids, intended_receiver_mode, resolved_feature_run_id, feature_flags = build_training_commands(
+    commands, trained_model_ids, intended_receiver_mode, resolved_feature_run_id, feature_flags = build_training_commands(
         cli_args
     )
     executed_commands: list[list[str]] = []
@@ -625,35 +786,52 @@ def main() -> None:
         subprocess.run(command, cwd=ROOT, check=True)
         executed_commands.append(command)
 
-    feature_run_metadata = load_feature_run_metadata(resolved_feature_run_id, required=False) or {}
+    existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
+    final_model_ids = dict(existing_bundle.get("model_ids", {}))
+    final_model_ids.update(trained_model_ids)
+
+    bundle_shared = derive_bundle_shared_context(final_model_ids, cli_args, resolved_feature_run_id)
+    effective_feature_run_id = str(bundle_shared.get("feature_run_id")) if bundle_shared.get("feature_run_id") else None
+    feature_run_metadata = load_feature_run_metadata(effective_feature_run_id, required=False) or {} if effective_feature_run_id else {}
+    timestamp = datetime.now().isoformat(timespec="seconds")
     metadata = {
         "bundle_id": bundle_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": existing_bundle.get("created_at", timestamp),
+        "updated_at": timestamp,
         "command": subprocess.list2cmdline(sys.argv),
-        "feature_run_id": resolved_feature_run_id,
-        "intended_receiver_mode": intended_receiver_mode,
-        "feature_run_intended_receiver_modes": cli_args.available_intended_receiver_modes,
-        "feature_run_return_types": cli_args.available_return_types,
+        "feature_run_id": effective_feature_run_id,
+        "intended_receiver_mode": bundle_shared.get("intended_receiver_mode"),
+        "feature_run_intended_receiver_modes": feature_run_metadata.get(
+            "intended_receiver_modes",
+            cli_args.available_intended_receiver_modes,
+        ),
+        "feature_run_return_types": feature_run_metadata.get("return_types", cli_args.available_return_types),
         "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
         "training_feature_flags": feature_flags,
-        "target_family": cli_args.target_family,
-        "return_type": cli_args.return_type,
-        "use_v_edge_features": bool(cli_args.use_v_edge_features),
-        "graph_schema": {
-            "edge_in_dim": 4 if cli_args.use_v_edge_features else 2,
-            "add_v_edge_features": bool(cli_args.use_v_edge_features),
-        },
+        "target_family": bundle_shared.get("target_family"),
+        "return_type": bundle_shared.get("return_type"),
+        "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", cli_args.use_v_edge_features)),
+        "graph_schema": dict(bundle_shared.get("graph_schema", {})),
         "success_intent_only": bool(cli_args.success_intent_only),
-        "success_intent_label_source": SUCCESS_INTENT_LABEL_SOURCE if cli_args.success_intent_only else None,
-        "success_intent_training_filter": SUCCESS_INTENT_TRAINING_FILTER if cli_args.success_intent_only else None,
-        "model_ids": bundle_model_ids,
+        "trained_tasks": list(trained_model_ids.keys()),
+        "success_intent_label_source": (
+            SUCCESS_INTENT_LABEL_SOURCE
+            if "success_intent" in trained_model_ids
+            else existing_bundle.get("success_intent_label_source")
+        ),
+        "success_intent_training_filter": (
+            SUCCESS_INTENT_TRAINING_FILTER
+            if "success_intent" in trained_model_ids
+            else existing_bundle.get("success_intent_training_filter")
+        ),
+        "model_ids": final_model_ids,
         "commands": executed_commands,
         "status": "completed",
     }
     write_run_metadata(bundle_root, metadata)
     print(f"Model bundle id: {bundle_id}")
     print(f"Model bundle manifest: {bundle_root / 'metadata.json'}")
-    for task, model_id in bundle_model_ids.items():
+    for task, model_id in final_model_ids.items():
         print(f"{task}: {model_id}")
 
 

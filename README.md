@@ -192,7 +192,7 @@ The current pipeline now follows an explicit-artifact contract:
 
 - `scripts/generate_relevant_features.py` can include multiple `--return_type` values in one feature run and always writes the full velocity-angle edge-feature schema.
 - Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
-- `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` for full retained-model training, plus explicit `--target-family`, `--return_type`, and `--intended-receiver-mode`.
+- `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
 - Training decides whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
 - `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. They no longer rely on wrapper-level “latest compatible” resolution or separate `--feature-run-id` selection.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
@@ -393,8 +393,9 @@ This writes, inside the run root:
 
 ```powershell
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type next_5 --intended-receiver-mode original --bundle-id model_bundle_20260414T123456_abcdef12
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-v-edge-features
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --success-intent-only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode original --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver --bundle-id model_bundle_20260414T123456_abcdef12
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --no-v-edge-features
 ```
 
 Inputs:
@@ -408,16 +409,20 @@ Outputs:
 - `saved/pass_success/<model_run_id>/...`
 - `saved/outcome_scoring/<model_run_id>/...`
 - `saved/outcome_conceding/<model_run_id>/...`
+- `saved/success_intent/<model_run_id>/...` when `success_intent` is enabled
 - `saved/failure_receiver/<model_run_id>/...`
 - `saved/bundles/<bundle_id>/metadata.json`
-- `saved/success_intent/<model_run_id>/...` only when using `--success-intent-only`
 
 Behavior:
 
-- full retained-model training requires `--feature-run-id`, `--target-family`, `--return_type`, and `--intended-receiver-mode`
+- all wrapper-managed models are enabled by default: `action_intent`, `pass_intent`, `success_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, and `failure_receiver`
+- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, and `--failure-receiver` / `--no-failure-receiver` let you rerun only the subset you need
+- `--target-family` and `--return_type` are required only when `outcome_scoring` or `outcome_conceding` is enabled
+- `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
 - `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
-- `--success-intent-only` is mode-independent and does not accept `--intended-receiver-mode`
-- the wrapper writes one bundle manifest under `saved/bundles/<bundle_id>/metadata.json` so later stages can reuse the exact produced model ids
+- `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
+- `pass_success` requires `pass_intent` in the same wrapper run because the newly trained `pass_intent` checkpoint is used as its IPW model
+- reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
 - training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
 - unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on, with `extend_features` and `xy_only` off
 
@@ -657,7 +662,14 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode original
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode angle_only --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver
 ```
+
+The direct wrapper also supports partial reruns:
+
+- retrain only `success_intent`: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --success-intent-only`
+- rerun only the two outcome models with a different target configuration: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode angle_only --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver`
+- rerun everything except `success_intent` after you already trained it once: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only --no-success-intent`
 
 Use `train.py` directly when you need explicit low-level control:
 
@@ -767,11 +779,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/train_relevant_models.py`
 
-- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required unless `--success-intent-only` is set.
-- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required unless `--success-intent-only` is set.
-- `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required for full retained-model training.
-- `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required unless `--success-intent-only` is set.
+- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
+- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
+- `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
+- `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
+- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: all on.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
@@ -996,7 +1009,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `saved/pass_success/<model_run_id>/...`
   - `saved/outcome_scoring/<model_run_id>/...`
   - `saved/outcome_conceding/<model_run_id>/...`
-  - `saved/success_intent/<model_run_id>/...` when `--success-intent-only` is used
+  - `saved/success_intent/<model_run_id>/...` when `success_intent` is enabled
   - `saved/failure_receiver/<model_run_id>/...`
   - `saved/bundles/<bundle_id>/metadata.json`
 

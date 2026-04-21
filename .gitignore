@@ -12,6 +12,8 @@ test*/*.csv
 test*/*.png
 !tests/
 tests/*.py
+!tests/test_success_intent_mode_independent.py
+!tests/test_benchmark_no_accel.py
 !tests/test_return_type_in_state.py
 test_kpi_final/
 test_nan_xg/
