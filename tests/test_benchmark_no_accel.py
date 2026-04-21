@@ -78,7 +78,7 @@ def make_enabled_tasks(**overrides: bool) -> dict[str, bool]:
         "pass_success": True,
         "outcome_scoring": True,
         "outcome_conceding": True,
-        "failure_receiver": True,
+        "failure_receiver": False,
     }
     enabled.update(overrides)
     return enabled

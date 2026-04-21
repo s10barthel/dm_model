@@ -21,7 +21,7 @@ def make_enabled_tasks(**overrides: bool) -> dict[str, bool]:
         "pass_success": True,
         "outcome_scoring": True,
         "outcome_conceding": True,
-        "failure_receiver": True,
+        "failure_receiver": False,
     }
     enabled.update(overrides)
     return enabled
@@ -39,7 +39,6 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
             "pass_success",
             "outcome_scoring",
             "outcome_conceding",
-            "failure_receiver",
         ],
         intended_receiver_mode="original",
         target_family="goal",
@@ -61,7 +60,7 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
 
 
 class SuccessIntentModeIndependentTests(unittest.TestCase):
-    def test_default_parse_args_enables_all_wrapper_models(self) -> None:
+    def test_default_parse_args_enables_failure_receiver_off(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
             patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),

@@ -104,6 +104,15 @@ MODEL_TOGGLE_SPECS = (
         "Skip training the failure_receiver checkpoint.",
     ),
 )
+MODEL_TOGGLE_DEFAULTS = {
+    "action_intent": True,
+    "pass_intent": True,
+    "success_intent": True,
+    "pass_success": True,
+    "outcome_scoring": True,
+    "outcome_conceding": True,
+    "failure_receiver": False,
+}
 MODE_DEPENDENT_TASKS = {
     "action_intent",
     "pass_intent",
@@ -179,7 +188,7 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
         return OrderedDict((task, task == "success_intent") for task, _, _, _ in MODEL_TOGGLE_SPECS)
 
     enabled_tasks = OrderedDict(
-        (task, True if getattr(args, task) is None else bool(getattr(args, task)))
+        (task, MODEL_TOGGLE_DEFAULTS[task] if getattr(args, task) is None else bool(getattr(args, task)))
         for task, _, _, _ in MODEL_TOGGLE_SPECS
     )
     if not any(enabled_tasks.values()):
