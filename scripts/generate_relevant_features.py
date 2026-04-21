@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         "--return_type",
         action="append",
         default=None,
-        help="Resolved return type for generated action labels. Repeat the flag to include multiple return types.",
+        help="Resolved return type for generated action labels. Repeat the flag to include multiple return types, including in_<N> for xt/goal_distance training.",
     )
     parser.add_argument(
         "--intended-receiver-model-id",

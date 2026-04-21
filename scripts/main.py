@@ -18,6 +18,7 @@ from project_config import (
     XT_DIR,
     XT_MATCH_DIR,
     generate_run_id,
+    validate_return_type_for_target_family,
 )
 
 TRAINING_WRAPPER_FEATURE_DEFAULTS = {
@@ -77,7 +78,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--return_type",
         default=None,
-        help="Resolved return type to generate and train against.",
+        help="Resolved return type to generate and train against: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only).",
     )
     parser.add_argument(
         "--intended-receiver-mode",
@@ -212,6 +213,12 @@ def parse_args() -> argparse.Namespace:
 
     if needs_feature_generation and not args.return_type:
         parser.error("--return_type is required when scripts/main.py generates feature artifacts.")
+
+    if args.target_family and args.return_type:
+        try:
+            args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.skip_features and not args.skip_train and not args.feature_run_id:
         parser.error("--feature-run-id is required when --skip-features is set and training is still enabled.")

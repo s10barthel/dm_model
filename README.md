@@ -617,10 +617,11 @@ Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 
 ### `--return_type` Applies To All Outcome Target Families
 
-`--return_type` accepts the same two forms for all four outcome target families:
+`--return_type` accepts three resolved forms overall:
 
 - `disc_<gamma>` uses discounted returns
 - `next_<N>` uses non-discounted lookahead returns
+- `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt` and `goal_distance`
 
 Example:
 
@@ -640,9 +641,11 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `disc_<gamma>` keeps the existing discounted xG-probability logic
 - xT:
   - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
   - `disc_<gamma>` uses `max(gamma^k * xT)` over future eligible actions until the stop condition
 - goal_distance:
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
   - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
 
 ### Where to switch targets
@@ -721,7 +724,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/main.py`
 
 - `--target-family {goal,xg,xt,goal_distance}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|next_N>`: resolved return semantics passed to feature generation and training. Required when feature generation or training is enabled.
+- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
@@ -758,14 +761,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
-- repeat `--return_type <disc_gamma|next_N>`: write labels for one or more return semantics in the same feature run.
+- repeat `--return_type <disc_gamma|next_N|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt` and `goal_distance`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 
 ### `scripts/train_relevant_models.py`
 
 - `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required unless `--success-intent-only` is set.
-- `--return_type <disc_gamma|next_N>`: resolved return semantics for the selected label directory. Required unless `--success-intent-only` is set.
+- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required unless `--success-intent-only` is set.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required for full retained-model training.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required unless `--success-intent-only` is set.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.

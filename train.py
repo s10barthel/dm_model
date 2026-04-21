@@ -95,7 +95,13 @@ parser.add_argument(
     default=False,
     help="use goal-distance labels instead of xG, xT, or actual goal labels",
 )
-parser.add_argument("--return_type", type=str, required=False, default=None, help="way of defining return")
+parser.add_argument(
+    "--return_type",
+    type=str,
+    required=False,
+    default=None,
+    help="way of defining return: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only)",
+)
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")

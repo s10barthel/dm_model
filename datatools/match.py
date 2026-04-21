@@ -494,6 +494,19 @@ class Match(ABC):
                 lookahead_len=lookahead_len,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
             )
+        elif return_kind == "in":
+            lookahead_len = int(return_value)
+            self.events = utils.label_returns(self.events, lookahead_len)
+            self.events = utils.label_xt_in_state_returns(
+                self.events,
+                action_offset=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            self.events = utils.label_goal_distance_in_state_returns(
+                self.events,
+                action_offset=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
         else:
             gamma = float(return_value)
             self.events = utils.label_discounted_goal_returns(self.events, gamma)

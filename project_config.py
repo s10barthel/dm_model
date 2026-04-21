@@ -496,7 +496,36 @@ def validate_return_type(return_type: str) -> str:
             raise ValueError(f"Lookahead length must be >= 1, got {lookahead_len}.")
         return value
 
-    raise ValueError(f"Unsupported return_type {return_type!r}. Expected disc_<gamma> or next_<N>.")
+    if value.startswith("in_"):
+        try:
+            lookahead_len = int(value.split("_", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Invalid in-state return type: {return_type!r}.") from exc
+        if lookahead_len < 1:
+            raise ValueError(f"In-state lookahead length must be >= 1, got {lookahead_len}.")
+        return value
+
+    raise ValueError(f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, next_<N>, or in_<N>.")
+
+
+def validate_return_type_for_target_family(
+    return_type: str,
+    target_family: str | None = None,
+) -> str:
+    normalized = validate_return_type(return_type)
+    if target_family is None:
+        return normalized
+
+    family = str(target_family).strip()
+    if family not in RETURN_TYPE_DEFAULTS:
+        raise ValueError(f"Unsupported target family for return_type validation: {family!r}.")
+
+    kind, _ = parse_return_type(normalized)
+    if kind == "in" and family not in {"xt", "goal_distance"}:
+        raise ValueError(
+            f"return_type={normalized!r} is only supported for target_family='xt' or 'goal_distance', got {family!r}."
+        )
+    return normalized
 
 
 def resolve_requested_return_types(
@@ -516,7 +545,7 @@ def resolve_requested_return_types(
     resolved: list[str] = []
     seen: set[str] = set()
     for value in requested_values:
-        normalized = validate_return_type(value)
+        normalized = validate_return_type_for_target_family(value, target_family=target_family)
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -577,7 +606,7 @@ def resolve_effective_return_type(
     requested_return_type: str | None = None,
 ) -> str:
     if requested_return_type is not None and str(requested_return_type).strip():
-        return validate_return_type(str(requested_return_type))
+        return validate_return_type_for_target_family(str(requested_return_type), target_family=target_family)
 
     family = str(target_family or "xg")
     if family not in RETURN_TYPE_DEFAULTS:

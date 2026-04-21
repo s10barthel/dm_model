@@ -30,6 +30,7 @@ from project_config import (
     resolve_feature_root,
     validate_intended_receiver_mode,
     validate_return_type,
+    validate_return_type_for_target_family,
     write_run_metadata,
 )
 
@@ -106,7 +107,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Outcome target family for the retained outcome models.",
     )
-    parser.add_argument("--return_type", default=None, help="Resolved outcome return type to use for label generation.")
+    parser.add_argument(
+        "--return_type",
+        default=None,
+        help="Resolved outcome return type to use for label generation: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only).",
+    )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
     parser.add_argument(
         "--intended-receiver-mode",
@@ -228,7 +233,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--target-family is required unless --success-intent-only is set.")
         if not args.return_type:
             parser.error("--return_type is required unless --success-intent-only is set.")
-        args.return_type = validate_return_type(args.return_type)
+        try:
+            args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if not args.success_intent_only and args.intended_receiver_mode not in available_modes:
         parser.error(

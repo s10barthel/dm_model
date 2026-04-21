@@ -269,6 +269,72 @@ def label_future_max_value(
     return events
 
 
+def label_nth_future_state_value(
+    events: pd.DataFrame,
+    value_col: str,
+    scores_col: str,
+    concedes_col: str,
+    action_offset: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    events = events.copy()
+    eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
+
+    if value_col not in events.columns:
+        events[value_col] = np.nan
+    events[value_col] = pd.to_numeric(events[value_col], errors="coerce")
+    events[scores_col] = 0.0
+    events[concedes_col] = 0.0
+
+    if events.empty or "spadl_type" not in events.columns or "object_id" not in events.columns:
+        return events
+
+    teams = events["object_id"].astype(str).str[:4]
+    eligible_mask = events["spadl_type"].isin(eligible_types) & events[value_col].notna() & teams.isin(["home", "away"])
+    eligible_positions = np.flatnonzero(eligible_mask.to_numpy())
+
+    if len(eligible_positions) == 0:
+        return events
+
+    score_loc = events.columns.get_loc(scores_col)
+    concede_loc = events.columns.get_loc(concedes_col)
+    team_values = teams.to_numpy(dtype=object)
+    value_array = events[value_col].to_numpy(dtype=float)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
+
+    for row_pos in range(len(events)):
+        future_start = np.searchsorted(eligible_positions, row_pos + 1, side="left")
+        future_positions = eligible_positions[future_start:]
+        if len(future_positions) == 0:
+            continue
+
+        if len(future_positions) >= action_offset:
+            search_positions = future_positions[:action_offset]
+        else:
+            search_positions = future_positions
+
+        shot_positions = search_positions[shot_array[search_positions]]
+        if len(shot_positions) > 0:
+            selected_pos = int(shot_positions[0])
+        elif len(future_positions) >= action_offset:
+            selected_pos = int(future_positions[action_offset - 1])
+        else:
+            continue
+
+        candidate = value_array[selected_pos]
+        if not np.isfinite(candidate):
+            continue
+
+        if team_values[selected_pos] == team_values[row_pos]:
+            events.iat[row_pos, score_loc] = float(candidate)
+            events.iat[row_pos, concede_loc] = 0.0
+        else:
+            events.iat[row_pos, score_loc] = 0.0
+            events.iat[row_pos, concede_loc] = float(candidate)
+
+    return events
+
+
 def _should_stop_discount_scan(events: pd.DataFrame, row_pos: int, period_i: Any, goal_array: np.ndarray) -> bool:
     if bool(goal_array[row_pos]):
         return True
@@ -419,6 +485,21 @@ def label_discounted_xt_returns(
     )
 
 
+def label_xt_in_state_returns(
+    events: pd.DataFrame,
+    action_offset: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_nth_future_state_value(
+        events,
+        value_col="xT",
+        scores_col="scores_xT",
+        concedes_col="concedes_xT",
+        action_offset=action_offset,
+        eligible_types=eligible_types,
+    )
+
+
 def label_goal_distance_returns(
     events: pd.DataFrame,
     lookahead_len: int = 5,
@@ -430,6 +511,21 @@ def label_goal_distance_returns(
         scores_col="scores_goal_distance",
         concedes_col="concedes_goal_distance",
         lookahead_len=lookahead_len,
+        eligible_types=eligible_types,
+    )
+
+
+def label_goal_distance_in_state_returns(
+    events: pd.DataFrame,
+    action_offset: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_nth_future_state_value(
+        events,
+        value_col="goal_distance",
+        scores_col="scores_goal_distance",
+        concedes_col="concedes_goal_distance",
+        action_offset=action_offset,
         eligible_types=eligible_types,
     )
 

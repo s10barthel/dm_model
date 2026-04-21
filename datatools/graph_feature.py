@@ -785,7 +785,7 @@ if __name__ == "__main__":
         type=str,
         action="append",
         default=None,
-        help="Way of defining future returns. Repeat the flag to generate multiple return types in one run.",
+        help="Way of defining future returns. Repeat the flag to generate multiple return types in one run, including in_<N> for xt/goal_distance training.",
     )
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
     parser.add_argument("--augment_blocks", action="store_true", default=False)
