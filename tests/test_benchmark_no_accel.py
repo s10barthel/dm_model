@@ -23,7 +23,9 @@ from scripts import train_relevant_models as train_wrapper
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from datatools.viz_helpers import figure_to_rgb_image
 from scripts import visualize_benchmark
+from scripts import visualize_hawkeye
 
 
 def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
@@ -130,6 +132,38 @@ def make_model_record(
 
 
 class BenchmarkNoAccelTests(unittest.TestCase):
+    def test_figure_to_rgb_image_tight_false_keeps_canvas_size_stable_when_text_extents_change(self) -> None:
+        fig_short, ax_short = plt.subplots(figsize=(4, 3))
+        ax_short.plot([0.0, 1.0], [0.0, 1.0])
+        ax_short.text(
+            0.5,
+            1.01,
+            "Short title",
+            transform=ax_short.transAxes,
+            ha="center",
+            va="bottom",
+        )
+
+        fig_long, ax_long = plt.subplots(figsize=(4, 3))
+        ax_long.plot([0.0, 1.0], [0.0, 1.0])
+        ax_long.text(
+            0.5,
+            1.01,
+            "A much longer title that would normally expand a tight bounding box",
+            transform=ax_long.transAxes,
+            ha="center",
+            va="bottom",
+        )
+
+        try:
+            short_image = figure_to_rgb_image(fig_short, dpi=100, tight=False)
+            long_image = figure_to_rgb_image(fig_long, dpi=100, tight=False)
+        finally:
+            plt.close(fig_short)
+            plt.close(fig_long)
+
+        self.assertEqual(short_image.size, long_image.size)
+
     def test_wrapper_parse_args_accepts_no_accel(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
@@ -519,6 +553,54 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertIsInstance(image, Image.Image)
         self.assertNotIn("ball_velocity_xy", mock_visualizer.call_args.kwargs)
+
+    def test_hawkeye_render_frame_image_uses_fixed_canvas_export(self) -> None:
+        tracking = pd.DataFrame(
+            [
+                {
+                    "frame_id": 0,
+                    "ball_x": 52.5,
+                    "ball_y": 34.0,
+                    "home_10_x": 50.0,
+                    "home_10_y": 30.0,
+                    "home_10_vx": 0.5,
+                    "home_10_vy": 0.1,
+                }
+            ]
+        ).set_index("frame_id", drop=False)
+        frame_meta = pd.DataFrame(
+            [
+                {
+                    "frame_id": 0,
+                    "abs_time": 12.345,
+                    "possession_prefix": "home",
+                    "possessor_object_id": "home_10",
+                }
+            ]
+        ).set_index("frame_id")
+        situation = SimpleNamespace(
+            situation_id="example-situation",
+            tracking=tracking,
+            frame_meta=frame_meta,
+        )
+        expected_image = Image.new("RGB", (16, 16))
+
+        with (
+            patch.object(visualize_hawkeye, "SnapshotVisualizer") as mock_visualizer,
+            patch.object(visualize_hawkeye, "figure_to_rgb_image", return_value=expected_image) as mock_figure_to_rgb,
+        ):
+            fig, ax = plt.subplots()
+            mock_visualizer.return_value.plot.return_value = (fig, ax)
+            image = visualize_hawkeye.render_frame_image(
+                situation,
+                0,
+                "pass_success",
+                pd.Series({"home_10": 0.7}),
+            )
+
+        self.assertIs(image, expected_image)
+        self.assertEqual(mock_figure_to_rgb.call_args.kwargs["dpi"], 150)
+        self.assertFalse(mock_figure_to_rgb.call_args.kwargs["tight"])
 
 
 if __name__ == "__main__":
