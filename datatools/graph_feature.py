@@ -507,6 +507,8 @@ def construct_graph_features(
 
     feature_graphs: List[Data | None] = []
     if action_indices is None:
+        if match.labels is None:
+            raise ValueError("construct_graph_features requires either action_indices or match.labels.")
         action_indices = match.labels[:, 0].long().numpy()
     action_indices = np.asarray(action_indices, dtype=int)
     iterator = tqdm(action_indices, desc=f"Constructing {feature_variant} graphs") if verbose else action_indices
@@ -531,6 +533,54 @@ def count_invalid_graphs(graphs: List[Data | None]) -> int:
 
 def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def extract_sorted_action_indices(labels: torch.Tensor, *, context: str) -> np.ndarray:
+    action_indices = labels[:, 0].numpy().astype(int)
+    if not np.all(np.sort(action_indices) == action_indices):
+        raise ValueError(f"{context} are not sorted by action index.")
+    return action_indices
+
+
+def bind_canonical_graph_context(
+    match: Match,
+    resolved_actions_by_mode: dict[str, pd.DataFrame],
+    labels_by_key: dict[tuple[str, str], torch.Tensor],
+    primary_mode: str,
+    primary_return_type: str,
+) -> np.ndarray:
+    canonical_key = (primary_mode, primary_return_type)
+    if primary_mode not in resolved_actions_by_mode:
+        raise ValueError(f"Missing resolved actions for intended_receiver_mode={primary_mode}.")
+    if canonical_key not in labels_by_key:
+        raise ValueError(
+            "Missing canonical labels for "
+            f"intended_receiver_mode={primary_mode}, return_type={primary_return_type}."
+        )
+
+    canonical_labels = labels_by_key[canonical_key]
+    canonical_action_indices = extract_sorted_action_indices(
+        canonical_labels,
+        context=(
+            "Canonical action labels for "
+            f"intended_receiver_mode={primary_mode}, return_type={primary_return_type}"
+        ),
+    )
+    for (mode, return_type), labels in labels_by_key.items():
+        action_indices = extract_sorted_action_indices(
+            labels,
+            context=f"Action labels for intended_receiver_mode={mode}, return_type={return_type}",
+        )
+        if not np.array_equal(action_indices, canonical_action_indices):
+            raise ValueError(
+                "Shared base graph artifacts require identical action ordering across label variants, but "
+                f"intended_receiver_mode={mode}, return_type={return_type} does not match the canonical ordering "
+                f"from intended_receiver_mode={primary_mode}, return_type={primary_return_type}."
+            )
+
+    match.actions = resolved_actions_by_mode[primary_mode].copy()
+    match.labels = canonical_labels.clone()
+    return canonical_action_indices
 
 
 def build_labels_by_mode_and_return(
@@ -893,9 +943,7 @@ if __name__ == "__main__":
                 if args.feature_variant == "success_intent":
                     resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, args.return_types)
                     for labels in success_intent_labels.values():
-                        action_indices = labels[:, 0].numpy().astype(int)
-                        if not np.all(np.sort(action_indices) == action_indices):
-                            raise ValueError("Action labels are not sorted by action index.")
+                        extract_sorted_action_indices(labels, context="Action labels")
 
                     primary_return_type = args.return_types[0]
                     match.actions = resolved_actions.copy()
@@ -944,17 +992,18 @@ if __name__ == "__main__":
                         resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
                         resolved_actions.to_parquet(resolved_action_path)
 
-                    for labels in labels_by_key.values():
-                        action_indices = labels[:, 0].numpy().astype(int)
-                        if not np.all(np.sort(action_indices) == action_indices):
-                            raise ValueError("Action labels are not sorted by action index.")
+                    primary_mode = args.intended_receiver_modes[0]
+                    primary_return_type = args.return_types[0]
+                    base_action_indices = bind_canonical_graph_context(
+                        match,
+                        resolved_actions_by_mode,
+                        labels_by_key,
+                        primary_mode,
+                        primary_return_type,
+                    )
 
                     if args.feature_variant == "intent_train_augmented":
                         print("Constructing intent-training augmentation graphs...")
-                        primary_mode = args.intended_receiver_modes[0]
-                        primary_return_type = args.return_types[0]
-                        match.actions = resolved_actions_by_mode[primary_mode].copy()
-                        match.labels = labels_by_key[(primary_mode, primary_return_type)]
                         augmented_graphs, _, augmented_action_indices = construct_intent_training_samples(
                             match,
                             extend=True,
@@ -988,6 +1037,7 @@ if __name__ == "__main__":
                             extend=True,
                             post_action=False,
                             feature_variant="base",
+                            action_indices=base_action_indices,
                             add_v_edge_features=True,
                         )
                         valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
@@ -1005,6 +1055,7 @@ if __name__ == "__main__":
                                 extend=True,
                                 post_action=True,
                                 feature_variant="base",
+                                action_indices=base_action_indices,
                                 add_v_edge_features=True,
                             )
                             torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
@@ -1038,9 +1089,7 @@ if __name__ == "__main__":
                 if match.labels.numel() == 0:
                     raise ValueError("No usable labels were constructed for this match.")
 
-                action_indices = match.labels[:, 0].numpy().astype(int)
-                if not np.all(np.sort(action_indices) == action_indices):
-                    raise ValueError("Action labels are not sorted by action index.")
+                action_indices = extract_sorted_action_indices(match.labels, context="Action labels")
 
                 print("Constructing base graph features for actions...")
                 match.graph_features_0 = construct_graph_features(
@@ -1048,6 +1097,7 @@ if __name__ == "__main__":
                     extend=True,
                     post_action=False,
                     feature_variant="base",
+                    action_indices=action_indices,
                     add_v_edge_features=True,
                 )
                 valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
