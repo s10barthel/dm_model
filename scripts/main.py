@@ -78,7 +78,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--return_type",
         default=None,
-        help="Resolved return type to generate and train against: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only).",
+        help=(
+            "Resolved return type to generate and train against: disc_<gamma>, disc_<gamma>_skip1, "
+            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance only)."
+        ),
     )
     parser.add_argument(
         "--intended-receiver-mode",

@@ -33,13 +33,23 @@ def make_xt_events(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
 class ReturnTypeValidationTests(unittest.TestCase):
     def test_validate_return_type_accepts_in_variant(self) -> None:
         self.assertEqual(project_config.validate_return_type("in_3"), "in_3")
-        self.assertEqual(project_config.parse_return_type("in_3"), ("in", 3))
+        self.assertEqual(project_config.parse_return_type("in_3"), ("in", 3, False))
+
+    def test_validate_return_type_accepts_skip1_variants(self) -> None:
+        self.assertEqual(project_config.validate_return_type("next_3_skip1"), "next_3_skip1")
+        self.assertEqual(project_config.validate_return_type("disc_0.5_skip1"), "disc_0.5_skip1")
+        self.assertEqual(project_config.parse_return_type("next_3_skip1"), ("next", 3, True))
+        self.assertEqual(project_config.parse_return_type("disc_0.5_skip1"), ("disc", 0.5, True))
 
     def test_validate_return_type_rejects_invalid_in_variant(self) -> None:
         with self.assertRaises(ValueError):
             project_config.validate_return_type("in_0")
         with self.assertRaises(ValueError):
             project_config.validate_return_type("in_three")
+        with self.assertRaises(ValueError):
+            project_config.validate_return_type("in_3_skip1")
+        with self.assertRaises(ValueError):
+            project_config.validate_return_type("next_three_skip1")
 
     def test_validate_return_type_for_target_family_rejects_goal_and_xg(self) -> None:
         for target_family in ["goal", "xg"]:
@@ -62,11 +72,12 @@ class ReturnTypeValidationTests(unittest.TestCase):
             project_config.resolve_effective_return_type("goal", "in_3")
         self.assertEqual(project_config.resolve_effective_return_type("xt", "in_3"), "in_3")
 
-    def test_infer_feature_run_return_types_detects_in_state_label_dirs(self) -> None:
+    def test_infer_feature_run_return_types_detects_in_state_and_skip1_label_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_root = Path(tmpdir)
             (run_root / "action_labels_in_3").mkdir()
-            (run_root / "action_labels_next_5_angle_only").mkdir()
+            (run_root / "action_labels_next_5_skip1_angle_only").mkdir()
+            (run_root / "action_labels_disc_0.5_skip1_model").mkdir()
 
             with (
                 patch.object(project_config, "load_feature_run_metadata", return_value={}),
@@ -74,7 +85,7 @@ class ReturnTypeValidationTests(unittest.TestCase):
             ):
                 return_types = project_config.infer_feature_run_return_types("feature_run")
 
-        self.assertEqual(return_types, ["in_3", "next_5"])
+        self.assertEqual(return_types, ["disc_0.5_skip1", "in_3", "next_5_skip1"])
 
 
 class InStateLabelingTests(unittest.TestCase):
@@ -159,6 +170,59 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertEqual(float(next_labeled.at[0, "concedes_xT"]), 0.60)
         self.assertEqual(float(disc_labeled.at[0, "scores_xT"]), 0.20)
         self.assertEqual(float(disc_labeled.at[0, "concedes_xT"]), 0.30)
+
+    def test_label_future_max_value_skip1_matches_next_3_example(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.15),
+                ("pass", "away_1", 0.20),
+                ("pass", "away_1", 0.10),
+                ("pass", "away_1", 0.15),
+                ("pass", "home_1", 0.05),
+            ]
+        )
+
+        labeled = utils.label_xt_returns(events, lookahead_len=3, skip_first=True)
+
+        self.assertEqual(labeled["scores_xT"].round(2).tolist(), [0.15, 0.15, 0.00, 0.00, 0.15, 0.00, 0.00, 0.00])
+        self.assertEqual(labeled["concedes_xT"].round(2).tolist(), [0.00, 0.20, 0.20, 0.15, 0.05, 0.05, 0.00, 0.00])
+
+    def test_label_discounted_future_max_value_skip1_resets_discount_rank_after_skipped_non_shot(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "home_1", 0.70),
+                ("pass", "away_1", 0.10),
+            ]
+        )
+
+        labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True)
+
+        self.assertEqual(float(labeled.at[0, "scores_xT"]), 0.70)
+        self.assertEqual(float(labeled.at[0, "concedes_xT"]), 0.05)
+
+    def test_skip1_next_and_discounted_xt_helpers_do_not_skip_first_rated_shot(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("shot", "away_1", 0.70),
+                ("pass", "home_1", 0.40),
+            ]
+        )
+
+        next_labeled = utils.label_xt_returns(events, lookahead_len=3)
+        next_skip_labeled = utils.label_xt_returns(events, lookahead_len=3, skip_first=True)
+        disc_labeled = utils.label_discounted_xt_returns(events, gamma=0.5)
+        disc_skip_labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True)
+
+        self.assertEqual(float(next_skip_labeled.at[0, "scores_xT"]), float(next_labeled.at[0, "scores_xT"]))
+        self.assertEqual(float(next_skip_labeled.at[0, "concedes_xT"]), float(next_labeled.at[0, "concedes_xT"]))
+        self.assertEqual(float(disc_skip_labeled.at[0, "scores_xT"]), float(disc_labeled.at[0, "scores_xT"]))
+        self.assertEqual(float(disc_skip_labeled.at[0, "concedes_xT"]), float(disc_labeled.at[0, "concedes_xT"]))
 
 
 class WrapperValidationTests(unittest.TestCase):

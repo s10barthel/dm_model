@@ -350,6 +350,7 @@ This is a separate post-preprocessing step. It reads canonical synced event CSVs
 ```powershell
 python scripts/generate_relevant_features.py --return_type disc_0.9
 python scripts/generate_relevant_features.py --return_type disc_0.9 --return_type next_5 --return_type next_3
+python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
 ```
 
@@ -374,7 +375,7 @@ Behavior:
 Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
-- repeat `--return_type <disc_gamma|next_N>` to include multiple resolved return semantics in one feature run
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 
 This writes, inside the run root:
@@ -622,10 +623,12 @@ Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 
 ### `--return_type` Applies To All Outcome Target Families
 
-`--return_type` accepts three resolved forms overall:
+`--return_type` accepts five resolved forms overall:
 
 - `disc_<gamma>` uses discounted returns
+- `disc_<gamma>_skip1` uses discounted returns but skips the first rated future non-shot action
 - `next_<N>` uses non-discounted lookahead returns
+- `next_<N>_skip1` uses non-discounted lookahead returns but skips the first rated future non-shot action
 - `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt` and `goal_distance`
 
 Example:
@@ -640,18 +643,26 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 - Binary goals:
   - `next_<N>` uses the current `scores` / `concedes` logic over the next `N` events, including the current event
+  - `next_<N>_skip1` uses the same event window, but suppresses the first future event contribution when that first future event is not a shot
   - `disc_<gamma>` writes discounted goal occurrence into `scores` / `concedes`
+  - `disc_<gamma>_skip1` uses the same discounted goal scan, but suppresses the first future event contribution when that first future event is not a shot
 - xG:
   - `next_<N>` uses non-discounted xG returns over the next `N` events
+  - `next_<N>_skip1` uses the same xG event window, but suppresses the first future event contribution when that first future event is not a shot
   - `disc_<gamma>` keeps the existing discounted xG-probability logic
+  - `disc_<gamma>_skip1` uses the same discounted xG scan, but suppresses the first future event contribution when that first future event is not a shot
 - xT:
   - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
   - `disc_<gamma>` uses `max(gamma^k * xT)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
 - goal_distance:
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
   - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
 
 ### Where to switch targets
 
@@ -736,7 +747,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/main.py`
 
 - `--target-family {goal,xg,xt,goal_distance}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
+- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
@@ -773,14 +784,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
-- repeat `--return_type <disc_gamma|next_N|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt` and `goal_distance`.
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt` and `goal_distance`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 
 ### `scripts/train_relevant_models.py`
 
 - `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
-- `--return_type <disc_gamma|next_N|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
+- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.

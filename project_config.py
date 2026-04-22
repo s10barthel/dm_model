@@ -478,34 +478,42 @@ def validate_return_type(return_type: str) -> str:
     if not value:
         raise ValueError("return_type must be a non-empty string.")
 
-    if value.startswith("disc_"):
+    skip_first = value.endswith("_skip1")
+    core_value = value[:-6] if skip_first else value
+
+    if core_value.startswith("disc_"):
         try:
-            gamma = float(value.split("_", 1)[1])
+            gamma = float(core_value.split("_", 1)[1])
         except (IndexError, ValueError) as exc:
             raise ValueError(f"Invalid discounted return type: {return_type!r}.") from exc
         if not (0.0 < gamma <= 1.0):
             raise ValueError(f"Discount factor must satisfy 0 < gamma <= 1, got {gamma}.")
         return value
 
-    if value.startswith("next_"):
+    if core_value.startswith("next_"):
         try:
-            lookahead_len = int(value.split("_", 1)[1])
+            lookahead_len = int(core_value.split("_", 1)[1])
         except (IndexError, ValueError) as exc:
             raise ValueError(f"Invalid lookahead return type: {return_type!r}.") from exc
         if lookahead_len < 1:
             raise ValueError(f"Lookahead length must be >= 1, got {lookahead_len}.")
         return value
 
-    if value.startswith("in_"):
+    if core_value.startswith("in_"):
+        if skip_first:
+            raise ValueError(f"Unsupported return_type {return_type!r}. in_<N>_skip1 is not supported.")
         try:
-            lookahead_len = int(value.split("_", 1)[1])
+            lookahead_len = int(core_value.split("_", 1)[1])
         except (IndexError, ValueError) as exc:
             raise ValueError(f"Invalid in-state return type: {return_type!r}.") from exc
         if lookahead_len < 1:
             raise ValueError(f"In-state lookahead length must be >= 1, got {lookahead_len}.")
         return value
 
-    raise ValueError(f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, next_<N>, or in_<N>.")
+    raise ValueError(
+        f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
+        "next_<N>, next_<N>_skip1, or in_<N>."
+    )
 
 
 def validate_return_type_for_target_family(
@@ -520,7 +528,7 @@ def validate_return_type_for_target_family(
     if family not in RETURN_TYPE_DEFAULTS:
         raise ValueError(f"Unsupported target family for return_type validation: {family!r}.")
 
-    kind, _ = parse_return_type(normalized)
+    kind, _, _ = parse_return_type(normalized)
     if kind == "in" and family not in {"xt", "goal_distance"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt' or 'goal_distance', got {family!r}."
@@ -571,10 +579,15 @@ def infer_feature_run_return_types(feature_run_id: str) -> list[str]:
         if path.name.startswith("action_labels_intent_train_"):
             continue
         suffix = path.name[len("action_labels_") :]
-        parts = suffix.split("_", 2)
-        if len(parts) < 2:
+        for mode in INTENDED_RECEIVER_MODES:
+            mode_suffix = intended_receiver_suffix(mode)
+            if mode_suffix and suffix.endswith(mode_suffix):
+                suffix = suffix[: -len(mode_suffix)]
+                break
+        try:
+            values.add(validate_return_type(suffix))
+        except ValueError:
             continue
-        values.add(f"{parts[0]}_{parts[1]}")
     if not values:
         return []
     return resolve_requested_return_types(sorted(values))
@@ -595,10 +608,12 @@ def infer_feature_run_intended_receiver_modes(feature_run_id: str) -> list[str]:
     return [mode for mode in INTENDED_RECEIVER_MODES if mode in modes]
 
 
-def parse_return_type(return_type: str) -> tuple[str, float | int]:
+def parse_return_type(return_type: str) -> tuple[str, float | int, bool]:
     value = validate_return_type(return_type)
-    kind, raw = value.split("_", 1)
-    return kind, float(raw) if kind == "disc" else int(raw)
+    skip_first = value.endswith("_skip1")
+    core_value = value[:-6] if skip_first else value
+    kind, raw = core_value.split("_", 1)
+    return kind, float(raw) if kind == "disc" else int(raw), skip_first
 
 
 def resolve_effective_return_type(

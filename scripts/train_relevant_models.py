@@ -253,7 +253,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--return_type",
         default=None,
-        help="Resolved outcome return type to use for label generation: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only).",
+        help=(
+            "Resolved outcome return type to use for label generation: disc_<gamma>, disc_<gamma>_skip1, "
+            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance only)."
+        ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
     parser.add_argument(

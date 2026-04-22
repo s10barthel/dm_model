@@ -100,7 +100,10 @@ parser.add_argument(
     type=str,
     required=False,
     default=None,
-    help="way of defining return: disc_<gamma>, next_<N>, or in_<N> (xt/goal_distance only)",
+    help=(
+        "way of defining return: disc_<gamma>, disc_<gamma>_skip1, next_<N>, next_<N>_skip1, "
+        "or in_<N> (xt/goal_distance only)"
+    ),
 )
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")

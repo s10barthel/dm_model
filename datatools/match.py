@@ -459,7 +459,7 @@ class Match(ABC):
     ) -> torch.Tensor:
         if return_type is None:
             return_type = f"disc_{gamma}" if discount_xg else f"next_{lookahead_len}"
-        return_kind, return_value = parse_return_type(return_type)
+        return_kind, return_value, skip_first = parse_return_type(return_type)
 
         if resolved_actions is not None:
             self.actions = resolved_actions.copy()
@@ -483,16 +483,18 @@ class Match(ABC):
 
         if return_kind == "next":
             lookahead_len = int(return_value)
-            self.events = utils.label_returns(self.events, lookahead_len)
+            self.events = utils.label_returns(self.events, lookahead_len, skip_first=skip_first)
             self.events = utils.label_xt_returns(
                 self.events,
                 lookahead_len=lookahead_len,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
             )
             self.events = utils.label_goal_distance_returns(
                 self.events,
                 lookahead_len=lookahead_len,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
             )
         elif return_kind == "in":
             lookahead_len = int(return_value)
@@ -509,17 +511,19 @@ class Match(ABC):
             )
         else:
             gamma = float(return_value)
-            self.events = utils.label_discounted_goal_returns(self.events, gamma)
-            self.events = utils.label_discounted_returns(self.events, gamma)
+            self.events = utils.label_discounted_goal_returns(self.events, gamma, skip_first=skip_first)
+            self.events = utils.label_discounted_returns(self.events, gamma, skip_first=skip_first)
             self.events = utils.label_discounted_xt_returns(
                 self.events,
                 gamma=gamma,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
             )
             self.events = utils.label_discounted_goal_distance_returns(
                 self.events,
                 gamma=gamma,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
             )
 
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]

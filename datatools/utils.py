@@ -225,6 +225,7 @@ def label_future_max_value(
     concedes_col: str,
     lookahead_len: int = 5,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     events = events.copy()
     eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
@@ -247,10 +248,15 @@ def label_future_max_value(
 
     value_array = events[value_col].to_numpy(dtype=float)
     team_values = teams.to_numpy(dtype=object)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
 
     for row_pos in range(len(events)):
         future_start = np.searchsorted(eligible_positions, row_pos + 1, side="left")
         future_positions = eligible_positions[future_start : future_start + lookahead_len]
+        if len(future_positions) == 0:
+            continue
+        if skip_first and not shot_array[int(future_positions[0])]:
+            future_positions = future_positions[1:]
         if len(future_positions) == 0:
             continue
 
@@ -345,7 +351,11 @@ def _should_stop_discount_scan(events: pd.DataFrame, row_pos: int, period_i: Any
     return False
 
 
-def label_discounted_goal_returns(events: pd.DataFrame, gamma: float = 0.95) -> pd.DataFrame:
+def label_discounted_goal_returns(
+    events: pd.DataFrame,
+    gamma: float = 0.95,
+    skip_first: bool = False,
+) -> pd.DataFrame:
     events = events.copy()
 
     expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
@@ -353,6 +363,7 @@ def label_discounted_goal_returns(events: pd.DataFrame, gamma: float = 0.95) -> 
     teams = events["object_id"].astype(str).str[:4]
     goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
     team_values = teams.to_numpy(dtype=object)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
 
     events["goal"] = goal_array
     events["scores"] = 0.0
@@ -370,9 +381,15 @@ def label_discounted_goal_returns(events: pd.DataFrame, gamma: float = 0.95) -> 
         team_i = team_values[row_pos]
         best_score = 0.0
         best_concede = 0.0
+        first_future_seen = False
 
         for future_pos in range(row_pos, len(events)):
-            if goal_array[future_pos]:
+            skip_future = False
+            if future_pos > row_pos and not first_future_seen:
+                first_future_seen = True
+                skip_future = skip_first and not shot_array[future_pos]
+
+            if goal_array[future_pos] and not skip_future:
                 weight = gamma ** (future_pos - row_pos)
                 if team_values[future_pos] == team_i:
                     best_score = max(best_score, weight)
@@ -395,6 +412,7 @@ def label_discounted_future_max_value(
     concedes_col: str,
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     events = events.copy()
     eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
@@ -414,6 +432,7 @@ def label_discounted_future_max_value(
     goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
     team_values = teams.to_numpy(dtype=object)
     value_array = events[value_col].to_numpy(dtype=float)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
     eligible_array = (
         events["spadl_type"].isin(eligible_types).to_numpy(dtype=bool)
         & np.isfinite(value_array)
@@ -430,6 +449,7 @@ def label_discounted_future_max_value(
         best_score = 0.0
         best_concede = 0.0
         eligible_rank = 0
+        first_eligible_seen = False
 
         if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
             events.iat[row_pos, score_loc] = float(best_score)
@@ -438,13 +458,19 @@ def label_discounted_future_max_value(
 
         for future_pos in range(row_pos + 1, len(events)):
             if eligible_array[future_pos]:
-                weight = gamma ** eligible_rank
-                candidate = weight * value_array[future_pos]
-                if team_values[future_pos] == team_i:
-                    best_score = max(best_score, candidate)
-                else:
-                    best_concede = max(best_concede, candidate)
-                eligible_rank += 1
+                skip_current = False
+                if not first_eligible_seen:
+                    first_eligible_seen = True
+                    skip_current = skip_first and not shot_array[future_pos]
+
+                if not skip_current:
+                    weight = gamma ** eligible_rank
+                    candidate = weight * value_array[future_pos]
+                    if team_values[future_pos] == team_i:
+                        best_score = max(best_score, candidate)
+                    else:
+                        best_concede = max(best_concede, candidate)
+                    eligible_rank += 1
 
             if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
                 break
@@ -459,6 +485,7 @@ def label_xt_returns(
     events: pd.DataFrame,
     lookahead_len: int = 5,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     return label_future_max_value(
         events,
@@ -467,6 +494,7 @@ def label_xt_returns(
         concedes_col="concedes_xT",
         lookahead_len=lookahead_len,
         eligible_types=eligible_types,
+        skip_first=skip_first,
     )
 
 
@@ -474,6 +502,7 @@ def label_discounted_xt_returns(
     events: pd.DataFrame,
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     return label_discounted_future_max_value(
         events,
@@ -482,6 +511,7 @@ def label_discounted_xt_returns(
         concedes_col="concedes_xT",
         gamma=gamma,
         eligible_types=eligible_types,
+        skip_first=skip_first,
     )
 
 
@@ -504,6 +534,7 @@ def label_goal_distance_returns(
     events: pd.DataFrame,
     lookahead_len: int = 5,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     return label_future_max_value(
         events,
@@ -512,6 +543,7 @@ def label_goal_distance_returns(
         concedes_col="concedes_goal_distance",
         lookahead_len=lookahead_len,
         eligible_types=eligible_types,
+        skip_first=skip_first,
     )
 
 
@@ -534,6 +566,7 @@ def label_discounted_goal_distance_returns(
     events: pd.DataFrame,
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
 ) -> pd.DataFrame:
     return label_discounted_future_max_value(
         events,
@@ -542,6 +575,7 @@ def label_discounted_goal_distance_returns(
         concedes_col="concedes_goal_distance",
         gamma=gamma,
         eligible_types=eligible_types,
+        skip_first=skip_first,
     )
 
 
@@ -706,7 +740,11 @@ def label_intended_receivers(
     return actions
 
 
-def label_returns(events: pd.DataFrame, lookahead_len: int = 10) -> pd.DataFrame:
+def label_returns(
+    events: pd.DataFrame,
+    lookahead_len: int = 10,
+    skip_first: bool = False,
+) -> pd.DataFrame:
     events = events.copy()
 
     events["team"] = events["object_id"].str[:4]
@@ -719,15 +757,26 @@ def label_returns(events: pd.DataFrame, lookahead_len: int = 10) -> pd.DataFrame
     for period in events["period_id"].unique():
         period_events = events[events["period_id"] == period]
         labels = period_events[["team", "goal", "expected_goal"]].copy()
+        first_future_types = period_events["spadl_type"].shift(-1)
+        skip_mask = first_future_types.notna() & first_future_types.ne("shot")
 
         for i in range(lookahead_len):
             shifted_teams = labels["team"].shift(-i)
             shifted_goals = labels[["goal", "expected_goal"]].shift(-i).fillna(0)
             # shifted_returns = labels.shift(-i).fillna(0).infer_objects(copy=False)
-            labels[f"sg+{i}"] = shifted_goals["goal"] * (shifted_teams == labels["team"]).astype(int)
-            labels[f"cg+{i}"] = shifted_goals["goal"] * (shifted_teams != labels["team"]).astype(int)
-            labels[f"sxg+{i}"] = shifted_goals["expected_goal"] * (shifted_teams == labels["team"]).astype(int)
-            labels[f"cxg+{i}"] = shifted_goals["expected_goal"] * (shifted_teams != labels["team"]).astype(int)
+            scoring_goals = shifted_goals["goal"] * (shifted_teams == labels["team"]).astype(int)
+            conceding_goals = shifted_goals["goal"] * (shifted_teams != labels["team"]).astype(int)
+            scoring_xg = shifted_goals["expected_goal"] * (shifted_teams == labels["team"]).astype(int)
+            conceding_xg = shifted_goals["expected_goal"] * (shifted_teams != labels["team"]).astype(int)
+            if skip_first and i == 1:
+                scoring_goals = scoring_goals.where(~skip_mask, 0)
+                conceding_goals = conceding_goals.where(~skip_mask, 0)
+                scoring_xg = scoring_xg.where(~skip_mask, 0)
+                conceding_xg = conceding_xg.where(~skip_mask, 0)
+            labels[f"sg+{i}"] = scoring_goals
+            labels[f"cg+{i}"] = conceding_goals
+            labels[f"sxg+{i}"] = scoring_xg
+            labels[f"cxg+{i}"] = conceding_xg
 
         scoring_cols = [c for c in labels.columns if c.startswith("sg+")]
         scoring_xg_cols = [c for c in labels.columns if c.startswith("sxg+")]
@@ -742,12 +791,17 @@ def label_returns(events: pd.DataFrame, lookahead_len: int = 10) -> pd.DataFrame
     return events
 
 
-def label_discounted_returns(events: pd.DataFrame, gamma: float = 0.95) -> pd.DataFrame:
+def label_discounted_returns(
+    events: pd.DataFrame,
+    gamma: float = 0.95,
+    skip_first: bool = False,
+) -> pd.DataFrame:
     events = events.copy()
 
     expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
     expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
     goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
     events["goal"] = goal_array
     events["scores_xg_disc"] = 0.0
     events["concedes_xg_disc"] = 0.0
@@ -759,8 +813,19 @@ def label_discounted_returns(events: pd.DataFrame, gamma: float = 0.95) -> pd.Da
 
         prob_not_scoring = 1.0
         prob_not_conceding = 1.0
+        first_future_seen = False
 
         for j in range(i, n_events):
+            skip_future = False
+            if j > i and not first_future_seen:
+                first_future_seen = True
+                skip_future = skip_first and not shot_array[j]
+
+            if skip_future:
+                if _should_stop_discount_scan(events, j, period_i, goal_array):
+                    break
+                continue
+
             if str(events.iat[j, events.columns.get_loc("object_id")])[:4] == team_i:  # future shot by a teammate
                 prob_not_scoring *= 1 - gamma ** (j - i) * expected_goals.iat[j]
             else:  # future shot by an opponent
