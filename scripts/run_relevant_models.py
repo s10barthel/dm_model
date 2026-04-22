@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +14,7 @@ import torch
 
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
+from datatools.success_intent import build_success_intent_resolved_actions
 from inference import inference_gnn
 from models.utils import (
     get_model_provenance,
@@ -31,6 +31,7 @@ from project_config import (
     generate_run_id,
     get_action_graph_dir,
     get_resolved_action_path,
+    get_success_intent_graph_dir,
     load_base_splits,
     resolve_feature_root,
     write_latest_run,
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
+    parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
@@ -137,6 +139,80 @@ def save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
     table.reset_index().to_parquet(output_path, index=False)
 
 
+def resolve_optional_success_intent_model_id(
+    args: argparse.Namespace,
+    bundle: dict[str, object] | None,
+) -> str | None:
+    if args.success_intent_model_id:
+        return str(args.success_intent_model_id)
+    if bundle is None:
+        return None
+    bundle_model_ids = bundle.get("model_ids", {})
+    if not isinstance(bundle_model_ids, dict):
+        return None
+    success_intent_model_id = bundle_model_ids.get("success_intent")
+    return str(success_intent_model_id) if success_intent_model_id else None
+
+
+def load_optional_success_intent_model(
+    success_intent_model_id: str | None,
+    device: str,
+    feature_root: Path,
+) -> tuple[object | None, dict[str, object] | None, dict[str, int | bool] | None, dict[str, int | bool] | None]:
+    if not success_intent_model_id:
+        return None, None, None, None
+
+    success_intent_model = load_model(success_intent_model_id, device)
+    if success_intent_model is None:
+        raise FileNotFoundError(f"Missing success_intent model checkpoint: {success_intent_model_id}")
+
+    success_intent_graph_schema = validate_model_graph_schemas({"success_intent": success_intent_model})
+    success_intent_feature_schema = infer_feature_graph_schema(get_success_intent_graph_dir(feature_root))
+    validate_feature_graph_schema(
+        success_intent_feature_schema,
+        success_intent_graph_schema,
+        context="Selected success_intent feature artifacts",
+    )
+    success_intent_model_record = get_model_provenance(success_intent_model_id)
+    return (
+        success_intent_model,
+        success_intent_model_record,
+        success_intent_graph_schema,
+        success_intent_feature_schema,
+    )
+
+
+def run_success_intent_inference(
+    match: Match,
+    model: object,
+    return_type: str | None,
+    device: str,
+) -> pd.DataFrame:
+    original_actions = match.actions.copy()
+    original_labels = match.labels.clone() if isinstance(match.labels, torch.Tensor) else match.labels
+    original_stats = dict(getattr(match, "intended_receiver_stats", {}))
+
+    try:
+        resolved_actions = build_success_intent_resolved_actions(original_actions)
+        labels = match.construct_labels(
+            discount_xg=True,
+            relabel_intended_receivers=False,
+            resolved_actions=resolved_actions,
+            return_type=return_type,
+        )
+        if labels.numel() == 0:
+            raise ValueError("No usable success_intent labels were produced for this match.")
+        match.labels = labels
+        success_intent, _ = inference_gnn(match, model, device=device, post_action=False)
+        if success_intent.empty:
+            raise ValueError("No usable success_intent inference rows were produced for this match.")
+        return success_intent
+    finally:
+        match.actions = original_actions
+        match.labels = original_labels
+        match.intended_receiver_stats = original_stats
+
+
 def resolve_match_ids(split: str, requested_match_ids: list[str] | None, feature_dir: Path) -> list[str]:
     train_ids, test_ids = load_base_splits(feature_dir)
 
@@ -160,7 +236,7 @@ def resolve_match_ids(split: str, requested_match_ids: list[str] | None, feature
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    resolved_model_ids, shared_context, _ = resolve_model_selection(
+    resolved_model_ids, shared_context, bundle = resolve_model_selection(
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -202,6 +278,13 @@ def main() -> None:
     feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
     validate_feature_graph_schema(feature_schema, graph_schema, context="Selected feature artifacts")
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
+    success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
+    (
+        success_intent_model,
+        success_intent_model_record,
+        success_intent_graph_schema,
+        success_intent_feature_schema,
+    ) = load_optional_success_intent_model(success_intent_model_id, device, feature_root)
 
     match_ids = resolve_match_ids(args.split, args.match_id, get_action_graph_dir(feature_root))
 
@@ -232,6 +315,13 @@ def main() -> None:
         "skipped_matches": [],
         "status": "completed",
     }
+    if success_intent_model_id and success_intent_model_record is not None:
+        metadata["models"]["success_intent"] = success_intent_model_id
+        metadata["model_records"]["success_intent"] = success_intent_model_record
+        metadata["model_feature_signatures"]["success_intent"] = success_intent_model_record["feature_signature"]
+        metadata["success_intent_graph_schema"] = success_intent_graph_schema
+        metadata["success_intent_feature_schema"] = success_intent_feature_schema
+        metadata["success_intent_skipped_matches"] = []
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for index, match_id in enumerate(match_ids, start=1):
@@ -271,6 +361,20 @@ def main() -> None:
             save_component_table(scoring_failure, match_output_dir / "outcome_scoring_failure.parquet")
             save_component_table(conceding_success, match_output_dir / "outcome_conceding_success.parquet")
             save_component_table(conceding_failure, match_output_dir / "outcome_conceding_failure.parquet")
+
+            if success_intent_model is not None:
+                try:
+                    success_intent = run_success_intent_inference(
+                        match,
+                        success_intent_model,
+                        return_type=return_type,
+                        device=device,
+                    )
+                    save_component_table(success_intent, match_output_dir / "success_intent.parquet")
+                except Exception as exc:
+                    error_summary = summarize_exception(exc)
+                    metadata["success_intent_skipped_matches"].append({"match_id": match_id, "error": error_summary})
+                    print(f"  WARN {match_id}: success_intent export skipped: {error_summary}")
             metadata["processed_match_ids"].append(match_id)
         except Exception as exc:
             error_summary = summarize_exception(exc)

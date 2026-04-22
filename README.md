@@ -159,6 +159,7 @@ The component run root contains one folder per processed match:
 
 - `data/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
 - `data/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
+- optionally `data/component_runs/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is provided
 - `data/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
 - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
 - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
@@ -454,6 +455,7 @@ Outputs:
 ```powershell
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id>
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --run-id component_20260414T123456_abcdef12
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 python scripts/run_relevant_models.py --split test --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
 ```
 
@@ -464,12 +466,14 @@ Inputs:
 - `data/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
 Each invocation creates a new component run under `data/component_runs/<component_run_id>/` and updates `data/component_runs/latest.json`.
+When a `success_intent` checkpoint is supplied explicitly or present in the selected bundle, each processed match also gets `success_intent.parquet`.
 
 Useful options:
 
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--run-id <component_run_id>` to pin the created component run id instead of auto-generating one
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
+- `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
 
 ### 7. Visualize one action at a time
 
@@ -821,6 +825,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <component_run_id>`: pin the created component export run id. Default: auto-generate a new component run id.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
+- `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used to export `success_intent.parquet`.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
@@ -1040,6 +1045,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - `data/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
   - `data/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
+  - optionally `data/component_runs/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is selected
   - `data/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
   - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
   - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
