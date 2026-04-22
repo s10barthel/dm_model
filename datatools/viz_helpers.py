@@ -13,10 +13,13 @@ from PIL import Image
 SeriesOrFrame = pd.Series | pd.DataFrame
 
 
-def figure_to_rgb_image(fig, dpi: int = 150) -> Image.Image:
+def figure_to_rgb_image(fig, dpi: int = 150, tight: bool = True) -> Image.Image:
     buffer = io.BytesIO()
     try:
-        fig.savefig(buffer, format="png", dpi=dpi, bbox_inches="tight")
+        savefig_kwargs = {"format": "png", "dpi": dpi}
+        if tight:
+            savefig_kwargs["bbox_inches"] = "tight"
+        fig.savefig(buffer, **savefig_kwargs)
         buffer.seek(0)
         with Image.open(buffer) as image:
             return image.convert("RGB").copy()

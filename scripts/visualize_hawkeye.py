@@ -112,7 +112,7 @@ def render_frame_image(
         color="black",
     )
 
-    image = figure_to_rgb_image(fig, dpi=150)
+    image = figure_to_rgb_image(fig, dpi=150, tight=False)
     plt.close(fig)
     return image
 

@@ -278,7 +278,7 @@ def add_coach_score_annotations(
         ax.annotate(
             format_coach_score(float(value)),
             xy=(x_value, y_value),
-            xytext=(0, -10),
+            xytext=(0, -3.5),
             textcoords="offset points",
             ha="center",
             va="top",
@@ -295,6 +295,7 @@ def render_frame_image(
     coach_scores: pd.Series,
     probs: pd.Series | None,
     show_trajectories: bool = False,
+    tight: bool = True,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -344,7 +345,7 @@ def render_frame_image(
     )
     add_coach_score_annotations(ax, snapshot, coach_scores, attacking_prefix)
 
-    image = figure_to_rgb_image(fig, dpi=150)
+    image = figure_to_rgb_image(fig, dpi=150, tight=tight)
     plt.close(fig)
     return image
 
@@ -414,6 +415,7 @@ def main() -> None:
                     coach_scores,
                     probs,
                     show_trajectories=args.show_trajectories,
+                    tight=False,
                 )
 
         animation_path = output_root / f"{situation_id}.{suffix}"
