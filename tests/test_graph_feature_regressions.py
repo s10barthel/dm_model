@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 
 from datatools import graph_feature
+from datatools.match import Match
 from scripts import run_relevant_models
 
 
@@ -148,6 +149,111 @@ class GraphFeatureRegressionTests(unittest.TestCase):
                 )
 
         construct_graph_features.assert_not_called()
+
+    def test_construct_labels_skips_shot_receiver_missing_from_frame_snapshot(self) -> None:
+        match = object.__new__(Match)
+        match.action_type = "all"
+        match.fps = 25
+        match.include_goals = True
+        match.intended_receiver_stats = {}
+        match.tracking = pd.DataFrame(
+            [
+                {
+                    "home_1_x": 10.0,
+                    "home_1_y": 34.0,
+                    "home_goal_x": 105.0,
+                    "home_goal_y": 34.0,
+                    "away_1_x": 80.0,
+                    "away_1_y": 34.0,
+                    "away_goal_x": 0.0,
+                    "away_goal_y": 34.0,
+                },
+                {
+                    "home_1_x": 20.0,
+                    "home_1_y": 34.0,
+                    "home_goal_x": 105.0,
+                    "home_goal_y": 34.0,
+                    "away_1_x": 70.0,
+                    "away_1_y": 34.0,
+                    "away_goal_x": 0.0,
+                    "away_goal_y": 34.0,
+                },
+            ],
+            index=pd.Index([10, 20], name="frame_id"),
+        )
+        match.events = pd.DataFrame(
+            {
+                "spadl_type": ["shot", "shot"],
+                "object_id": ["home_1", "home_1"],
+                "period_id": [1, 1],
+                "expected_goal": [0.0, 0.0],
+                "xT": [0.0, 0.0],
+                "goal_distance": [0.0, 0.0],
+            },
+            index=[1, 2],
+        )
+        actions = pd.DataFrame(
+            [
+                {
+                    "frame_id": 10,
+                    "object_id": "home_1",
+                    "action_type": "shot",
+                    "receiver_id": "home_22",
+                    "receive_frame_id": pd.NA,
+                    "intent_id": "home_goal",
+                    "blocked": False,
+                    "success": False,
+                    "start_x": 10.0,
+                    "start_y": 34.0,
+                    "end_x": 105.0,
+                    "end_y": 34.0,
+                },
+                {
+                    "frame_id": 20,
+                    "object_id": "home_1",
+                    "action_type": "shot",
+                    "receiver_id": "home_goal",
+                    "receive_frame_id": pd.NA,
+                    "intent_id": "home_goal",
+                    "blocked": False,
+                    "success": False,
+                    "start_x": 20.0,
+                    "start_y": 34.0,
+                    "end_x": 105.0,
+                    "end_y": 34.0,
+                },
+            ],
+            index=[1, 2],
+        )
+        match.actions = actions.copy()
+
+        def add_return_columns(events: pd.DataFrame, *_args: object, **_kwargs: object) -> pd.DataFrame:
+            events = events.copy()
+            for column in [
+                "scores",
+                "concedes",
+                "scores_xg",
+                "concedes_xg",
+                "scores_xT",
+                "concedes_xT",
+                "scores_goal_distance",
+                "concedes_goal_distance",
+            ]:
+                events[column] = 0.0
+            return events
+
+        with (
+            patch("datatools.match.utils.label_returns", side_effect=add_return_columns),
+            patch("datatools.match.utils.label_xt_returns", side_effect=add_return_columns),
+            patch("datatools.match.utils.label_goal_distance_returns", side_effect=add_return_columns),
+        ):
+            labels = match.construct_labels(
+                relabel_intended_receivers=False,
+                resolved_actions=actions,
+                return_type="next_1",
+            )
+
+        self.assertEqual(labels[:, 0].tolist(), [2.0])
 
 
 class ComponentExportRegressionTests(unittest.TestCase):

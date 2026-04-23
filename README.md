@@ -795,6 +795,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt` and `goal_distance`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
+- `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types or the model intended-receiver variant.
 
 ### `scripts/train_relevant_models.py`
 

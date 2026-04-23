@@ -616,12 +616,15 @@ class Match(ABC):
 
                     if pd.isna(receiver_id):
                         continue
-                    if receiver_id == "out" or receiver_id.endswith("goal"):
-                        receiver_index = -1
-                    elif self.actions.at[i, "object_id"].startswith("home"):
-                        receiver_index = (home_players + away_players).index(receiver_id)
-                    elif self.actions.at[i, "object_id"].startswith("away"):
-                        receiver_index = (away_players + home_players).index(receiver_id)
+                    try:
+                        if receiver_id == "out" or receiver_id.endswith("goal"):
+                            receiver_index = -1
+                        elif self.actions.at[i, "object_id"].startswith("home"):
+                            receiver_index = (home_players + away_players).index(receiver_id)
+                        elif self.actions.at[i, "object_id"].startswith("away"):
+                            receiver_index = (away_players + home_players).index(receiver_id)
+                    except ValueError:
+                        continue
 
                 else:
                     is_real = 1
