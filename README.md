@@ -353,6 +353,7 @@ python scripts/generate_relevant_features.py --return_type disc_0.9
 python scripts/generate_relevant_features.py --return_type disc_0.9 --return_type next_5 --return_type next_3
 python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 ```
 
 Inputs:
@@ -364,7 +365,7 @@ Inputs:
 - optional sidecars from `data/xT/matches/*.csv` and `data/goal_distance/matches/*.csv`
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json`.
+Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types and/or the model intended-receiver variant.
 
 Behavior:
 
@@ -376,6 +377,7 @@ Behavior:
 Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
+- `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 
@@ -731,8 +733,10 @@ The learned workflow is now explicit:
 
 1. generate a feature run without `--intended-receiver-model-id`
 2. train `success_intent` with `scripts/train_relevant_models.py --success-intent-only --feature-run-id <feature_run_id>`
-3. generate a new feature run with `--intended-receiver-model-id success_intent/<model_run_id>`
+3. generate a derived model-mode feature run with `scripts/generate_relevant_features.py --extend-feature-run-id <feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>`
 4. train the retained models on that new feature run with `--intended-receiver-mode model`
+
+If you also need additional return semantics, repeat `--return_type` on the extension command. The derived run preserves the base run's existing return types first, then appends any newly requested return types.
 
 `success_intent` is the teammate-selection intended-receiver model. It is trained from observed successful-pass receivers (`receiver_id`) and does not belong to any intended-receiver mode. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
 

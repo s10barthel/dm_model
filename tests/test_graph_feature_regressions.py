@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -96,6 +98,55 @@ class GraphFeatureRegressionTests(unittest.TestCase):
             )
 
         self.assertIn("Shared base graph artifacts require identical action ordering", str(exc.exception))
+
+    def test_intent_train_labels_preserve_existing_augmented_action_sequence(self) -> None:
+        base_labels = torch.tensor(
+            [
+                [1.0, 10.0],
+                [3.0, 30.0],
+            ],
+            dtype=torch.float32,
+        )
+        source_intent_labels = torch.tensor(
+            [
+                [3.0, 0.0],
+                [1.0, 0.0],
+                [3.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        aligned = graph_feature.build_intent_train_labels_from_source_actions(base_labels, source_intent_labels)
+
+        self.assertEqual(aligned[:, 0].tolist(), [3.0, 1.0, 3.0])
+        self.assertEqual(aligned[:, 1].tolist(), [30.0, 10.0, 30.0])
+
+    def test_labels_only_artifact_save_does_not_construct_graph_features(self) -> None:
+        match = make_minimal_match()
+        resolved_actions = pd.DataFrame({"frame_id": [10, 20]}, index=[1, 3])
+        labels = torch.tensor([[1.0, 0.0], [3.0, 0.0]], dtype=torch.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            resolved_dir = feature_root / "resolved_actions_original"
+            resolved_dir.mkdir(parents=True)
+            (resolved_dir / "match.parquet").write_text(
+                "not parquet, only used as an existence marker",
+                encoding="utf-8",
+            )
+
+            with patch.object(graph_feature, "construct_graph_features") as construct_graph_features:
+                graph_feature.save_labels_only_artifacts(
+                    match,
+                    {"original": resolved_actions},
+                    {("original", "next_5"): labels},
+                    ["original"],
+                    ["next_5"],
+                    "match",
+                    feature_root,
+                )
+
+        construct_graph_features.assert_not_called()
 
 
 if __name__ == "__main__":
