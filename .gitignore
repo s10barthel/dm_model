@@ -22,10 +22,9 @@ test_nan_xg/
 test_smoke_2425
 test_smoke_2425_rerun
 
-validation/**/*
-!validation/**/
-!validation/**/*.py
-!validation/**/*.R
+validation/coach_ratings/results/
+validation/coach_ratings/visualizations/
+validation/coach_ratings/__pycache__/
 
 __pycache__/
 .pycache_tmp/
