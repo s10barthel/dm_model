@@ -130,6 +130,9 @@ class GraphFeatureRegressionTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)
+            graph_dir = graph_feature.get_action_graph_dir(feature_root)
+            graph_dir.mkdir(parents=True)
+            (graph_dir / "match.pt").write_text("graph marker", encoding="utf-8")
             resolved_dir = feature_root / "resolved_actions_original"
             resolved_dir.mkdir(parents=True)
             (resolved_dir / "match.parquet").write_text(
@@ -149,6 +152,96 @@ class GraphFeatureRegressionTests(unittest.TestCase):
                 )
 
         construct_graph_features.assert_not_called()
+
+    def test_labels_only_artifact_save_requires_copied_base_graphs(self) -> None:
+        match = make_minimal_match()
+        resolved_actions = pd.DataFrame({"frame_id": [10, 20]}, index=[1, 3])
+        labels = torch.tensor([[1.0, 0.0], [3.0, 0.0]], dtype=torch.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            resolved_action_path = graph_feature.get_resolved_action_path(
+                "match",
+                intended_receiver_mode="original",
+                root=feature_root,
+            )
+            label_path = graph_feature.get_action_label_dir(
+                "next_5",
+                intended_receiver_mode="original",
+                root=feature_root,
+            ) / "match.pt"
+
+            with self.assertRaises(FileNotFoundError) as exc:
+                graph_feature.save_labels_only_artifacts(
+                    match,
+                    {"original": resolved_actions},
+                    {("original", "next_5"): labels},
+                    ["original"],
+                    ["next_5"],
+                    "match",
+                    feature_root,
+                )
+
+            self.assertFalse(resolved_action_path.exists())
+            self.assertFalse(label_path.exists())
+
+        self.assertIn("Base action graphs not found", str(exc.exception))
+
+    def test_intent_train_labels_only_requires_copied_graphs_and_source_labels(self) -> None:
+        match = make_minimal_match()
+        resolved_actions = pd.DataFrame({"frame_id": [10, 20]}, index=[1, 3])
+        labels = torch.tensor([[1.0, 0.0], [3.0, 0.0]], dtype=torch.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            resolved_action_path = graph_feature.get_resolved_action_path(
+                "match",
+                intended_receiver_mode="original",
+                root=feature_root,
+            )
+            intent_label_path = graph_feature.get_intent_train_label_dir(
+                "next_5",
+                intended_receiver_mode="original",
+                root=feature_root,
+            ) / "match.pt"
+
+            with self.assertRaises(FileNotFoundError) as missing_graph_exc:
+                graph_feature.save_labels_only_artifacts(
+                    match,
+                    {"original": resolved_actions},
+                    {("original", "next_5"): labels},
+                    ["original"],
+                    ["next_5"],
+                    "match",
+                    feature_root,
+                    feature_variant="intent_train_augmented",
+                    intent_train_label_source_mode="original",
+                    intent_train_label_source_return_type="disc_0.9",
+                )
+
+            graph_dir = graph_feature.get_action_graph_intent_train_dir(feature_root)
+            graph_dir.mkdir(parents=True)
+            (graph_dir / "match.pt").write_text("intent graph marker", encoding="utf-8")
+
+            with self.assertRaises(FileNotFoundError) as missing_source_exc:
+                graph_feature.save_labels_only_artifacts(
+                    match,
+                    {"original": resolved_actions},
+                    {("original", "next_5"): labels},
+                    ["original"],
+                    ["next_5"],
+                    "match",
+                    feature_root,
+                    feature_variant="intent_train_augmented",
+                    intent_train_label_source_mode="original",
+                    intent_train_label_source_return_type="disc_0.9",
+                )
+
+            self.assertFalse(resolved_action_path.exists())
+            self.assertFalse(intent_label_path.exists())
+
+        self.assertIn("Base intent-train graphs not found", str(missing_graph_exc.exception))
+        self.assertIn("Source intent-train labels not found", str(missing_source_exc.exception))
 
     def test_construct_labels_skips_shot_receiver_missing_from_frame_snapshot(self) -> None:
         match = object.__new__(Match)

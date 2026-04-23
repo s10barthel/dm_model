@@ -706,6 +706,41 @@ def build_intent_train_labels_from_source_actions(
     return torch.stack(aligned_labels, dim=0)
 
 
+def _validate_labels_only_base_artifacts(
+    match_id: str,
+    feature_root: Path,
+    *,
+    feature_variant: str = "base",
+    intent_train_label_source_mode: str | None = None,
+    intent_train_label_source_return_type: str | None = None,
+) -> None:
+    if feature_variant == "base":
+        graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
+        if not graph_path.exists():
+            raise FileNotFoundError(f"Base action graphs not found at {graph_path}.")
+        return
+
+    if feature_variant == "intent_train_augmented":
+        graph_path = get_action_graph_intent_train_dir(feature_root) / f"{match_id}.pt"
+        if not graph_path.exists():
+            raise FileNotFoundError(f"Base intent-train graphs not found at {graph_path}.")
+        if intent_train_label_source_mode is None or intent_train_label_source_return_type is None:
+            raise ValueError("Labels-only intent-train generation requires source mode and return_type.")
+        source_label_path = (
+            get_intent_train_label_dir(
+                intent_train_label_source_return_type,
+                intended_receiver_mode=intent_train_label_source_mode,
+                root=feature_root,
+            )
+            / f"{match_id}.pt"
+        )
+        if not source_label_path.exists():
+            raise FileNotFoundError(f"Source intent-train labels not found at {source_label_path}.")
+        return
+
+    raise ValueError(f"Unsupported labels-only feature_variant={feature_variant!r}.")
+
+
 def save_resolved_actions_if_missing(
     resolved_actions_by_mode: dict[str, pd.DataFrame],
     match_id: str,
@@ -823,6 +858,13 @@ def save_labels_only_artifacts(
     intent_train_label_source_return_type: str | None = None,
     augment_blocks_from_existing_graphs: bool = False,
 ) -> None:
+    _validate_labels_only_base_artifacts(
+        match_id,
+        feature_root,
+        feature_variant=feature_variant,
+        intent_train_label_source_mode=intent_train_label_source_mode,
+        intent_train_label_source_return_type=intent_train_label_source_return_type,
+    )
     primary_mode = intended_receiver_modes[0]
     primary_return_type = return_types[0]
     bind_canonical_graph_context(
@@ -834,8 +876,6 @@ def save_labels_only_artifacts(
     )
     save_resolved_actions_if_missing(resolved_actions_by_mode, match_id, feature_root)
     if feature_variant == "intent_train_augmented":
-        if intent_train_label_source_mode is None or intent_train_label_source_return_type is None:
-            raise ValueError("Labels-only intent-train generation requires source mode and return_type.")
         save_intent_train_labels_from_existing_source(
             labels_by_key,
             match_id,
@@ -1221,6 +1261,14 @@ if __name__ == "__main__":
                     torch.save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
                     print(f"Successfully saved success-intent graphs for {len(success_graphs)} events.")
                 else:
+                    if args.labels_only:
+                        _validate_labels_only_base_artifacts(
+                            match_id,
+                            feature_root,
+                            feature_variant=args.feature_variant,
+                            intent_train_label_source_mode=args.intent_train_label_source_mode,
+                            intent_train_label_source_return_type=args.intent_train_label_source_return_type,
+                        )
                     resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
                         match,
                         intended_receiver_modes=args.intended_receiver_modes,
