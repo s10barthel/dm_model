@@ -31,7 +31,7 @@ from viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from viz_snapshot import SnapshotVisualizer
 
 
-COACH_RATINGS_PATH = DM_MODEL_ROOT / "validation" / "coach_ratings" / "coach_ratings.csv"
+COACH_RATINGS_PATH = DM_MODEL_ROOT / "validation" / "coach_ratings" / "output" / "coach_ratings.csv"
 DEFAULT_TRACKING_CSV = DM_MODEL_ROOT / "hawkeye_data" / "centroid_data_team.csv"
 DEFAULT_BALL_CSV = DM_MODEL_ROOT / "hawkeye_data" / "ball_data_selected.csv"
 DEFAULT_COMPONENT_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye"

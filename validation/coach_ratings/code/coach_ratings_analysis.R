@@ -10,8 +10,8 @@
 # 6. Top-selection validity in the full dataset only
 #
 # Expected setup:
-# - coach_ratings.csv is stored in the same folder as this script
-# - results are written to a subfolder named "results"
+# - coach_ratings.csv is stored in a sibling folder named "output"
+# - results are written to a sibling folder named "results"
 # ============================================================
 
 # ----------------------------
@@ -682,8 +682,8 @@ write_readme <- function(results_dir, model_score_var, high_intent_threshold, rb
 # 3) Paths and I/O
 # ----------------------------
 SCRIPT_DIR <- get_script_dir()
-BASE_DIR <- if (dir.exists(SCRIPT_DIR)) SCRIPT_DIR else WINDOWS_BASE_DIR
-DATA_PATH <- file.path(BASE_DIR, "coach_ratings.csv")
+BASE_DIR <- if (dir.exists(SCRIPT_DIR)) dirname(SCRIPT_DIR) else WINDOWS_BASE_DIR
+DATA_PATH <- file.path(BASE_DIR, "output", "coach_ratings.csv")
 RESULTS_DIR <- file.path(BASE_DIR, "results")
 
 safe_dir_create(RESULTS_DIR)

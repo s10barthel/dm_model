@@ -10,8 +10,9 @@ from typing import Iterable
 import pandas as pd
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_DIR = Path(__file__).resolve().parent
+RANKING_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+OUTPUT_DIR = RANKING_ROOT / "output"
 
 LINEUP_PATH = PROJECT_ROOT / "data" / "lineup" / "line_up.parquet"
 EVENT_SYNCED_DIR = PROJECT_ROOT / "data" / "event_synced"

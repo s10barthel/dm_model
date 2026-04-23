@@ -3,22 +3,16 @@ from pathlib import Path
 import pandas as pd
 
 
-PATRICK_CSV_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\sequence_files\files_patrick\coach_ratings\xy_data_patrick.csv"
-)
-JELLE_CSV_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\sequence_files\files_jelle\coach_ratings\xy_data_jelle.csv"
-)
-PATRICK_XLSX_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VU\mrp\Patrick\coach_ratings.xlsx"
-)
-JELLE_METADATA_XLSX_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VU\mrp\Jelle\coach_ratings_metadata.xlsx"
-)
-JELLE_RATINGS_CSV_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VU\mrp\Jelle\coach_ratings.csv"
-)
-OUTPUT_PATH = Path(__file__).resolve().parent / "preprocessed_coach_ratings.csv"
+COACH_RATINGS_ROOT = Path(__file__).resolve().parents[1]
+QUESTIONNAIRE_DATA_DIR = COACH_RATINGS_ROOT / "questionnaire_data"
+OUTPUT_DIR = COACH_RATINGS_ROOT / "output"
+
+PATRICK_CSV_PATH = QUESTIONNAIRE_DATA_DIR / "xy_data_patrick.csv"
+JELLE_CSV_PATH = QUESTIONNAIRE_DATA_DIR / "xy_data_jelle.csv"
+PATRICK_XLSX_PATH = QUESTIONNAIRE_DATA_DIR / "coach_ratings_patrick.xlsx"
+JELLE_METADATA_XLSX_PATH = QUESTIONNAIRE_DATA_DIR / "coach_ratings_metadata_jelle.xlsx"
+JELLE_RATINGS_CSV_PATH = QUESTIONNAIRE_DATA_DIR / "coach_ratings_jelle.csv"
+OUTPUT_PATH = OUTPUT_DIR / "preprocessed_coach_ratings.csv"
 
 KEY_COLUMNS = ["uefa_player_id", "id"]
 FINAL_EXTRA_COLUMNS = [
