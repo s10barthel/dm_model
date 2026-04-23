@@ -3,15 +3,9 @@ from pathlib import Path
 import pandas as pd
 
 
-COACH_RATINGS_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\dm_model\validation\coach_ratings\preprocessed_coach_ratings.csv"
-)
-PASS_SCORES_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\dm_model\data\defcon_components\hawkeye_data.csv"
-)
-OUTPUT_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\dm_model\validation\coach_ratings\coach_ratings.csv"
-)
+COACH_RATINGS_PATH = Path("validation/coach_ratings/preprocessed_coach_ratings.csv")
+PASS_SCORES_PATH = Path("data/defcon_components/hawkeye_data_xT.csv")
+OUTPUT_PATH = Path("validation/coach_ratings/coach_ratings.csv")
 
 KEY_COLUMNS = ["id", "uefa_player_id"]
 HAWKEYE_OUTPUT_COLUMNS = [
@@ -312,3 +306,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
