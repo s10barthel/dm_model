@@ -18,6 +18,7 @@ from datatools.config import LABEL_COLUMNS
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
+from scripts import run_benchmark
 from scripts import train_relevant_models as train_wrapper
 
 matplotlib.use("Agg")
@@ -132,6 +133,26 @@ def make_model_record(
 
 
 class BenchmarkNoAccelTests(unittest.TestCase):
+    def test_benchmark_identifier_columns_export_as_nullable_integers(self) -> None:
+        table = pd.DataFrame(
+            [
+                {"team": 1.0, "player": 10.0, "event_player": 10.0, "pos_x": 5.5},
+                {"team": pd.NA, "player": pd.NA, "event_player": pd.NA, "pos_x": 6.5},
+            ]
+        )
+
+        normalized = run_benchmark._coerce_benchmark_identifier_columns(table)
+
+        for column in ["team", "player", "event_player"]:
+            self.assertEqual(str(normalized[column].dtype), "Int64")
+            self.assertEqual(int(normalized.at[0, column]), 10 if column != "team" else 1)
+            self.assertTrue(pd.isna(normalized.at[1, column]))
+
+        csv_export = normalized.to_csv(index=False)
+        self.assertIn("1,10,10", csv_export)
+        self.assertNotIn("1.0", csv_export)
+        self.assertNotIn("10.0", csv_export)
+
     def test_figure_to_rgb_image_tight_false_keeps_canvas_size_stable_when_text_extents_change(self) -> None:
         fig_short, ax_short = plt.subplots(figsize=(4, 3))
         ax_short.plot([0.0, 1.0], [0.0, 1.0])

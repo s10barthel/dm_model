@@ -56,6 +56,14 @@ def _compact_skips(skipped: dict[str, list[int]]) -> dict[str, list[int]]:
     return {key: sorted(int(value) for value in values) for key, values in skipped.items() if values}
 
 
+def _coerce_benchmark_identifier_columns(table: pd.DataFrame) -> pd.DataFrame:
+    normalized = table.copy()
+    for column in ["team", "player", "event_player"]:
+        if column in normalized.columns:
+            normalized[column] = pd.to_numeric(normalized[column], errors="coerce").astype("Int64")
+    return normalized
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -152,6 +160,7 @@ def main() -> None:
         raise RuntimeError("No usable benchmark states were processed.")
 
     benchmark_table = pd.concat(export_tables, ignore_index=True) if export_tables else pd.DataFrame()
+    benchmark_table = _coerce_benchmark_identifier_columns(benchmark_table)
     parquet_path = output_dir / "benchmark_data.parquet"
     csv_path = output_dir / "benchmark_data.csv"
     benchmark_table.to_parquet(parquet_path, index=False)
