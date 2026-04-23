@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 
 from datatools import graph_feature
+from scripts import run_relevant_models
 
 
 def make_minimal_match() -> SimpleNamespace:
@@ -147,6 +148,45 @@ class GraphFeatureRegressionTests(unittest.TestCase):
                 )
 
         construct_graph_features.assert_not_called()
+
+
+class ComponentExportRegressionTests(unittest.TestCase):
+    def test_component_export_uses_true_event_action_id(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "home_1": [0.25, 0.75],
+                "away_4": [0.75, 0.25],
+            },
+            index=pd.Index([4, 9], name="index"),
+        )
+        actions = pd.DataFrame(
+            [
+                {
+                    "stats_perform_match_id": "DFL-MAT-TEST",
+                    "action_id": 105,
+                    "original_event_id": "EVENT-105",
+                },
+                {
+                    "stats_perform_match_id": "DFL-MAT-TEST",
+                    "action_id": 211,
+                    "original_event_id": "EVENT-211",
+                },
+            ],
+            index=pd.Index([4, 9], name="index"),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "component.parquet"
+            run_relevant_models.save_component_table(frame, actions, output_path)
+            exported = pd.read_parquet(output_path)
+
+        self.assertEqual(
+            exported.columns.tolist(),
+            ["stats_perform_match_id", "action_id", "original_event_id", "home_1", "away_4"],
+        )
+        self.assertEqual(exported["action_id"].tolist(), [105, 211])
+        self.assertEqual(exported["original_event_id"].tolist(), ["EVENT-105", "EVENT-211"])
+        self.assertNotIn("index", exported.columns)
 
 
 if __name__ == "__main__":

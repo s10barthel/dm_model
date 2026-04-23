@@ -132,11 +132,41 @@ def load_match(
     return match
 
 
-def save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
-    table = frame.copy()
-    table.index.name = "action_id"
+COMPONENT_IDENTIFIER_COLUMNS = ["stats_perform_match_id", "action_id", "original_event_id"]
+
+
+def save_component_table(frame: pd.DataFrame, actions: pd.DataFrame, output_path: Path) -> None:
+    missing_columns = [column for column in COMPONENT_IDENTIFIER_COLUMNS if column not in actions.columns]
+    if missing_columns:
+        raise ValueError(
+            "Cannot export component table because match.actions is missing: "
+            f"{', '.join(missing_columns)}"
+        )
+    if not frame.index.is_unique:
+        raise ValueError("Cannot export component table because prediction rows have duplicate action indexes.")
+    if not actions.index.is_unique:
+        raise ValueError("Cannot export component table because match.actions has duplicate indexes.")
+
+    missing_action_indexes = frame.index.difference(actions.index)
+    if len(missing_action_indexes) > 0:
+        sample = missing_action_indexes[:5].tolist()
+        raise ValueError(
+            "Cannot export component table because prediction action indexes are missing from match.actions: "
+            f"{sample}"
+        )
+
+    identifiers = actions.loc[frame.index, COMPONENT_IDENTIFIER_COLUMNS].reset_index(drop=True)
+    table = frame.reset_index(drop=True)
+    duplicate_columns = [column for column in COMPONENT_IDENTIFIER_COLUMNS if column in table.columns]
+    if duplicate_columns:
+        raise ValueError(
+            "Cannot export component table because prediction columns duplicate identifiers: "
+            f"{', '.join(duplicate_columns)}"
+        )
+
+    table = pd.concat([identifiers, table], axis=1)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    table.reset_index().to_parquet(output_path, index=False)
+    table.to_parquet(output_path, index=False)
 
 
 def resolve_optional_success_intent_model_id(
@@ -354,13 +384,13 @@ def main() -> None:
             if action_intent.empty:
                 raise ValueError("No usable inference rows were produced for this match.")
 
-            save_component_table(action_intent, match_output_dir / "action_intent.parquet")
-            save_component_table(pass_intent, match_output_dir / "pass_intent.parquet")
-            save_component_table(pass_success, match_output_dir / "pass_success.parquet")
-            save_component_table(scoring_success, match_output_dir / "outcome_scoring_success.parquet")
-            save_component_table(scoring_failure, match_output_dir / "outcome_scoring_failure.parquet")
-            save_component_table(conceding_success, match_output_dir / "outcome_conceding_success.parquet")
-            save_component_table(conceding_failure, match_output_dir / "outcome_conceding_failure.parquet")
+            save_component_table(action_intent, match.actions, match_output_dir / "action_intent.parquet")
+            save_component_table(pass_intent, match.actions, match_output_dir / "pass_intent.parquet")
+            save_component_table(pass_success, match.actions, match_output_dir / "pass_success.parquet")
+            save_component_table(scoring_success, match.actions, match_output_dir / "outcome_scoring_success.parquet")
+            save_component_table(scoring_failure, match.actions, match_output_dir / "outcome_scoring_failure.parquet")
+            save_component_table(conceding_success, match.actions, match_output_dir / "outcome_conceding_success.parquet")
+            save_component_table(conceding_failure, match.actions, match_output_dir / "outcome_conceding_failure.parquet")
 
             if success_intent_model is not None:
                 try:
@@ -370,7 +400,7 @@ def main() -> None:
                         return_type=return_type,
                         device=device,
                     )
-                    save_component_table(success_intent, match_output_dir / "success_intent.parquet")
+                    save_component_table(success_intent, match.actions, match_output_dir / "success_intent.parquet")
                 except Exception as exc:
                     error_summary = summarize_exception(exc)
                     metadata["success_intent_skipped_matches"].append({"match_id": match_id, "error": error_summary})
