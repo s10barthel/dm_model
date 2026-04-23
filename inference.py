@@ -21,6 +21,29 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 
+PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
+
+
+def _exclude_possessor_from_pass_only_intent(
+    task: str,
+    player_indices: list[str],
+    probs: np.ndarray,
+    possessor_object_id: str,
+) -> tuple[list[str], np.ndarray]:
+    if task not in PASS_ONLY_INTENT_TASKS or possessor_object_id not in player_indices:
+        return list(player_indices), probs
+
+    keep_mask = np.array([player_id != possessor_object_id for player_id in player_indices], dtype=bool)
+    filtered_players = [player_id for player_id in player_indices if player_id != possessor_object_id]
+    filtered_probs = np.asarray(probs, dtype=float)[keep_mask]
+
+    if filtered_probs.size > 0:
+        total = float(filtered_probs.sum())
+        if total > 0:
+            filtered_probs = filtered_probs / total
+
+    return filtered_players, filtered_probs
+
 
 def resolve_graph_feature_dir(model: GNN, post_action: bool = False) -> str:
     feature_dir = model.args.get("feature_dir", "data/features/action_graphs")
@@ -153,9 +176,11 @@ def inference_gnn(
         if post_action:
             frame = int(match.actions.at[event_index, "end_frame_id"])
             team = match.actions.at[event_index, "end_player_id"][:4]
+            possessor_object_id = match.actions.at[event_index, "end_player_id"]
         else:
             frame = int(match.actions.at[event_index, "frame_id"])
             team = match.actions.at[event_index, "object_id"][:4]
+            possessor_object_id = match.actions.at[event_index, "object_id"]
 
         active_players = find_active_players(match.tracking, frame, team, include_goals=include_goals)
 
@@ -167,7 +192,14 @@ def inference_gnn(
             probs_i = torch.sigmoid(out[batch == i]).cpu().detach().numpy() * 2 - 1
 
         if out_filter == "teammates":
-            player_indices_i = active_players[0]
+            player_indices_i = list(active_players[0])
+            if gnn_task == "node_selection":
+                player_indices_i, probs_i = _exclude_possessor_from_pass_only_intent(
+                    model.args["task"],
+                    player_indices_i,
+                    probs_i,
+                    str(possessor_object_id),
+                )
         elif out_filter == "all":  # "receiver" in model.args["task"]
             player_indices_i = active_players[0] + active_players[1]
             if model.args["include_out"]:

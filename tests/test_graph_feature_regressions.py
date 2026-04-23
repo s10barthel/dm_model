@@ -8,9 +8,13 @@ from unittest.mock import patch
 
 import pandas as pd
 import torch
+from torch_geometric.data import Data
 
+from datatools.benchmark import build_benchmark_export
+from datatools.config import LABEL_COLUMNS
 from datatools import graph_feature
 from datatools.match import Match
+from inference import inference_gnn
 from scripts import run_relevant_models
 
 
@@ -21,6 +25,95 @@ def make_minimal_match() -> SimpleNamespace:
         actions=pd.DataFrame({"frame_id": [10, 20]}, index=[1, 3]),
         labels=None,
         label_post_actions=lambda actions: actions,
+    )
+
+
+class DummyNodeModel(torch.nn.Module):
+    def __init__(self, task: str, logits: list[float]) -> None:
+        super().__init__()
+        self.args = {
+            "task": task,
+            "node_in_dim": 25,
+            "include_out": False,
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "extend_features": False,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+            "filter_blockers": False,
+        }
+        self._logits = torch.tensor(logits, dtype=torch.float32)
+
+    def forward(self, graphs: Data, _batch_dests: torch.Tensor | None = None) -> torch.Tensor:
+        return self._logits[: graphs.x.shape[0]].to(graphs.x.device)
+
+
+def make_inference_graph() -> Data:
+    x = torch.zeros((4, 25), dtype=torch.float32)
+    x[:3, 0] = 1.0
+    x[0, 13] = 1.0
+    edge_index = torch.tensor(
+        [
+            [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3],
+            [1, 2, 3, 0, 2, 3, 0, 1, 3, 0, 1, 2],
+        ],
+        dtype=torch.long,
+    )
+    edge_attr = torch.ones((edge_index.shape[1], 2), dtype=torch.float32)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def make_inference_labels(*, success: bool = False) -> torch.Tensor:
+    labels = torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
+    labels[0, 0] = 0.0
+    labels[0, 1] = 1.0
+    labels[0, 4] = 4.0
+    labels[0, 5] = 1.0
+    labels[0, 6] = 1.0
+    labels[0, 14] = 1.0
+    labels[0, 16] = 1.0 if success else 0.0
+    return labels
+
+
+def make_inference_match(labels: torch.Tensor) -> SimpleNamespace:
+    tracking = pd.DataFrame(
+        [
+            {
+                "home_10_x": 10.0,
+                "home_10_y": 34.0,
+                "home_11_x": 20.0,
+                "home_11_y": 30.0,
+                "home_12_x": 30.0,
+                "home_12_y": 38.0,
+                "away_20_x": 60.0,
+                "away_20_y": 34.0,
+            }
+        ],
+        index=pd.Index([0], name="frame_id"),
+    )
+    actions = pd.DataFrame(
+        [
+            {
+                "frame_id": 0,
+                "object_id": "home_10",
+                "end_frame_id": 0,
+                "end_player_id": "home_10",
+            }
+        ],
+        index=pd.Index([0], name="index"),
+    )
+    return SimpleNamespace(
+        actions=actions,
+        tracking=tracking,
+        labels=labels,
+        graph_features_0=[make_inference_graph()],
+        graph_features_1=None,
+        graph_features_by_dir={},
     )
 
 
@@ -347,6 +440,107 @@ class GraphFeatureRegressionTests(unittest.TestCase):
             )
 
         self.assertEqual(labels[:, 0].tolist(), [2.0])
+
+
+class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
+    def _run_inference(self, task: str, *, success: bool = False) -> pd.DataFrame:
+        model = DummyNodeModel(task, logits=[2.0, 1.0, 0.0, -1.0])
+        match = make_inference_match(make_inference_labels(success=success))
+        probs, _ = inference_gnn(match, model, device="cpu", post_action=False)
+        return probs
+
+    def test_pass_only_intent_tasks_exclude_possessor_and_renormalize(self) -> None:
+        expected = torch.softmax(torch.tensor([1.0, 0.0]), dim=0)
+
+        for task in ["pass_intent", "pass_intent_oppo_agn"]:
+            with self.subTest(task=task):
+                probs = self._run_inference(task)
+
+                self.assertEqual(probs.columns.tolist(), ["home_11", "home_12"])
+                torch.testing.assert_close(torch.tensor(probs.loc[0].tolist()), expected, atol=1e-6, rtol=0.0)
+                self.assertAlmostEqual(float(probs.loc[0].sum()), 1.0, places=6)
+
+    def test_success_intent_excludes_possessor_and_renormalizes(self) -> None:
+        probs = self._run_inference("success_intent", success=True)
+        expected = torch.softmax(torch.tensor([1.0, 0.0]), dim=0)
+
+        self.assertEqual(probs.columns.tolist(), ["home_11", "home_12"])
+        torch.testing.assert_close(torch.tensor(probs.loc[0].tolist()), expected, atol=1e-6, rtol=0.0)
+        self.assertAlmostEqual(float(probs.loc[0].sum()), 1.0, places=6)
+
+    def test_action_intent_keeps_possessor_option(self) -> None:
+        probs = self._run_inference("action_intent")
+        expected = torch.softmax(torch.tensor([2.0, 1.0, 0.0]), dim=0)
+
+        self.assertEqual(probs.columns.tolist(), ["home_10", "home_11", "home_12"])
+        torch.testing.assert_close(torch.tensor(probs.loc[0].tolist()), expected, atol=1e-6, rtol=0.0)
+
+    def test_benchmark_export_leaves_passer_pass_intent_empty_and_renormalized(self) -> None:
+        pass_intent = self._run_inference("pass_intent")
+        export_rows = pd.DataFrame(
+            [
+                {
+                    "modification": 1,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "frame_id": 0,
+                    "team": 2,
+                    "player": 10,
+                    "pos_x": 10.0,
+                    "pos_y": 34.0,
+                    "pos_z": 0.0,
+                    "smooth_x_speed": 0.0,
+                    "smooth_y_speed": 0.0,
+                    "event_player": 10,
+                    "object_id": "home_10",
+                },
+                {
+                    "modification": 1,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "frame_id": 0,
+                    "team": 2,
+                    "player": 11,
+                    "pos_x": 20.0,
+                    "pos_y": 30.0,
+                    "pos_z": 0.0,
+                    "smooth_x_speed": 0.0,
+                    "smooth_y_speed": 0.0,
+                    "event_player": 10,
+                    "object_id": "home_11",
+                },
+                {
+                    "modification": 1,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "frame_id": 0,
+                    "team": 2,
+                    "player": 12,
+                    "pos_x": 30.0,
+                    "pos_y": 38.0,
+                    "pos_z": 0.0,
+                    "smooth_x_speed": 0.0,
+                    "smooth_y_speed": 0.0,
+                    "event_player": 10,
+                    "object_id": "home_12",
+                },
+            ]
+        )
+        state = SimpleNamespace(frame_meta=pd.DataFrame(index=pd.Index([0], name="frame_id")))
+
+        exported = build_benchmark_export(export_rows, state, {"pass_intent": pass_intent})
+
+        passer_row = exported.loc[exported["player"].eq(exported["event_player"])].iloc[0]
+        receiver_rows = exported.loc[exported["player"].ne(exported["event_player"])]
+
+        self.assertTrue(pd.isna(passer_row["pass_intent"]))
+        self.assertAlmostEqual(float(receiver_rows["pass_intent"].sum()), 1.0, places=6)
+
+    def test_success_intent_row_excludes_possessor_for_visualization_consumers(self) -> None:
+        row = self._run_inference("success_intent", success=True).loc[0]
+
+        self.assertEqual(row.index.tolist(), ["home_11", "home_12"])
+        self.assertNotIn("home_10", row.index)
 
 
 class ComponentExportRegressionTests(unittest.TestCase):
