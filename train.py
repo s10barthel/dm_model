@@ -381,7 +381,7 @@ if __name__ == "__main__":
         valid_dataset.set_inverse_propensity_weights(valid_ipw)
 
     train_loader = DataLoader(train_dataset, **loader_args)
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
     # Train loop
     best_loss = args.best_loss
