@@ -145,6 +145,17 @@ def main() -> None:
                     ]:
                         match_stats[key] += int(possession_stats.get(key, 0))
 
+                    if int(possession_stats.get("valid_frames", 0)) == 0:
+                        skipped_possessions.setdefault(str(match_id), []).append(
+                            {
+                                "event_index": str(event_index),
+                                "error": "ValueError: no valid frames were available after SkillCorner graph construction.",
+                            }
+                        )
+                        match_stats["skipped_possessions"] += 1
+                        print(f"  SKIP possession {event_index}: no valid frames were available after graph construction.")
+                        continue
+
                     components = infer_skillcorner_components(possession, model_specs, device=device)
                     player_meta = context["player_meta"]
                     for component_name in COMPONENT_COLUMNS:

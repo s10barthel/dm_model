@@ -210,6 +210,17 @@ def load_frame_snapshot(primary_tracking: pd.DataFrame, fallback_tracking: pd.Da
     snapshot = primary_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
     if snapshot.empty or "phase_id" not in snapshot.columns:
         snapshot = fallback_tracking.loc[frame - 1 : frame].dropna(axis=1, how="all").copy()
+    if snapshot.empty or "phase_id" not in snapshot.columns or frame not in snapshot.index:
+        return snapshot
+
+    # Keep the snapshot phase-local so the first frame of a new phase can still
+    # build a graph without inheriting an incompatible active-player set from
+    # the immediately previous frame.
+    current_phase = snapshot.at[frame, "phase_id"]
+    if pd.notna(current_phase):
+        same_phase_snapshot = snapshot.loc[snapshot["phase_id"].eq(current_phase)].copy()
+        if not same_phase_snapshot.empty:
+            snapshot = same_phase_snapshot
     return snapshot
 
 

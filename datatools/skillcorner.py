@@ -24,6 +24,7 @@ REQUIRED_EVENT_COLUMNS = [
     "frame_start",
     "frame_end",
     "period",
+    "start_type_id",
     "attacking_side",
     "player_id",
 ]
@@ -144,11 +145,18 @@ def load_skillcorner_events(match_id: str, input_dir: str | Path) -> pd.DataFram
     if events.empty:
         return events
 
-    numeric_cols = ["match_id", "index", "frame_start", "frame_end", "period", "player_id"]
+    numeric_cols = ["match_id", "index", "frame_start", "frame_end", "period", "player_id", "start_type_id"]
     for column in numeric_cols:
         events[column] = pd.to_numeric(events[column], errors="coerce")
 
     events = events.dropna(subset=numeric_cols + ["attacking_side"]).copy()
+    if events.empty:
+        return events.reset_index(drop=True)
+
+    events = events.loc[events["start_type_id"].eq(1)].copy()
+    if events.empty:
+        return events.reset_index(drop=True)
+
     events[numeric_cols] = events[numeric_cols].astype(int)
     events["attacking_side"] = events["attacking_side"].astype(str)
     events = events.sort_values(["frame_start", "frame_end", "index"]).reset_index(drop=True)
