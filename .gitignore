@@ -23,6 +23,7 @@ tests/*.py
 !tests/test_graph_feature_regressions.py
 !tests/test_feature_run_extension.py
 !tests/test_skillcorner_postprocessing.py
+!tests/test_skillcorner_filter.py
 test_kpi_final/
 test_nan_xg/
 test_smoke_2425
