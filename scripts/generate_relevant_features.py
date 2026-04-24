@@ -17,7 +17,12 @@ if str(ROOT) not in sys.path:
 from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
     generate_run_id,
+    get_action_label_dir,
+    get_augmented_feature_dir,
+    get_augmented_label_dir,
     get_feature_run_root,
+    get_intent_train_label_dir,
+    get_resolved_action_dir,
     load_feature_run_metadata,
     resolve_generation_intended_receiver_modes,
     resolve_requested_return_types,
@@ -42,6 +47,9 @@ class FeatureExtensionPlan:
     final_intended_receiver_modes: list[str]
     added_intended_receiver_modes: list[str]
     intended_receiver_model_id: str | None
+    regenerate_model_mode: bool
+    replaced_intended_receiver_model_id: str | None
+    replaced_intended_receiver_modes: list[str]
     commands: list[list[str]]
 
 
@@ -68,6 +76,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Create a new derived feature run from this completed feature run, copying existing artifacts and "
             "generating only newly requested return types or the model intended-receiver variant."
+        ),
+    )
+    parser.add_argument(
+        "--replace-intended-receiver-model",
+        action="store_true",
+        default=False,
+        help=(
+            "When extending a feature run that already contains the model intended-receiver variant, create a "
+            "new derived run and regenerate only model-mode artifacts with --intended-receiver-model-id."
         ),
     )
     args = parser.parse_args()
@@ -245,12 +262,18 @@ def extension_commands_for_plan(
     base_modes: list[str],
     added_modes: list[str],
     intended_receiver_model_id: str | None,
+    regenerate_model_mode: bool = False,
 ) -> list[list[str]]:
     commands: list[list[str]] = []
-    source_mode = base_modes[0]
+    non_model_base_modes = [mode for mode in base_modes if mode != INTENDED_RECEIVER_MODE_MODEL]
+    if regenerate_model_mode and not non_model_base_modes:
+        raise ValueError("Regenerating model-mode artifacts requires at least one non-model base mode.")
+
+    source_mode = non_model_base_modes[0] if non_model_base_modes else base_modes[0]
     source_return_type = base_return_types[0]
 
     if added_return_types:
+        added_return_modes = non_model_base_modes if regenerate_model_mode else base_modes
         for split in ["train", "test"]:
             commands.append(
                 extension_graph_feature_command(
@@ -258,7 +281,7 @@ def extension_commands_for_plan(
                     output_run_id,
                     split=split,
                     return_types=added_return_types,
-                    intended_receiver_modes=base_modes,
+                    intended_receiver_modes=added_return_modes,
                     intended_receiver_model_id=intended_receiver_model_id,
                 )
             )
@@ -268,7 +291,7 @@ def extension_commands_for_plan(
                 output_run_id,
                 split="train",
                 return_types=added_return_types,
-                intended_receiver_modes=base_modes,
+                intended_receiver_modes=added_return_modes,
                 intended_receiver_model_id=intended_receiver_model_id,
                 feature_variant="intent_train_augmented",
                 intent_train_label_source_mode=source_mode,
@@ -276,7 +299,7 @@ def extension_commands_for_plan(
             )
         )
 
-    if INTENDED_RECEIVER_MODE_MODEL in added_modes:
+    if INTENDED_RECEIVER_MODE_MODEL in added_modes or regenerate_model_mode:
         validation_modes = [source_mode, INTENDED_RECEIVER_MODE_MODEL]
         for split in ["train", "test"]:
             commands.append(
@@ -332,9 +355,15 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     if base_model_id is not None:
         base_model_id = str(base_model_id)
     requested_model_id = str(args.intended_receiver_model_id) if args.intended_receiver_model_id else None
+    replace_model = bool(getattr(args, "replace_intended_receiver_model", False))
+    if replace_model and not requested_model_id:
+        raise ValueError("--replace-intended-receiver-model requires --intended-receiver-model-id.")
 
     final_modes = list(base_modes)
     added_modes: list[str] = []
+    regenerate_model_mode = False
+    replaced_model_id: str | None = None
+    replaced_modes: list[str] = []
     if INTENDED_RECEIVER_MODE_MODEL in base_modes:
         if not base_model_id:
             raise ValueError(
@@ -342,11 +371,21 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
                 "intended_receiver_model_id."
             )
         if requested_model_id and requested_model_id != base_model_id:
-            raise ValueError(
-                f"Feature run {base_run_id} already uses intended_receiver_model_id={base_model_id!r}; "
-                f"cannot derive it with {requested_model_id!r}."
-            )
-        final_model_id = base_model_id
+            if not replace_model:
+                raise ValueError(
+                    f"Feature run {base_run_id} already uses intended_receiver_model_id={base_model_id!r}; "
+                    f"cannot derive it with {requested_model_id!r}."
+                )
+            final_model_id = requested_model_id
+            regenerate_model_mode = True
+            replaced_model_id = base_model_id
+            replaced_modes = [INTENDED_RECEIVER_MODE_MODEL]
+        else:
+            final_model_id = requested_model_id if replace_model and requested_model_id else base_model_id
+            if replace_model and requested_model_id:
+                regenerate_model_mode = True
+                replaced_model_id = base_model_id
+                replaced_modes = [INTENDED_RECEIVER_MODE_MODEL]
     elif requested_model_id:
         final_modes.append(INTENDED_RECEIVER_MODE_MODEL)
         added_modes.append(INTENDED_RECEIVER_MODE_MODEL)
@@ -354,7 +393,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     else:
         final_model_id = base_model_id
 
-    if not added_return_types and not added_modes:
+    if not added_return_types and not added_modes and not regenerate_model_mode:
         raise ValueError(
             "Extension would not add any return types or intended-receiver modes. "
             "Use a fresh full run or request a new --return_type / --intended-receiver-model-id."
@@ -376,6 +415,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         base_modes=base_modes,
         added_modes=added_modes,
         intended_receiver_model_id=final_model_id,
+        regenerate_model_mode=regenerate_model_mode,
     )
     return FeatureExtensionPlan(
         base_run_id=base_run_id,
@@ -388,6 +428,9 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         final_intended_receiver_modes=final_modes,
         added_intended_receiver_modes=added_modes,
         intended_receiver_model_id=final_model_id,
+        regenerate_model_mode=regenerate_model_mode,
+        replaced_intended_receiver_model_id=replaced_model_id,
+        replaced_intended_receiver_modes=replaced_modes,
         commands=commands,
     )
 
@@ -401,6 +444,8 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_requested_return_types": args.requested_return_types,
         "extension_added_return_types": plan.added_return_types,
         "extension_added_intended_receiver_modes": plan.added_intended_receiver_modes,
+        "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
+        "extension_replaced_intended_receiver_modes": plan.replaced_intended_receiver_modes,
         "extension_commands": plan.commands,
         "intended_receiver_modes": plan.final_intended_receiver_modes,
         "intended_receiver_model_id": plan.intended_receiver_model_id,
@@ -429,11 +474,38 @@ def copy_base_feature_run(base_run_id: str, output_run_id: str) -> Path:
     return output_root
 
 
+def remove_model_mode_artifacts(output_root: Path, return_types: list[str]) -> None:
+    paths = [
+        get_resolved_action_dir(INTENDED_RECEIVER_MODE_MODEL, root=output_root),
+        get_augmented_feature_dir(INTENDED_RECEIVER_MODE_MODEL, root=output_root),
+        get_augmented_label_dir(INTENDED_RECEIVER_MODE_MODEL, root=output_root),
+    ]
+    for return_type in return_types:
+        paths.extend(
+            [
+                get_action_label_dir(return_type, intended_receiver_mode=INTENDED_RECEIVER_MODE_MODEL, root=output_root),
+                get_intent_train_label_dir(
+                    return_type,
+                    intended_receiver_mode=INTENDED_RECEIVER_MODE_MODEL,
+                    root=output_root,
+                ),
+            ]
+        )
+
+    for path in paths:
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+
+
 def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
     output_root = copy_base_feature_run(plan.base_run_id, plan.output_run_id)
     write_run_metadata(output_root, derived_metadata(args, plan, "in_progress"))
     try:
+        if plan.regenerate_model_mode:
+            remove_model_mode_artifacts(output_root, plan.final_return_types)
         for command in plan.commands:
             run_command(command)
     except Exception as exc:

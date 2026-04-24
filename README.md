@@ -354,6 +354,7 @@ python scripts/generate_relevant_features.py --return_type disc_0.9 --return_typ
 python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 ```
 
 Inputs:
@@ -365,7 +366,7 @@ Inputs:
 - optional sidecars from `data/xT/matches/*.csv` and `data/goal_distance/matches/*.csv`
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types and/or the model intended-receiver variant.
+Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts.
 
 Behavior:
 
@@ -380,6 +381,7 @@ Useful options:
 - `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
+- `--replace-intended-receiver-model` with `--extend-feature-run-id` and `--intended-receiver-model-id` to regenerate copied model-mode artifacts with a different `success_intent` checkpoint in the derived run
 
 Terminal output progression:
 
@@ -821,6 +823,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types or the model intended-receiver variant.
+- `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
 
 ### `scripts/train_relevant_models.py`
 
