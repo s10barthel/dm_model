@@ -36,6 +36,12 @@ EXPECTED_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
 
 
 @dataclass(frozen=True)
+class FeatureGenerationStep:
+    description: str
+    command: list[str]
+
+
+@dataclass(frozen=True)
 class FeatureExtensionPlan:
     base_run_id: str
     output_run_id: str
@@ -51,6 +57,7 @@ class FeatureExtensionPlan:
     replaced_intended_receiver_model_id: str | None
     replaced_intended_receiver_modes: list[str]
     commands: list[list[str]]
+    command_steps: list[FeatureGenerationStep]
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +106,13 @@ def run_command(args: list[str]) -> None:
     subprocess.run(args, cwd=ROOT, check=True)
 
 
+def run_generation_steps(steps: list[FeatureGenerationStep]) -> None:
+    total = len(steps)
+    for index, step in enumerate(steps, start=1):
+        print(f"Feature generation step {index}/{total}: {step.description}")
+        run_command(step.command)
+
+
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
     for return_type in args.return_types:
@@ -110,57 +124,72 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     return command
 
 
-def full_generation_commands(python: str) -> list[list[str]]:
+def full_generation_commands(python: str) -> list[FeatureGenerationStep]:
     return [
-        [
-            python,
-            "datatools/graph_feature.py",
-            "--action_type",
-            "all",
-            "--split",
-            "train",
-            "--post_action",
-            "--augment_blocks",
-        ],
-        [
-            python,
-            "datatools/graph_feature.py",
-            "--action_type",
-            "all",
-            "--split",
-            "test",
-            "--post_action",
-        ],
-        [
-            python,
-            "datatools/graph_feature.py",
-            "--action_type",
-            "all",
-            "--split",
-            "train",
-            "--feature_variant",
-            "intent_train_augmented",
-        ],
-        [
-            python,
-            "datatools/graph_feature.py",
-            "--action_type",
-            "all",
-            "--split",
-            "train",
-            "--feature_variant",
-            "success_intent",
-        ],
-        [
-            python,
-            "datatools/graph_feature.py",
-            "--action_type",
-            "all",
-            "--split",
-            "test",
-            "--feature_variant",
-            "success_intent",
-        ],
+        FeatureGenerationStep(
+            "train split with post_action + augment_blocks",
+            [
+                python,
+                "datatools/graph_feature.py",
+                "--action_type",
+                "all",
+                "--split",
+                "train",
+                "--post_action",
+                "--augment_blocks",
+            ],
+        ),
+        FeatureGenerationStep(
+            "test split with post_action",
+            [
+                python,
+                "datatools/graph_feature.py",
+                "--action_type",
+                "all",
+                "--split",
+                "test",
+                "--post_action",
+            ],
+        ),
+        FeatureGenerationStep(
+            "train split with intent_train_augmented",
+            [
+                python,
+                "datatools/graph_feature.py",
+                "--action_type",
+                "all",
+                "--split",
+                "train",
+                "--feature_variant",
+                "intent_train_augmented",
+            ],
+        ),
+        FeatureGenerationStep(
+            "train split with success_intent",
+            [
+                python,
+                "datatools/graph_feature.py",
+                "--action_type",
+                "all",
+                "--split",
+                "train",
+                "--feature_variant",
+                "success_intent",
+            ],
+        ),
+        FeatureGenerationStep(
+            "test split with success_intent",
+            [
+                python,
+                "datatools/graph_feature.py",
+                "--action_type",
+                "all",
+                "--split",
+                "test",
+                "--feature_variant",
+                "success_intent",
+            ],
+        ),
     ]
 
 
@@ -263,8 +292,8 @@ def extension_commands_for_plan(
     added_modes: list[str],
     intended_receiver_model_id: str | None,
     regenerate_model_mode: bool = False,
-) -> list[list[str]]:
-    commands: list[list[str]] = []
+) -> list[FeatureGenerationStep]:
+    steps: list[FeatureGenerationStep] = []
     non_model_base_modes = [mode for mode in base_modes if mode != INTENDED_RECEIVER_MODE_MODEL]
     if regenerate_model_mode and not non_model_base_modes:
         raise ValueError("Regenerating model-mode artifacts requires at least one non-model base mode.")
@@ -275,58 +304,70 @@ def extension_commands_for_plan(
     if added_return_types:
         added_return_modes = non_model_base_modes if regenerate_model_mode else base_modes
         for split in ["train", "test"]:
-            commands.append(
+            steps.append(
+                FeatureGenerationStep(
+                    f"{split} split (labels-only)",
+                    extension_graph_feature_command(
+                        python,
+                        output_run_id,
+                        split=split,
+                        return_types=added_return_types,
+                        intended_receiver_modes=added_return_modes,
+                        intended_receiver_model_id=intended_receiver_model_id,
+                    ),
+                )
+            )
+        steps.append(
+            FeatureGenerationStep(
+                "train split with intent_train_augmented (labels-only)",
                 extension_graph_feature_command(
                     python,
                     output_run_id,
-                    split=split,
+                    split="train",
                     return_types=added_return_types,
                     intended_receiver_modes=added_return_modes,
                     intended_receiver_model_id=intended_receiver_model_id,
-                )
-            )
-        commands.append(
-            extension_graph_feature_command(
-                python,
-                output_run_id,
-                split="train",
-                return_types=added_return_types,
-                intended_receiver_modes=added_return_modes,
-                intended_receiver_model_id=intended_receiver_model_id,
-                feature_variant="intent_train_augmented",
-                intent_train_label_source_mode=source_mode,
-                intent_train_label_source_return_type=source_return_type,
+                    feature_variant="intent_train_augmented",
+                    intent_train_label_source_mode=source_mode,
+                    intent_train_label_source_return_type=source_return_type,
+                ),
             )
         )
 
     if INTENDED_RECEIVER_MODE_MODEL in added_modes or regenerate_model_mode:
         validation_modes = [source_mode, INTENDED_RECEIVER_MODE_MODEL]
         for split in ["train", "test"]:
-            commands.append(
+            steps.append(
+                FeatureGenerationStep(
+                    f"{split} split with model mode (labels-only)",
+                    extension_graph_feature_command(
+                        python,
+                        output_run_id,
+                        split=split,
+                        return_types=final_return_types,
+                        intended_receiver_modes=validation_modes,
+                        intended_receiver_model_id=intended_receiver_model_id,
+                        augment_blocks_from_existing_graphs=(split == "train"),
+                    ),
+                )
+            )
+        steps.append(
+            FeatureGenerationStep(
+                "train split with model mode intent_train_augmented (labels-only)",
                 extension_graph_feature_command(
                     python,
                     output_run_id,
-                    split=split,
+                    split="train",
                     return_types=final_return_types,
-                    intended_receiver_modes=validation_modes,
+                    intended_receiver_modes=[INTENDED_RECEIVER_MODE_MODEL],
                     intended_receiver_model_id=intended_receiver_model_id,
-                    augment_blocks_from_existing_graphs=(split == "train"),
-                )
-            )
-        commands.append(
-            extension_graph_feature_command(
-                python,
-                output_run_id,
-                split="train",
-                return_types=final_return_types,
-                intended_receiver_modes=[INTENDED_RECEIVER_MODE_MODEL],
-                intended_receiver_model_id=intended_receiver_model_id,
-                feature_variant="intent_train_augmented",
-                intent_train_label_source_mode=source_mode,
-                intent_train_label_source_return_type=source_return_type,
+                    feature_variant="intent_train_augmented",
+                    intent_train_label_source_mode=source_mode,
+                    intent_train_label_source_return_type=source_return_type,
+                ),
             )
         )
-    return commands
+    return steps
 
 
 def build_extension_plan(args: argparse.Namespace, python: str | None = None) -> FeatureExtensionPlan:
@@ -406,7 +447,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     if output_root.exists():
         raise FileExistsError(f"Derived feature run {output_run_id} already exists at {output_root}.")
 
-    commands = extension_commands_for_plan(
+    command_steps = extension_commands_for_plan(
         python=python,
         output_run_id=output_run_id,
         base_return_types=base_return_types,
@@ -417,6 +458,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
     )
+    commands = [step.command for step in command_steps]
     return FeatureExtensionPlan(
         base_run_id=base_run_id,
         output_run_id=output_run_id,
@@ -432,6 +474,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         replaced_intended_receiver_model_id=replaced_model_id,
         replaced_intended_receiver_modes=replaced_modes,
         commands=commands,
+        command_steps=command_steps,
     )
 
 
@@ -506,8 +549,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     try:
         if plan.regenerate_model_mode:
             remove_model_mode_artifacts(output_root, plan.final_return_types)
-        for command in plan.commands:
-            run_command(command)
+        run_generation_steps(plan.command_steps)
     except Exception as exc:
         write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
         raise
@@ -521,9 +563,11 @@ def run_extension_generation(args: argparse.Namespace) -> None:
 def run_full_generation(args: argparse.Namespace) -> None:
     args.run_id = args.run_id or generate_run_id("feature")
     python = sys.executable
-    commands = full_generation_commands(python)
-    for command in commands:
-        run_command(with_mode_flags(command, args))
+    command_steps = [
+        FeatureGenerationStep(step.description, with_mode_flags(step.command, args))
+        for step in full_generation_commands(python)
+    ]
+    run_generation_steps(command_steps)
 
     run_root = get_feature_run_root(args.run_id)
     metadata = {
@@ -536,7 +580,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "splits": ["train", "test"],
         "return_types": args.return_types,
         "return_type": args.return_types[0] if len(args.return_types) == 1 else None,
-        "commands": [with_mode_flags(command, args) for command in commands],
+        "commands": [step.command for step in command_steps],
         "status": "completed",
     }
     write_run_metadata(run_root, metadata)

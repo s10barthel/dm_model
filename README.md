@@ -385,7 +385,7 @@ Useful options:
 
 Terminal output progression:
 
-A normal (full) feature run executes 5 sequential steps, printing these messages for each match (e.g., `[1/306] ... [306/306]`):
+A normal (full) feature run executes 5 sequential steps. Before each subprocess starts, it prints a top-level progress line such as `Feature generation step 1/5: train split with post_action + augment_blocks`, then prints these messages for each match (e.g., `[1/306] ... [306/306]`):
 
 1. **train split with post_action + augment_blocks:** prints `"Successfully saved {N} augmented events for mode={mode}."` then `"Successfully saved for {N} events."`
 2. **test split with post_action:** prints `"Successfully saved for {N} events."`
@@ -393,13 +393,13 @@ A normal (full) feature run executes 5 sequential steps, printing these messages
 4. **train split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
 5. **test split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
 
-An `--extend-feature-run-id` run with new `--return_type` values only executes 3 steps:
+An `--extend-feature-run-id` run with new `--return_type` values only executes 3 steps, printing `Feature generation step X/3: ...` before each step:
 
 1. **train split (labels-only):** prints `"Successfully saved labels-only action labels."`
 2. **test split (labels-only):** prints `"Successfully saved labels-only action labels."`
 3. **train split with intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
 
-An `--extend-feature-run-id` run with both new `--return_type` values and `--intended-receiver-model-id` executes 6 steps:
+An `--extend-feature-run-id` run with both new `--return_type` values and `--intended-receiver-model-id` executes 6 steps, printing `Feature generation step X/6: ...` before each step:
 
 1. **train split (labels-only):** prints `"Successfully saved labels-only action labels."`
 2. **test split (labels-only):** prints `"Successfully saved labels-only action labels."`

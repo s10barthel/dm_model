@@ -74,6 +74,14 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertEqual(plan.added_return_types, [])
         self.assertEqual(plan.added_intended_receiver_modes, ["model"])
         self.assertEqual(plan.intended_receiver_model_id, "success_intent/42")
+        self.assertEqual(
+            [step.description for step in plan.command_steps],
+            [
+                "train split with model mode (labels-only)",
+                "test split with model mode (labels-only)",
+                "train split with model mode intent_train_augmented (labels-only)",
+            ],
+        )
 
     def test_unions_requested_return_types_in_order(self) -> None:
         plan = self.build_plan(make_args(["next_5", "disc_0.9", "in_3"]))
@@ -81,12 +89,32 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertEqual(plan.final_return_types, ["disc_0.9", "next_5", "in_3"])
         self.assertEqual(plan.added_return_types, ["next_5", "in_3"])
         self.assertEqual(plan.final_intended_receiver_modes, ["original", "angle_only"])
+        self.assertEqual(
+            [step.description for step in plan.command_steps],
+            [
+                "train split (labels-only)",
+                "test split (labels-only)",
+                "train split with intent_train_augmented (labels-only)",
+            ],
+        )
 
     def test_model_mode_addition_updates_final_modes(self) -> None:
         plan = self.build_plan(make_args(["next_5"], model_id="success_intent/42"))
 
         self.assertEqual(plan.final_intended_receiver_modes, ["original", "angle_only", "model"])
         self.assertEqual(plan.added_intended_receiver_modes, ["model"])
+        self.assertEqual(len(plan.command_steps), 6)
+        self.assertEqual(
+            [step.description for step in plan.command_steps],
+            [
+                "train split (labels-only)",
+                "test split (labels-only)",
+                "train split with intent_train_augmented (labels-only)",
+                "train split with model mode (labels-only)",
+                "test split with model mode (labels-only)",
+                "train split with model mode intent_train_augmented (labels-only)",
+            ],
+        )
 
     def test_noop_extension_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -178,6 +206,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         plan = self.build_plan(make_args(["next_5"], model_id="success_intent/42"))
 
         self.assertEqual(len(plan.commands), 6)
+        self.assertEqual(plan.commands, [step.command for step in plan.command_steps])
         self.assertTrue(all("--labels-only" in command for command in plan.commands))
         self.assertTrue(all("--post_action" not in command for command in plan.commands))
         self.assertFalse(
@@ -186,6 +215,21 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
                 and command[command.index("--feature_variant") + 1] == "success_intent"
                 for command in plan.commands
             )
+        )
+
+    def test_full_generation_commands_have_documented_step_descriptions(self) -> None:
+        steps = generator.full_generation_commands("python")
+
+        self.assertEqual(len(steps), 5)
+        self.assertEqual(
+            [step.description for step in steps],
+            [
+                "train split with post_action + augment_blocks",
+                "test split with post_action",
+                "train split with intent_train_augmented",
+                "train split with success_intent",
+                "test split with success_intent",
+            ],
         )
 
 
