@@ -150,7 +150,7 @@ def test_melt_component_frame_preserves_possessor_and_renames_receiver() -> None
     assert melted["action_intent"].tolist() == [0.4, 0.6]
 
 
-def test_compute_model_scores_calculates_pass_score_and_game_state_value() -> None:
+def test_compute_model_scores_calculates_pass_score_risk_reward_and_game_state_value() -> None:
     model_data = pd.DataFrame(
         [
             {
@@ -187,7 +187,11 @@ def test_compute_model_scores_calculates_pass_score_and_game_state_value() -> No
     scored = post.compute_model_scores(model_data)
 
     pass_scores = scored.sort_values("receiver_id")["pass_score"].tolist()
+    risks = scored.sort_values("receiver_id")["risk"].tolist()
+    rewards = scored.sort_values("receiver_id")["reward"].tolist()
     assert all(math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9) for left, right in zip(pass_scores, [0.3, 0.14]))
+    assert all(math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9) for left, right in zip(risks, [0.14, 0.06]))
+    assert all(math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9) for left, right in zip(rewards, [0.44, 0.2]))
     assert all(
         math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-9)
         for left, right in zip(scored["game_state_value"].tolist(), [0.252, 0.252])
@@ -197,11 +201,11 @@ def test_compute_model_scores_calculates_pass_score_and_game_state_value() -> No
 def test_add_scores_to_event_data_uses_nearest_available_frames_and_one_frame_events() -> None:
     model_data = pd.DataFrame(
         [
-            {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 63801, "pass_score": 0.10, "game_state_value": 0.25},
-            {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.20, "game_state_value": 0.25},
-            {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 63801, "pass_score": 0.30, "game_state_value": 0.25},
-            {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.40, "game_state_value": 0.25},
-            {"match_id": "117670", "index": 1, "frame": 400, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.50, "game_state_value": 0.35},
+            {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 63801, "pass_score": 0.10, "risk": 0.01, "reward": 0.11, "game_state_value": 0.25},
+            {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.20, "risk": 0.02, "reward": 0.22, "game_state_value": 0.25},
+            {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 63801, "pass_score": 0.30, "risk": 0.03, "reward": 0.33, "game_state_value": 0.25},
+            {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.40, "risk": 0.04, "reward": 0.44, "game_state_value": 0.25},
+            {"match_id": "117670", "index": 1, "frame": 400, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.50, "risk": 0.05, "reward": 0.55, "game_state_value": 0.35},
         ]
     )
     event_data = pd.DataFrame(
@@ -215,13 +219,19 @@ def test_add_scores_to_event_data_uses_nearest_available_frames_and_one_frame_ev
 
     scored = post.add_scores_to_event_data(model_data, event_data)
 
-    assert scored.columns.tolist()[-3:] == ["pass_score", "game_state_value", "dm_score"]
+    assert scored.columns.tolist()[-5:] == ["pass_score", "risk", "reward", "game_state_value", "dm_score"]
     assert math.isclose(scored.loc[0, "pass_score"], 0.40, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "risk"], 0.04, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "reward"], 0.44, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "game_state_value"], 0.25, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert pd.isna(scored.loc[1, "pass_score"])
+    assert pd.isna(scored.loc[1, "risk"])
+    assert pd.isna(scored.loc[1, "reward"])
     assert math.isclose(scored.loc[1, "game_state_value"], 0.25, rel_tol=1e-9, abs_tol=1e-9)
     assert pd.isna(scored.loc[1, "dm_score"])
     assert math.isclose(scored.loc[2, "pass_score"], 0.50, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[2, "risk"], 0.05, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[2, "reward"], 0.55, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[2, "game_state_value"], 0.35, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[2, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
