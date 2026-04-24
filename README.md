@@ -381,6 +381,31 @@ Useful options:
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 
+Terminal output progression:
+
+A normal (full) feature run executes 5 sequential steps, printing these messages for each match (e.g., `[1/306] ... [306/306]`):
+
+1. **train split with post_action + augment_blocks:** prints `"Successfully saved {N} augmented events for mode={mode}."` then `"Successfully saved for {N} events."`
+2. **test split with post_action:** prints `"Successfully saved for {N} events."`
+3. **train split with intent_train_augmented:** prints `"Successfully saved {N} augmented intent samples."`
+4. **train split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
+5. **test split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
+
+An `--extend-feature-run-id` run with new `--return_type` values only executes 3 steps:
+
+1. **train split (labels-only):** prints `"Successfully saved labels-only action labels."`
+2. **test split (labels-only):** prints `"Successfully saved labels-only action labels."`
+3. **train split with intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
+
+An `--extend-feature-run-id` run with both new `--return_type` values and `--intended-receiver-model-id` executes 6 steps:
+
+1. **train split (labels-only):** prints `"Successfully saved labels-only action labels."`
+2. **test split (labels-only):** prints `"Successfully saved labels-only action labels."`
+3. **train split with intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
+4. **train split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
+5. **test split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
+6. **train split with model mode intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
+
 This writes, inside the run root:
 
 - `action_graphs/*.pt`
