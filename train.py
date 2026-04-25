@@ -156,6 +156,8 @@ parser.add_argument("--seed", type=int, required=False, default=128, help="PyTor
 parser.add_argument("--cont", action="store_true", default=False, help="continue training previous best model")
 parser.add_argument("--best_loss", type=float, required=False, default=0, help="best loss")
 parser.add_argument("--best_acc", type=float, required=False, default=0, help="best accuracy")
+parser.add_argument("--training-step-index", type=int, default=None, help=argparse.SUPPRESS)
+parser.add_argument("--training-step-total", type=int, default=None, help=argparse.SUPPRESS)
 
 args, _ = parser.parse_known_args()
 
@@ -407,6 +409,9 @@ if __name__ == "__main__":
         # Remove parameters with requires_grad=False (https://github.com/pytorch/pytorch/issues/679)
         optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.module.parameters()), lr=lr)
 
+        if args.training_step_index is not None and args.training_step_total is not None:
+            printlog(f"\nTraining model {args.training_step_index}/{args.training_step_total}: {args.task}", trial_path)
+            printlog(f"Run id: {args.run_id}", trial_path)
         printlog(f"\nEpoch: {epoch:d}", trial_path)
         start_time = time.time()
 

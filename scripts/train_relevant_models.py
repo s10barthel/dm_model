@@ -789,11 +789,13 @@ def main() -> None:
     )
     executed_commands: list[list[str]] = []
 
-    for args in commands:
+    total_commands = len(commands)
+    for index, args in enumerate(commands, start=1):
         command = [python, "train.py"]
         if resolved_feature_run_id:
             command.extend(["--feature-run-id", str(resolved_feature_run_id)])
         command.extend(args)
+        command.extend(["--training-step-index", str(index), "--training-step-total", str(total_commands)])
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
         executed_commands.append(command)
