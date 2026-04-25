@@ -20,18 +20,40 @@ DEFAULT_SKILLCORNER_IDS_PATH = Path(
     r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\data\skillcorner_id.csv"
 )
 
-SKILLCORNER_DATA_REQUIRED_COLUMNS = ["player_id", "pass_score", "game_state_value", "dm_score", "match_id"]
+SKILLCORNER_DATA_REQUIRED_COLUMNS = [
+    "player_id",
+    "pass_score",
+    "risk",
+    "reward",
+    "game_state_value",
+    "dm_score",
+    "match_id",
+]
 SKILLCORNER_IDS_REQUIRED_COLUMNS = ["player_id", "participant"]
 RAW_ACTIONS_FILENAME = "skillcorner_actions_raw.csv"
 ACTIONS_FILENAME = "skillcorner_actions.csv"
 PLAYERS_FILENAME = "skillcorner_players.csv"
-ACTIONS_COLUMNS = ["participant", "pass_score", "game_state_value", "dm_score", "match_id"]
+ACTIONS_COLUMNS = [
+    "participant",
+    "pass_score",
+    "risk",
+    "reward",
+    "game_state_value",
+    "dm_score",
+    "match_id",
+]
 PLAYER_SUMMARY_COLUMNS = [
     "participant",
     "actions",
     "pass_score_sum",
     "pass_score_avg",
     "pass_score_median",
+    "risk_sum",
+    "risk_avg",
+    "risk_median",
+    "reward_sum",
+    "reward_avg",
+    "reward_median",
     "game_state_value_sum",
     "game_state_value_avg",
     "game_state_value_median",
@@ -138,6 +160,12 @@ def aggregate_skillcorner_players(skillcorner_actions: pd.DataFrame) -> pd.DataF
             pass_score_sum=("pass_score", "sum"),
             pass_score_avg=("pass_score", "mean"),
             pass_score_median=("pass_score", "median"),
+            risk_sum=("risk", "sum"),
+            risk_avg=("risk", "mean"),
+            risk_median=("risk", "median"),
+            reward_sum=("reward", "sum"),
+            reward_avg=("reward", "mean"),
+            reward_median=("reward", "median"),
             game_state_value_sum=("game_state_value", "sum"),
             game_state_value_avg=("game_state_value", "mean"),
             game_state_value_median=("game_state_value", "median"),

@@ -349,17 +349,18 @@ def _freeze_hawkeye_ballreceipt_frame_meta(
         int(anchor["half"]),
         float(anchor["ballreceipt"]),
     )
-    ball_lookup = ball.set_index(FRAME_KEY_COLUMNS)
-    if ball_key not in ball_lookup.index:
+    ball_match = ball.loc[
+        (ball["game_id"] == ball_key[0])
+        & (ball["half"] == ball_key[1])
+        & np.isclose(ball["abs_time"], ball_key[2], atol=BALLRECEIPT_ATOL)
+    ]
+    if ball_match.empty:
         raise ValueError(
             f"Hawkeye ball data is missing the BallReceipt frame {ball_key} required for freezing."
         )
-
-    ball_row = ball_lookup.loc[ball_key]
-    if isinstance(ball_row, pd.DataFrame):
-        if len(ball_row) != 1:
-            raise ValueError(f"Hawkeye ball data contains duplicated BallReceipt rows for frame {ball_key}.")
-        ball_row = ball_row.iloc[0]
+    if len(ball_match) != 1:
+        raise ValueError(f"Hawkeye ball data contains duplicated BallReceipt rows for frame {ball_key}.")
+    ball_row = ball_match.iloc[0]
 
     ball_x_raw, ball_y_raw = _apply_hawkeye_xy_transform(
         float(ball_row["ball_x"]),

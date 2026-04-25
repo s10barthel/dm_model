@@ -24,7 +24,7 @@ validation/skillcorner/
 
 ### `code/skillcorner_postprocessing.py`
 
-Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates `pass_score` and `game_state_value`, joins those scores back onto filtered SkillCorner event rows, and writes:
+Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates `pass_score`, `risk`, `reward`, and `game_state_value`, joins those scores back onto filtered SkillCorner event rows, and writes:
 
 - `output/skillcorner_summary.csv`
 
@@ -58,6 +58,8 @@ It writes:
 Row-level SkillCorner event export produced by `skillcorner_postprocessing.py`. It retains the filtered event data and appends:
 
 - `pass_score`
+- `risk`
+- `reward`
 - `game_state_value`
 - `dm_score`
 
@@ -71,6 +73,8 @@ A reduced row-level action table with only:
 
 - `participant`
 - `pass_score`
+- `risk`
+- `reward`
 - `game_state_value`
 - `dm_score`
 - `match_id`
@@ -83,5 +87,7 @@ Participant-level aggregates derived from `skillcorner_actions.csv`, including:
 
 - `actions`
 - `pass_score_sum`, `pass_score_avg`, `pass_score_median`
+- `risk_sum`, `risk_avg`, `risk_median`
+- `reward_sum`, `reward_avg`, `reward_median`
 - `game_state_value_sum`, `game_state_value_avg`, `game_state_value_median`
 - `dm_score_sum`, `dm_score_avg`, `dm_score_median`

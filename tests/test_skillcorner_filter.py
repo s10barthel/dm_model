@@ -64,8 +64,8 @@ def test_filter_skillcorner_actions_raw_keeps_only_known_players() -> None:
 def test_build_skillcorner_actions_keeps_requested_columns_and_drops_empty_dm_score() -> None:
     skillcorner_actions_raw = pd.DataFrame(
         [
-            {"player_id": 10, "match_id": "m1", "pass_score": 0.1, "game_state_value": 0.2, "dm_score": 0.3},
-            {"player_id": 20, "match_id": "m2", "pass_score": 0.4, "game_state_value": 0.5, "dm_score": pd.NA},
+            {"player_id": 10, "match_id": "m1", "pass_score": 0.1, "risk": 0.01, "reward": 0.11, "game_state_value": 0.2, "dm_score": 0.3},
+            {"player_id": 20, "match_id": "m2", "pass_score": 0.4, "risk": 0.04, "reward": 0.44, "game_state_value": 0.5, "dm_score": pd.NA},
         ]
     )
     filtered_ids = pd.DataFrame(
@@ -82,14 +82,16 @@ def test_build_skillcorner_actions_keeps_requested_columns_and_drops_empty_dm_sc
     assert actions.columns.tolist() == filt.ACTIONS_COLUMNS
     assert actions["participant"].tolist() == ["DM10"]
     assert actions["match_id"].tolist() == ["m1"]
+    assert actions["risk"].tolist() == [0.01]
+    assert actions["reward"].tolist() == [0.11]
 
 
 def test_aggregate_skillcorner_players_computes_counts_sums_means_and_medians() -> None:
     skillcorner_actions = pd.DataFrame(
         [
-            {"participant": "DM1", "pass_score": 1.0, "game_state_value": 4.0, "dm_score": 7.0, "match_id": "m1"},
-            {"participant": "DM1", "pass_score": 3.0, "game_state_value": 6.0, "dm_score": 9.0, "match_id": "m2"},
-            {"participant": "DM2", "pass_score": 5.0, "game_state_value": 8.0, "dm_score": 11.0, "match_id": "m3"},
+            {"participant": "DM1", "pass_score": 1.0, "risk": 2.0, "reward": 10.0, "game_state_value": 4.0, "dm_score": 7.0, "match_id": "m1"},
+            {"participant": "DM1", "pass_score": 3.0, "risk": 4.0, "reward": 20.0, "game_state_value": 6.0, "dm_score": 9.0, "match_id": "m2"},
+            {"participant": "DM2", "pass_score": 5.0, "risk": 6.0, "reward": 30.0, "game_state_value": 8.0, "dm_score": 11.0, "match_id": "m3"},
         ]
     )
 
@@ -101,6 +103,12 @@ def test_aggregate_skillcorner_players_computes_counts_sums_means_and_medians() 
     assert math.isclose(dm1["pass_score_sum"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["pass_score_avg"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["pass_score_median"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["risk_sum"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["risk_avg"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["risk_median"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["reward_sum"], 30.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["reward_avg"], 15.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["reward_median"], 15.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["game_state_value_sum"], 10.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["game_state_value_avg"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["game_state_value_median"], 5.0, rel_tol=1e-9, abs_tol=1e-9)

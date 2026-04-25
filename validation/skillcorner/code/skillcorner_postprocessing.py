@@ -38,7 +38,7 @@ REQUIRED_COMPONENT_IDENTIFIER_COLUMNS = ["match_id", "frame", "index", "player_i
 IGNORED_COMPONENT_COLUMNS = {"period", "attacking_side", "shot"}
 MODEL_KEY_COLUMNS = ["match_id", "frame", "index", "player_id", "receiver_id"]
 GAME_STATE_KEY_COLUMNS = ["match_id", "index"]
-PASS_SCORE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "receiver_id", "pass_score"]
+PASS_SCORE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "receiver_id", "pass_score", "risk", "reward"]
 GAME_STATE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "game_state_value"]
 REQUIRED_EVENT_COLUMNS = [
     "match_id",
@@ -179,6 +179,8 @@ def compute_model_scores(model_data: pd.DataFrame) -> pd.DataFrame:
     scored = model_data.copy()
     if scored.empty:
         scored["pass_score"] = pd.Series(dtype=float)
+        scored["risk"] = pd.Series(dtype=float)
+        scored["reward"] = pd.Series(dtype=float)
         scored["game_state_value"] = pd.Series(dtype=float)
         return scored
 
@@ -187,6 +189,14 @@ def compute_model_scores(model_data: pd.DataFrame) -> pd.DataFrame:
         * (scored["outcome_scoring_success"] - scored["outcome_conceding_success"])
         + (1 - scored["pass_success"])
         * (scored["outcome_scoring_failure"] - scored["outcome_conceding_failure"])
+    )
+    scored["reward"] = (
+        scored["pass_success"] * scored["outcome_scoring_success"]
+        + (1 - scored["pass_success"]) * scored["outcome_scoring_failure"]
+    )
+    scored["risk"] = (
+        scored["pass_success"] * scored["outcome_conceding_success"]
+        + (1 - scored["pass_success"]) * scored["outcome_conceding_failure"]
     )
     game_state_values = (
         (scored["pass_intent"] * scored["pass_score"])
@@ -215,7 +225,11 @@ def build_match_model_data(match_dir: Path) -> pd.DataFrame:
 
 def build_model_data(match_dirs: list[Path]) -> pd.DataFrame:
     if not match_dirs:
-        return pd.DataFrame(columns=MODEL_KEY_COLUMNS + REQUIRED_COMPONENTS + ["pass_score", "game_state_value"])
+        return pd.DataFrame(
+            columns=MODEL_KEY_COLUMNS
+            + REQUIRED_COMPONENTS
+            + ["pass_score", "risk", "reward", "game_state_value"]
+        )
     frames = [build_match_model_data(match_dir) for match_dir in match_dirs]
     return pd.concat(frames, ignore_index=True)
 
@@ -228,7 +242,7 @@ def validate_unique_lookup(df: pd.DataFrame, key_columns: list[str], label: str)
 
 def build_pass_score_candidates(model_data: pd.DataFrame) -> pd.DataFrame:
     if model_data.empty:
-        return pd.DataFrame(columns=["match_id", "index", "frame", "receiver_id", "pass_score"])
+        return pd.DataFrame(columns=PASS_SCORE_LOOKUP_COLUMNS)
 
     max_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("max")
     candidates = model_data.loc[model_data["frame"].eq(max_frames), PASS_SCORE_LOOKUP_COLUMNS].copy()
@@ -347,13 +361,13 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         event_frame_column="frame_end",
         candidate_frame_column="frame",
         tie_break="later",
-        value_columns=["pass_score"],
+        value_columns=["pass_score", "risk", "reward"],
     )
 
     scored = base.merge(selected_game_state, on="__event_row_id", how="left")
     scored = scored.merge(selected_pass_score, on="__event_row_id", how="left")
     scored["dm_score"] = scored["pass_score"] - scored["game_state_value"]
-    return scored[original_columns + ["pass_score", "game_state_value", "dm_score"]]
+    return scored[original_columns + ["pass_score", "risk", "reward", "game_state_value", "dm_score"]]
 
 
 def resolve_component_run_root(args: argparse.Namespace) -> tuple[Path, str | None]:
@@ -422,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
         "model_rows": len(model_data),
         "event_rows": len(event_data),
         "events_with_pass_score": int(event_data["pass_score"].notna().sum()),
+        "events_with_risk": int(event_data["risk"].notna().sum()),
+        "events_with_reward": int(event_data["reward"].notna().sum()),
         "events_with_game_state_value": int(event_data["game_state_value"].notna().sum()),
         "events_with_dm_score": int(event_data["dm_score"].notna().sum()),
         "output_file": args.output_file,
