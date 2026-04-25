@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,6 +35,7 @@ def make_args(
     model_id: str | None = None,
     run_id: str | None = "derived",
     replace_model: bool = False,
+    refresh_target_families: list[str] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         extend_feature_run_id="base",
@@ -43,6 +45,7 @@ def make_args(
         ),
         intended_receiver_model_id=model_id,
         replace_intended_receiver_model=replace_model,
+        refresh_target_families=refresh_target_families or [],
     )
 
 
@@ -120,6 +123,62 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.build_plan(make_args(["disc_0.9"]))
 
+    def test_refresh_only_extension_regenerates_existing_labels(self) -> None:
+        plan = self.build_plan(make_args(refresh_target_families=["epv"]))
+
+        self.assertEqual(plan.final_return_types, ["disc_0.9"])
+        self.assertEqual(plan.added_return_types, [])
+        self.assertEqual(plan.refresh_target_families, ["epv"])
+        self.assertEqual(plan.refreshed_return_types, ["disc_0.9"])
+        self.assertEqual(plan.refreshed_intended_receiver_modes, ["original", "angle_only"])
+        self.assertEqual(
+            [step.description for step in plan.command_steps],
+            [
+                "train split target-label refresh (labels-only)",
+                "test split target-label refresh (labels-only)",
+                "train split target-label refresh with intent_train_augmented (labels-only)",
+            ],
+        )
+        self.assertTrue(all("--labels-only" in command for command in plan.commands))
+        self.assertTrue(all("--overwrite-labels" in command for command in plan.commands))
+
+    def test_refresh_target_families_are_deduplicated_in_order(self) -> None:
+        plan = self.build_plan(make_args(refresh_target_families=["epv", "xt", "epv", "goal_distance"]))
+
+        self.assertEqual(plan.refresh_target_families, ["epv", "xt", "goal_distance"])
+
+    def test_unknown_refresh_target_family_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.build_plan(make_args(refresh_target_families=["bad"]))
+
+    def test_parse_rejects_unknown_refresh_target_family(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "generate_relevant_features.py",
+                "--extend-feature-run-id",
+                "base",
+                "--refresh-target-family",
+                "bad",
+            ],
+        ):
+            with self.assertRaises(SystemExit):
+                generator.parse_args()
+
+    def test_parse_rejects_refresh_without_extension(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "generate_relevant_features.py",
+                "--refresh-target-family",
+                "epv",
+            ],
+        ):
+            with self.assertRaises(SystemExit):
+                generator.parse_args()
+
     def test_output_run_must_not_already_exist(self) -> None:
         with self.assertRaises(FileExistsError):
             self.build_plan(make_args(["next_5"]), existing_output=True)
@@ -164,6 +223,28 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertEqual(plan.replaced_intended_receiver_modes, ["model"])
         self.assertEqual(len(plan.commands), 3)
         self.assertTrue(all("--labels-only" in command for command in plan.commands))
+
+    def test_refresh_existing_model_mode_preserves_model_id(self) -> None:
+        metadata = make_metadata(
+            modes=["original", "angle_only", "model"],
+            model_id="success_intent/old",
+        )
+
+        plan = self.build_plan(make_args(refresh_target_families=["epv"]), metadata=metadata)
+
+        self.assertEqual(plan.final_intended_receiver_modes, ["original", "angle_only", "model"])
+        self.assertEqual(plan.intended_receiver_model_id, "success_intent/old")
+        self.assertEqual(plan.refreshed_intended_receiver_modes, ["original", "angle_only", "model"])
+        self.assertEqual(len(plan.commands), 6)
+        model_commands = [
+            command
+            for command in plan.commands
+            if "--only-intended-receiver-mode" in command and "model" in command
+        ]
+        self.assertEqual(len(model_commands), 3)
+        self.assertTrue(all("success_intent/old" in command for command in model_commands))
+        self.assertTrue(all("--overwrite-labels" in command for command in model_commands))
+        self.assertFalse(any("--augment-blocks-from-existing-graphs" in command for command in model_commands))
 
     def test_replace_model_requires_requested_model_id(self) -> None:
         metadata = make_metadata(
@@ -260,7 +341,45 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(output_metadata["status"], "completed")
             self.assertEqual(output_metadata["return_types"], ["disc_0.9", "next_5"])
             self.assertEqual(output_metadata["derived_from_feature_run_id"], "base")
+            self.assertEqual(output_metadata["extension_refresh_target_families"], [])
+            self.assertEqual(output_metadata["extension_refreshed_return_types"], [])
+            self.assertEqual(output_metadata["extension_refreshed_intended_receiver_modes"], [])
             self.assertEqual(run_command.call_count, 3)
+            write_latest_run.assert_called_once_with("feature", "derived")
+
+    def test_refresh_extension_records_metadata_and_overwrites_labels(self) -> None:
+        args = make_args(run_id="derived", refresh_target_families=["epv"])
+        metadata = make_metadata(return_types=["next_5", "in_3"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            (base_root / "artifact.txt").write_text("copied", encoding="utf-8")
+            (base_root / "metadata.json").write_text('{"status": "completed"}', encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "run_command") as run_command,
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                generator.run_extension_generation(args)
+
+            output_root = root / "derived"
+            output_metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue((output_root / "artifact.txt").exists())
+            self.assertEqual(output_metadata["status"], "completed")
+            self.assertEqual(output_metadata["return_types"], ["next_5", "in_3"])
+            self.assertEqual(output_metadata["extension_refresh_target_families"], ["epv"])
+            self.assertEqual(output_metadata["extension_refreshed_return_types"], ["next_5", "in_3"])
+            self.assertEqual(
+                output_metadata["extension_refreshed_intended_receiver_modes"],
+                ["original", "angle_only"],
+            )
+            self.assertEqual(run_command.call_count, 3)
+            self.assertTrue(all("--overwrite-labels" in call.args[0] for call in run_command.call_args_list))
             write_latest_run.assert_called_once_with("feature", "derived")
 
     def test_replacement_removes_only_copied_model_mode_artifacts(self) -> None:

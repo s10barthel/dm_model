@@ -547,6 +547,55 @@ def label_goal_distance_returns(
     )
 
 
+def label_epv_returns(
+    events: pd.DataFrame,
+    lookahead_len: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
+) -> pd.DataFrame:
+    return label_future_max_value(
+        events,
+        value_col="epv",
+        scores_col="scores_epv",
+        concedes_col="concedes_epv",
+        lookahead_len=lookahead_len,
+        eligible_types=eligible_types,
+        skip_first=skip_first,
+    )
+
+
+def label_epv_in_state_returns(
+    events: pd.DataFrame,
+    action_offset: int = 5,
+    eligible_types: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
+    return label_nth_future_state_value(
+        events,
+        value_col="epv",
+        scores_col="scores_epv",
+        concedes_col="concedes_epv",
+        action_offset=action_offset,
+        eligible_types=eligible_types,
+    )
+
+
+def label_discounted_epv_returns(
+    events: pd.DataFrame,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
+) -> pd.DataFrame:
+    return label_discounted_future_max_value(
+        events,
+        value_col="epv",
+        scores_col="scores_epv",
+        concedes_col="concedes_epv",
+        gamma=gamma,
+        eligible_types=eligible_types,
+        skip_first=skip_first,
+    )
+
+
 def label_goal_distance_in_state_returns(
     events: pd.DataFrame,
     action_offset: int = 5,

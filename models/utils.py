@@ -122,6 +122,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
             bool(args.get("use_xg", False)),
             bool(args.get("use_xt", False)),
             bool(args.get("use_goal_distance", False)),
+            bool(args.get("use_epv", False)),
         )
     if target_family is None and legacy_context is not None:
         target_family = legacy_context.get("target_family")
@@ -373,6 +374,7 @@ def resolve_relevant_model_ids(
     use_xg: bool = False,
     use_xt: bool = False,
     use_goal_distance: bool = False,
+    use_epv: bool = False,
     explicit_model_ids: dict[str, str | None] | None = None,
     include_pass_intent: bool = False,
     include_success_intent: bool = False,
@@ -382,6 +384,7 @@ def resolve_relevant_model_ids(
         use_xg=bool(use_xg),
         use_xt=bool(use_xt),
         use_goal_distance=bool(use_goal_distance),
+        use_epv=bool(use_epv),
     )
 
     resolved = {}
@@ -732,10 +735,10 @@ def validate_target_flags(args) -> None:
         int(
             bool(getattr(args, name, False))
         )
-        for name in ["use_xg", "use_xt", "use_goal_distance"]
+        for name in ["use_xg", "use_xt", "use_goal_distance", "use_epv"]
     )
     if enabled_flags > 1:
-        raise ValueError("--use_xg, --use_xt, and --use_goal_distance are mutually exclusive.")
+        raise ValueError("--use_xg, --use_xt, --use_goal_distance, and --use_epv are mutually exclusive.")
 
 
 def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
@@ -750,6 +753,8 @@ def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor,
         )
     if getattr(args, "use_xt", False):
         return get_label_slice(batch_labels, "scores_xt"), get_label_slice(batch_labels, "concedes_xt")
+    if getattr(args, "use_epv", False):
+        return get_label_slice(batch_labels, "scores_epv"), get_label_slice(batch_labels, "concedes_epv")
     if getattr(args, "use_xg", False):
         return get_label_slice(batch_labels, "scores_xg"), get_label_slice(batch_labels, "concedes_xg")
     return get_label_slice(batch_labels, "scores"), get_label_slice(batch_labels, "concedes")

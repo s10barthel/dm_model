@@ -33,6 +33,7 @@ from project_config import (
 )
 
 EXPECTED_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
+REFRESH_TARGET_FAMILIES = ("xt", "goal_distance", "epv")
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,9 @@ class FeatureExtensionPlan:
     base_intended_receiver_modes: list[str]
     final_intended_receiver_modes: list[str]
     added_intended_receiver_modes: list[str]
+    refresh_target_families: list[str]
+    refreshed_return_types: list[str]
+    refreshed_intended_receiver_modes: list[str]
     intended_receiver_model_id: str | None
     regenerate_model_mode: bool
     replaced_intended_receiver_model_id: str | None
@@ -68,7 +72,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Resolved return type for generated action labels. Repeat the flag to include multiple return types, "
-            "including disc_<gamma>_skip1 and next_<N>_skip1, plus in_<N> for xt/goal_distance training."
+            "including disc_<gamma>_skip1 and next_<N>_skip1, plus in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument(
@@ -82,7 +86,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Create a new derived feature run from this completed feature run, copying existing artifacts and "
-            "generating only newly requested return types or the model intended-receiver variant."
+            "generating only newly requested return types, refreshed target labels, or the model intended-receiver "
+            "variant."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-target-family",
+        action="append",
+        choices=REFRESH_TARGET_FAMILIES,
+        default=None,
+        help=(
+            "With --extend-feature-run-id, rebuild copied label tensors from current sidecar target artifacts "
+            "without rebuilding graph tensors. Repeat to record multiple refreshed target families."
         ),
     )
     parser.add_argument(
@@ -98,6 +113,9 @@ def parse_args() -> argparse.Namespace:
     args.requested_return_types = resolve_requested_return_types(args.return_type) if args.return_type else []
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
+    args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
+    if args.refresh_target_families and not args.extend_feature_run_id:
+        parser.error("--refresh-target-family requires --extend-feature-run-id.")
     return args
 
 
@@ -227,6 +245,33 @@ def metadata_intended_receiver_modes(metadata: dict[str, Any]) -> list[str]:
     return modes
 
 
+def normalize_refresh_target_families(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+
+    families: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        family = str(value)
+        if family not in REFRESH_TARGET_FAMILIES:
+            raise ValueError(
+                f"Unsupported refresh target family {family!r}. Expected one of: "
+                f"{', '.join(REFRESH_TARGET_FAMILIES)}."
+            )
+        if family in seen:
+            continue
+        seen.add(family)
+        families.append(family)
+    return families
+
+
+def args_refresh_target_families(args: argparse.Namespace) -> list[str]:
+    values = getattr(args, "refresh_target_families", None)
+    if values is None:
+        values = getattr(args, "refresh_target_family", None)
+    return normalize_refresh_target_families(values)
+
+
 def union_preserving_order(base_values: list[str], requested_values: list[str]) -> tuple[list[str], list[str]]:
     final_values = list(base_values)
     seen = set(final_values)
@@ -252,6 +297,7 @@ def extension_graph_feature_command(
     intent_train_label_source_mode: str | None = None,
     intent_train_label_source_return_type: str | None = None,
     augment_blocks_from_existing_graphs: bool = False,
+    overwrite_labels: bool = False,
 ) -> list[str]:
     command = [
         python,
@@ -278,6 +324,8 @@ def extension_graph_feature_command(
         command.extend(["--intent-train-label-source-return-type", intent_train_label_source_return_type])
     if augment_blocks_from_existing_graphs:
         command.append("--augment-blocks-from-existing-graphs")
+    if overwrite_labels:
+        command.append("--overwrite-labels")
     return command
 
 
@@ -292,14 +340,92 @@ def extension_commands_for_plan(
     added_modes: list[str],
     intended_receiver_model_id: str | None,
     regenerate_model_mode: bool = False,
+    refresh_existing_labels: bool = False,
+    final_modes: list[str] | None = None,
 ) -> list[FeatureGenerationStep]:
     steps: list[FeatureGenerationStep] = []
+    final_modes = final_modes if final_modes is not None else [*base_modes, *added_modes]
     non_model_base_modes = [mode for mode in base_modes if mode != INTENDED_RECEIVER_MODE_MODEL]
-    if regenerate_model_mode and not non_model_base_modes:
+    refreshes_model_mode = refresh_existing_labels and INTENDED_RECEIVER_MODE_MODEL in final_modes
+    if (regenerate_model_mode or refreshes_model_mode) and not non_model_base_modes:
         raise ValueError("Regenerating model-mode artifacts requires at least one non-model base mode.")
 
     source_mode = non_model_base_modes[0] if non_model_base_modes else base_modes[0]
     source_return_type = base_return_types[0]
+
+    if refresh_existing_labels:
+        non_model_final_modes = [mode for mode in final_modes if mode != INTENDED_RECEIVER_MODE_MODEL]
+        if non_model_final_modes:
+            for split in ["train", "test"]:
+                steps.append(
+                    FeatureGenerationStep(
+                        f"{split} split target-label refresh (labels-only)",
+                        extension_graph_feature_command(
+                            python,
+                            output_run_id,
+                            split=split,
+                            return_types=final_return_types,
+                            intended_receiver_modes=non_model_final_modes,
+                            intended_receiver_model_id=intended_receiver_model_id,
+                            overwrite_labels=True,
+                        ),
+                    )
+                )
+            steps.append(
+                FeatureGenerationStep(
+                    "train split target-label refresh with intent_train_augmented (labels-only)",
+                    extension_graph_feature_command(
+                        python,
+                        output_run_id,
+                        split="train",
+                        return_types=final_return_types,
+                        intended_receiver_modes=non_model_final_modes,
+                        intended_receiver_model_id=intended_receiver_model_id,
+                        feature_variant="intent_train_augmented",
+                        intent_train_label_source_mode=source_mode,
+                        intent_train_label_source_return_type=source_return_type,
+                        overwrite_labels=True,
+                    ),
+                )
+            )
+
+        if INTENDED_RECEIVER_MODE_MODEL in final_modes:
+            validation_modes = [source_mode, INTENDED_RECEIVER_MODE_MODEL]
+            should_generate_model_augmented = INTENDED_RECEIVER_MODE_MODEL in added_modes or regenerate_model_mode
+            for split in ["train", "test"]:
+                steps.append(
+                    FeatureGenerationStep(
+                        f"{split} split target-label refresh with model mode (labels-only)",
+                        extension_graph_feature_command(
+                            python,
+                            output_run_id,
+                            split=split,
+                            return_types=final_return_types,
+                            intended_receiver_modes=validation_modes,
+                            intended_receiver_model_id=intended_receiver_model_id,
+                            augment_blocks_from_existing_graphs=should_generate_model_augmented and split == "train",
+                            overwrite_labels=True,
+                        ),
+                    )
+                )
+            steps.append(
+                FeatureGenerationStep(
+                    "train split target-label refresh with model mode intent_train_augmented (labels-only)",
+                    extension_graph_feature_command(
+                        python,
+                        output_run_id,
+                        split="train",
+                        return_types=final_return_types,
+                        intended_receiver_modes=[INTENDED_RECEIVER_MODE_MODEL],
+                        intended_receiver_model_id=intended_receiver_model_id,
+                        feature_variant="intent_train_augmented",
+                        intent_train_label_source_mode=source_mode,
+                        intent_train_label_source_return_type=source_return_type,
+                        overwrite_labels=True,
+                    ),
+                )
+            )
+        return steps
 
     if added_return_types:
         added_return_modes = non_model_base_modes if regenerate_model_mode else base_modes
@@ -391,6 +517,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     base_return_types = metadata_return_types(base_metadata)
     base_modes = metadata_intended_receiver_modes(base_metadata)
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
+    refresh_target_families = args_refresh_target_families(args)
 
     base_model_id = base_metadata.get("intended_receiver_model_id")
     if base_model_id is not None:
@@ -434,10 +561,11 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     else:
         final_model_id = base_model_id
 
-    if not added_return_types and not added_modes and not regenerate_model_mode:
+    if not added_return_types and not added_modes and not regenerate_model_mode and not refresh_target_families:
         raise ValueError(
-            "Extension would not add any return types or intended-receiver modes. "
-            "Use a fresh full run or request a new --return_type / --intended-receiver-model-id."
+            "Extension would not add any return types, intended-receiver modes, or target-label refreshes. "
+            "Use a fresh full run or request a new --return_type / --intended-receiver-model-id / "
+            "--refresh-target-family."
         )
 
     output_run_id = str(args.run_id) if args.run_id else generate_run_id("feature")
@@ -454,9 +582,11 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         final_return_types=final_return_types,
         added_return_types=added_return_types,
         base_modes=base_modes,
+        final_modes=final_modes,
         added_modes=added_modes,
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
+        refresh_existing_labels=bool(refresh_target_families),
     )
     commands = [step.command for step in command_steps]
     return FeatureExtensionPlan(
@@ -469,6 +599,9 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         base_intended_receiver_modes=base_modes,
         final_intended_receiver_modes=final_modes,
         added_intended_receiver_modes=added_modes,
+        refresh_target_families=refresh_target_families,
+        refreshed_return_types=final_return_types if refresh_target_families else [],
+        refreshed_intended_receiver_modes=final_modes if refresh_target_families else [],
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
         replaced_intended_receiver_model_id=replaced_model_id,
@@ -487,6 +620,9 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_requested_return_types": args.requested_return_types,
         "extension_added_return_types": plan.added_return_types,
         "extension_added_intended_receiver_modes": plan.added_intended_receiver_modes,
+        "extension_refresh_target_families": plan.refresh_target_families,
+        "extension_refreshed_return_types": plan.refreshed_return_types,
+        "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
         "extension_replaced_intended_receiver_modes": plan.replaced_intended_receiver_modes,
         "extension_commands": plan.commands,

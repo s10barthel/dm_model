@@ -122,6 +122,8 @@ LABEL_COLUMNS = [
     "concedes_xt",
     "scores_goal_distance",
     "concedes_goal_distance",
+    "scores_epv",
+    "concedes_epv",
 ]
 
 LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

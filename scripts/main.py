@@ -11,6 +11,8 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from project_config import (
+    EPV_DIR,
+    EPV_MATCH_DIR,
     EVENT_SYNCED_DIR,
     GOAL_DISTANCE_DIR,
     GOAL_DISTANCE_MATCH_DIR,
@@ -71,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-family",
-        choices=["goal", "xg", "xt", "goal_distance"],
+        choices=["goal", "xg", "xt", "goal_distance", "epv"],
         default=None,
         help="Outcome target family for retained outcome models.",
     )
@@ -80,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Resolved return type to generate and train against: disc_<gamma>, disc_<gamma>_skip1, "
-            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance only)."
+            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance/epv only)."
         ),
     )
     parser.add_argument(
@@ -104,6 +106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
     parser.add_argument("--skip-goal-distance", action="store_true", help="Skip scripts/generate_goal_distance.py.")
+    parser.add_argument("--skip-epv", action="store_true", help="Skip scripts/generate_epv.py.")
     parser.add_argument("--skip-features", action="store_true", help="Skip scripts/generate_relevant_features.py.")
     parser.add_argument("--skip-train", action="store_true", help="Skip scripts/train_relevant_models.py.")
     parser.add_argument("--skip-evaluate", action="store_true", help="Skip scripts/evaluate_relevant_models.py.")
@@ -222,6 +225,9 @@ def parse_args() -> argparse.Namespace:
             args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
         except ValueError as exc:
             parser.error(str(exc))
+
+    if args.target_family == "epv" and not args.skip_epv and not args.bundle_id:
+        parser.error("--bundle-id is required when scripts/main.py generates EPV artifacts.")
 
     if args.skip_features and not args.skip_train and not args.feature_run_id:
         parser.error("--feature-run-id is required when --skip-features is set and training is still enabled.")
@@ -345,6 +351,51 @@ def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
     validate_goal_distance_artifacts(require_match_sidecars=require_match_sidecars)
 
 
+def validate_epv_artifacts(require_match_sidecars: bool) -> None:
+    missing_paths = [path for path in [EPV_DIR / "epv.csv", EPV_DIR / "metadata.json"] if not path.exists()]
+    if missing_paths:
+        missing = ", ".join(str(path.relative_to(ROOT)) for path in missing_paths)
+        raise FileNotFoundError(
+            f"Missing required EPV artifacts: {missing}. Run scripts/generate_epv.py or rerun without --skip-epv."
+        )
+
+    if not require_match_sidecars:
+        return
+
+    synced_match_ids = sorted(path.stem for path in EVENT_SYNCED_DIR.glob("*.csv"))
+    missing_sidecars = [match_id for match_id in synced_match_ids if not (EPV_MATCH_DIR / f"{match_id}.csv").exists()]
+    if missing_sidecars:
+        preview = ", ".join(missing_sidecars[:5])
+        if len(missing_sidecars) > 5:
+            preview += f", ... ({len(missing_sidecars)} total)"
+        raise FileNotFoundError(
+            "Missing per-match EPV sidecars for synced events: "
+            f"{preview}. Run scripts/generate_epv.py or rerun without --skip-epv."
+        )
+
+
+def maybe_validate_epv_skip(args: argparse.Namespace) -> None:
+    if args.target_family != "epv" or not args.skip_epv or args.dry_run:
+        return
+
+    needs_epv_artifacts = any(
+        not skipped
+        for skipped in [
+            args.skip_features,
+            args.skip_train,
+            args.skip_evaluate,
+            args.skip_run_relevant,
+            args.skip_hawkeye,
+            args.skip_skillcorner,
+        ]
+    )
+    if not needs_epv_artifacts:
+        return
+
+    require_match_sidecars = not args.skip_features or not args.skip_run_relevant
+    validate_epv_artifacts(require_match_sidecars=require_match_sidecars)
+
+
 def append_training_target_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
     if args.target_family:
@@ -414,6 +465,11 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         if args.overwrite:
             goal_distance_command.append("--overwrite")
         commands.append(goal_distance_command)
+    if args.target_family == "epv" and not args.skip_epv:
+        epv_command = [python, "scripts/generate_epv.py", "--bundle-id", args.bundle_id]
+        if args.overwrite:
+            epv_command.append("--overwrite")
+        commands.append(epv_command)
 
     if not args.skip_features:
         feature_command = append_return_type_flag(
@@ -515,6 +571,7 @@ def main() -> None:
     args = parse_args()
     maybe_validate_xt_skip(args)
     maybe_validate_goal_distance_skip(args)
+    maybe_validate_epv_skip(args)
     commands = build_commands(args)
 
     if not commands:

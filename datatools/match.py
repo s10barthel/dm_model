@@ -13,6 +13,7 @@ import torch
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.epv import merge_epv_annotations
 from datatools.goal_distance import merge_goal_distance_annotations
 from datatools.xt import merge_xt_annotations
 from datatools.viz_snapshot import SnapshotVisualizer
@@ -48,6 +49,7 @@ class Match(ABC):
         self.events = utils.sanitize_expected_goal(self.events)
         self.events = merge_xt_annotations(self.events, self.match_id)
         self.events = merge_goal_distance_annotations(self.events, self.match_id)
+        self.events = merge_epv_annotations(self.events, self.match_id)
 
         self.action_type = action_type
         self.fps = fps
@@ -496,6 +498,12 @@ class Match(ABC):
                 eligible_types=tuple(config.XT_ACTION_TYPES),
                 skip_first=skip_first,
             )
+            self.events = utils.label_epv_returns(
+                self.events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
         elif return_kind == "in":
             lookahead_len = int(return_value)
             self.events = utils.label_returns(self.events, lookahead_len)
@@ -505,6 +513,11 @@ class Match(ABC):
                 eligible_types=tuple(config.XT_ACTION_TYPES),
             )
             self.events = utils.label_goal_distance_in_state_returns(
+                self.events,
+                action_offset=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            self.events = utils.label_epv_in_state_returns(
                 self.events,
                 action_offset=lookahead_len,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
@@ -525,6 +538,12 @@ class Match(ABC):
                 eligible_types=tuple(config.XT_ACTION_TYPES),
                 skip_first=skip_first,
             )
+            self.events = utils.label_discounted_epv_returns(
+                self.events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
 
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
@@ -538,6 +557,8 @@ class Match(ABC):
         self.actions["concedes_goal_distance"] = self.events.loc[self.actions.index, "concedes_goal_distance"]
         self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
         self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
+        self.actions["scores_epv"] = self.events.loc[self.actions.index, "scores_epv"]
+        self.actions["concedes_epv"] = self.events.loc[self.actions.index, "concedes_epv"]
 
         labels_list = []
 
@@ -657,6 +678,8 @@ class Match(ABC):
                     self.actions.at[i, "concedes_xt"],
                     self.actions.at[i, "scores_goal_distance"],
                     self.actions.at[i, "concedes_goal_distance"],
+                    self.actions.at[i, "scores_epv"],
+                    self.actions.at[i, "concedes_epv"],
                 ]
             )
 

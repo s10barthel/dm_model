@@ -246,7 +246,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--target-family",
-        choices=["goal", "xg", "xt", "goal_distance"],
+        choices=["goal", "xg", "xt", "goal_distance", "epv"],
         default=None,
         help="Outcome target family for the retained outcome models.",
     )
@@ -255,7 +255,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Resolved outcome return type to use for label generation: disc_<gamma>, disc_<gamma>_skip1, "
-            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance only)."
+            "next_<N>, next_<N>_skip1, or in_<N> (xt/goal_distance/epv only)."
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
@@ -581,6 +581,8 @@ def outcome_command(
     ]
     if target_family == "goal_distance":
         command.append("--use_goal_distance")
+    elif target_family == "epv":
+        command.append("--use_epv")
     elif target_family == "xt":
         command.append("--use_xt")
     elif target_family == "xg":

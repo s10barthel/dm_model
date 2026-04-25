@@ -93,8 +93,9 @@ parser.add_argument(
     "--use_goal_distance",
     action="store_true",
     default=False,
-    help="use goal-distance labels instead of xG, xT, or actual goal labels",
+    help="use goal-distance labels instead of xG, xT, EPV, or actual goal labels",
 )
+parser.add_argument("--use_epv", action="store_true", default=False, help="use EPV labels instead of xG, xT, goal-distance, or actual goal labels")
 parser.add_argument(
     "--return_type",
     type=str,
@@ -102,7 +103,7 @@ parser.add_argument(
     default=None,
     help=(
         "way of defining return: disc_<gamma>, disc_<gamma>_skip1, next_<N>, next_<N>_skip1, "
-        "or in_<N> (xt/goal_distance only)"
+        "or in_<N> (xt/goal_distance/epv only)"
     ),
 )
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
@@ -212,6 +213,7 @@ if __name__ == "__main__":
         bool(args.use_xg),
         bool(args.use_xt),
         bool(args.use_goal_distance),
+        bool(args.use_epv),
     )
     args.return_type = resolve_effective_return_type(args.target_family, args.return_type)
 

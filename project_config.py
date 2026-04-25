@@ -33,6 +33,8 @@ XT_DIR = DATA_ROOT / "xT"
 XT_MATCH_DIR = XT_DIR / "matches"
 GOAL_DISTANCE_DIR = DATA_ROOT / "goal_distance"
 GOAL_DISTANCE_MATCH_DIR = GOAL_DISTANCE_DIR / "matches"
+EPV_DIR = DATA_ROOT / "epv"
+EPV_MATCH_DIR = EPV_DIR / "matches"
 SAVED_DIR = PROJECT_ROOT / "saved"
 MODEL_BUNDLES_DIR = SAVED_DIR / "bundles"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
@@ -143,6 +145,8 @@ def ensure_project_dirs() -> None:
         XT_MATCH_DIR,
         GOAL_DISTANCE_DIR,
         GOAL_DISTANCE_MATCH_DIR,
+        EPV_DIR,
+        EPV_MATCH_DIR,
         COMPONENT_DIR,
         COMPONENT_RUNS_DIR,
         HAWKEYE_COMPONENT_RUNS_DIR,
@@ -452,10 +456,13 @@ def infer_target_family(
     use_xg: bool = False,
     use_xt: bool = False,
     use_goal_distance: bool = False,
+    use_epv: bool = False,
 ) -> str:
-    enabled_flags = int(bool(use_xg)) + int(bool(use_xt)) + int(bool(use_goal_distance))
+    enabled_flags = int(bool(use_xg)) + int(bool(use_xt)) + int(bool(use_goal_distance)) + int(bool(use_epv))
     if enabled_flags > 1:
-        raise ValueError("use_xg, use_xt, and use_goal_distance are mutually exclusive.")
+        raise ValueError("use_xg, use_xt, use_goal_distance, and use_epv are mutually exclusive.")
+    if use_epv:
+        return "epv"
     if use_goal_distance:
         return "goal_distance"
     if use_xt:
@@ -470,6 +477,7 @@ RETURN_TYPE_DEFAULTS = {
     "xg": "disc_0.9",
     "xt": "next_5",
     "goal_distance": "next_5",
+    "epv": "next_5",
 }
 
 
@@ -529,9 +537,9 @@ def validate_return_type_for_target_family(
         raise ValueError(f"Unsupported target family for return_type validation: {family!r}.")
 
     kind, _, _ = parse_return_type(normalized)
-    if kind == "in" and family not in {"xt", "goal_distance"}:
+    if kind == "in" and family not in {"xt", "goal_distance", "epv"}:
         raise ValueError(
-            f"return_type={normalized!r} is only supported for target_family='xt' or 'goal_distance', got {family!r}."
+            f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
         )
     return normalized
 

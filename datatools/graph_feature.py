@@ -868,6 +868,7 @@ def save_labels_only_artifacts(
     intent_train_label_source_mode: str | None = None,
     intent_train_label_source_return_type: str | None = None,
     augment_blocks_from_existing_graphs: bool = False,
+    overwrite_labels: bool = False,
 ) -> None:
     _validate_labels_only_base_artifacts(
         match_id,
@@ -893,10 +894,11 @@ def save_labels_only_artifacts(
             feature_root,
             intent_train_label_source_mode,
             intent_train_label_source_return_type,
+            overwrite=overwrite_labels,
         )
         print("Successfully saved labels-only intent-training labels.")
     else:
-        save_action_labels_if_missing(labels_by_key, match_id, feature_root)
+        save_action_labels_if_missing(labels_by_key, match_id, feature_root, overwrite=overwrite_labels)
         if augment_blocks_from_existing_graphs:
             save_augmented_blocks_from_existing_graphs(
                 match,
@@ -1083,7 +1085,7 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Way of defining future returns. Repeat the flag to generate multiple return types in one run, "
-            "including disc_<gamma>_skip1, next_<N>_skip1, and in_<N> for xt/goal_distance training."
+            "including disc_<gamma>_skip1, next_<N>_skip1, and in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
@@ -1128,6 +1130,12 @@ if __name__ == "__main__":
         default=False,
         help="Build augmented blocked-action artifacts from copied base action graphs in --labels-only mode.",
     )
+    parser.add_argument(
+        "--overwrite-labels",
+        action="store_true",
+        default=False,
+        help="Overwrite existing label tensors in --labels-only mode.",
+    )
     args, _ = parser.parse_known_args()
     args.return_types = resolve_requested_return_types(args.return_type)
     if args.only_intended_receiver_mode:
@@ -1148,6 +1156,8 @@ if __name__ == "__main__":
         raise ValueError("--labels-only is not supported for feature_variant='success_intent'.")
     if args.augment_blocks_from_existing_graphs and not args.labels_only:
         raise ValueError("--augment-blocks-from-existing-graphs requires --labels-only.")
+    if args.overwrite_labels and not args.labels_only:
+        raise ValueError("--overwrite-labels requires --labels-only.")
     if args.augment_blocks_from_existing_graphs and args.feature_variant != "base":
         raise ValueError("--augment-blocks-from-existing-graphs is only supported for base labels.")
     if args.labels_only and args.feature_variant == "intent_train_augmented":
@@ -1312,6 +1322,7 @@ if __name__ == "__main__":
                             intent_train_label_source_mode=args.intent_train_label_source_mode,
                             intent_train_label_source_return_type=args.intent_train_label_source_return_type,
                             augment_blocks_from_existing_graphs=args.augment_blocks_from_existing_graphs,
+                            overwrite_labels=args.overwrite_labels,
                         )
                     else:
                         for mode, resolved_actions in resolved_actions_by_mode.items():

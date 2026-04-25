@@ -17,7 +17,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Main Pipeline Runner](#main-pipeline-runner)
 - [End-to-End Workflow](#end-to-end-workflow)
   - [1. Preprocess Sportec data](#1-preprocess-sportec-data)
-  - [2. Generate soft-target artifacts when xT or goal_distance targets are needed](#2-generate-soft-target-artifacts-when-xt-or-goal_distance-targets-are-needed)
+  - [2. Generate soft-target artifacts when xT, goal_distance, or EPV targets are needed](#2-generate-soft-target-artifacts-when-xt-goal_distance-or-epv-targets-are-needed)
   - [3. Generate graph features and labels](#3-generate-graph-features-and-labels)
   - [4. Train the retained models](#4-train-the-retained-models)
   - [5. Evaluate the retained models on the test set](#5-evaluate-the-retained-models-on-the-test-set)
@@ -30,6 +30,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
   - [`--return_type` Applies To All Outcome Target Families](#return_type-applies-to-all-outcome-target-families)
   - [Where to switch targets](#where-to-switch-targets)
 - [Intended-Receiver Workflow](#intended-receiver-workflow)
+- [EPV Workflow](#epv-workflow)
 - [Notes](#notes)
 - [CLI Reference](#cli-reference)
 - [Script I/O Reference](#script-io-reference)
@@ -39,7 +40,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 The main adaptations in this repository are:
 
 - Sportec-specific preprocessing and synchronization to turn Sportec XML tracking/event data into DEFCON-compatible inputs
-- xT as an alternative soft target variable for `outcome_scoring` and `outcome_conceding`
+- xT, goal-distance, and EPV as alternative soft target variables for `outcome_scoring` and `outcome_conceding`
 - temporal `t0 / t-12 / t-25` augmentation for `action_intent` and `pass_intent` training data
 - narrowed modeled pass family: only `pass` and `cross` are treated as pass-like actions, so set pieces are excluded from the modeled pass category
 - a HawkEye inference/visualization pipeline for frame-level external data
@@ -94,9 +95,13 @@ After preprocessing, the project writes DEFCON-style files under `data`:
 - `event_synced/*.csv`
 - `xT/xT.csv`
 - `goal_distance/goal_distance.csv`
+- `epv/epv.csv`
 - `xT/xT_grid.csv`
 - `xT/fit_metadata.json`
 - `xT/matches/*.csv`
+- `goal_distance/matches/*.csv`
+- `epv/metadata.json`
+- `epv/matches/*.csv`
 - `lineup/line_up.parquet`
 - `features/runs/<feature_run_id>/...`
 - `features/runs/latest.json`
@@ -113,6 +118,8 @@ The main output directories are:
 
 - `data/event_synced` for canonical synced event tables used by the DEFCON-style pipeline
 - `data/xT` for xT exports and xT fitting artifacts
+- `data/goal_distance` for goal-distance exports
+- `data/epv` for model-derived EPV exports
 - `data/features/runs/<feature_run_id>` for versioned graph tensors and label tensors used by training/evaluation
 - `data/component_runs/<component_run_id>` for versioned per-match component prediction exports from `scripts/run_relevant_models.py`
 - `data/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
@@ -236,12 +243,13 @@ Use `scripts/main.py` when you want the scoped end-to-end runner without any vis
 python scripts/main.py --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
 python scripts/main.py --target-family xt --return_type next_5 --intended-receiver-mode angle_only
 python scripts/main.py --target-family goal_distance --return_type next_3 --intended-receiver-mode original
+python scripts/main.py --target-family epv --return_type next_5 --intended-receiver-mode angle_only --bundle-id <source_bundle_id>
 ```
 
 The runner executes these stages in order:
 
 1. `scripts/preprocess_sportec.py`
-2. `scripts/generate_xt.py` only when `--target-family xt` is selected, or `scripts/generate_goal_distance.py` only when `--target-family goal_distance` is selected
+2. `scripts/generate_xt.py` only when `--target-family xt` is selected, `scripts/generate_goal_distance.py` only when `--target-family goal_distance` is selected, or `scripts/generate_epv.py` only when `--target-family epv` is selected
 3. `scripts/generate_relevant_features.py`
 4. `scripts/train_relevant_models.py`
 5. `scripts/evaluate_relevant_models.py`
@@ -252,9 +260,9 @@ The runner executes these stages in order:
 
 Useful options:
 
-- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`
+- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`
 - `--feature-run-id <feature_run_id>` to pin or reuse a feature run id
-- `--bundle-id <bundle_id>` to pin or reuse a model bundle id
+- `--bundle-id <bundle_id>` to pin or reuse a model bundle id; required when `scripts/main.py` generates EPV artifacts
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
 - `--v-edge-features` / `--no-v-edge-features` to control whether training uses the stored velocity-angle edge features; default: on
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
@@ -314,17 +322,19 @@ This step does the Sportec-specific work that DEFCON does not provide:
 - ELASTIC synchronization
 - split-manifest creation
 
-### 2. Generate soft-target artifacts when xT or goal_distance targets are needed
+### 2. Generate soft-target artifacts when xT, goal_distance, or EPV targets are needed
 
 ```powershell
 python scripts/generate_xt.py
 python scripts/generate_goal_distance.py
+python scripts/generate_epv.py --bundle-id <source_bundle_id>
 ```
 
 Inputs:
 
 - `data/event_synced/*.csv`
 - `data/splits/match_splits.json`
+- for EPV, a model bundle or explicit source model ids for `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`
 
 Outputs:
 
@@ -337,6 +347,10 @@ Outputs:
   - `data/goal_distance/goal_distance.csv`
   - `data/goal_distance/metadata.json`
   - `data/goal_distance/matches/*.csv`
+- for EPV:
+  - `data/epv/epv.csv`
+  - `data/epv/metadata.json`
+  - `data/epv/matches/*.csv`
 
 Useful options:
 
@@ -345,6 +359,8 @@ Useful options:
 - `--overwrite` to rebuild existing outputs
 
 This is a separate post-preprocessing step. It reads canonical synced event CSVs, fits or exports the sidecar targets, and writes per-match artifacts used later during feature generation.
+
+EPV computes `sum(pass_intent * pass_score)` across players, where `pass_score` combines pass success with the scoring and conceding outcome models. Shot actions use `max(epv, xG)`, matching the xT shot-value convention.
 
 ### 3. Generate graph features and labels
 
@@ -355,6 +371,7 @@ python scripts/generate_relevant_features.py --return_type next_5 --return_type 
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
 ```
 
 Inputs:
@@ -363,10 +380,10 @@ Inputs:
 - `data/event_synced/*.csv`
 - `data/lineup/line_up.parquet`
 - `data/splits/match_splits.json`
-- optional sidecars from `data/xT/matches/*.csv` and `data/goal_distance/matches/*.csv`
+- optional sidecars from `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts.
+Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types, refreshed target labels, and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts.
 
 Behavior:
 
@@ -379,6 +396,7 @@ Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
 - `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
+- `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--replace-intended-receiver-model` with `--extend-feature-run-id` and `--intended-receiver-model-id` to regenerate copied model-mode artifacts with a different `success_intent` checkpoint in the derived run
@@ -408,6 +426,8 @@ An `--extend-feature-run-id` run with both new `--return_type` values and `--int
 5. **test split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
 6. **train split with model mode intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
 
+An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars.
+
 This writes, inside the run root:
 
 - `action_graphs/*.pt`
@@ -427,6 +447,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --success-intent-only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode original --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver --bundle-id model_bundle_20260414T123456_abcdef12
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --no-v-edge-features
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only
 ```
 
 Inputs:
@@ -650,8 +671,8 @@ python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_po
 
 Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 
-- In the low-level `train.py`, select the outcome family with `--use_xg`, `--use_xt`, or `--use_goal_distance`, or omit all three for binary goals.
-- In `scripts/train_relevant_models.py` and `scripts/main.py`, select the outcome family with `--target-family {goal,xg,xt,goal_distance}`.
+- In the low-level `train.py`, select the outcome family with `--use_xg`, `--use_xt`, `--use_goal_distance`, or `--use_epv`, or omit all four for binary goals.
+- In `scripts/train_relevant_models.py` and `scripts/main.py`, select the outcome family with `--target-family {goal,xg,xt,goal_distance,epv}`.
 - `--return_type` controls the return semantics for all outcome families and for the shared action-label directories in the selected feature run.
 
 ### `--return_type` Applies To All Outcome Target Families
@@ -662,7 +683,7 @@ Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 - `disc_<gamma>_skip1` uses discounted returns but skips the first rated future non-shot action
 - `next_<N>` uses non-discounted lookahead returns
 - `next_<N>_skip1` uses non-discounted lookahead returns but skips the first rated future non-shot action
-- `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt` and `goal_distance`
+- `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt`, `goal_distance`, and `epv`
 
 Example:
 
@@ -671,6 +692,7 @@ python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123450_
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123456_abcdef12 --model gat --use_xg --return_type disc_0.9 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123510_cdef1234 --model gat --use_xt --return_type disc_0.9 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123520_def12345 --model gat --use_goal_distance --return_type next_7 ...
+python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123530_ef123456 --model gat --use_epv --return_type next_5 ...
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
 ```
 
@@ -696,6 +718,12 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
   - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
   - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
+- EPV:
+  - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
+  - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
+  - `in_<N>` uses the EPV value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_epv` / `concedes_epv` is non-zero
+  - `disc_<gamma>` uses `max(gamma^k * epv)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
 
 ### Where to switch targets
 
@@ -706,6 +734,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode original
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode angle_only --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver
 ```
 
@@ -722,6 +751,7 @@ python train.py --task outcome_scoring --model gat ...
 python train.py --task outcome_scoring --model gat --use_xg --return_type disc_0.9 ...
 python train.py --task outcome_scoring --model gat --use_xt --return_type next_5 ...
 python train.py --task outcome_scoring --model gat --use_goal_distance --return_type disc_0.9 ...
+python train.py --task outcome_scoring --model gat --use_epv --return_type next_5 ...
 python train.py --task outcome_scoring --model gat --feature_run_id <feature_run_id> ...
 ```
 
@@ -744,7 +774,7 @@ Note: the low-level entrypoints do not use the same spelling here:
 - `test.py` uses `--feature-run-id`
 - the wrapper scripts use `--feature-run-id`
 
-If you generate or rebuild xT or goal-distance artifacts, rerun `scripts/generate_relevant_features.py` before any xT or goal-distance training run so the feature label tensors are refreshed.
+If you generate or rebuild xT, goal-distance, or EPV artifacts after a feature run already exists, create a derived labels-only feature run before any matching target-family training run, for example `scripts/generate_relevant_features.py --extend-feature-run-id <feature_run_id> --refresh-target-family epv`. A full feature rebuild also works, but is no longer required just to refresh target labels.
 
 ## Intended-Receiver Workflow
 
@@ -767,6 +797,20 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 
 `success_intent` is the teammate-selection intended-receiver model. It is trained from observed successful-pass receivers (`receiver_id`) and does not belong to any intended-receiver mode. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
 
+## EPV Workflow
+
+EPV is a bootstrapped target family: first train the source component models on an existing feature run, then use those checkpoints to generate EPV sidecars, refresh labels in a derived feature run, and finally train the outcome models on `--target-family epv`.
+
+The workflow is explicit:
+
+1. generate a feature run with the return semantics you want available later, for example `scripts/generate_relevant_features.py --return_type next_5`
+2. train the source component models with a non-EPV target family, for example `scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type next_5 --intended-receiver-mode angle_only`
+3. generate EPV sidecars with `scripts/generate_epv.py --bundle-id <source_bundle_id>`
+4. generate a derived labels-only feature run with `scripts/generate_relevant_features.py --extend-feature-run-id <feature_run_id> --refresh-target-family epv`
+5. train the retained models on the derived feature run with `scripts/train_relevant_models.py --feature-run-id <epv_feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only`
+
+If the source bundle is incomplete, pass explicit overrides to `scripts/generate_epv.py` with `--pass-intent-model-id`, `--pass-success-model-id`, `--outcome-scoring-model-id`, and `--outcome-conceding-model-id`.
+
 ## Notes
 
 - `scripts/main.py` is the scoped pipeline runner for this repository.
@@ -781,14 +825,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/main.py`
 
-- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
+- `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required unless `--skip-train` is set.
+- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
 - `--bundle-id <bundle_id>`: explicit model bundle id to reuse or assign.
 - `--success-intent-model-id <model_id>`: optional `success_intent` checkpoint forwarded to evaluation.
-- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
+- `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
 - `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the training feature profile.
@@ -817,18 +861,28 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
 - `--overwrite`: overwrite existing goal-distance outputs. Default: off.
 
+### `scripts/generate_epv.py`
+
+- `--bundle-id <bundle_id>`: source model bundle containing `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`.
+- `--pass-intent-model-id`, `--pass-success-model-id`, `--outcome-scoring-model-id`, `--outcome-conceding-model-id`: explicit source checkpoint overrides.
+- `--match-id <id>`: export EPV sidecars only for one or more specific match ids. Default: all available synced matches.
+- `--limit <N>`: process only the first `N` available matches. Default: no limit.
+- `--device <device>`: inference device. Default: `cuda:0`.
+- `--overwrite`: overwrite existing EPV outputs. Default: off.
+
 ### `scripts/generate_relevant_features.py`
 
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt` and `goal_distance`.
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt`, `goal_distance`, and `epv`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
-- `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types or the model intended-receiver variant.
+- `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
+- `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.
 - `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
 
 ### `scripts/train_relevant_models.py`
 
-- `--target-family {goal,xg,xt,goal_distance}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
-- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
+- `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
+- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
@@ -1027,6 +1081,18 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/goal_distance/metadata.json`
   - `data/goal_distance/matches/*.csv`
 
+### `scripts/generate_epv.py`
+
+- Inputs:
+  - `data/event_synced/*.csv`
+  - `data/tracking_processed/*.parquet`
+  - `data/lineup/line_up.parquet`
+  - source checkpoints from `saved/<task>/<model_run_id>/...`
+- Outputs:
+  - `data/epv/epv.csv`
+  - `data/epv/metadata.json`
+  - `data/epv/matches/*.csv`
+
 ### `scripts/generate_relevant_features.py`
 
 - Inputs:
@@ -1034,7 +1100,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/*.csv`
   - `data/lineup/line_up.parquet`
   - `data/splits/match_splits.json`
-  - optional target sidecars under `data/xT/matches/*.csv` and `data/goal_distance/matches/*.csv`
+  - optional target sidecars under `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
   - optional learned intended-receiver checkpoint `saved/success_intent/<model_run_id>/...`
     That checkpoint also determines the edge schema of the transient failed-pass relabeling graphs used during feature generation.
 - Outputs:
