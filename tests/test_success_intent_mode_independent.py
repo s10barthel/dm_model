@@ -53,10 +53,37 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
         poss_vel_aware=None,
         accel_aware=None,
         extend_features=None,
+        pass_intent_model_id=None,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
     return args
+
+
+def make_pass_intent_record(
+    *,
+    feature_run_id: str = "feature_run",
+    intended_receiver_mode: str = "original",
+    return_type: str = "disc_0.9",
+    target_family: str | None = None,
+    has_weights: bool = True,
+    edge_in_dim: int = 4,
+    add_v_edge_features: bool = True,
+    feature_signature: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "task": "pass_intent",
+        "feature_run_id": feature_run_id,
+        "intended_receiver_mode": intended_receiver_mode,
+        "return_type": return_type,
+        "target_family": target_family,
+        "has_weights": has_weights,
+        "graph_schema": {
+            "edge_in_dim": edge_in_dim,
+            "add_v_edge_features": add_v_edge_features,
+        },
+        "feature_signature": feature_signature or train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+    }
 
 
 class SuccessIntentModeIndependentTests(unittest.TestCase):
@@ -200,7 +227,7 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         self.assertEqual(args.return_type, "next_5")
         self.assertIsNone(args.target_family)
 
-    def test_pass_success_requires_pass_intent(self) -> None:
+    def test_pass_success_requires_pass_intent_or_external_model_id(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
             patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
@@ -218,6 +245,78 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
                         "--intended-receiver-mode",
                         "original",
                         "--no-pass-intent",
+                    ]
+                )
+
+    def test_pass_success_accepts_external_pass_intent_model_id(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(
+                [
+                    "--feature-run-id",
+                    "feature_run",
+                    "--target-family",
+                    "goal",
+                    "--return_type",
+                    "disc_0.9",
+                    "--intended-receiver-mode",
+                    "original",
+                    "--no-pass-intent",
+                    "--pass-intent-model-id",
+                    "pass_intent/old",
+                ]
+            )
+
+        self.assertEqual(args.pass_intent_model_id, "pass_intent/old")
+        self.assertFalse(args.enabled_tasks["pass_intent"])
+        self.assertTrue(args.enabled_tasks["pass_success"])
+
+    def test_pass_intent_model_id_rejects_same_run_pass_intent_training(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "goal",
+                        "--return_type",
+                        "disc_0.9",
+                        "--intended-receiver-mode",
+                        "original",
+                        "--pass-intent-model-id",
+                        "pass_intent/old",
+                    ]
+                )
+
+    def test_pass_intent_model_id_rejects_disabled_pass_success(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "goal",
+                        "--return_type",
+                        "disc_0.9",
+                        "--intended-receiver-mode",
+                        "original",
+                        "--no-pass-intent",
+                        "--no-pass-success",
+                        "--pass-intent-model-id",
+                        "pass_intent/old",
                     ]
                 )
 
@@ -362,6 +461,109 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         success_intent_args = next(command for command in commands if command[1] == "success_intent")
         self.assertIn("--label-source", success_intent_args)
         self.assertIn("--training-filter", success_intent_args)
+
+    def test_pass_success_uses_external_pass_intent_model_id_for_ipw(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "get_model_record",
+                    return_value=make_pass_intent_record(return_type="next_5", target_family="xt"),
+                ),
+            ):
+                commands, model_ids, _, _, _ = train_wrapper.build_training_commands(args)
+
+        task_names = [command[1] for command in commands]
+        self.assertEqual(task_names, ["pass_success"])
+        self.assertEqual(set(model_ids.keys()), {"pass_success"})
+        pass_success_args = commands[0]
+        self.assertEqual(pass_success_args[pass_success_args.index("--ipw_model_id") + 1], "pass_intent/old")
+
+    def test_external_pass_intent_rejects_incompatible_graph_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "get_model_record",
+                    return_value=make_pass_intent_record(edge_in_dim=2, add_v_edge_features=False),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    train_wrapper.build_training_commands(args)
+
+    def test_external_pass_intent_rejects_incompatible_feature_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            source_signature = train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy()
+            source_signature["poss_vel_aware"] = False
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "get_model_record",
+                    return_value=make_pass_intent_record(feature_signature=source_signature),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    train_wrapper.build_training_commands(args)
 
     def test_failure_receiver_can_be_disabled_independently(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

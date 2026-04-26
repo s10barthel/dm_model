@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from models.utils import get_model_records, validate_model_record_consistency
+from models.utils import get_model_record, get_model_records, parse_model_id, validate_model_record_consistency
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
     generate_model_run_id,
@@ -236,6 +236,8 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
         if getattr(args, task) is not None
     ]
     if args.success_intent_only:
+        if args.pass_intent_model_id:
+            raise ValueError("--pass-intent-model-id requires --pass-success and cannot be combined with --success-intent-only.")
         if explicit_toggles:
             toggles = ", ".join(flag for _, flag in explicit_toggles)
             raise ValueError(f"--success-intent-only cannot be combined with explicit per-model toggles: {toggles}.")
@@ -247,13 +249,75 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
     )
     if not any(enabled_tasks.values()):
         raise ValueError("At least one model must be enabled.")
-    if enabled_tasks["pass_success"] and not enabled_tasks["pass_intent"]:
-        raise ValueError("--pass-success requires --pass-intent in the same wrapper run.")
+    if args.pass_intent_model_id and not enabled_tasks["pass_success"]:
+        raise ValueError("--pass-intent-model-id requires --pass-success.")
+    if args.pass_intent_model_id and enabled_tasks["pass_intent"]:
+        raise ValueError("--pass-intent-model-id requires --no-pass-intent.")
+    if enabled_tasks["pass_success"] and not enabled_tasks["pass_intent"] and not args.pass_intent_model_id:
+        raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
     if args.outcome_scoring_trial is not None and not enabled_tasks["outcome_scoring"]:
         raise ValueError("--outcome-scoring-trial requires --outcome-scoring.")
     if args.outcome_conceding_trial is not None and not enabled_tasks["outcome_conceding"]:
         raise ValueError("--outcome-conceding-trial requires --outcome-conceding.")
     return enabled_tasks
+
+
+def source_model_ids(args: argparse.Namespace) -> dict[str, str]:
+    pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
+    return {"pass_intent": str(pass_intent_model_id)} if pass_intent_model_id else {}
+
+
+def validate_external_pass_intent_model_id(
+    args: argparse.Namespace,
+    feature_flags: dict[str, bool],
+    resolved_feature_run_id: str,
+) -> str | None:
+    pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
+    if not pass_intent_model_id:
+        return None
+
+    task, _ = parse_model_id(str(pass_intent_model_id))
+    if task != "pass_intent":
+        raise ValueError(f"--pass-intent-model-id must reference a pass_intent checkpoint, got {pass_intent_model_id!r}.")
+
+    record = get_model_record(str(pass_intent_model_id))
+    mismatches: list[str] = []
+    if record.get("task") != "pass_intent":
+        mismatches.append(f"task={record.get('task')!r}")
+    if not record.get("has_weights"):
+        mismatches.append("missing best_weights.pt or best_model.json")
+    if record.get("feature_run_id") != resolved_feature_run_id:
+        mismatches.append(f"feature_run_id={record.get('feature_run_id')!r}, expected {resolved_feature_run_id!r}")
+    if record.get("intended_receiver_mode") != args.intended_receiver_mode:
+        mismatches.append(
+            f"intended_receiver_mode={record.get('intended_receiver_mode')!r}, "
+            f"expected {args.intended_receiver_mode!r}"
+        )
+
+    expected_graph_schema = {
+        "edge_in_dim": 4 if bool(args.use_v_edge_features) else 2,
+        "add_v_edge_features": bool(args.use_v_edge_features),
+    }
+    graph_schema = record.get("graph_schema", {})
+    normalized_graph_schema = {
+        "edge_in_dim": int(graph_schema.get("edge_in_dim", 0)),
+        "add_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
+    }
+    if normalized_graph_schema != expected_graph_schema:
+        mismatches.append(f"graph_schema={normalized_graph_schema!r}, expected {expected_graph_schema!r}")
+
+    feature_signature = record.get("feature_signature", {})
+    for key, expected in feature_flags.items():
+        if key not in feature_signature:
+            mismatches.append(f"feature_signature.{key}=missing, expected {bool(expected)!r}")
+        elif bool(feature_signature[key]) != bool(expected):
+            mismatches.append(f"feature_signature.{key}={bool(feature_signature[key])!r}, expected {bool(expected)!r}")
+
+    if mismatches:
+        details = "; ".join(mismatches)
+        raise ValueError(f"External pass_intent checkpoint {pass_intent_model_id!r} is incompatible: {details}.")
+
+    return str(pass_intent_model_id)
 
 
 def retained_bundle_model_ids(model_ids: dict[str, str]) -> dict[str, str]:
@@ -271,14 +335,14 @@ def derive_bundle_shared_context(
             get_model_records(retained_model_ids),
             require_feature_run_id=True,
             require_intended_receiver_mode=True,
-            require_return_type=True,
+            require_return_type=False,
         )
         graph_schema = dict(shared["graph_schema"])
         return {
             "feature_run_id": shared.get("feature_run_id") or resolved_feature_run_id,
             "intended_receiver_mode": shared.get("intended_receiver_mode"),
-            "return_type": shared.get("return_type") or cli_args.return_type,
-            "target_family": shared.get("target_family"),
+            "return_type": cli_args.return_type,
+            "target_family": cli_args.target_family or shared.get("target_family"),
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
         }
@@ -327,6 +391,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     for task, option_name, enable_help, disable_help in MODEL_TOGGLE_SPECS:
         add_bool_override(parser, option_name, task, enable_help, disable_help)
+    parser.add_argument(
+        "--pass-intent-model-id",
+        default=None,
+        help="Existing pass_intent checkpoint to use as the pass_success IPW model when --no-pass-intent is set.",
+    )
     parser.add_argument(
         "--outcome-scoring-trial",
         type=int,
@@ -744,6 +813,11 @@ def build_training_commands(
     success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
     commands = []
     trained_model_ids: dict[str, str] = {}
+    external_pass_intent_model_id = validate_external_pass_intent_model_id(
+        args,
+        feature_flags,
+        resolved_feature_run_id,
+    )
 
     if args.enabled_tasks["success_intent"]:
         commands.append(
@@ -810,13 +884,16 @@ def build_training_commands(
             trained_model_ids["action_intent"] = model_ids["action_intent"]
 
         if args.enabled_tasks["pass_success"]:
+            ipw_model_id = model_ids["pass_intent"] if args.enabled_tasks["pass_intent"] else external_pass_intent_model_id
+            if ipw_model_id is None:
+                raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
             commands.append(
                 pass_success_command(
                     "pass_success",
                     model_ids["pass_success"],
                     base_feature_dir,
                     base_label_dir,
-                    model_ids["pass_intent"],
+                    ipw_model_id,
                     mode,
                     effective_return_type,
                     bool(args.use_v_edge_features),
@@ -893,6 +970,7 @@ def main() -> None:
     completed_model_ids: dict[str, str] = {}
     existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
     training_control_settings = get_training_control_settings(cli_args)
+    explicit_source_model_ids = source_model_ids(cli_args)
 
     total_commands = len(commands)
     for index, args in enumerate(commands, start=1):
@@ -938,6 +1016,7 @@ def main() -> None:
                 "completed_model_ids": completed_model_ids,
                 "model_ids": {
                     **dict(existing_bundle.get("model_ids", {})),
+                    **explicit_source_model_ids,
                     **completed_model_ids,
                 },
                 "commands": executed_commands,
@@ -951,6 +1030,8 @@ def main() -> None:
                 "error": str(exc),
                 "status": "failed",
             }
+            if explicit_source_model_ids:
+                failure_metadata["source_model_ids"] = explicit_source_model_ids
             write_run_metadata(bundle_root, failure_metadata)
             print(f"Training failed for {failure_metadata['failed_model_id'] or failed_task or 'unknown task'}.")
             print(f"Return code: {failure_metadata['returncode_description']}")
@@ -966,6 +1047,7 @@ def main() -> None:
             completed_model_ids[task] = trained_model_ids[task]
 
     final_model_ids = dict(existing_bundle.get("model_ids", {}))
+    final_model_ids.update(explicit_source_model_ids)
     final_model_ids.update(trained_model_ids)
 
     bundle_shared = derive_bundle_shared_context(final_model_ids, cli_args, resolved_feature_run_id)
@@ -1009,6 +1091,8 @@ def main() -> None:
         "commands": executed_commands,
         "status": "completed",
     }
+    if explicit_source_model_ids:
+        metadata["source_model_ids"] = explicit_source_model_ids
     write_run_metadata(bundle_root, metadata)
     print(f"Model bundle id: {bundle_id}")
     print(f"Model bundle manifest: {bundle_root / 'metadata.json'}")

@@ -537,6 +537,124 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(captured_metadata["success_intent_training_filter"], "successful_pass_actions")
         self.assertEqual(len(captured_metadata["commands"]), 2)
 
+    def test_wrapper_main_records_external_pass_intent_source_in_bundle_metadata(self) -> None:
+        captured_metadata: dict[str, object] = {}
+        cli_args = SimpleNamespace(
+            bundle_id="bundle_under_test",
+            available_intended_receiver_modes=["original", "angle_only"],
+            available_return_types=["disc_0.9"],
+            use_v_edge_features=True,
+            device=None,
+            pin_memory=None,
+            success_intent_only=False,
+            target_family=None,
+            return_type="disc_0.9",
+            pass_intent_model_id="pass_intent/source",
+        )
+
+        def capture_write_run_metadata(_root: Path, payload: dict[str, object]) -> None:
+            captured_metadata.update(payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_root = Path(tmpdir) / "bundle_under_test"
+            with (
+                patch.object(train_wrapper, "parse_args", return_value=cli_args),
+                patch.object(
+                    train_wrapper,
+                    "build_training_commands",
+                    return_value=(
+                        [["--task", "pass_success", "--run-id", "pass_success_new", "--ipw_model_id", "pass_intent/source"]],
+                        {"pass_success": "pass_success/new"},
+                        "angle_only",
+                        "feature_run",
+                        {
+                            "xy_only": False,
+                            "possessor_aware": True,
+                            "keeper_aware": True,
+                            "ball_z_aware": True,
+                            "poss_vel_aware": True,
+                            "accel_aware": True,
+                            "extend_features": False,
+                        },
+                    ),
+                ),
+                patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
+                patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
+                patch.object(
+                    train_wrapper,
+                    "derive_bundle_shared_context",
+                    return_value=make_bundle_shared_context(target_family=None),
+                ),
+                patch.object(train_wrapper, "load_feature_run_metadata", return_value={}),
+                patch.object(train_wrapper, "write_run_metadata", side_effect=capture_write_run_metadata),
+                patch.object(train_wrapper.subprocess, "run"),
+            ):
+                train_wrapper.main()
+
+        self.assertEqual(
+            captured_metadata["model_ids"],
+            {
+                "pass_intent": "pass_intent/source",
+                "pass_success": "pass_success/new",
+            },
+        )
+        self.assertEqual(captured_metadata["trained_tasks"], ["pass_success"])
+        self.assertEqual(captured_metadata["source_model_ids"], {"pass_intent": "pass_intent/source"})
+
+    def test_derive_bundle_shared_context_ignores_pass_intent_target_metadata(self) -> None:
+        cli_args = SimpleNamespace(
+            return_type="disc_0.9",
+            target_family="goal",
+            use_v_edge_features=True,
+        )
+        model_records = {
+            "pass_intent": make_model_record("pass_intent", return_type="next_5", target_family="xt"),
+            "pass_success": make_model_record("pass_success", return_type="disc_0.9", target_family="goal"),
+        }
+
+        with patch.object(train_wrapper, "get_model_records", return_value=model_records):
+            shared = train_wrapper.derive_bundle_shared_context(
+                {
+                    "pass_intent": "pass_intent/source",
+                    "pass_success": "pass_success/new",
+                },
+                cli_args,
+                "feature_run",
+            )
+
+        self.assertEqual(shared["return_type"], "disc_0.9")
+        self.assertEqual(shared["target_family"], "goal")
+        self.assertEqual(shared["feature_run_id"], "feature_run")
+        self.assertEqual(shared["intended_receiver_mode"], "angle_only")
+
+    def test_derive_bundle_shared_context_uses_existing_outcome_target_family_when_cli_omits_it(self) -> None:
+        cli_args = SimpleNamespace(
+            return_type="disc_0.9",
+            target_family=None,
+            use_v_edge_features=True,
+        )
+        model_records = {
+            "pass_intent": make_model_record("pass_intent", return_type="next_5", target_family="epv"),
+            "pass_success": make_model_record("pass_success", return_type="disc_0.9", target_family="goal"),
+            "outcome_scoring": make_model_record("outcome_scoring", return_type="in_3", target_family="xt"),
+            "outcome_conceding": make_model_record("outcome_conceding", return_type="in_3", target_family="xt"),
+        }
+
+        with patch.object(train_wrapper, "get_model_records", return_value=model_records):
+            shared = train_wrapper.derive_bundle_shared_context(
+                {
+                    "pass_intent": "pass_intent/source",
+                    "pass_success": "pass_success/new",
+                    "outcome_scoring": "outcome_scoring/old",
+                    "outcome_conceding": "outcome_conceding/old",
+                },
+                cli_args,
+                "feature_run",
+            )
+
+        self.assertEqual(shared["return_type"], "disc_0.9")
+        self.assertEqual(shared["target_family"], "xt")
+
     def test_validate_model_record_consistency_uses_outcome_return_types_for_shared_context(self) -> None:
         model_records = {
             "action_intent": make_model_record("action_intent", return_type="next_5"),
