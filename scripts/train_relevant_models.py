@@ -23,6 +23,7 @@ from project_config import (
     get_augmented_label_dir,
     get_intent_train_label_dir,
     get_model_bundle_root,
+    get_model_run_root,
     get_success_intent_graph_dir,
     get_success_intent_label_dir,
     infer_feature_run_intended_receiver_modes,
@@ -172,6 +173,59 @@ def append_edge_feature_flag(command: list[str], use_v_edge_features: bool) -> l
     return command
 
 
+def append_runtime_flags(command: list[str], device: str | None = None, pin_memory: bool | None = False) -> list[str]:
+    command = list(command)
+    if device:
+        command.extend(["--device", str(device)])
+    command.append("--pin-memory" if bool(pin_memory) else "--no-pin-memory")
+    return command
+
+
+def get_training_control_settings(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "early_stopping": bool(getattr(args, "early_stopping", True)),
+        "early_stopping_patience": int(getattr(args, "early_stopping_patience", 10)),
+        "early_stopping_min_epochs": int(getattr(args, "early_stopping_min_epochs", 30)),
+        "early_stopping_min_delta": float(getattr(args, "early_stopping_min_delta", 1e-5)),
+    }
+
+
+def append_training_control_flags(command: list[str], settings: dict[str, object]) -> list[str]:
+    command = list(command)
+    command.extend(
+        [
+            "--early-stopping-patience",
+            str(settings["early_stopping_patience"]),
+            "--early-stopping-min-epochs",
+            str(settings["early_stopping_min_epochs"]),
+            "--early-stopping-min-delta",
+            str(settings["early_stopping_min_delta"]),
+        ]
+    )
+    if not bool(settings["early_stopping"]):
+        command.append("--no-early-stopping")
+    return command
+
+
+def get_cli_value(command: list[str], option: str) -> str | None:
+    try:
+        index = command.index(option)
+    except ValueError:
+        return None
+    value_index = index + 1
+    if value_index >= len(command):
+        return None
+    return str(command[value_index])
+
+
+def describe_returncode(returncode: int) -> str:
+    unsigned_code = int(returncode) & 0xFFFFFFFF
+    hex_code = f"0x{unsigned_code:08X}"
+    if unsigned_code == 0xC0000005:
+        return f"{hex_code} Windows access violation from native code, commonly CUDA/PyTorch/driver-side."
+    return f"{hex_code} process exit code"
+
+
 def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
     explicit_toggles = [
         (
@@ -259,6 +313,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
+    parser.add_argument("--device", default=None, help="Training device passed to train.py.")
     parser.add_argument(
         "--intended-receiver-mode",
         choices=["original", "angle_only", "model"],
@@ -299,6 +354,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Ignore the stored velocity-angle edge features during training.",
     )
     parser.set_defaults(use_v_edge_features=True)
+    pin_memory_group = parser.add_mutually_exclusive_group()
+    pin_memory_group.add_argument(
+        "--pin-memory",
+        dest="pin_memory",
+        action="store_true",
+        help="Use pinned host memory in low-level DataLoaders.",
+    )
+    pin_memory_group.add_argument(
+        "--no-pin-memory",
+        dest="pin_memory",
+        action="store_false",
+        help="Disable pinned host memory in low-level DataLoaders.",
+    )
+    parser.set_defaults(pin_memory=False)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=10,
+        help="Stop each low-level training run after this many validation-loss misses.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-epochs",
+        type=int,
+        default=30,
+        help="Minimum epoch before early stopping can terminate a low-level training run.",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-5,
+        help="Minimum validation-loss improvement passed to train.py.",
+    )
+    parser.add_argument(
+        "--no-early-stopping",
+        dest="early_stopping",
+        action="store_false",
+        help="Disable validation-loss early stopping in low-level training runs.",
+    )
+    parser.set_defaults(early_stopping=True)
     add_bool_override(
         parser,
         "xy-only",
@@ -349,6 +443,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Disable the extended handcrafted node features during training.",
     )
     args = parser.parse_args(argv)
+    if args.early_stopping_patience < 1:
+        parser.error("--early-stopping-patience must be at least 1.")
+    if args.early_stopping_min_epochs < 1:
+        parser.error("--early-stopping-min-epochs must be at least 1.")
+    if args.early_stopping_min_delta < 0:
+        parser.error("--early-stopping-min-delta must be non-negative.")
     try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
@@ -790,6 +890,9 @@ def main() -> None:
         cli_args
     )
     executed_commands: list[list[str]] = []
+    completed_model_ids: dict[str, str] = {}
+    existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
+    training_control_settings = get_training_control_settings(cli_args)
 
     total_commands = len(commands)
     for index, args in enumerate(commands, start=1):
@@ -797,12 +900,71 @@ def main() -> None:
         if resolved_feature_run_id:
             command.extend(["--feature-run-id", str(resolved_feature_run_id)])
         command.extend(args)
+        command = append_runtime_flags(
+            command,
+            device=getattr(cli_args, "device", None),
+            pin_memory=getattr(cli_args, "pin_memory", None),
+        )
+        command = append_training_control_flags(command, training_control_settings)
         command.extend(["--training-step-index", str(index), "--training-step-total", str(total_commands)])
         print("Running:", " ".join(command))
-        subprocess.run(command, cwd=ROOT, check=True)
+        try:
+            subprocess.run(command, cwd=ROOT, check=True)
+        except subprocess.CalledProcessError as exc:
+            failed_task = get_cli_value(command, "--task")
+            failed_run_id = get_cli_value(command, "--run-id")
+            failed_log = str(get_model_run_root(failed_task, failed_run_id) / "log.txt") if failed_task and failed_run_id else None
+            failed_crash_log = (
+                str(get_model_run_root(failed_task, failed_run_id) / "crash.log") if failed_task and failed_run_id else None
+            )
+            timestamp = datetime.now().isoformat(timespec="seconds")
+            failure_metadata = {
+                "bundle_id": bundle_id,
+                "created_at": existing_bundle.get("created_at", timestamp),
+                "updated_at": timestamp,
+                "command": subprocess.list2cmdline(sys.argv),
+                "feature_run_id": resolved_feature_run_id,
+                "intended_receiver_mode": intended_receiver_mode,
+                "return_type": cli_args.return_type,
+                "target_family": cli_args.target_family,
+                "use_v_edge_features": bool(cli_args.use_v_edge_features),
+                "device": getattr(cli_args, "device", None),
+                "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
+                **training_control_settings,
+                "training_feature_flags": feature_flags,
+                "success_intent_only": bool(cli_args.success_intent_only),
+                "planned_tasks": list(trained_model_ids.keys()),
+                "completed_tasks": list(completed_model_ids.keys()),
+                "completed_model_ids": completed_model_ids,
+                "model_ids": {
+                    **dict(existing_bundle.get("model_ids", {})),
+                    **completed_model_ids,
+                },
+                "commands": executed_commands,
+                "failed_command": command,
+                "failed_task": failed_task,
+                "failed_model_id": f"{failed_task}/{failed_run_id}" if failed_task and failed_run_id else None,
+                "failed_log": failed_log,
+                "failed_crash_log": failed_crash_log,
+                "returncode": int(exc.returncode),
+                "returncode_description": describe_returncode(int(exc.returncode)),
+                "error": str(exc),
+                "status": "failed",
+            }
+            write_run_metadata(bundle_root, failure_metadata)
+            print(f"Training failed for {failure_metadata['failed_model_id'] or failed_task or 'unknown task'}.")
+            print(f"Return code: {failure_metadata['returncode_description']}")
+            if failed_log:
+                print(f"Model log: {failed_log}")
+            if failed_crash_log:
+                print(f"Crash log: {failed_crash_log}")
+            print(f"Model bundle manifest: {bundle_root / 'metadata.json'}")
+            raise
         executed_commands.append(command)
+        task = get_cli_value(command, "--task")
+        if task and task in trained_model_ids:
+            completed_model_ids[task] = trained_model_ids[task]
 
-    existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
     final_model_ids = dict(existing_bundle.get("model_ids", {}))
     final_model_ids.update(trained_model_ids)
 
@@ -824,6 +986,9 @@ def main() -> None:
         "feature_run_return_types": feature_run_metadata.get("return_types", cli_args.available_return_types),
         "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
         "training_feature_flags": feature_flags,
+        "device": getattr(cli_args, "device", None),
+        "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
+        **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
         "return_type": bundle_shared.get("return_type"),
         "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", cli_args.use_v_edge_features)),

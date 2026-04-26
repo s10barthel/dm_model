@@ -55,6 +55,22 @@ FEATURE_SIGNATURE_KEYS = (
 )
 
 
+def is_validation_loss_improved(current_loss: float, best_loss: float, min_delta: float) -> bool:
+    if best_loss <= 0:
+        return True
+    return float(current_loss) < float(best_loss) - float(min_delta)
+
+
+def should_stop_early(
+    enabled: bool,
+    epoch: int,
+    min_epochs: int,
+    epochs_since_loss_improvement: int,
+    patience: int,
+) -> bool:
+    return bool(enabled) and int(epoch) >= int(min_epochs) and int(epochs_since_loss_improvement) >= int(patience)
+
+
 def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
     signature = {
         "xy_only": bool(args.get("xy_only", False)),
@@ -309,6 +325,10 @@ def l1_regularizer(model, lambda_l1=0.1):
         if model_param_name.endswith("weight"):
             l1_loss += lambda_l1 * model_param_value.abs().sum()
     return l1_loss
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
 
 
 def encode_onehot(labels, classes=None):
@@ -680,9 +700,9 @@ def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]
     raise FileNotFoundError(f"Could not infer graph schema from feature directory {feature_dir}.")
 
 
-def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01) -> torch.Tensor:
+def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:
     model = load_model(model_id, device)
-    loader = DataLoader(dataset, batch_size=2048, shuffle=False, pin_memory=True)
+    loader = DataLoader(dataset, batch_size=2048, shuffle=False, pin_memory=pin_memory)
     likelihoods = []
 
     for batch_graphs, batch_labels, _ in tqdm(loader):
@@ -876,7 +896,7 @@ def find_cell_index(xy: torch.Tensor, grid_size: Tuple[int, int] = FIELD_SIZE) -
 
 def run_epoch(
     args: argparse.Namespace,
-    model: nn.DataParallel,
+    model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Adam = None,
     device: str = "cuda",
@@ -939,10 +959,10 @@ def run_epoch(
                 grid_features = grid_xy.clone()  # [G, 2]
 
             if train:
-                out: torch.Tensor = model.module.forward_grid(batch_graphs, grid_features)
+                out: torch.Tensor = unwrap_model(model).forward_grid(batch_graphs, grid_features)
             else:
                 with torch.no_grad():
-                    out: torch.Tensor = model.module.forward_grid(batch_graphs, grid_features)
+                    out: torch.Tensor = unwrap_model(model).forward_grid(batch_graphs, grid_features)
 
         else:
             if train:
@@ -1134,7 +1154,7 @@ def run_epoch(
             optimizer.zero_grad()
             loss = pred_loss + l1_loss
             loss.backward()
-            nn.utils.clip_grad_norm_(model.module.parameters(), args.clip)
+            nn.utils.clip_grad_norm_(unwrap_model(model).parameters(), args.clip)
             optimizer.step()
 
         if train and batch_index % args.print_freq == 0:

@@ -1,4 +1,5 @@
 import argparse
+import faulthandler
 import json
 import os
 import subprocess
@@ -25,10 +26,13 @@ from models.utils import (
     get_losses_str,
     infer_training_edge_schema,
     estimate_propensity,
+    is_validation_loss_improved,
     load_splits,
     num_trainable_params,
     printlog,
     run_epoch,
+    should_stop_early,
+    unwrap_model,
     validate_target_flags,
 )
 from project_config import (
@@ -53,6 +57,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--trial", type=int, required=False, default=None)
 parser.add_argument("--run-id", type=str, default=None, help="Checkpoint run id. Auto-generated when omitted.")
+parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing checkpoint run id.")
+parser.add_argument("--device", type=str, default=None, help="Training device. Defaults to cuda when available, otherwise cpu.")
 parser.add_argument("--model", type=str, required=True, default="gat")
 parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID to estimate propensity scores")
 parser.add_argument("--weight_bce", action="store_true", default=False, help="use weighted BCE to balance classes")
@@ -135,6 +141,20 @@ edge_feature_group.add_argument(
     help="Ignore the stored velocity-angle edge features and use only the base edge features.",
 )
 parser.set_defaults(use_v_edge_features=True)
+pin_memory_group = parser.add_mutually_exclusive_group()
+pin_memory_group.add_argument(
+    "--pin-memory",
+    dest="pin_memory",
+    action="store_true",
+    help="Pin host tensors before CUDA transfer.",
+)
+pin_memory_group.add_argument(
+    "--no-pin-memory",
+    dest="pin_memory",
+    action="store_false",
+    help="Avoid pinned host-memory transfers.",
+)
+parser.set_defaults(pin_memory=False)
 
 parser.add_argument("--node_emb_dim", type=int, required=False, default=128, help="node embedding dim")
 parser.add_argument("--graph_emb_dim", type=int, required=False, default=128, help="graph embedding dim")
@@ -153,6 +173,31 @@ parser.add_argument("--min_lr", type=float, required=False, default=0.0001, help
 parser.add_argument("--clip", type=int, required=False, default=10, help="gradient clipping")
 parser.add_argument("--print_freq", type=int, required=False, default=50, help="periodically print performance")
 parser.add_argument("--seed", type=int, required=False, default=128, help="PyTorch random seed")
+parser.add_argument(
+    "--early-stopping-patience",
+    type=int,
+    default=10,
+    help="Stop after this many consecutive validation-loss misses once min epochs are complete.",
+)
+parser.add_argument(
+    "--early-stopping-min-epochs",
+    type=int,
+    default=30,
+    help="Minimum epoch before early stopping can terminate training.",
+)
+parser.add_argument(
+    "--early-stopping-min-delta",
+    type=float,
+    default=1e-5,
+    help="Minimum validation-loss improvement required to reset early-stopping patience.",
+)
+parser.add_argument(
+    "--no-early-stopping",
+    dest="early_stopping",
+    action="store_false",
+    help="Disable validation-loss early stopping.",
+)
+parser.set_defaults(early_stopping=True)
 
 parser.add_argument("--cont", action="store_true", default=False, help="continue training previous best model")
 parser.add_argument("--best_loss", type=float, required=False, default=0, help="best loss")
@@ -197,16 +242,103 @@ def log_skipped_matches(name: str, dataset: ActionDataset, trial_path: str, max_
         printlog(f"  ... and {len(skipped) - max_items} more", trial_path)
 
 
+def resolve_training_device(requested_device: str | None) -> str:
+    if requested_device:
+        device = str(requested_device)
+        if device.startswith("cuda") and not torch.cuda.is_available():
+            raise ValueError(f"Requested device {device!r}, but CUDA is not available.")
+        return device
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def resolve_pin_memory(requested_pin_memory: bool | None, device: str) -> bool:
+    if not str(device).startswith("cuda"):
+        return False
+    if requested_pin_memory is not None:
+        return bool(requested_pin_memory)
+    return False
+
+
+def load_existing_metadata(trial_path: str) -> dict:
+    metadata_path = Path(trial_path) / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def infer_last_completed_epoch_from_log(trial_path: str) -> int:
+    log_path = Path(trial_path) / "log.txt"
+    if not log_path.exists():
+        return 0
+
+    current_epoch = 0
+    completed_epoch = 0
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line.startswith("Epoch:"):
+                try:
+                    current_epoch = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    continue
+            elif line.startswith("Time:") and current_epoch:
+                completed_epoch = current_epoch
+    except OSError:
+        return 0
+    return completed_epoch
+
+
+def infer_last_lr_from_log(trial_path: str, default_lr: float) -> float:
+    log_path = Path(trial_path) / "log.txt"
+    if not log_path.exists():
+        return default_lr
+
+    lr = float(default_lr)
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line.startswith("########## lr") and line.endswith("##########"):
+                try:
+                    lr = float(line.replace("#", "").strip().split("lr", 1)[1].strip())
+                except (IndexError, ValueError):
+                    continue
+    except OSError:
+        return default_lr
+    return lr
+
+
+def checkpoint_path_for_resume(trial_path: str) -> Path:
+    for name in ("last_weights.pt", "best_weights.pt"):
+        path = Path(trial_path) / name
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"No resumable checkpoint found in {trial_path}. Expected last_weights.pt or best_weights.pt.")
+
+
+def update_training_metadata(trial_path: str, metadata: dict, **updates) -> None:
+    metadata.update(updates)
+    write_run_metadata(Path(trial_path), metadata)
+
+
 if __name__ == "__main__":
     # Set device and manual seed
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        device = "cuda"
+    device = resolve_training_device(args.device)
+    args.device = device
+    args.pin_memory = resolve_pin_memory(args.pin_memory, device)
+    if args.early_stopping_patience < 1:
+        raise ValueError("--early-stopping-patience must be at least 1.")
+    if args.early_stopping_min_epochs < 1:
+        raise ValueError("--early-stopping-min-epochs must be at least 1.")
+    if args.early_stopping_min_delta < 0:
+        raise ValueError("--early-stopping-min-delta must be non-negative.")
+    if str(device).startswith("cuda"):
         torch.cuda.manual_seed(args.seed)
         torch.cuda.manual_seed_all(args.seed)
-    else:
-        device = "cpu"
 
     validate_target_flags(args)
     args.target_family = infer_target_family(
@@ -220,6 +352,10 @@ if __name__ == "__main__":
     args.gnn_task = config.TASK_CONFIG.at[args.task, "gnn_task"]
     args.condition = config.TASK_CONFIG.at[args.task, "condition"]
     args.out_dim = config.TASK_CONFIG.at[args.task, "out_dim"]
+    if args.resume_run_id:
+        if args.run_id and args.run_id != args.resume_run_id:
+            raise ValueError("--run-id must match --resume-run-id when both are provided.")
+        args.run_id = args.resume_run_id
     args.run_id = args.run_id or (f"{args.trial:02d}" if args.trial is not None else generate_model_run_id(args.task))
     args.model_id = f"{args.task}/{args.run_id}"
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
@@ -267,7 +403,8 @@ if __name__ == "__main__":
     # Load model
     args_dict = vars(args)
     model = GNN(args_dict).to(device)
-    model = nn.DataParallel(model)
+    if str(device).startswith("cuda") and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
     args_dict["total_params"] = num_trainable_params(model)
     args_dict["run_id"] = args.run_id
     args_dict["model_id"] = args.model_id
@@ -275,6 +412,9 @@ if __name__ == "__main__":
     # Create a path to save model arguments and parameters
     trial_path = str(get_model_run_root(args.task, args.run_id))
     os.makedirs(trial_path, exist_ok=True)
+    crash_log_file = open(f"{trial_path}/crash.log", "a", encoding="utf-8", buffering=1)
+    faulthandler.enable(file=crash_log_file, all_threads=True)
+    existing_metadata = load_existing_metadata(trial_path) if args.resume_run_id else {}
     with open(f"{trial_path}/args.json", "w", encoding="utf-8") as f:
         json.dump(args_dict, f, indent=4)
 
@@ -283,8 +423,10 @@ if __name__ == "__main__":
         "task": args.task,
         "run_id": args.run_id,
         "trial": args.trial,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": existing_metadata.get("created_at", datetime.now().isoformat(timespec="seconds")),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
+        "resume_run_id": args.resume_run_id,
         "feature_run_id": args.feature_run_id,
         "intended_receiver_mode": None if args.task == "success_intent" and args.intended_receiver_mode == "unknown" else args.intended_receiver_mode,
         "target_family": args.target_family,
@@ -301,14 +443,35 @@ if __name__ == "__main__":
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
+        "early_stopping": bool(args.early_stopping),
+        "early_stopping_patience": int(args.early_stopping_patience),
+        "early_stopping_min_epochs": int(args.early_stopping_min_epochs),
+        "early_stopping_min_delta": float(args.early_stopping_min_delta),
+        "crash_log": str(Path(trial_path) / "crash.log"),
         "status": "running",
     }
+    for key in (
+        "last_epoch",
+        "best_loss",
+        "best_acc",
+        "lr",
+        "epochs_since_best",
+        "epochs_since_loss_improvement",
+        "epochs_since_lr_loss_improvement",
+    ):
+        if key in existing_metadata:
+            metadata[key] = existing_metadata[key]
     write_run_metadata(Path(trial_path), metadata)
 
     # Continue a previous experiment, or start a new one
-    if args.cont:
-        state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False)
-        model.module.load_state_dict(state_dict)
+    if args.resume_run_id:
+        resume_path = checkpoint_path_for_resume(trial_path)
+        state_dict = torch.load(resume_path, weights_only=False, map_location=device)
+        unwrap_model(model).load_state_dict(state_dict)
+        printlog(f"Resumed weights from {resume_path}", trial_path)
+    elif args.cont:
+        state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False, map_location=device)
+        unwrap_model(model).load_state_dict(state_dict)
 
     train_match_ids, valid_match_ids, _ = load_splits(feature_dir=feature_dir)
 
@@ -358,7 +521,7 @@ if __name__ == "__main__":
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
     #Adjust as needed for your environment.
     #loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 16, "pin_memory": True}
-    loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": True}
+    loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": args.pin_memory}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
         ipw_train_dataset = ActionDataset(
@@ -376,40 +539,84 @@ if __name__ == "__main__":
         if len(ipw_train_dataset) == 0 or len(ipw_valid_dataset) == 0:
             raise ValueError("No usable samples remained for inverse-propensity weighting.")
 
-        inverse_propensity = 1 / estimate_propensity(ipw_train_dataset, model_id=args.ipw_model_id, device=device)
+        inverse_propensity = 1 / estimate_propensity(
+            ipw_train_dataset,
+            model_id=args.ipw_model_id,
+            device=device,
+            pin_memory=args.pin_memory,
+        )
         train_ipw = inverse_propensity / inverse_propensity.mean()
         train_dataset.set_inverse_propensity_weights(train_ipw)
 
-        inverse_propensity = 1 / estimate_propensity(ipw_valid_dataset, model_id=args.ipw_model_id, device=device)
+        inverse_propensity = 1 / estimate_propensity(
+            ipw_valid_dataset,
+            model_id=args.ipw_model_id,
+            device=device,
+            pin_memory=args.pin_memory,
+        )
         valid_ipw = inverse_propensity / inverse_propensity.mean()
         valid_dataset.set_inverse_propensity_weights(valid_ipw)
 
     train_loader = DataLoader(train_dataset, **loader_args)
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
 
     # Train loop
-    best_loss = args.best_loss
-    best_acc = args.best_acc
-    epochs_since_best = 0
-    lr = max(args.start_lr, args.min_lr)
+    default_lr = max(args.start_lr, args.min_lr)
+    best_loss = args.best_loss or float(existing_metadata.get("best_loss", 0) or 0)
+    best_acc = args.best_acc or float(existing_metadata.get("best_acc", 0) or 0)
+    if args.resume_run_id:
+        legacy_epochs_since_best = int(existing_metadata.get("epochs_since_best", 0) or 0)
+        epochs_since_loss_improvement = int(
+            existing_metadata.get("epochs_since_loss_improvement", legacy_epochs_since_best) or 0
+        )
+        epochs_since_lr_loss_improvement = int(
+            existing_metadata.get("epochs_since_lr_loss_improvement", legacy_epochs_since_best) or 0
+        )
+    else:
+        epochs_since_loss_improvement = 0
+        epochs_since_lr_loss_improvement = 0
+    lr = (
+        float(existing_metadata.get("lr", infer_last_lr_from_log(trial_path, default_lr)) or default_lr)
+        if args.resume_run_id
+        else default_lr
+    )
+    last_epoch = int(existing_metadata.get("last_epoch", 0) or 0) if args.resume_run_id else 0
+    if args.resume_run_id and last_epoch == 0:
+        last_epoch = infer_last_completed_epoch_from_log(trial_path)
+    start_epoch = min(last_epoch + 1, args.n_epochs + 1) if args.resume_run_id else 1
+    update_training_metadata(
+        trial_path,
+        metadata,
+        start_epoch=start_epoch,
+        last_epoch=last_epoch,
+        best_loss=best_loss,
+        best_acc=best_acc,
+        lr=lr,
+        epochs_since_best=epochs_since_loss_improvement,
+        epochs_since_loss_improvement=epochs_since_loss_improvement,
+        epochs_since_lr_loss_improvement=epochs_since_lr_loss_improvement,
+        stopped_early=False,
+        updated_at=datetime.now().isoformat(timespec="seconds"),
+    )
 
-    for epoch in np.arange(args.n_epochs) + 1:
+    stopped_early = False
+    early_stop_epoch = None
+    early_stop_reason = None
+    for epoch in range(start_epoch, args.n_epochs + 1):
         # Set a custom learning rate schedule
-        if epochs_since_best == 3 and lr > args.min_lr:
+        if epochs_since_lr_loss_improvement >= 3 and lr > args.min_lr and best_loss > 0:
             # Load previous best model
             path = f"{trial_path}/best_weights.pt"
-            state_dict = torch.load(path, weights_only=False)
+            state_dict = torch.load(path, weights_only=False, map_location=device)
+            unwrap_model(model).load_state_dict(state_dict)
 
             # Decrease learning rate
             lr = max(lr * 0.5, args.min_lr)
             printlog(f"########## lr {lr} ##########", trial_path)
-            epochs_since_best = 0
-
-        else:
-            epochs_since_best += 1
+            epochs_since_lr_loss_improvement = 0
 
         # Remove parameters with requires_grad=False (https://github.com/pytorch/pytorch/issues/679)
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.module.parameters()), lr=lr)
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, unwrap_model(model).parameters()), lr=lr)
 
         if args.training_step_index is not None and args.training_step_total is not None:
             printlog(f"\nTraining model {args.training_step_index}/{args.training_step_total}: {args.task}", trial_path)
@@ -429,25 +636,72 @@ if __name__ == "__main__":
         epoch_loss = valid_metrics["ce_loss"] if "ce_loss" in valid_metrics else valid_metrics["mse_loss"]
 
         # Best model on test set
-        if best_loss == 0 or epoch_loss < best_loss:
-            epochs_since_best = 0
+        if is_validation_loss_improved(epoch_loss, best_loss, args.early_stopping_min_delta):
+            epochs_since_loss_improvement = 0
+            epochs_since_lr_loss_improvement = 0
             best_loss = epoch_loss
 
-            torch.save(model.module.state_dict(), f"{trial_path}/best_weights.pt")
+            torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_weights.pt")
             printlog("######## Best Loss ########", trial_path)
+        else:
+            epochs_since_loss_improvement += 1
+            epochs_since_lr_loss_improvement += 1
 
         if "accuracy" in valid_metrics or "f1" in valid_metrics:
             epoch_acc = valid_metrics["accuracy"] if "accuracy" in valid_metrics else valid_metrics["f1"]
             if epoch_acc > best_acc:
                 best_acc = epoch_acc
-                if epochs_since_best > 0:
-                    epochs_since_best = 0
-                    torch.save(model.module.state_dict(), f"{trial_path}/best_acc_weights.pt")
-                    printlog("###### Best Accuracy ######", trial_path)
+                torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_acc_weights.pt")
+                printlog("###### Best Accuracy ######", trial_path)
+
+        torch.save(unwrap_model(model).state_dict(), f"{trial_path}/last_weights.pt")
+        update_training_metadata(
+            trial_path,
+            metadata,
+            last_epoch=epoch,
+            best_loss=best_loss,
+            best_acc=best_acc,
+            lr=lr,
+            epochs_since_best=epochs_since_loss_improvement,
+            epochs_since_loss_improvement=epochs_since_loss_improvement,
+            epochs_since_lr_loss_improvement=epochs_since_lr_loss_improvement,
+            last_epoch_train_metrics=train_metrics,
+            last_epoch_valid_metrics=valid_metrics,
+            updated_at=datetime.now().isoformat(timespec="seconds"),
+            status="running",
+        )
+
+        if should_stop_early(
+            args.early_stopping,
+            epoch,
+            args.early_stopping_min_epochs,
+            epochs_since_loss_improvement,
+            args.early_stopping_patience,
+        ):
+            stopped_early = True
+            early_stop_epoch = epoch
+            early_stop_reason = (
+                f"validation loss did not improve by at least {args.early_stopping_min_delta:g} "
+                f"for {epochs_since_loss_improvement} consecutive epochs"
+            )
+            printlog(f"######## Early stopping at epoch {epoch}: {early_stop_reason}. ########", trial_path)
+            break
 
     printlog(f"Best loss: {best_loss:.4f}", trial_path)
-    metadata["status"] = "completed"
-    metadata["best_loss"] = best_loss
-    metadata["best_acc"] = best_acc
-    metadata["completed_at"] = datetime.now().isoformat(timespec="seconds")
-    write_run_metadata(Path(trial_path), metadata)
+    update_training_metadata(
+        trial_path,
+        metadata,
+        status="completed",
+        best_loss=best_loss,
+        best_acc=best_acc,
+        epochs_since_best=epochs_since_loss_improvement,
+        epochs_since_loss_improvement=epochs_since_loss_improvement,
+        epochs_since_lr_loss_improvement=epochs_since_lr_loss_improvement,
+        stopped_early=stopped_early,
+        early_stop_epoch=early_stop_epoch,
+        early_stop_reason=early_stop_reason,
+        completed_at=datetime.now().isoformat(timespec="seconds"),
+        updated_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    faulthandler.disable()
+    crash_log_file.close()

@@ -195,6 +195,44 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertFalse(args.accel_aware)
 
+    def test_wrapper_parse_args_defaults_no_pin_memory_and_early_stopping(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(["--feature-run-id", "feature_run", "--success-intent-only"])
+
+        self.assertFalse(args.pin_memory)
+        self.assertTrue(args.early_stopping)
+        self.assertEqual(args.early_stopping_patience, 10)
+        self.assertEqual(args.early_stopping_min_epochs, 30)
+        self.assertEqual(args.early_stopping_min_delta, 1e-5)
+
+    def test_early_stopping_helpers_use_min_delta_and_patience(self) -> None:
+        self.assertTrue(model_utils.is_validation_loss_improved(0.9, 0, 1e-5))
+        self.assertTrue(model_utils.is_validation_loss_improved(0.99998, 1.0, 1e-5))
+        self.assertFalse(model_utils.is_validation_loss_improved(0.999995, 1.0, 1e-5))
+
+        self.assertFalse(model_utils.should_stop_early(True, 29, 30, 10, 10))
+        self.assertFalse(model_utils.should_stop_early(True, 30, 30, 9, 10))
+        self.assertTrue(model_utils.should_stop_early(True, 30, 30, 10, 10))
+        self.assertFalse(model_utils.should_stop_early(False, 30, 30, 10, 10))
+
+    def test_wrapper_training_control_flags_can_disable_early_stopping(self) -> None:
+        command = train_wrapper.append_training_control_flags(
+            ["train.py"],
+            {
+                "early_stopping": False,
+                "early_stopping_patience": 10,
+                "early_stopping_min_epochs": 30,
+                "early_stopping_min_delta": 1e-5,
+            },
+        )
+
+        self.assertIn("--early-stopping-patience", command)
+        self.assertIn("--no-early-stopping", command)
+
     def test_build_training_commands_emit_no_accel_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)
@@ -242,6 +280,8 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
             use_v_edge_features=True,
+            device=None,
+            pin_memory=None,
             success_intent_only=False,
             target_family="goal",
             return_type="disc_0.9",
@@ -291,6 +331,115 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(captured_metadata["model_ids"], {"pass_intent": "pass_intent/test"})
         self.assertEqual(captured_metadata["trained_tasks"], ["pass_intent"])
 
+    def test_wrapper_forwards_runtime_flags_to_train(self) -> None:
+        captured_command: list[str] = []
+        cli_args = SimpleNamespace(
+            bundle_id="bundle_under_test",
+            available_intended_receiver_modes=["original", "angle_only"],
+            available_return_types=["disc_0.9"],
+            use_v_edge_features=True,
+            device="cuda:0",
+            pin_memory=False,
+            early_stopping=True,
+            early_stopping_patience=10,
+            early_stopping_min_epochs=30,
+            early_stopping_min_delta=1e-5,
+            success_intent_only=False,
+            target_family="goal",
+            return_type="disc_0.9",
+        )
+
+        def capture_run(command: list[str], **_kwargs: object) -> None:
+            captured_command.extend(command)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_root = Path(tmpdir) / "bundle_under_test"
+            with (
+                patch.object(train_wrapper, "parse_args", return_value=cli_args),
+                patch.object(
+                    train_wrapper,
+                    "build_training_commands",
+                    return_value=(
+                        [["--task", "pass_intent", "--run-id", "pass_run"]],
+                        {"pass_intent": "pass_intent/pass_run"},
+                        "angle_only",
+                        "feature_run",
+                        train_wrapper.WRAPPER_FEATURE_DEFAULTS,
+                    ),
+                ),
+                patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
+                patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
+                patch.object(
+                    train_wrapper,
+                    "derive_bundle_shared_context",
+                    return_value=make_bundle_shared_context(target_family=None),
+                ),
+                patch.object(train_wrapper, "load_feature_run_metadata", return_value={}),
+                patch.object(train_wrapper, "write_run_metadata"),
+                patch.object(train_wrapper.subprocess, "run", side_effect=capture_run),
+            ):
+                train_wrapper.main()
+
+        self.assertIn("--device", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--device") + 1], "cuda:0")
+        self.assertIn("--no-pin-memory", captured_command)
+        self.assertIn("--early-stopping-patience", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--early-stopping-patience") + 1], "10")
+        self.assertIn("--early-stopping-min-epochs", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--early-stopping-min-epochs") + 1], "30")
+        self.assertIn("--early-stopping-min-delta", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--early-stopping-min-delta") + 1], "1e-05")
+        self.assertNotIn("--no-early-stopping", captured_command)
+
+    def test_wrapper_records_failed_metadata_for_access_violation(self) -> None:
+        captured_metadata: dict[str, object] = {}
+        cli_args = SimpleNamespace(
+            bundle_id="bundle_under_test",
+            available_intended_receiver_modes=["original", "angle_only"],
+            available_return_types=["disc_0.9"],
+            use_v_edge_features=True,
+            device=None,
+            pin_memory=False,
+            success_intent_only=False,
+            target_family="goal",
+            return_type="disc_0.9",
+        )
+
+        def capture_write_run_metadata(_root: Path, payload: dict[str, object]) -> None:
+            captured_metadata.update(payload)
+
+        def fail_run(command: list[str], **_kwargs: object) -> None:
+            raise train_wrapper.subprocess.CalledProcessError(3221225477, command)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_root = Path(tmpdir) / "bundle_under_test"
+            with (
+                patch.object(train_wrapper, "parse_args", return_value=cli_args),
+                patch.object(
+                    train_wrapper,
+                    "build_training_commands",
+                    return_value=(
+                        [["--task", "action_intent", "--run-id", "action_run"]],
+                        {"action_intent": "action_intent/action_run"},
+                        "model",
+                        "feature_run",
+                        train_wrapper.WRAPPER_FEATURE_DEFAULTS,
+                    ),
+                ),
+                patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
+                patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
+                patch.object(train_wrapper, "write_run_metadata", side_effect=capture_write_run_metadata),
+                patch.object(train_wrapper.subprocess, "run", side_effect=fail_run),
+            ):
+                with self.assertRaises(train_wrapper.subprocess.CalledProcessError):
+                    train_wrapper.main()
+
+        self.assertEqual(captured_metadata["status"], "failed")
+        self.assertEqual(captured_metadata["failed_model_id"], "action_intent/action_run")
+        self.assertEqual(captured_metadata["returncode"], 3221225477)
+        self.assertIn("0xC0000005", captured_metadata["returncode_description"])
+        self.assertIn("crash.log", captured_metadata["failed_crash_log"])
+
     def test_wrapper_main_merges_existing_bundle_metadata_for_partial_outcome_rerun(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
@@ -298,6 +447,8 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9", "in_3"],
             use_v_edge_features=True,
+            device=None,
+            pin_memory=None,
             success_intent_only=False,
             target_family="xt",
             return_type="in_3",
