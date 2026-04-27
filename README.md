@@ -478,6 +478,7 @@ Behavior:
 - an external `--pass-intent-model-id` must match the selected feature run, intended-receiver mode, graph schema, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
 - training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
+- wrapper batch-size defaults are `256` for `action_intent`, `pass_intent`, `success_intent`, and `failure_receiver`, and `512` for `pass_success`, `outcome_scoring`, and `outcome_conceding`; `--batch-size` overrides all defaults, and per-model `--<model>-batch-size` flags take highest precedence
 - unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on, with `extend_features` and `xy_only` off
 
 In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. It is trained independently of the `original` / `angle_only` / `model` intended-receiver modes. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
@@ -890,6 +891,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
 - `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `failure_receiver`.
 - `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--no-pass-intent` is set.
+- `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
+- `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.

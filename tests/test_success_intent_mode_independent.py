@@ -86,6 +86,10 @@ def make_pass_intent_record(
     }
 
 
+def command_batch_size(command: list[str]) -> int:
+    return int(command[command.index("--batch_size") + 1])
+
+
 class SuccessIntentModeIndependentTests(unittest.TestCase):
     def test_default_parse_args_enables_failure_receiver_off(self) -> None:
         with (
@@ -226,6 +230,50 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
 
         self.assertEqual(args.return_type, "next_5")
         self.assertIsNone(args.target_family)
+
+    def test_train_wrapper_rejects_invalid_general_batch_size(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "goal",
+                        "--return_type",
+                        "disc_0.9",
+                        "--intended-receiver-mode",
+                        "original",
+                        "--batch-size",
+                        "0",
+                    ]
+                )
+
+    def test_train_wrapper_rejects_invalid_model_batch_size(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "goal",
+                        "--return_type",
+                        "disc_0.9",
+                        "--intended-receiver-mode",
+                        "original",
+                        "--pass-success-batch-size",
+                        "-1",
+                    ]
+                )
 
     def test_pass_success_requires_pass_intent_or_external_model_id(self) -> None:
         with (
@@ -461,6 +509,89 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         success_intent_args = next(command for command in commands if command[1] == "success_intent")
         self.assertIn("--label-source", success_intent_args)
         self.assertIn("--training-filter", success_intent_args)
+
+    def test_default_batch_sizes_are_task_specific(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(failure_receiver=False),
+                target_family="goal",
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        batch_sizes = {command[1]: command_batch_size(command) for command in commands}
+        self.assertEqual(batch_sizes["action_intent"], 256)
+        self.assertEqual(batch_sizes["pass_intent"], 256)
+        self.assertEqual(batch_sizes["success_intent"], 256)
+        self.assertEqual(batch_sizes["pass_success"], 512)
+        self.assertEqual(batch_sizes["outcome_scoring"], 512)
+        self.assertEqual(batch_sizes["outcome_conceding"], 512)
+
+    def test_general_batch_size_overrides_all_task_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    pass_success=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["outcome_scoring", "outcome_conceding"],
+                target_family="xt",
+                return_type="next_5",
+                intended_receiver_mode="original",
+                batch_size=384,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual({command_batch_size(command) for command in commands}, {384})
+
+    def test_model_specific_batch_size_overrides_general_batch_size(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+                batch_size=384,
+                pass_success_batch_size=640,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(train_wrapper, "get_model_record", return_value=make_pass_intent_record()),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual(command_batch_size(commands[0]), 640)
 
     def test_pass_success_uses_external_pass_intent_model_id_for_ipw(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

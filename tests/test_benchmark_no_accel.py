@@ -600,6 +600,76 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         )
         self.assertEqual(captured_metadata["trained_tasks"], ["pass_success"])
         self.assertEqual(captured_metadata["source_model_ids"], {"pass_intent": "pass_intent/source"})
+        self.assertEqual(captured_metadata["batch_sizes"], {"pass_success": 512})
+
+    def test_wrapper_main_records_effective_batch_sizes_in_bundle_metadata(self) -> None:
+        captured_metadata: dict[str, object] = {}
+        cli_args = SimpleNamespace(
+            bundle_id="bundle_under_test",
+            available_intended_receiver_modes=["original", "angle_only"],
+            available_return_types=["disc_0.9"],
+            use_v_edge_features=True,
+            device=None,
+            pin_memory=None,
+            success_intent_only=False,
+            target_family="goal",
+            return_type="disc_0.9",
+            batch_size=384,
+            pass_success_batch_size=640,
+        )
+
+        def capture_write_run_metadata(_root: Path, payload: dict[str, object]) -> None:
+            captured_metadata.update(payload)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bundle_root = Path(tmpdir) / "bundle_under_test"
+            with (
+                patch.object(train_wrapper, "parse_args", return_value=cli_args),
+                patch.object(
+                    train_wrapper,
+                    "build_training_commands",
+                    return_value=(
+                        [
+                            ["--task", "pass_success", "--run-id", "pass_success_new"],
+                            ["--task", "outcome_scoring", "--run-id", "outcome_scoring_new"],
+                        ],
+                        {
+                            "pass_success": "pass_success/new",
+                            "outcome_scoring": "outcome_scoring/new",
+                        },
+                        "angle_only",
+                        "feature_run",
+                        {
+                            "xy_only": False,
+                            "possessor_aware": True,
+                            "keeper_aware": True,
+                            "ball_z_aware": True,
+                            "poss_vel_aware": True,
+                            "accel_aware": True,
+                            "extend_features": False,
+                        },
+                    ),
+                ),
+                patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
+                patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
+                patch.object(
+                    train_wrapper,
+                    "derive_bundle_shared_context",
+                    return_value=make_bundle_shared_context(target_family="goal"),
+                ),
+                patch.object(train_wrapper, "load_feature_run_metadata", return_value={}),
+                patch.object(train_wrapper, "write_run_metadata", side_effect=capture_write_run_metadata),
+                patch.object(train_wrapper.subprocess, "run"),
+            ):
+                train_wrapper.main()
+
+        self.assertEqual(
+            captured_metadata["batch_sizes"],
+            {
+                "pass_success": 640,
+                "outcome_scoring": 384,
+            },
+        )
 
     def test_derive_bundle_shared_context_ignores_pass_intent_target_metadata(self) -> None:
         cli_args = SimpleNamespace(

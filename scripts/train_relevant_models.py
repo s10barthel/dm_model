@@ -114,6 +114,15 @@ MODEL_TOGGLE_DEFAULTS = {
     "outcome_conceding": True,
     "failure_receiver": False,
 }
+BATCH_SIZE_DEFAULTS = {
+    "action_intent": 256,
+    "pass_intent": 256,
+    "success_intent": 256,
+    "pass_success": 512,
+    "outcome_scoring": 512,
+    "outcome_conceding": 512,
+    "failure_receiver": 256,
+}
 MODE_DEPENDENT_TASKS = {
     "action_intent",
     "pass_intent",
@@ -188,6 +197,32 @@ def get_training_control_settings(args: argparse.Namespace) -> dict[str, object]
         "early_stopping_min_epochs": int(getattr(args, "early_stopping_min_epochs", 30)),
         "early_stopping_min_delta": float(getattr(args, "early_stopping_min_delta", 1e-5)),
     }
+
+
+def resolve_batch_sizes(args: argparse.Namespace, enabled_tasks: dict[str, bool]) -> dict[str, int]:
+    general_batch_size = getattr(args, "batch_size", None)
+    batch_sizes = {}
+    for task, enabled in enabled_tasks.items():
+        if not enabled:
+            continue
+        task_batch_size = getattr(args, f"{task}_batch_size", None)
+        batch_sizes[task] = int(
+            task_batch_size
+            if task_batch_size is not None
+            else general_batch_size
+            if general_batch_size is not None
+            else BATCH_SIZE_DEFAULTS[task]
+        )
+    return batch_sizes
+
+
+def validate_batch_size_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    batch_size_values = [("--batch-size", getattr(args, "batch_size", None))]
+    for _, option_name, _, _ in MODEL_TOGGLE_SPECS:
+        batch_size_values.append((f"--{option_name}-batch-size", getattr(args, f"{option_name.replace('-', '_')}_batch_size", None)))
+    for option_name, value in batch_size_values:
+        if value is not None and int(value) < 1:
+            parser.error(f"{option_name} must be at least 1.")
 
 
 def append_training_control_flags(command: list[str], settings: dict[str, object]) -> list[str]:
@@ -392,6 +427,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for task, option_name, enable_help, disable_help in MODEL_TOGGLE_SPECS:
         add_bool_override(parser, option_name, task, enable_help, disable_help)
     parser.add_argument(
+        "--batch-size",
+        "--batch_size",
+        dest="batch_size",
+        type=int,
+        default=None,
+        help="Override the wrapper batch size for every low-level model training command.",
+    )
+    for task, option_name, _, _ in MODEL_TOGGLE_SPECS:
+        parser.add_argument(
+            f"--{option_name}-batch-size",
+            dest=f"{task}_batch_size",
+            type=int,
+            default=None,
+            help=f"Override the wrapper batch size for {task}.",
+        )
+    parser.add_argument(
         "--pass-intent-model-id",
         default=None,
         help="Existing pass_intent checkpoint to use as the pass_success IPW model when --no-pass-intent is set.",
@@ -518,6 +569,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--early-stopping-min-epochs must be at least 1.")
     if args.early_stopping_min_delta < 0:
         parser.error("--early-stopping-min-delta must be non-negative.")
+    validate_batch_size_args(args, parser)
     try:
         resolve_wrapper_feature_flags(args)
     except ValueError as exc:
@@ -593,6 +645,7 @@ def base_gnn_args(
     model_id: str,
     intended_receiver_mode: str | None,
     return_type: str,
+    batch_size: int,
     use_v_edge_features: bool,
 ) -> list[str]:
     _, run_id = str(model_id).split("/", 1)
@@ -619,7 +672,7 @@ def base_gnn_args(
         "--n_epochs",
         "100",
         "--batch_size",
-        "256", #originally 512, reduced due to memory constraints on GPU; adjust as needed
+        str(batch_size),
         "--print_freq",
         "50",
         "--seed",
@@ -645,13 +698,14 @@ def intent_command(
     train_label_dir: str,
     intended_receiver_mode: str,
     return_type: str,
+    batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -674,13 +728,14 @@ def success_intent_command(
     feature_dir: str,
     label_dir: str,
     return_type: str,
+    batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, batch_size, use_v_edge_features),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -705,13 +760,14 @@ def pass_success_command(
     ipw_model_id: str,
     intended_receiver_mode: str,
     return_type: str,
+    batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
         "--ipw_model_id",
         ipw_model_id,
         "--min_pass_dur",
@@ -734,13 +790,14 @@ def outcome_command(
     target_family: str,
     return_type: str,
     intended_receiver_mode: str,
+    batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
         "--lambda_l1",
         "1e-6",
         "--start_lr",
@@ -766,13 +823,14 @@ def failure_receiver_command(
     label_dir: str,
     intended_receiver_mode: str,
     return_type: str,
+    batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
         "--augment_blocks",
         "--shot_success",
         "unblocked",
@@ -806,6 +864,7 @@ def build_training_commands(
     target_family = args.target_family if any(args.enabled_tasks[task] for task in OUTCOME_TASKS) else None
     effective_return_type = args.return_type
     feature_flags = resolve_wrapper_feature_flags(args)
+    batch_sizes = resolve_batch_sizes(args, args.enabled_tasks)
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
     model_ids = build_model_ids(args, args.enabled_tasks)
@@ -827,6 +886,7 @@ def build_training_commands(
                 success_intent_feature_dir,
                 success_intent_label_dir,
                 effective_return_type,
+                batch_sizes["success_intent"],
                 bool(args.use_v_edge_features),
                 feature_flags,
             )
@@ -860,6 +920,7 @@ def build_training_commands(
                     intent_train_label_dir,
                     mode,
                     effective_return_type,
+                    batch_sizes["pass_intent"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -877,6 +938,7 @@ def build_training_commands(
                     intent_train_label_dir,
                     mode,
                     effective_return_type,
+                    batch_sizes["action_intent"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -896,6 +958,7 @@ def build_training_commands(
                     ipw_model_id,
                     mode,
                     effective_return_type,
+                    batch_sizes["pass_success"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -912,6 +975,7 @@ def build_training_commands(
                     target_family,
                     effective_return_type,
                     mode,
+                    batch_sizes["outcome_scoring"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -928,6 +992,7 @@ def build_training_commands(
                     target_family,
                     effective_return_type,
                     mode,
+                    batch_sizes["outcome_conceding"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -943,6 +1008,7 @@ def build_training_commands(
                     augmented_label_dir,
                     mode,
                     effective_return_type,
+                    batch_sizes["failure_receiver"],
                     bool(args.use_v_edge_features),
                     feature_flags,
                 )
@@ -971,6 +1037,10 @@ def main() -> None:
     existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
     training_control_settings = get_training_control_settings(cli_args)
     explicit_source_model_ids = source_model_ids(cli_args)
+    trained_batch_sizes = resolve_batch_sizes(
+        cli_args,
+        {task: task in trained_model_ids for task in MODEL_TOGGLE_DEFAULTS},
+    )
 
     total_commands = len(commands)
     for index, args in enumerate(commands, start=1):
@@ -1010,6 +1080,7 @@ def main() -> None:
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
                 "training_feature_flags": feature_flags,
+                "batch_sizes": trained_batch_sizes,
                 "success_intent_only": bool(cli_args.success_intent_only),
                 "planned_tasks": list(trained_model_ids.keys()),
                 "completed_tasks": list(completed_model_ids.keys()),
@@ -1068,6 +1139,7 @@ def main() -> None:
         "feature_run_return_types": feature_run_metadata.get("return_types", cli_args.available_return_types),
         "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
         "training_feature_flags": feature_flags,
+        "batch_sizes": trained_batch_sizes,
         "device": getattr(cli_args, "device", None),
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,
