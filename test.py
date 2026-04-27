@@ -9,11 +9,12 @@ import torch
 import torch.nn as nn
 from torch_geometric.loader import DataLoader
 
-from dataset import ActionDataset
+from dataset import ActionDataset, requires_goal_next10_diagnostics
+from datatools import config
 from models import utils
 from models.utils import get_losses_str, infer_feature_graph_schema, load_splits, run_epoch
 from models.utils import validate_feature_graph_schema
-from project_config import resolve_feature_root
+from project_config import DEFAULT_INTENDED_RECEIVER_MODE, get_action_label_dir, resolve_feature_root, resolve_feature_run_id
 
 
 def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
@@ -27,12 +28,56 @@ def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10
     if len(skipped) > max_items:
         print(f"  ... and {len(skipped) - max_items} more")
 
+
+def resolve_goal_next10_diagnostic_context(
+    cli_args: argparse.Namespace,
+    model_args: argparse.Namespace,
+    feature_root: Path,
+) -> tuple[str | None, str | None]:
+    if not requires_goal_next10_diagnostics(getattr(model_args, "task", None)):
+        return None, None
+
+    mode = getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE
+    if mode == "unknown":
+        mode = DEFAULT_INTENDED_RECEIVER_MODE
+
+    if cli_args.diagnostic_feature_run_id:
+        diagnostic_feature_run_id = resolve_feature_run_id(
+            cli_args.diagnostic_feature_run_id,
+            required=True,
+            allow_latest=False,
+        )
+        diagnostic_root = resolve_feature_root(diagnostic_feature_run_id)
+        diagnostic_label_dir = get_action_label_dir(
+            config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+            intended_receiver_mode=mode,
+            root=diagnostic_root,
+        )
+        if not diagnostic_label_dir.exists():
+            raise FileNotFoundError(f"Canonical goal-next10 diagnostic labels not found at {diagnostic_label_dir}.")
+        return diagnostic_feature_run_id, str(diagnostic_label_dir)
+
+    model_diagnostic_label_dir = getattr(model_args, "diagnostic_label_dir", None)
+    if model_diagnostic_label_dir and Path(model_diagnostic_label_dir).exists():
+        return getattr(model_args, "diagnostic_feature_run_id", None), str(model_diagnostic_label_dir)
+
+    selected_label_dir = get_action_label_dir(
+        config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+        intended_receiver_mode=mode,
+        root=feature_root,
+    )
+    if selected_label_dir.exists():
+        return getattr(model_args, "feature_run_id", None), str(selected_label_dir)
+    return getattr(model_args, "feature_run_id", None), None
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
     parser.add_argument("--feature-run-id", type=str, required=False, default=None)
+    parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -52,6 +97,8 @@ if __name__ == "__main__":
     else:
         feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/features/action_graphs")
         label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
+        feature_root = Path(feature_dir).parent
+    diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
     feature_schema = infer_feature_graph_schema(feature_dir)
     model_schema = {
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
@@ -79,6 +126,8 @@ if __name__ == "__main__":
         "max_edge_dist": model_args.max_edge_dist,
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
         "train": False,
+        "diagnostic_label_dir": diagnostic_label_dir,
+        "require_goal_next10_diagnostics": requires_goal_next10_diagnostics(model_args.task),
     }
     test_dataset = ActionDataset(test_match_ids, **dataset_args)
     print_skipped_matches("test", test_dataset)

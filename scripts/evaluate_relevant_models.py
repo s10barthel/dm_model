@@ -21,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--diagnostic-feature-run-id")
     parser.add_argument("--device", default="cuda:0")
     return parser.parse_args()
 
@@ -61,6 +62,8 @@ def main() -> None:
 
     for model_id in model_ids:
         command = [python, "test.py", "--model_id", model_id, "--device", args.device]
+        if args.diagnostic_feature_run_id:
+            command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
 

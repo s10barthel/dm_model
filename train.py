@@ -16,7 +16,7 @@ from torch.utils.data import WeightedRandomSampler
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
-from dataset import ActionDataset
+from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
@@ -127,6 +127,12 @@ parser.add_argument("--train_label_dir", type=str, default=None, help="label dir
 parser.add_argument("--valid_feature_dir", type=str, default=None, help="feature directory used for validation")
 parser.add_argument("--valid_label_dir", type=str, default=None, help="label directory used for validation")
 parser.add_argument("--ipw_feature_dir", type=str, default=None, help="feature directory used for IPW estimation")
+parser.add_argument(
+    "--diagnostic-feature-run-id",
+    type=str,
+    default=None,
+    help="Feature run containing canonical goal-next10 labels for comparable outcome diagnostics.",
+)
 edge_feature_group = parser.add_mutually_exclusive_group()
 edge_feature_group.add_argument(
     "--v-edge-features",
@@ -318,6 +324,41 @@ def checkpoint_path_for_resume(trial_path: str) -> Path:
     raise FileNotFoundError(f"No resumable checkpoint found in {trial_path}. Expected last_weights.pt or best_weights.pt.")
 
 
+def resolve_goal_next10_diagnostic_context(args: argparse.Namespace, feature_root: Path) -> tuple[str | None, str | None]:
+    if not requires_goal_next10_diagnostics(args.task):
+        return None, None
+
+    mode = (
+        args.intended_receiver_mode
+        if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
+        else DEFAULT_INTENDED_RECEIVER_MODE
+    )
+    if args.diagnostic_feature_run_id:
+        diagnostic_feature_run_id = resolve_feature_run_id(
+            args.diagnostic_feature_run_id,
+            required=True,
+            allow_latest=False,
+        )
+        diagnostic_root = resolve_feature_root(diagnostic_feature_run_id)
+        diagnostic_label_dir = get_action_label_dir(
+            config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+            intended_receiver_mode=mode,
+            root=diagnostic_root,
+        )
+        if not diagnostic_label_dir.exists():
+            raise FileNotFoundError(f"Canonical goal-next10 diagnostic labels not found at {diagnostic_label_dir}.")
+        return diagnostic_feature_run_id, str(diagnostic_label_dir)
+
+    selected_label_dir = get_action_label_dir(
+        config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+        intended_receiver_mode=mode,
+        root=feature_root,
+    )
+    if selected_label_dir.exists():
+        return args.feature_run_id, str(selected_label_dir)
+    return args.feature_run_id, None
+
+
 def update_training_metadata(trial_path: str, metadata: dict, **updates) -> None:
     metadata.update(updates)
     write_run_metadata(Path(trial_path), metadata)
@@ -360,6 +401,11 @@ if __name__ == "__main__":
     args.model_id = f"{args.task}/{args.run_id}"
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
+    label_intended_receiver_mode = (
+        args.intended_receiver_mode
+        if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
+        else DEFAULT_INTENDED_RECEIVER_MODE
+    )
 
     if args.task == "shot_blocking":
         feature_dir = getattr(args, "feature_dir", None) or str(feature_root / "augmented_shot_graphs")
@@ -379,7 +425,7 @@ if __name__ == "__main__":
         label_dir = getattr(args, "label_dir", None) or str(
             get_action_label_dir(
                 args.return_type,
-                intended_receiver_mode=DEFAULT_INTENDED_RECEIVER_MODE,
+                intended_receiver_mode=label_intended_receiver_mode,
                 root=feature_root,
             )
         )
@@ -390,6 +436,12 @@ if __name__ == "__main__":
     args.valid_feature_dir = getattr(args, "valid_feature_dir", None) or feature_dir
     args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
+    args.require_goal_next10_diagnostics = requires_goal_next10_diagnostics(args.task)
+    args.diagnostic_feature_run_id, args.diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, feature_root)
+    args.diagnostic_target = config.GOAL_NEXT10_DIAGNOSTIC_TARGET if args.require_goal_next10_diagnostics else None
+    args.diagnostic_return_type = (
+        config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE if args.require_goal_next10_diagnostics else None
+    )
     args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task)
     _, feature_edge_dim = infer_graph_input_dims(args.train_feature_dir)
     feature_schema = {
@@ -430,6 +482,10 @@ if __name__ == "__main__":
         "feature_run_id": args.feature_run_id,
         "intended_receiver_mode": None if args.task == "success_intent" and args.intended_receiver_mode == "unknown" else args.intended_receiver_mode,
         "target_family": args.target_family,
+        "diagnostic_target": args.diagnostic_target,
+        "diagnostic_return_type": args.diagnostic_return_type,
+        "diagnostic_feature_run_id": args.diagnostic_feature_run_id,
+        "diagnostic_label_dir": args.diagnostic_label_dir,
         "label_source": args.label_source,
         "training_filter": args.training_filter,
         "resolved_dirs": {
@@ -492,6 +548,8 @@ if __name__ == "__main__":
         "sparsify": args.sparsify,
         "max_edge_dist": args.max_edge_dist,
         "edge_in_dim": args.edge_in_dim,
+        "diagnostic_label_dir": args.diagnostic_label_dir,
+        "require_goal_next10_diagnostics": args.require_goal_next10_diagnostics,
     }
     train_dataset = ActionDataset(
         train_match_ids,

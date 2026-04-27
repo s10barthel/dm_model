@@ -14,7 +14,7 @@ from PIL import Image
 from torch_geometric.data import Data
 
 from dataset import ActionDataset
-from datatools.config import LABEL_COLUMNS
+from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
@@ -43,6 +43,10 @@ def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
 
 def make_labels() -> torch.Tensor:
     return torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
+
+
+def make_legacy_labels() -> torch.Tensor:
+    return torch.zeros((1, len(LABEL_COLUMNS) - 2), dtype=torch.float32)
 
 
 def make_model_args(*, accel_aware: bool | None = None) -> dict[str, object]:
@@ -533,6 +537,9 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(captured_metadata["trained_tasks"], ["outcome_scoring", "outcome_conceding"])
         self.assertEqual(captured_metadata["return_type"], "in_3")
         self.assertEqual(captured_metadata["target_family"], "xt")
+        self.assertEqual(captured_metadata["diagnostic_target"], "goal_next10")
+        self.assertEqual(captured_metadata["diagnostic_return_type"], "next_10")
+        self.assertEqual(captured_metadata["diagnostic_feature_run_id"], "feature_run")
         self.assertEqual(captured_metadata["success_intent_label_source"], "receiver_id")
         self.assertEqual(captured_metadata["success_intent_training_filter"], "successful_pass_actions")
         self.assertEqual(len(captured_metadata["commands"]), 2)
@@ -860,6 +867,101 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 8], torch.zeros_like(graph.x[:, 8])))
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
+
+    def test_action_dataset_loads_goal_next10_diagnostics_from_label_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels_disc"
+            diagnostic_label_dir = Path(tmpdir) / "labels_next10"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            diagnostic_label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+
+            selected_labels = make_legacy_labels()
+            selected_labels[:, LABEL_INDEX["scores"]] = 0.729
+            diagnostic_labels = make_legacy_labels()
+            diagnostic_labels[:, LABEL_INDEX["scores"]] = 1.0
+            diagnostic_labels[:, LABEL_INDEX["concedes"]] = 0.0
+            torch.save(selected_labels, label_dir / "match_1.pt")
+            torch.save(diagnostic_labels, diagnostic_label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                diagnostic_label_dir=str(diagnostic_label_dir),
+                task="outcome_scoring",
+            )
+
+        self.assertAlmostEqual(float(dataset.labels[0, LABEL_INDEX["scores"]]), 0.729, places=6)
+        self.assertEqual(float(dataset.labels[0, LABEL_INDEX["scores_goal_next10"]]), 1.0)
+        self.assertEqual(float(dataset.labels[0, LABEL_INDEX["concedes_goal_next10"]]), 0.0)
+
+    def test_action_dataset_accepts_embedded_goal_next10_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels_disc"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+
+            labels = make_labels()
+            labels[:, LABEL_INDEX["scores"]] = 0.729
+            labels[:, LABEL_INDEX["scores_goal_next10"]] = 1.0
+            torch.save(labels, label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="outcome_scoring",
+            )
+
+        self.assertAlmostEqual(float(dataset.labels[0, LABEL_INDEX["scores"]]), 0.729, places=6)
+        self.assertEqual(float(dataset.labels[0, LABEL_INDEX["scores_goal_next10"]]), 1.0)
+
+    def test_action_dataset_requires_goal_next10_diagnostics_for_outcome_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels_disc"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_legacy_labels(), label_dir / "match_1.pt")
+
+            with self.assertRaises(FileNotFoundError):
+                ActionDataset(
+                    ["match_1"],
+                    feature_dir=str(feature_dir),
+                    label_dir=str(label_dir),
+                    task="outcome_scoring",
+                )
+
+    def test_action_dataset_rejects_misaligned_goal_next10_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels_disc"
+            diagnostic_label_dir = Path(tmpdir) / "labels_next10"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            diagnostic_label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+
+            selected_labels = make_legacy_labels()
+            diagnostic_labels = make_legacy_labels()
+            diagnostic_labels[:, LABEL_INDEX["action_index"]] = 99.0
+            torch.save(selected_labels, label_dir / "match_1.pt")
+            torch.save(diagnostic_labels, diagnostic_label_dir / "match_1.pt")
+
+            with self.assertRaises(ValueError):
+                ActionDataset(
+                    ["match_1"],
+                    feature_dir=str(feature_dir),
+                    label_dir=str(label_dir),
+                    diagnostic_label_dir=str(diagnostic_label_dir),
+                    task="outcome_scoring",
+                )
 
     def test_get_model_record_defaults_legacy_checkpoint_to_accel_aware(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

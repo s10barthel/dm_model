@@ -483,6 +483,8 @@ class Match(ABC):
 
         self.intended_receiver_stats = dict(self.actions.attrs.get("intended_receiver_stats", {}))
 
+        diagnostic_events = utils.label_returns(self.events, lookahead_len=10, skip_first=False)
+
         if return_kind == "next":
             lookahead_len = int(return_value)
             self.events = utils.label_returns(self.events, lookahead_len, skip_first=skip_first)
@@ -559,6 +561,8 @@ class Match(ABC):
         self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
         self.actions["scores_epv"] = self.events.loc[self.actions.index, "scores_epv"]
         self.actions["concedes_epv"] = self.events.loc[self.actions.index, "concedes_epv"]
+        self.actions["scores_goal_next10"] = diagnostic_events.loc[self.actions.index, "scores"]
+        self.actions["concedes_goal_next10"] = diagnostic_events.loc[self.actions.index, "concedes"]
 
         labels_list = []
 
@@ -680,6 +684,8 @@ class Match(ABC):
                     self.actions.at[i, "concedes_goal_distance"],
                     self.actions.at[i, "scores_epv"],
                     self.actions.at[i, "concedes_epv"],
+                    self.actions.at[i, "scores_goal_next10"],
+                    self.actions.at[i, "concedes_goal_next10"],
                 ]
             )
 

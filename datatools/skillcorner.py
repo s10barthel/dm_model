@@ -505,12 +505,7 @@ def _build_actions_and_labels(
                 1,
                 0,
                 1,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
+                *([0.0] * (len(config.LABEL_COLUMNS) - 17)),
             ]
         )
         graphs.append(graph)

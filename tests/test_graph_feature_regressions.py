@@ -11,7 +11,7 @@ import torch
 from torch_geometric.data import Data
 
 from datatools.benchmark import build_benchmark_export
-from datatools.config import LABEL_COLUMNS
+from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import graph_feature
 from datatools.match import Match
 from inference import inference_gnn
@@ -440,6 +440,9 @@ class GraphFeatureRegressionTests(unittest.TestCase):
             )
 
         self.assertEqual(labels[:, 0].tolist(), [2.0])
+        self.assertEqual(labels.shape[1], len(LABEL_COLUMNS))
+        self.assertEqual(float(labels[0, LABEL_INDEX["scores_goal_next10"]]), 0.0)
+        self.assertEqual(float(labels[0, LABEL_INDEX["concedes_goal_next10"]]), 0.0)
 
 
 class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):

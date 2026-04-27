@@ -54,6 +54,7 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
         accel_aware=None,
         extend_features=None,
         pass_intent_model_id=None,
+        diagnostic_feature_run_id=None,
     )
     for key, value in overrides.items():
         setattr(args, key, value)
@@ -480,6 +481,37 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         self.assertEqual(len(commands), 2)
         self.assertEqual(set(model_ids.keys()), {"outcome_scoring", "outcome_conceding"})
         self.assertTrue(all("--use_xt" in command for command in commands))
+
+    def test_outcome_commands_pass_explicit_diagnostic_feature_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    pass_success=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["outcome_scoring", "outcome_conceding"],
+                target_family="xt",
+                return_type="next_5",
+                intended_receiver_mode="original",
+                diagnostic_feature_run_id="diagnostic_run",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertTrue(all("--diagnostic-feature-run-id" in command for command in commands))
+        self.assertEqual(
+            {command[command.index("--diagnostic-feature-run-id") + 1] for command in commands},
+            {"diagnostic_run"},
+        )
 
     def test_success_intent_and_outcomes_build_training_commands_emit_three_commands(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

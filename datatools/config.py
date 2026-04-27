@@ -3,6 +3,9 @@ import pandas as pd
 
 FIELD_SIZE = (105.0, 68.0)
 GOAL_SIZE = 7.32
+GOAL_NEXT10_DIAGNOSTIC_TARGET = "goal_next10"
+GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE = "next_10"
+GOAL_NEXT10_DIAGNOSTIC_COLUMNS = ("scores_goal_next10", "concedes_goal_next10")
 GOAL_XY = np.array(
     [
         (0, FIELD_SIZE[1] / 2 - GOAL_SIZE / 2),
@@ -124,6 +127,8 @@ LABEL_COLUMNS = [
     "concedes_goal_distance",
     "scores_epv",
     "concedes_epv",
+    "scores_goal_next10",
+    "concedes_goal_next10",
 ]
 
 LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

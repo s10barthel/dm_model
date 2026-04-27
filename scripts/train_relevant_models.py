@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools import config
 from models.utils import get_model_record, get_model_records, parse_model_id, validate_model_record_consistency
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
@@ -302,6 +303,83 @@ def source_model_ids(args: argparse.Namespace) -> dict[str, str]:
     return {"pass_intent": str(pass_intent_model_id)} if pass_intent_model_id else {}
 
 
+def resolve_diagnostic_label_dir(
+    feature_run_id: str | None,
+    intended_receiver_mode: str | None,
+) -> Path | None:
+    if not feature_run_id or not intended_receiver_mode:
+        return None
+    try:
+        feature_root = resolve_feature_root(feature_run_id)
+    except FileNotFoundError:
+        return None
+    label_dir = get_action_label_dir(
+        config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+        intended_receiver_mode=intended_receiver_mode,
+        root=feature_root,
+    )
+    return label_dir if label_dir.exists() else None
+
+
+def validate_diagnostic_feature_run(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    requires_outcome_config: bool,
+) -> None:
+    if not args.diagnostic_feature_run_id:
+        return
+    if not requires_outcome_config:
+        parser.error("--diagnostic-feature-run-id requires --outcome-scoring or --outcome-conceding.")
+    try:
+        args.diagnostic_feature_run_id = resolve_feature_run_id(
+            args.diagnostic_feature_run_id,
+            required=True,
+            allow_latest=False,
+        )
+    except FileNotFoundError as exc:
+        parser.error(str(exc))
+
+    label_dir = resolve_diagnostic_label_dir(args.diagnostic_feature_run_id, args.intended_receiver_mode)
+    if label_dir is None:
+        parser.error(
+            f"Diagnostic feature run {args.diagnostic_feature_run_id!r} does not expose "
+            f"return_type={config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE!r} for "
+            f"intended_receiver_mode={args.intended_receiver_mode!r}."
+        )
+
+
+def diagnostic_metadata(
+    args: argparse.Namespace,
+    intended_receiver_mode: str | None,
+    *,
+    outcome_enabled: bool | None = None,
+    feature_run_id_fallback: str | None = None,
+) -> dict[str, object]:
+    if outcome_enabled is None:
+        outcome_enabled = any(getattr(args, "enabled_tasks", {}).get(task, False) for task in OUTCOME_TASKS)
+    if not outcome_enabled:
+        return {
+            "diagnostic_target": None,
+            "diagnostic_return_type": None,
+            "diagnostic_feature_run_id": None,
+            "diagnostic_label_dir": None,
+        }
+
+    diagnostic_feature_run_id = (
+        getattr(args, "diagnostic_feature_run_id", None)
+        or getattr(args, "feature_run_id", None)
+        or feature_run_id_fallback
+    )
+    label_dir = resolve_diagnostic_label_dir(diagnostic_feature_run_id, intended_receiver_mode)
+    return {
+        "diagnostic_target": config.GOAL_NEXT10_DIAGNOSTIC_TARGET,
+        "diagnostic_return_type": config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
+        "diagnostic_feature_run_id": diagnostic_feature_run_id,
+        "diagnostic_label_dir": str(label_dir) if label_dir is not None else None,
+    }
+
+
 def validate_external_pass_intent_model_id(
     args: argparse.Namespace,
     feature_flags: dict[str, bool],
@@ -412,6 +490,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
+    parser.add_argument(
+        "--diagnostic-feature-run-id",
+        default=None,
+        help="Feature run containing canonical goal-next10 labels for comparable outcome diagnostics.",
+    )
     parser.add_argument("--device", default=None, help="Training device passed to train.py.")
     parser.add_argument(
         "--intended-receiver-mode",
@@ -632,6 +715,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Feature run {args.feature_run_id} does not expose return_type={args.return_type!r}. "
             f"Available: {', '.join(available_return_types) or 'none'}."
         )
+    validate_diagnostic_feature_run(args, parser, requires_outcome_config=requires_outcome_config)
 
     args.available_return_types = available_return_types
     args.available_intended_receiver_modes = available_modes
@@ -793,6 +877,7 @@ def outcome_command(
     batch_size: int,
     use_v_edge_features: bool,
     feature_flags: dict[str, bool],
+    diagnostic_feature_run_id: str | None = None,
 ) -> list[str]:
     command = [
         "--task",
@@ -813,6 +898,8 @@ def outcome_command(
         command.append("--use_xt")
     elif target_family == "xg":
         command.append("--use_xg")
+    if diagnostic_feature_run_id:
+        command.extend(["--diagnostic-feature-run-id", str(diagnostic_feature_run_id)])
     return append_low_level_feature_flags(command, feature_flags)
 
 
@@ -978,6 +1065,7 @@ def build_training_commands(
                     batch_sizes["outcome_scoring"],
                     bool(args.use_v_edge_features),
                     feature_flags,
+                    getattr(args, "diagnostic_feature_run_id", None),
                 )
             )
             trained_model_ids["outcome_scoring"] = model_ids["outcome_scoring"]
@@ -995,6 +1083,7 @@ def build_training_commands(
                     batch_sizes["outcome_conceding"],
                     bool(args.use_v_edge_features),
                     feature_flags,
+                    getattr(args, "diagnostic_feature_run_id", None),
                 )
             )
             trained_model_ids["outcome_conceding"] = model_ids["outcome_conceding"]
@@ -1037,6 +1126,12 @@ def main() -> None:
     existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
     training_control_settings = get_training_control_settings(cli_args)
     explicit_source_model_ids = source_model_ids(cli_args)
+    wrapper_diagnostic_metadata = diagnostic_metadata(
+        cli_args,
+        intended_receiver_mode,
+        outcome_enabled=any(task in trained_model_ids for task in OUTCOME_TASKS),
+        feature_run_id_fallback=resolved_feature_run_id,
+    )
     trained_batch_sizes = resolve_batch_sizes(
         cli_args,
         {task: task in trained_model_ids for task in MODEL_TOGGLE_DEFAULTS},
@@ -1075,6 +1170,7 @@ def main() -> None:
                 "intended_receiver_mode": intended_receiver_mode,
                 "return_type": cli_args.return_type,
                 "target_family": cli_args.target_family,
+                **wrapper_diagnostic_metadata,
                 "use_v_edge_features": bool(cli_args.use_v_edge_features),
                 "device": getattr(cli_args, "device", None),
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
@@ -1145,6 +1241,7 @@ def main() -> None:
         **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
         "return_type": bundle_shared.get("return_type"),
+        **wrapper_diagnostic_metadata,
         "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", cli_args.use_v_edge_features)),
         "graph_schema": dict(bundle_shared.get("graph_schema", {})),
         "success_intent_only": bool(cli_args.success_intent_only),

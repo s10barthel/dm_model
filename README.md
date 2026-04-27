@@ -440,6 +440,13 @@ This writes, inside the run root:
 - `resolved_actions*.parquet` for each intended-receiver mode
 - `metadata.json`
 
+Every generated action-label tensor also carries canonical outcome diagnostic columns:
+
+- `scores_goal_next10`
+- `concedes_goal_next10`
+
+These are binary goal labels over `next_10`, generated independently of the selected `--return_type`.
+
 ### 4. Train the retained models
 
 ```powershell
@@ -476,6 +483,8 @@ Behavior:
 - `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
 - `pass_success` uses a `pass_intent` checkpoint as its IPW model; train `pass_intent` in the same wrapper run or use `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>` to reuse a compatible existing checkpoint
 - an external `--pass-intent-model-id` must match the selected feature run, intended-receiver mode, graph schema, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
+- outcome model loss uses the selected `--target-family` and `--return_type`; outcome F1/ROC AUC/Brier diagnostics use canonical `goal next_10` labels for comparability across target families and return types
+- older feature runs without embedded `goal next_10` diagnostic columns can still be used if the selected run exposes `action_labels_next_10<intended_receiver_suffix>` or if you pass `--diagnostic-feature-run-id <feature_run_id>` pointing to compatible `next_10` labels
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
 - training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
 - wrapper batch-size defaults are `256` for `action_intent`, `pass_intent`, `success_intent`, and `failure_receiver`, and `512` for `pass_success`, `outcome_scoring`, and `outcome_conceding`; `--batch-size` overrides all defaults, and per-model `--<model>-batch-size` flags take highest precedence
@@ -501,7 +510,7 @@ Outputs:
 - no dedicated output files
 - metrics are printed to stdout by `test.py`
 
-`test.py` uses the target configuration and graph schema saved inside each checkpoint. The wrapper now prefers `--bundle-id` for the main retained-model set. `success_intent` is optional and can be supplied explicitly if you want it evaluated too.
+`test.py` uses the target configuration, graph schema, and diagnostic-label metadata saved inside each checkpoint. Pass `--diagnostic-feature-run-id <feature_run_id>` when evaluating older checkpoints whose selected feature run lacks canonical `goal next_10` diagnostics. The wrapper now prefers `--bundle-id` for the main retained-model set. `success_intent` is optional and can be supplied explicitly if you want it evaluated too.
 
 ### 6. Export per-match component predictions
 
@@ -677,6 +686,13 @@ Outcome target selection affects `outcome_scoring` and `outcome_conceding`.
 - In the low-level `train.py`, select the outcome family with `--use_xg`, `--use_xt`, `--use_goal_distance`, or `--use_epv`, or omit all four for binary goals.
 - In `scripts/train_relevant_models.py` and `scripts/main.py`, select the outcome family with `--target-family {goal,xg,xt,goal_distance,epv}`.
 - `--return_type` controls the return semantics for all outcome families and for the shared action-label directories in the selected feature run.
+
+Training loss and diagnostics intentionally use different targets:
+
+- loss target: the selected `--target-family` and `--return_type`
+- comparable event diagnostics: canonical binary `goal next_10` labels in `scores_goal_next10` / `concedes_goal_next10`
+
+The logged metric names remain `f1`, `roc_auc`, and `brier`. For non-goal target families, treat them as goal-event proxy diagnostics rather than true probability-calibration metrics for the trained target.
 
 ### `--return_type` Applies To All Outcome Target Families
 
@@ -887,6 +903,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
 - `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
+- `--diagnostic-feature-run-id <feature_run_id>`: optional feature run containing compatible `action_labels_next_10*` labels for canonical goal-event diagnostics when the selected run lacks embedded `goal next_10` diagnostic columns.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
 - `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `failure_receiver`.
@@ -907,6 +924,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
+- `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
 - `--device <device>`: device passed to `test.py`. Default: `cuda:0`.
 
 ### `scripts/run_relevant_models.py`

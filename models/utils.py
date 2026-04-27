@@ -735,17 +735,22 @@ def calc_class_accuracy(y, y_hat, aggfunc="mean"):
 
 
 def calc_binary_metrics(y, y_hat, threshold=0.5):
-    y_pred = y_hat > threshold
-    precision = precision_score(y, y_pred) if np.sum(y_pred) > 0 else 0
-    recall = recall_score(y, y_pred) if np.sum(y) > 0 else 0
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    y_score = np.asarray(y_hat).reshape(-1)
+    y_pred = y_score > threshold
+    has_positive = np.sum(y_true) > 0
+    has_negative = np.sum(y_true == 0) > 0
+
+    precision = precision_score(y_true, y_pred) if np.sum(y_pred) > 0 else 0
+    recall = recall_score(y_true, y_pred) if has_positive else 0
 
     metrics = {
         "precision": precision,
         "recall": recall,
-        "f1": f1_score(y, y_pred) if precision > 0 and recall > 0 else 0,
-        "roc_auc": roc_auc_score(y, y_hat) if np.sum(y) > 0 else 0.5,
-        "brier": brier_score_loss(y, y_hat),
-        "log_loss": log_loss(y, y_hat) if np.sum(y) > 0 else np.nan,
+        "f1": f1_score(y_true, y_pred) if precision > 0 and recall > 0 else 0,
+        "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else 0.5,
+        "brier": brier_score_loss(y_true, y_score),
+        "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
     }
     return {k: round(v, 4) for k, v in metrics.items()}
 
@@ -778,6 +783,10 @@ def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor,
     if getattr(args, "use_xg", False):
         return get_label_slice(batch_labels, "scores_xg"), get_label_slice(batch_labels, "concedes_xg")
     return get_label_slice(batch_labels, "scores"), get_label_slice(batch_labels, "concedes")
+
+
+def get_outcome_diagnostic_targets(batch_labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return get_label_slice(batch_labels, "scores_goal_next10"), get_label_slice(batch_labels, "concedes_goal_next10")
 
 
 def adjust_dests(labels: torch.Tensor) -> torch.Tensor:
@@ -922,6 +931,7 @@ def run_epoch(
 
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
+        diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(batch_labels)
 
         if args.include_out:
             # One node per player and one ball-out node per graph instance
@@ -1046,7 +1056,7 @@ def run_epoch(
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
-                y = get_label_slice(batch_labels, "scores") if args.task.endswith("scoring") else get_label_slice(batch_labels, "concedes")
+                y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 
@@ -1065,7 +1075,7 @@ def run_epoch(
 
                 # Calculate performance metrics only for goal-scoring prediction for simplicity
                 y_hat = torch.sigmoid(pred_s).cpu().detach().numpy()
-                y = get_label_slice(batch_labels, "scores").cpu().detach().numpy()
+                y = diagnostic_scoring.cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 
             metrics["f1"] += batch_metrics["f1"] * batch_graphs.num_graphs
@@ -1110,7 +1120,7 @@ def run_epoch(
                 pred_loss = nn.BCEWithLogitsLoss()(pred, target)
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
-                y = get_label_slice(batch_labels, "scores") if args.task.endswith("scoring") else get_label_slice(batch_labels, "concedes")
+                y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
                 batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
 

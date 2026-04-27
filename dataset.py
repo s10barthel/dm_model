@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
-from datatools.config import LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
+from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     adapt_graph_edge_features,
     drop_goal_nodes,
@@ -13,6 +13,69 @@ from datatools.utils import (
     drop_opponent_nodes,
     sparsify_edges,
 )
+
+
+OUTCOME_DIAGNOSTIC_TASKS = {
+    "outcome_scoring",
+    "outcome_conceding",
+    "intent_return",
+    "intent_return_oppo_agn",
+    "overall_scoring",
+    "overall_conceding",
+    "dest_scoring",
+    "dest_conceding",
+}
+DIAGNOSTIC_IDENTITY_COLUMNS = ("action_index", "is_pass", "is_dribble", "is_shot", "success")
+
+
+def requires_goal_next10_diagnostics(task: str | None) -> bool:
+    return str(task) in OUTCOME_DIAGNOSTIC_TASKS
+
+
+def _has_label_columns(labels: torch.Tensor, columns: tuple[str, ...]) -> bool:
+    return labels.shape[1] > max(LABEL_INDEX[column] for column in columns)
+
+
+def _normalize_label_width(labels: torch.Tensor) -> torch.Tensor:
+    expected_width = len(LABEL_COLUMNS)
+    if labels.shape[1] == expected_width:
+        return labels
+    if labels.shape[1] > expected_width:
+        raise ValueError(f"label tensor has {labels.shape[1]} columns, expected at most {expected_width}.")
+    padding = torch.zeros((labels.shape[0], expected_width - labels.shape[1]), dtype=labels.dtype, device=labels.device)
+    return torch.cat([labels, padding], dim=1)
+
+
+def _validate_diagnostic_labels(match_id: str, selected_labels: torch.Tensor, diagnostic_labels: torch.Tensor) -> None:
+    if not isinstance(diagnostic_labels, torch.Tensor) or diagnostic_labels.ndim != 2:
+        raise ValueError(f"Diagnostic labels for match {match_id} have invalid shape.")
+    if int(selected_labels.shape[0]) != int(diagnostic_labels.shape[0]):
+        raise ValueError(
+            f"Diagnostic labels for match {match_id} have row_count={int(diagnostic_labels.shape[0])}, "
+            f"expected {int(selected_labels.shape[0])}."
+        )
+    for column in DIAGNOSTIC_IDENTITY_COLUMNS:
+        column_index = LABEL_INDEX[column]
+        if selected_labels.shape[1] <= column_index or diagnostic_labels.shape[1] <= column_index:
+            raise ValueError(f"Diagnostic labels for match {match_id} are missing identity column {column!r}.")
+        if not torch.equal(selected_labels[:, column_index], diagnostic_labels[:, column_index]):
+            raise ValueError(f"Diagnostic labels for match {match_id} do not align on {column!r}.")
+
+
+def _copy_goal_next10_diagnostics(selected_labels: torch.Tensor, diagnostic_labels: torch.Tensor) -> torch.Tensor:
+    labels = _normalize_label_width(selected_labels)
+    if _has_label_columns(diagnostic_labels, GOAL_NEXT10_DIAGNOSTIC_COLUMNS):
+        source_score = diagnostic_labels[:, LABEL_INDEX["scores_goal_next10"]]
+        source_concede = diagnostic_labels[:, LABEL_INDEX["concedes_goal_next10"]]
+    elif _has_label_columns(diagnostic_labels, ("scores", "concedes")):
+        source_score = diagnostic_labels[:, LABEL_INDEX["scores"]]
+        source_concede = diagnostic_labels[:, LABEL_INDEX["concedes"]]
+    else:
+        raise ValueError("Diagnostic labels do not contain scores/concedes or goal-next10 diagnostic columns.")
+
+    labels[:, LABEL_INDEX["scores_goal_next10"]] = source_score.to(dtype=labels.dtype, device=labels.device)
+    labels[:, LABEL_INDEX["concedes_goal_next10"]] = source_concede.to(dtype=labels.dtype, device=labels.device)
+    return labels
 
 
 class ActionDataset(Dataset):
@@ -37,13 +100,22 @@ class ActionDataset(Dataset):
         max_edge_dist=10.0,
         edge_in_dim=None,
         train=True,
+        diagnostic_label_dir=None,
+        require_goal_next10_diagnostics=None,
     ):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
+        diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
+        self.diagnostic_label_dir = str(diagnostic_label_root) if diagnostic_label_root is not None else None
+        self.require_goal_next10_diagnostics = (
+            requires_goal_next10_diagnostics(task)
+            if require_goal_next10_diagnostics is None
+            else bool(require_goal_next10_diagnostics)
+        )
 
         features = []
         label_tensors: list[torch.Tensor] = []
@@ -78,6 +150,24 @@ class ActionDataset(Dataset):
                     f"feature_label_length_mismatch:{len(match_features)}!={int(match_labels.shape[0])}"
                 )
                 continue
+
+            has_diagnostics = _has_label_columns(match_labels, GOAL_NEXT10_DIAGNOSTIC_COLUMNS)
+            if not has_diagnostics:
+                if diagnostic_label_root is None:
+                    if self.require_goal_next10_diagnostics:
+                        raise FileNotFoundError(
+                            "Canonical goal-next10 diagnostics are required for "
+                            f"task={task!r}, but no diagnostic_label_dir was provided."
+                        )
+                else:
+                    diagnostic_label_path = diagnostic_label_root / f"{match_id}.pt"
+                    if not diagnostic_label_path.exists():
+                        raise FileNotFoundError(f"Diagnostic labels not found at {diagnostic_label_path}.")
+                    diagnostic_labels = torch.load(diagnostic_label_path, weights_only=False)
+                    _validate_diagnostic_labels(match_id, match_labels, diagnostic_labels)
+                    match_labels = _copy_goal_next10_diagnostics(match_labels, diagnostic_labels)
+
+            match_labels = _normalize_label_width(match_labels)
 
             features.extend(match_features)
             label_tensors.append(match_labels)

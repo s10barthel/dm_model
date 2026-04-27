@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import math
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
+import torch
 
 import project_config
+from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import utils
+from models.utils import calc_binary_metrics, get_outcome_diagnostic_targets, get_outcome_targets
 from scripts import main as main_script
 from scripts import train_relevant_models as train_wrapper
 
@@ -223,6 +229,77 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertEqual(float(next_skip_labeled.at[0, "concedes_xT"]), float(next_labeled.at[0, "concedes_xT"]))
         self.assertEqual(float(disc_skip_labeled.at[0, "scores_xT"]), float(disc_labeled.at[0, "scores_xT"]))
         self.assertEqual(float(disc_skip_labeled.at[0, "concedes_xT"]), float(disc_labeled.at[0, "concedes_xT"]))
+
+
+class BinaryMetricsTests(unittest.TestCase):
+    def test_binary_labels_are_supported(self) -> None:
+        metrics = calc_binary_metrics(
+            np.array([0, 1, 0, 1]),
+            np.array([0.05, 0.7, 0.2, 0.9]),
+            threshold=0.5,
+        )
+
+        self.assertEqual(metrics["precision"], 1.0)
+        self.assertEqual(metrics["recall"], 1.0)
+        self.assertEqual(metrics["f1"], 1.0)
+        self.assertEqual(metrics["roc_auc"], 1.0)
+
+    def test_discounted_goal_labels_are_binarized_for_metrics(self) -> None:
+        metrics = calc_binary_metrics(
+            np.array([0.0, 0.729, 0.9, 1.0]),
+            np.array([0.05, 0.8, 0.7, 0.95]),
+            threshold=0.1,
+        )
+
+        self.assertEqual(metrics["precision"], 1.0)
+        self.assertEqual(metrics["recall"], 1.0)
+        self.assertEqual(metrics["f1"], 1.0)
+        self.assertEqual(metrics["roc_auc"], 1.0)
+
+    def test_soft_continuous_labels_are_binarized_for_metrics(self) -> None:
+        metrics = calc_binary_metrics(
+            np.array([0.0, 0.02, 0.4, 0.8]),
+            np.array([0.2, 0.05, 0.6, 0.7]),
+            threshold=0.1,
+        )
+
+        self.assertEqual(metrics["precision"], 0.6667)
+        self.assertEqual(metrics["recall"], 0.6667)
+        self.assertEqual(metrics["f1"], 0.6667)
+        self.assertEqual(metrics["roc_auc"], 0.6667)
+
+    def test_all_zero_labels_use_safe_fallbacks(self) -> None:
+        metrics = calc_binary_metrics(
+            np.array([0.0, 0.0, 0.0]),
+            np.array([0.1, 0.2, 0.3]),
+            threshold=0.5,
+        )
+
+        self.assertEqual(metrics["precision"], 0)
+        self.assertEqual(metrics["recall"], 0)
+        self.assertEqual(metrics["f1"], 0)
+        self.assertEqual(metrics["roc_auc"], 0.5)
+        self.assertFalse(math.isnan(metrics["brier"]))
+        self.assertTrue(math.isnan(metrics["log_loss"]))
+
+
+class OutcomeTargetSelectionTests(unittest.TestCase):
+    def test_training_targets_remain_selected_target_family_while_diagnostics_use_goal_next10(self) -> None:
+        labels = torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
+        labels[:, LABEL_INDEX["scores"]] = 0.729
+        labels[:, LABEL_INDEX["scores_xg"]] = 0.42
+        labels[:, LABEL_INDEX["concedes_xg"]] = 0.13
+        labels[:, LABEL_INDEX["scores_goal_next10"]] = 1.0
+        labels[:, LABEL_INDEX["concedes_goal_next10"]] = 0.0
+
+        args = SimpleNamespace(use_xg=True, use_xt=False, use_goal_distance=False, use_epv=False)
+        outcome_scoring, outcome_conceding = get_outcome_targets(labels, args)
+        diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(labels)
+
+        self.assertAlmostEqual(float(outcome_scoring[0]), 0.42, places=6)
+        self.assertAlmostEqual(float(outcome_conceding[0]), 0.13, places=6)
+        self.assertEqual(float(diagnostic_scoring[0]), 1.0)
+        self.assertEqual(float(diagnostic_conceding[0]), 0.0)
 
 
 class WrapperValidationTests(unittest.TestCase):
