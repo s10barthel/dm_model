@@ -84,6 +84,7 @@ def main() -> None:
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        require_feature_run_id=False,
     )
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     component_run_id = args.run_id or generate_run_id("hawkeye_component")
@@ -140,6 +141,7 @@ def main() -> None:
         "intended_receiver_mode": intended_receiver_mode,
         "return_type": shared_context["return_type"],
         "target_family": shared_context["target_family"],
+        "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
         "requested_situation_ids": args.situation_id or [],
         "limit": args.limit,

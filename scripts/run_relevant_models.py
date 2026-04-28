@@ -21,6 +21,7 @@ from models.utils import (
     infer_feature_graph_schema,
     load_model,
     resolve_model_selection,
+    resolve_runtime_feature_run_context,
     validate_feature_graph_schema,
     validate_model_graph_schemas,
 )
@@ -33,7 +34,6 @@ from project_config import (
     get_resolved_action_path,
     get_success_intent_graph_dir,
     load_base_splits,
-    resolve_feature_root,
     write_latest_run,
     write_run_metadata,
 )
@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id")
+    parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
     parser.add_argument("--run-id")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -282,11 +283,10 @@ def main() -> None:
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        require_feature_run_id=False,
     )
-    feature_run_id = shared_context["feature_run_id"]
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     return_type = shared_context["return_type"]
-    feature_root = resolve_feature_root(feature_run_id)
     component_run_id = args.run_id or generate_run_id("component")
     output_parent = Path(args.output_dir) if args.output_dir else COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
@@ -305,8 +305,21 @@ def main() -> None:
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
     graph_schema = validate_model_graph_schemas(model_specs)
-    feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
-    validate_feature_graph_schema(feature_schema, graph_schema, context="Selected feature artifacts")
+    runtime_feature_context = resolve_runtime_feature_run_context(
+        args.feature_run_id,
+        shared_context,
+        bundle,
+        str(intended_receiver_mode),
+        graph_schema,
+        context="Selected component feature artifacts",
+    )
+    feature_run_id = str(runtime_feature_context["feature_run_id"])
+    feature_root = Path(runtime_feature_context["feature_root"])
+    feature_schema = runtime_feature_context["feature_schema"]
+    shared_context = dict(shared_context)
+    shared_context["feature_run_id"] = feature_run_id
+    shared_context["runtime_feature_run_id"] = feature_run_id
+    shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
     success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
     (
@@ -326,6 +339,9 @@ def main() -> None:
         "split": args.split,
         "requested_match_ids": match_ids,
         "feature_run_id": feature_run_id,
+        "runtime_feature_run_id": feature_run_id,
+        "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
+        "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
         "feature_root": str(feature_root),
         "feature_schema": feature_schema,
         "intended_receiver_mode": intended_receiver_mode,

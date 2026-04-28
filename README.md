@@ -202,7 +202,7 @@ The current pipeline now follows an explicit-artifact contract:
 - Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
 - `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
 - Training decides whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
-- `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. They no longer rely on wrapper-level “latest compatible” resolution or separate `--feature-run-id` selection.
+- `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
 
 
@@ -334,7 +334,7 @@ Inputs:
 
 - `data/event_synced/*.csv`
 - `data/splits/match_splits.json`
-- for EPV, a model bundle or explicit source model ids for `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`
+- for EPV, a model bundle or explicit source model ids for `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`; mixed-source checkpoints use the newest compatible runtime feature run unless `--feature-run-id` is supplied
 
 Outputs:
 
@@ -523,7 +523,7 @@ python scripts/run_relevant_models.py --split test --action-intent-model-id acti
 
 Inputs:
 
-- feature artifacts referenced by the selected model metadata
+- feature artifacts from the selected runtime feature run; compatible mixed-source checkpoints are allowed, and the runtime feature run is chosen automatically from the selected source runs unless `--feature-run-id` is supplied
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
@@ -533,6 +533,7 @@ When a `success_intent` checkpoint is supplied explicitly or present in the sele
 Useful options:
 
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
+- `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--run-id <component_run_id>` to pin the created component run id instead of auto-generating one
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
@@ -548,7 +549,7 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 
 Inputs:
 
-- feature artifacts referenced by the selected model metadata
+- feature artifacts from the selected runtime feature run; compatible mixed-source checkpoints are allowed, and the runtime feature run is chosen automatically from the selected source runs unless `--feature-run-id` is supplied
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/event_synced/<match_id>.csv`
 
@@ -567,6 +568,7 @@ Outputs:
 Useful options:
 
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
+- `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--show-trajectories` to render dashed recent player trajectories
 - `--row-index <index>` to use the legacy internal modeled-action row index instead of the CSV `action_id`
 - `--original-event-id <sportec_event_id>` to look up the action by the raw Sportec event id
@@ -884,6 +886,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 - `--bundle-id <bundle_id>`: source model bundle containing `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`.
 - `--pass-intent-model-id`, `--pass-success-model-id`, `--outcome-scoring-model-id`, `--outcome-conceding-model-id`: explicit source checkpoint overrides.
+- `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--match-id <id>`: export EPV sidecars only for one or more specific match ids. Default: all available synced matches.
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
@@ -933,6 +936,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
+- `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--run-id <component_run_id>`: pin the created component export run id. Default: auto-generate a new component run id.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
@@ -998,6 +1002,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--original-event-id <id>`: raw Sportec event id lookup. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
+- `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
@@ -1111,6 +1116,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/*.csv`
   - `data/tracking_processed/*.parquet`
   - `data/lineup/line_up.parquet`
+  - a compatible runtime feature run for Sportec graphs and resolved actions
   - source checkpoints from `saved/<task>/<model_run_id>/...`
 - Outputs:
   - `data/epv/epv.csv`
@@ -1163,7 +1169,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/run_relevant_models.py`
 
 - Inputs:
-  - feature artifacts resolved from the selected model metadata
+  - feature artifacts from the selected runtime feature run
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
   - `data/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
@@ -1179,7 +1185,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/visualize_action_components.py`
 
 - Inputs:
-  - feature artifacts resolved from the selected model metadata
+  - feature artifacts from the selected runtime feature run
   - `data/event_synced/<match_id>.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:

@@ -45,6 +45,7 @@ def main() -> None:
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        require_feature_run_id=False,
     )
     python = sys.executable
     model_ids = [

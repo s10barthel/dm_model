@@ -97,6 +97,7 @@ def make_bundle_shared_context(
     intended_receiver_mode: str | None = "angle_only",
     return_type: str = "disc_0.9",
     target_family: str | None = "goal",
+    node_in_dim: int = 25,
     edge_in_dim: int = 4,
     add_v_edge_features: bool = True,
 ) -> dict[str, object]:
@@ -106,6 +107,7 @@ def make_bundle_shared_context(
         "return_type": return_type,
         "target_family": target_family,
         "graph_schema": {
+            "node_in_dim": node_in_dim,
             "edge_in_dim": edge_in_dim,
             "add_v_edge_features": add_v_edge_features,
         },
@@ -120,6 +122,7 @@ def make_model_record(
     intended_receiver_mode: str | None = "angle_only",
     return_type: str = "disc_0.9",
     target_family: str | None = None,
+    node_in_dim: int = 25,
     edge_in_dim: int = 4,
     add_v_edge_features: bool = True,
 ) -> dict[str, object]:
@@ -130,6 +133,7 @@ def make_model_record(
         "return_type": return_type,
         "target_family": target_family,
         "graph_schema": {
+            "node_in_dim": node_in_dim,
             "edge_in_dim": edge_in_dim,
             "add_v_edge_features": add_v_edge_features,
         },
@@ -137,6 +141,14 @@ def make_model_record(
 
 
 class BenchmarkNoAccelTests(unittest.TestCase):
+    @staticmethod
+    def _make_runtime_feature_run(root: Path, run_id: str, *, mode: str = "model", with_resolved_actions: bool = True) -> Path:
+        feature_root = root / run_id
+        (feature_root / "action_graphs").mkdir(parents=True, exist_ok=True)
+        if with_resolved_actions:
+            model_utils.get_resolved_action_dir(mode, root=feature_root).mkdir(parents=True, exist_ok=True)
+        return feature_root
+
     def test_benchmark_identifier_columns_export_as_nullable_integers(self) -> None:
         table = pd.DataFrame(
             [
@@ -756,6 +768,82 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(shared["return_type"], "in_3")
         self.assertEqual(shared["target_family"], "xt")
 
+    def test_validate_model_record_consistency_rejects_mixed_feature_run_by_default(self) -> None:
+        model_records = {
+            "pass_intent": make_model_record("pass_intent", feature_run_id="feature_old"),
+            "pass_success": make_model_record("pass_success", feature_run_id="feature_new"),
+        }
+
+        with self.assertRaises(ValueError):
+            model_utils.validate_model_record_consistency(model_records)
+
+    def test_validate_model_record_consistency_accepts_mixed_feature_run_when_relaxed(self) -> None:
+        model_records = {
+            "pass_intent": make_model_record(
+                "pass_intent",
+                feature_run_id="feature_old",
+                node_in_dim=20,
+                edge_in_dim=2,
+                add_v_edge_features=False,
+            ),
+            "pass_success": make_model_record(
+                "pass_success",
+                feature_run_id="feature_new",
+                node_in_dim=25,
+                edge_in_dim=4,
+                add_v_edge_features=True,
+            ),
+        }
+
+        shared = model_utils.validate_model_record_consistency(model_records, require_feature_run_id=False)
+
+        self.assertIsNone(shared["feature_run_id"])
+        self.assertEqual(
+            shared["source_feature_run_ids"],
+            {"pass_intent": "feature_old", "pass_success": "feature_new"},
+        )
+        self.assertEqual(
+            shared["graph_schema"],
+            {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+        )
+
+    def test_resolve_model_selection_relaxed_accepts_bundle_plus_override_mixed_feature_runs(self) -> None:
+        resolved_model_ids = {
+            "pass_intent": "pass_intent/old",
+            "pass_success": "pass_success/new",
+        }
+        bundle = {
+            "bundle_id": "bundle_under_test",
+            "feature_run_id": "feature_bundle",
+            "intended_receiver_mode": "angle_only",
+            "return_type": "disc_0.9",
+            "model_ids": {"pass_success": "pass_success/new"},
+        }
+        model_records = {
+            "pass_intent": make_model_record("pass_intent", feature_run_id="feature_old"),
+            "pass_success": make_model_record("pass_success", feature_run_id="feature_new"),
+        }
+
+        with (
+            patch.object(model_utils, "resolve_bundle_model_ids", return_value=(resolved_model_ids, bundle)),
+            patch.object(model_utils, "get_model_records", return_value=model_records),
+        ):
+            selected_model_ids, shared, selected_bundle = model_utils.resolve_model_selection(
+                required_tasks=["pass_intent", "pass_success"],
+                bundle_id="bundle_under_test",
+                explicit_model_ids={"pass_intent": "pass_intent/old"},
+                require_feature_run_id=False,
+            )
+
+        self.assertEqual(selected_model_ids, resolved_model_ids)
+        self.assertEqual(selected_bundle, bundle)
+        self.assertEqual(shared["feature_run_id"], "feature_bundle")
+        self.assertEqual(shared["bundle_feature_run_id"], "feature_bundle")
+        self.assertEqual(
+            shared["source_feature_run_ids"],
+            {"pass_intent": "feature_old", "pass_success": "feature_new"},
+        )
+
     def test_resolve_model_selection_uses_outcome_return_type_for_mixed_bundle(self) -> None:
         required_tasks = [
             "action_intent",
@@ -809,6 +897,182 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(shared["target_family"], "xt")
         self.assertEqual(shared["feature_run_id"], "feature_run")
         self.assertEqual(selected_bundle, bundle)
+
+    def test_validate_model_graph_schemas_aggregates_compatible_requirements(self) -> None:
+        small_model = SimpleNamespace(args={"node_in_dim": 20, "edge_in_dim": 2, "add_v_edge_features": False})
+        large_model = SimpleNamespace(args={"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True})
+
+        graph_schema = model_utils.validate_model_graph_schemas({"small": small_model, "large": large_model})
+
+        self.assertEqual(graph_schema, {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True})
+
+    def test_validate_feature_graph_schema_checks_node_dimension(self) -> None:
+        with self.assertRaises(ValueError):
+            model_utils.validate_feature_graph_schema(
+                {"node_in_dim": 20, "edge_in_dim": 4, "add_v_edge_features": True},
+                {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+            )
+
+    def test_resolve_runtime_feature_run_context_explicit_feature_run_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_old")
+            self._make_runtime_feature_run(root, "feature_new")
+            metadata = {
+                "feature_old": {
+                    "created_at": "2026-04-01T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+                "feature_new": {
+                    "created_at": "2026-04-02T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+            }
+            schemas = {
+                "feature_old": {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                "feature_new": {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+            }
+
+            with (
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+                patch.object(model_utils, "infer_feature_graph_schema", side_effect=lambda path: schemas[Path(path).parent.name]),
+            ):
+                runtime = model_utils.resolve_runtime_feature_run_context(
+                    "feature_old",
+                    {"source_feature_run_ids": {"pass_success": "feature_old", "outcome_scoring": "feature_new"}},
+                    None,
+                    "model",
+                    {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                )
+
+        self.assertEqual(runtime["feature_run_id"], "feature_old")
+        self.assertEqual(runtime["selection"], "explicit")
+
+    def test_resolve_runtime_feature_run_context_uses_newest_compatible_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_old")
+            self._make_runtime_feature_run(root, "feature_new")
+            metadata = {
+                "feature_old": {
+                    "created_at": "2026-04-01T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+                "feature_new": {
+                    "created_at": "2026-04-02T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+            }
+            schemas = {
+                "feature_old": {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                "feature_new": {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+            }
+
+            with (
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+                patch.object(model_utils, "infer_feature_graph_schema", side_effect=lambda path: schemas[Path(path).parent.name]),
+            ):
+                runtime = model_utils.resolve_runtime_feature_run_context(
+                    None,
+                    {"source_feature_run_ids": {"pass_success": "feature_old", "outcome_scoring": "feature_new"}},
+                    None,
+                    "model",
+                    {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                )
+
+        self.assertEqual(runtime["feature_run_id"], "feature_new")
+        self.assertEqual(runtime["selection"], "newest_compatible")
+
+    def test_resolve_runtime_feature_run_context_rejects_incompatible_graph_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_old")
+            metadata = {
+                "feature_old": {
+                    "created_at": "2026-04-01T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+            }
+            schemas = {"feature_old": {"node_in_dim": 25, "edge_in_dim": 2, "add_v_edge_features": False}}
+
+            with (
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+                patch.object(model_utils, "infer_feature_graph_schema", side_effect=lambda path: schemas[Path(path).parent.name]),
+            ):
+                with self.assertRaises(ValueError):
+                    model_utils.resolve_runtime_feature_run_context(
+                        None,
+                        {"source_feature_run_ids": {"pass_success": "feature_old"}},
+                        None,
+                        "model",
+                        {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                    )
+
+    def test_validate_runtime_feature_run_rejects_missing_resolved_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_old", with_resolved_actions=False)
+            metadata = {
+                "feature_old": {
+                    "created_at": "2026-04-01T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/source",
+                },
+            }
+
+            with (
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    model_utils.validate_runtime_feature_run(
+                        "feature_old",
+                        "model",
+                        {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                        {},
+                    )
+
+    def test_validate_runtime_feature_run_rejects_model_mode_intended_receiver_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_runtime")
+            metadata = {
+                "feature_runtime": {
+                    "created_at": "2026-04-02T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                    "intended_receiver_model_id": "success_intent/runtime",
+                },
+            }
+
+            with (
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+                patch.object(
+                    model_utils,
+                    "infer_feature_graph_schema",
+                    return_value={"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    model_utils.validate_runtime_feature_run(
+                        "feature_runtime",
+                        "model",
+                        {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                        {"feature_source": {"intended_receiver_model_id": "success_intent/source"}},
+                    )
 
     def test_resolve_bundle_model_ids_still_rejects_missing_required_tasks(self) -> None:
         with patch.object(

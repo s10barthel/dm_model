@@ -20,10 +20,9 @@ from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn
 from models.utils import (
-    infer_feature_graph_schema,
     load_model,
     resolve_model_selection,
-    validate_feature_graph_schema,
+    resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
 from project_config import (
@@ -31,7 +30,6 @@ from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     get_action_graph_dir,
     get_resolved_action_path,
-    resolve_feature_root,
 )
 
 
@@ -55,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id", default=None)
+    parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -307,13 +306,12 @@ def main() -> None:
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        require_feature_run_id=False,
     )
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
-    feature_run_id = shared_context["feature_run_id"]
-    feature_root = resolve_feature_root(feature_run_id)
 
     model_ids = {
         "action_intent": resolved_model_ids["action_intent"],
@@ -329,8 +327,20 @@ def main() -> None:
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
     graph_schema = validate_model_graph_schemas(loaded_models)
-    feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
-    validate_feature_graph_schema(feature_schema, graph_schema, context="Selected feature artifacts")
+    runtime_feature_context = resolve_runtime_feature_run_context(
+        args.feature_run_id,
+        shared_context,
+        bundle,
+        str(intended_receiver_mode),
+        graph_schema,
+        context="Selected visualization feature artifacts",
+    )
+    feature_run_id = str(runtime_feature_context["feature_run_id"])
+    feature_root = Path(runtime_feature_context["feature_root"])
+    shared_context = dict(shared_context)
+    shared_context["feature_run_id"] = feature_run_id
+    shared_context["runtime_feature_run_id"] = feature_run_id
+    shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
 
     match = load_match(
         args.match_id,

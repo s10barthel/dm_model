@@ -29,12 +29,17 @@ from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from project_config import (
     SAVED_DIR,
+    get_action_graph_dir,
     get_model_bundle_root,
+    get_feature_run_root,
+    get_resolved_action_dir,
     get_task_saved_dir,
     infer_legacy_model_context,
     infer_target_family,
+    load_feature_run_metadata,
     load_model_bundle_metadata,
     load_model_splits,
+    resolve_feature_run_id,
 )
 
 
@@ -171,6 +176,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "model_name": str(args.get("model", metadata.get("model", "unknown"))),
         "feature_signature": feature_signature,
         "graph_schema": {
+            "node_in_dim": feature_signature["node_in_dim"],
             "edge_in_dim": feature_signature["edge_in_dim"],
             "add_v_edge_features": feature_signature["add_v_edge_features"],
         },
@@ -482,6 +488,13 @@ def is_feature_graph_schema_compatible(
     feature_schema: dict[str, int | bool],
     required_schema: dict[str, int | bool],
 ) -> bool:
+    feature_node_dim = feature_schema.get("node_in_dim")
+    required_node_dim = required_schema.get("node_in_dim")
+    if required_node_dim is not None:
+        if feature_node_dim is None:
+            return False
+        if int(feature_node_dim) < int(required_node_dim):
+            return False
     feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
     required_edge_dim = int(required_schema.get("edge_in_dim", 0))
     return feature_edge_dim >= required_edge_dim
@@ -521,6 +534,22 @@ def get_model_records(model_ids: dict[str, str]) -> dict[str, dict[str, Any]]:
     return {task: get_model_record(model_id) for task, model_id in model_ids.items()}
 
 
+def aggregate_graph_schemas(schemas: dict[str, dict[str, Any]]) -> dict[str, int | bool]:
+    if not schemas:
+        return {"edge_in_dim": 2, "add_v_edge_features": False}
+
+    edge_dims = [int(schema.get("edge_in_dim", 2)) for schema in schemas.values()]
+    node_dims = [int(schema["node_in_dim"]) for schema in schemas.values() if schema.get("node_in_dim") is not None]
+    edge_in_dim = max(edge_dims) if edge_dims else 2
+    result: dict[str, int | bool] = {
+        "edge_in_dim": edge_in_dim,
+        "add_v_edge_features": bool(edge_in_dim > 2 or any(schema.get("add_v_edge_features") for schema in schemas.values())),
+    }
+    if node_dims:
+        result["node_in_dim"] = max(node_dims)
+    return result
+
+
 def validate_model_record_consistency(
     model_records: dict[str, dict[str, Any]],
     require_feature_run_id: bool = True,
@@ -541,7 +570,12 @@ def validate_model_record_consistency(
             "Selected model checkpoints do not agree on feature_run_id: "
             f"{details}."
         )
-    shared["feature_run_id"] = next(iter(feature_run_ids)) if feature_run_ids else None
+    shared["feature_run_id"] = next(iter(feature_run_ids)) if len(feature_run_ids) == 1 else None
+    shared["source_feature_run_ids"] = {
+        task: record.get("feature_run_id")
+        for task, record in model_records.items()
+        if record.get("feature_run_id")
+    }
 
     intended_modes = {record.get("intended_receiver_mode") for record in model_records.values()}
     intended_modes.discard(None)
@@ -566,14 +600,9 @@ def validate_model_record_consistency(
         )
     shared["return_type"] = next(iter(return_types)) if return_types else None
 
-    graph_schemas = {json.dumps(record["graph_schema"], sort_keys=True) for record in model_records.values()}
-    if len(graph_schemas) != 1:
-        details = ", ".join(f"{task}={record.get('graph_schema')}" for task, record in model_records.items())
-        raise ValueError(
-            "Selected model checkpoints do not agree on graph schema: "
-            f"{details}."
-        )
-    shared["graph_schema"] = next(iter(model_records.values()))["graph_schema"]
+    shared["graph_schema"] = aggregate_graph_schemas(
+        {task: record["graph_schema"] for task, record in model_records.items()}
+    )
 
     target_families = {record.get("target_family") for record in outcome_records.values()}
     target_families.discard(None)
@@ -618,7 +647,7 @@ def resolve_model_selection(
     shared["model_records"] = model_records
 
     if bundle is not None:
-        if bundle.get("feature_run_id") and shared.get("feature_run_id") and bundle["feature_run_id"] != shared["feature_run_id"]:
+        if require_feature_run_id and bundle.get("feature_run_id") and shared.get("feature_run_id") and bundle["feature_run_id"] != shared["feature_run_id"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} feature_run_id={bundle['feature_run_id']!r} does not match the selected model ids "
                 f"(feature_run_id={shared['feature_run_id']!r})."
@@ -639,6 +668,8 @@ def resolve_model_selection(
                 f"(target_family={shared['target_family']!r})."
             )
 
+        if bundle.get("feature_run_id"):
+            shared["bundle_feature_run_id"] = bundle.get("feature_run_id")
         shared["feature_run_id"] = shared.get("feature_run_id") or bundle.get("feature_run_id")
         shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or bundle.get("intended_receiver_mode")
         shared["return_type"] = shared.get("return_type") or bundle.get("return_type")
@@ -652,6 +683,7 @@ def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
         return None
     edge_in_dim = int(model.args.get("edge_in_dim", 2))
     return {
+        "node_in_dim": int(model.args.get("node_in_dim", 0)),
         "edge_in_dim": edge_in_dim,
         "add_v_edge_features": bool(model.args.get("add_v_edge_features", edge_in_dim > 2)),
     }
@@ -665,19 +697,7 @@ def validate_model_graph_schemas(models: dict[str, GNN | None]) -> dict[str, int
     }
     if not schemas:
         return {"edge_in_dim": 2, "add_v_edge_features": False}
-
-    reference_name, reference_schema = next(iter(schemas.items()))
-    mismatches = []
-    for name, schema in list(schemas.items())[1:]:
-        if schema != reference_schema:
-            mismatches.append(f"{name}={schema}")
-
-    if mismatches:
-        raise ValueError(
-            "Loaded model checkpoints use incompatible graph edge schemas. "
-            f"Reference {reference_name}={reference_schema}; mismatches: {', '.join(mismatches)}."
-        )
-    return reference_schema
+    return aggregate_graph_schemas(schemas)
 
 
 def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]:
@@ -690,14 +710,156 @@ def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]
             first_graph = next((graph for graph in graphs if graph is not None), None)
             if first_graph is None:
                 continue
+            node_in_dim = int(first_graph.x.shape[1]) if getattr(first_graph, "x", None) is not None else 0
             edge_in_dim = int(first_graph.edge_attr.shape[1]) if getattr(first_graph, "edge_attr", None) is not None else 0
             return {
+                "node_in_dim": node_in_dim,
                 "edge_in_dim": edge_in_dim,
                 "add_v_edge_features": bool(edge_in_dim > 2),
             }
         except Exception:
             continue
     raise FileNotFoundError(f"Could not infer graph schema from feature directory {feature_dir}.")
+
+
+def runtime_feature_run_candidate_ids(
+    shared_context: dict[str, Any],
+    bundle: dict[str, Any] | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    source_ids = shared_context.get("source_feature_run_ids", {})
+    if isinstance(source_ids, dict):
+        candidates.extend(str(feature_run_id) for feature_run_id in source_ids.values() if feature_run_id)
+    for feature_run_id in (
+        shared_context.get("feature_run_id"),
+        shared_context.get("bundle_feature_run_id"),
+        bundle.get("feature_run_id") if isinstance(bundle, dict) else None,
+    ):
+        if feature_run_id:
+            candidates.append(str(feature_run_id))
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for feature_run_id in candidates:
+        if feature_run_id in seen:
+            continue
+        seen.add(feature_run_id)
+        unique.append(feature_run_id)
+    return unique
+
+
+def _feature_run_sort_key(feature_run_id: str, metadata: dict[str, Any] | None) -> tuple[str, str]:
+    return (str((metadata or {}).get("created_at") or ""), str(feature_run_id))
+
+
+def validate_runtime_feature_run(
+    feature_run_id: str,
+    intended_receiver_mode: str,
+    required_graph_schema: dict[str, int | bool],
+    source_feature_metadata: dict[str, dict[str, Any]],
+    *,
+    context: str = "Selected feature artifacts",
+) -> dict[str, Any]:
+    resolved_feature_run_id = resolve_feature_run_id(feature_run_id, required=True, allow_latest=False)
+    feature_root = get_feature_run_root(str(resolved_feature_run_id))
+    metadata = load_feature_run_metadata(str(resolved_feature_run_id), required=False) or {}
+
+    modes = metadata.get("intended_receiver_modes")
+    if isinstance(modes, list) and intended_receiver_mode not in {str(mode) for mode in modes}:
+        raise ValueError(
+            f"Feature run {resolved_feature_run_id!r} does not expose intended_receiver_mode={intended_receiver_mode!r}."
+        )
+
+    resolved_action_dir = get_resolved_action_dir(intended_receiver_mode, root=feature_root)
+    if not resolved_action_dir.exists():
+        raise FileNotFoundError(
+            f"Resolved actions for intended_receiver_mode={intended_receiver_mode!r} not found at {resolved_action_dir}."
+        )
+
+    feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
+    validate_feature_graph_schema(feature_schema, required_graph_schema, context=context)
+
+    if intended_receiver_mode == "model":
+        runtime_model_id = metadata.get("intended_receiver_model_id")
+        source_model_ids = {
+            source_metadata.get("intended_receiver_model_id")
+            for source_metadata in source_feature_metadata.values()
+            if source_metadata.get("intended_receiver_model_id")
+        }
+        source_model_ids.discard(None)
+        if source_model_ids and (runtime_model_id is None or source_model_ids != {runtime_model_id}):
+            details = ", ".join(f"{run_id}={meta.get('intended_receiver_model_id')!r}" for run_id, meta in source_feature_metadata.items())
+            raise ValueError(
+                f"Feature run {resolved_feature_run_id!r} intended_receiver_model_id={runtime_model_id!r} "
+                f"does not match source feature runs: {details}."
+            )
+
+    return {
+        "feature_run_id": str(resolved_feature_run_id),
+        "feature_root": feature_root,
+        "feature_schema": feature_schema,
+        "metadata": metadata,
+    }
+
+
+def resolve_runtime_feature_run_context(
+    explicit_feature_run_id: str | None,
+    shared_context: dict[str, Any],
+    bundle: dict[str, Any] | None,
+    intended_receiver_mode: str,
+    required_graph_schema: dict[str, int | bool],
+    *,
+    context: str = "Selected feature artifacts",
+) -> dict[str, Any]:
+    candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
+    source_feature_metadata = {
+        feature_run_id: (load_feature_run_metadata(feature_run_id, required=False) or {})
+        for feature_run_id in candidate_ids
+        if get_feature_run_root(feature_run_id).exists()
+    }
+
+    if explicit_feature_run_id:
+        resolved = validate_runtime_feature_run(
+            str(explicit_feature_run_id),
+            intended_receiver_mode,
+            required_graph_schema,
+            source_feature_metadata,
+            context=context,
+        )
+        resolved["selection"] = "explicit"
+        resolved["candidate_feature_run_ids"] = candidate_ids
+        return resolved
+
+    if not candidate_ids:
+        raise ValueError("No source feature runs are available for runtime feature selection. Pass --feature-run-id.")
+
+    compatible: list[dict[str, Any]] = []
+    rejected: list[str] = []
+    for feature_run_id in candidate_ids:
+        try:
+            resolved = validate_runtime_feature_run(
+                feature_run_id,
+                intended_receiver_mode,
+                required_graph_schema,
+                source_feature_metadata,
+                context=context,
+            )
+        except Exception as exc:
+            rejected.append(f"{feature_run_id}: {type(exc).__name__}: {exc}")
+            continue
+        compatible.append(resolved)
+
+    if not compatible:
+        raise ValueError(
+            "No compatible runtime feature run could be selected from model source feature runs. "
+            f"Rejected candidates: {'; '.join(rejected)}"
+        )
+
+    compatible.sort(key=lambda item: _feature_run_sort_key(str(item["feature_run_id"]), item.get("metadata")))
+    selected = compatible[-1]
+    selected["selection"] = "newest_compatible"
+    selected["candidate_feature_run_ids"] = candidate_ids
+    return selected
 
 
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:

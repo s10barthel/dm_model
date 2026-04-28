@@ -17,10 +17,9 @@ from datatools.epv import annotate_match_epv, build_epv_action_values, compute_e
 from inference import inference_gnn
 from models.utils import (
     get_model_provenance,
-    infer_feature_graph_schema,
     load_model,
     resolve_model_selection,
-    validate_feature_graph_schema,
+    resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
 from project_config import (
@@ -28,7 +27,6 @@ from project_config import (
     EPV_MATCH_DIR,
     EVENT_SYNCED_DIR,
     ensure_project_dirs,
-    get_action_graph_dir,
     resolve_feature_root,
 )
 from scripts.run_relevant_models import load_match
@@ -49,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--device", default="cuda:0")
@@ -86,6 +85,7 @@ def resolve_epv_model_selection(args: argparse.Namespace) -> tuple[dict[str, str
             "outcome_scoring": args.outcome_scoring_model_id,
             "outcome_conceding": args.outcome_conceding_model_id,
         },
+        require_feature_run_id=False,
     )
 
 
@@ -201,9 +201,19 @@ def main() -> None:
     resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
     model_specs = load_epv_models(resolved_model_ids, device)
     graph_schema = validate_model_graph_schemas(model_specs)
-    feature_root = resolve_feature_root(str(shared_context["feature_run_id"]))
-    feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
-    validate_feature_graph_schema(feature_schema, graph_schema, context="Selected feature artifacts")
+    runtime_feature_context = resolve_runtime_feature_run_context(
+        args.feature_run_id,
+        shared_context,
+        bundle,
+        str(shared_context["intended_receiver_mode"]),
+        graph_schema,
+        context="Selected EPV feature artifacts",
+    )
+    shared_context = dict(shared_context)
+    shared_context["feature_run_id"] = runtime_feature_context["feature_run_id"]
+    shared_context["runtime_feature_run_id"] = runtime_feature_context["feature_run_id"]
+    shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
+    feature_schema = runtime_feature_context["feature_schema"]
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     match_ids = resolve_match_ids(args.match_id, args.limit)
@@ -232,6 +242,9 @@ def main() -> None:
         "models": resolved_model_ids,
         "model_records": model_records,
         "feature_run_id": shared_context["feature_run_id"],
+        "runtime_feature_run_id": shared_context["runtime_feature_run_id"],
+        "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
+        "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
         "intended_receiver_mode": shared_context["intended_receiver_mode"],
         "return_type": shared_context["return_type"],
         "source_target_family": shared_context["target_family"],
