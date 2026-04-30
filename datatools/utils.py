@@ -405,7 +405,7 @@ def label_discounted_goal_returns(
     return events
 
 
-def label_discounted_future_max_value(
+def label_discounted_future_sum_value(
     events: pd.DataFrame,
     value_col: str,
     scores_col: str,
@@ -446,14 +446,14 @@ def label_discounted_future_max_value(
     for row_pos in range(len(events)):
         period_i = events.iat[row_pos, period_loc]
         team_i = team_values[row_pos]
-        best_score = 0.0
-        best_concede = 0.0
+        score_sum = 0.0
+        concede_sum = 0.0
         eligible_rank = 0
         first_eligible_seen = False
 
         if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
-            events.iat[row_pos, score_loc] = float(best_score)
-            events.iat[row_pos, concede_loc] = float(best_concede)
+            events.iat[row_pos, score_loc] = float(score_sum)
+            events.iat[row_pos, concede_loc] = float(concede_sum)
             continue
 
         for future_pos in range(row_pos + 1, len(events)):
@@ -467,18 +467,38 @@ def label_discounted_future_max_value(
                     weight = gamma ** eligible_rank
                     candidate = weight * value_array[future_pos]
                     if team_values[future_pos] == team_i:
-                        best_score = max(best_score, candidate)
+                        score_sum += candidate
                     else:
-                        best_concede = max(best_concede, candidate)
+                        concede_sum += candidate
                     eligible_rank += 1
 
             if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
                 break
 
-        events.iat[row_pos, score_loc] = float(best_score)
-        events.iat[row_pos, concede_loc] = float(best_concede)
+        events.iat[row_pos, score_loc] = float(score_sum)
+        events.iat[row_pos, concede_loc] = float(concede_sum)
 
     return events
+
+
+def label_discounted_future_max_value(
+    events: pd.DataFrame,
+    value_col: str,
+    scores_col: str,
+    concedes_col: str,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
+) -> pd.DataFrame:
+    return label_discounted_future_sum_value(
+        events,
+        value_col=value_col,
+        scores_col=scores_col,
+        concedes_col=concedes_col,
+        gamma=gamma,
+        eligible_types=eligible_types,
+        skip_first=skip_first,
+    )
 
 
 def label_xt_returns(
@@ -504,7 +524,7 @@ def label_discounted_xt_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_max_value(
+    return label_discounted_future_sum_value(
         events,
         value_col="xT",
         scores_col="scores_xT",
@@ -585,7 +605,7 @@ def label_discounted_epv_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_max_value(
+    return label_discounted_future_sum_value(
         events,
         value_col="epv",
         scores_col="scores_epv",
@@ -617,7 +637,7 @@ def label_discounted_goal_distance_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_max_value(
+    return label_discounted_future_sum_value(
         events,
         value_col="goal_distance",
         scores_col="scores_goal_distance",

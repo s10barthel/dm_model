@@ -36,6 +36,38 @@ def make_xt_events(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
     )
 
 
+def make_goal_distance_events(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "spadl_type": spadl_type,
+                "object_id": object_id,
+                "goal_distance": goal_distance,
+                "period_id": 1,
+                "success": False,
+                "expected_goal": 0.0,
+            }
+            for spadl_type, object_id, goal_distance in rows
+        ]
+    )
+
+
+def make_epv_events(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "spadl_type": spadl_type,
+                "object_id": object_id,
+                "epv": epv,
+                "period_id": 1,
+                "success": False,
+                "expected_goal": 0.0,
+            }
+            for spadl_type, object_id, epv in rows
+        ]
+    )
+
+
 class ReturnTypeValidationTests(unittest.TestCase):
     def test_validate_return_type_accepts_in_variant(self) -> None:
         self.assertEqual(project_config.validate_return_type("in_3"), "in_3")
@@ -174,8 +206,38 @@ class InStateLabelingTests(unittest.TestCase):
 
         self.assertEqual(float(next_labeled.at[0, "scores_xT"]), 0.40)
         self.assertEqual(float(next_labeled.at[0, "concedes_xT"]), 0.60)
-        self.assertEqual(float(disc_labeled.at[0, "scores_xT"]), 0.20)
-        self.assertEqual(float(disc_labeled.at[0, "concedes_xT"]), 0.30)
+        self.assertAlmostEqual(float(disc_labeled.at[0, "scores_xT"]), 0.30)
+        self.assertAlmostEqual(float(disc_labeled.at[0, "concedes_xT"]), 0.30)
+
+    def test_discounted_goal_distance_returns_sum_future_values(self) -> None:
+        events = make_goal_distance_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "away_1", 0.60),
+                ("shot", "home_1", 0.40),
+            ]
+        )
+
+        labeled = utils.label_discounted_goal_distance_returns(events, gamma=0.5)
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_goal_distance"]), 0.30)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_goal_distance"]), 0.30)
+
+    def test_discounted_epv_returns_sum_future_values(self) -> None:
+        events = make_epv_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "away_1", 0.60),
+                ("shot", "home_1", 0.40),
+            ]
+        )
+
+        labeled = utils.label_discounted_epv_returns(events, gamma=0.5)
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), 0.30)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_epv"]), 0.30)
 
     def test_label_future_max_value_skip1_matches_next_3_example(self) -> None:
         events = make_xt_events(
@@ -196,20 +258,21 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertEqual(labeled["scores_xT"].round(2).tolist(), [0.15, 0.15, 0.00, 0.00, 0.15, 0.00, 0.00, 0.00])
         self.assertEqual(labeled["concedes_xT"].round(2).tolist(), [0.00, 0.20, 0.20, 0.15, 0.05, 0.05, 0.00, 0.00])
 
-    def test_label_discounted_future_max_value_skip1_resets_discount_rank_after_skipped_non_shot(self) -> None:
+    def test_label_discounted_future_sum_value_skip1_skips_first_non_shot_without_consuming_rank(self) -> None:
         events = make_xt_events(
             [
                 ("pass", "home_1", 0.10),
                 ("pass", "home_1", 0.20),
                 ("pass", "home_1", 0.70),
+                ("pass", "home_1", 0.20),
                 ("pass", "away_1", 0.10),
             ]
         )
 
         labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True)
 
-        self.assertEqual(float(labeled.at[0, "scores_xT"]), 0.70)
-        self.assertEqual(float(labeled.at[0, "concedes_xT"]), 0.05)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.80)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.025)
 
     def test_skip1_next_and_discounted_xt_helpers_do_not_skip_first_rated_shot(self) -> None:
         events = make_xt_events(

@@ -731,20 +731,20 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
-  - `disc_<gamma>` uses `max(gamma^k * xT)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
+  - `disc_<gamma>` uses `sum(gamma^k * xT)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
 - goal_distance:
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
-  - `disc_<gamma>` uses `max(gamma^k * goal_distance)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
+  - `disc_<gamma>` uses `sum(gamma^k * goal_distance)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
 - EPV:
   - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the EPV value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_epv` / `concedes_epv` is non-zero
-  - `disc_<gamma>` uses `max(gamma^k * epv)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then applies weights `1, gamma, gamma^2, ...` to the remaining eligible actions
+  - `disc_<gamma>` uses `sum(gamma^k * epv)` over future eligible actions until the stop condition
+  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
 
 ### Where to switch targets
 
