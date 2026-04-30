@@ -12,7 +12,15 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
-from models.utils import get_model_record, get_model_records, parse_model_id, validate_model_record_consistency
+from models.utils import (
+    get_model_record,
+    get_model_records,
+    mask_possessor_v_edge_features_for_mode,
+    normalize_v_edge_feature_mode,
+    parse_model_id,
+    use_v_edge_features_for_mode,
+    validate_model_record_consistency,
+)
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
     generate_model_run_id,
@@ -177,9 +185,26 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     return command
 
 
-def append_edge_feature_flag(command: list[str], use_v_edge_features: bool) -> list[str]:
+def cli_v_edge_feature_mode(args: argparse.Namespace) -> str:
+    return normalize_v_edge_feature_mode(
+        getattr(args, "v_edge_feature_mode", None),
+        use_v_edge_features=getattr(args, "use_v_edge_features", None),
+        mask_possessor_v_edge_features=getattr(args, "mask_possessor_v_edge_features", None),
+    )
+
+
+def edge_feature_flag_for_mode(v_edge_feature_mode: str) -> str:
+    mode = normalize_v_edge_feature_mode(v_edge_feature_mode)
+    if mode == "none":
+        return "--no-v-edge-features"
+    if mode == "no_poss":
+        return "--v-edge-features-no-poss"
+    return "--v-edge-features"
+
+
+def append_edge_feature_flag(command: list[str], v_edge_feature_mode: str) -> list[str]:
     command = list(command)
-    command.append("--v-edge-features" if use_v_edge_features else "--no-v-edge-features")
+    command.append(edge_feature_flag_for_mode(v_edge_feature_mode))
     return command
 
 
@@ -407,9 +432,11 @@ def validate_external_pass_intent_model_id(
             f"expected {args.intended_receiver_mode!r}"
         )
 
+    expected_v_edge_feature_mode = cli_v_edge_feature_mode(args)
+    expected_use_v_edge_features = use_v_edge_features_for_mode(expected_v_edge_feature_mode)
     expected_graph_schema = {
-        "edge_in_dim": 4 if bool(args.use_v_edge_features) else 2,
-        "add_v_edge_features": bool(args.use_v_edge_features),
+        "edge_in_dim": 4 if expected_use_v_edge_features else 2,
+        "add_v_edge_features": expected_use_v_edge_features,
     }
     graph_schema = record.get("graph_schema", {})
     normalized_graph_schema = {
@@ -420,6 +447,16 @@ def validate_external_pass_intent_model_id(
         mismatches.append(f"graph_schema={normalized_graph_schema!r}, expected {expected_graph_schema!r}")
 
     feature_signature = record.get("feature_signature", {})
+    actual_v_edge_feature_mode = normalize_v_edge_feature_mode(
+        feature_signature.get("v_edge_feature_mode"),
+        add_v_edge_features=normalized_graph_schema["add_v_edge_features"],
+        edge_in_dim=normalized_graph_schema["edge_in_dim"],
+    )
+    if actual_v_edge_feature_mode != expected_v_edge_feature_mode:
+        mismatches.append(
+            f"feature_signature.v_edge_feature_mode={actual_v_edge_feature_mode!r}, "
+            f"expected {expected_v_edge_feature_mode!r}"
+        )
     for key, expected in feature_flags.items():
         if key not in feature_signature:
             mismatches.append(f"feature_signature.{key}=missing, expected {bool(expected)!r}")
@@ -444,13 +481,23 @@ def derive_bundle_shared_context(
 ) -> dict[str, object]:
     retained_model_ids = retained_bundle_model_ids(final_model_ids)
     if retained_model_ids:
+        model_records = get_model_records(retained_model_ids)
         shared = validate_model_record_consistency(
-            get_model_records(retained_model_ids),
+            model_records,
             require_feature_run_id=True,
             require_intended_receiver_mode=True,
             require_return_type=False,
         )
         graph_schema = dict(shared["graph_schema"])
+        retained_modes = {
+            normalize_v_edge_feature_mode(
+                record.get("feature_signature", {}).get("v_edge_feature_mode"),
+                add_v_edge_features=record.get("graph_schema", {}).get("add_v_edge_features"),
+                edge_in_dim=record.get("graph_schema", {}).get("edge_in_dim"),
+            )
+            for record in model_records.values()
+        }
+        v_edge_feature_mode = next(iter(retained_modes)) if len(retained_modes) == 1 else "mixed"
         return {
             "feature_run_id": shared.get("feature_run_id") or resolved_feature_run_id,
             "intended_receiver_mode": shared.get("intended_receiver_mode"),
@@ -458,18 +505,22 @@ def derive_bundle_shared_context(
             "target_family": cli_args.target_family or shared.get("target_family"),
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
+            "v_edge_feature_mode": v_edge_feature_mode,
         }
 
+    v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
+    use_v_edge_features = use_v_edge_features_for_mode(v_edge_feature_mode)
     return {
         "feature_run_id": resolved_feature_run_id,
         "intended_receiver_mode": None,
         "return_type": cli_args.return_type,
         "target_family": cli_args.target_family,
         "graph_schema": {
-            "edge_in_dim": 4 if cli_args.use_v_edge_features else 2,
-            "add_v_edge_features": bool(cli_args.use_v_edge_features),
+            "edge_in_dim": 4 if use_v_edge_features else 2,
+            "add_v_edge_features": use_v_edge_features,
         },
-        "use_v_edge_features": bool(cli_args.use_v_edge_features),
+        "use_v_edge_features": use_v_edge_features,
+        "v_edge_feature_mode": v_edge_feature_mode,
     }
 
 
@@ -546,17 +597,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     edge_feature_group = parser.add_mutually_exclusive_group()
     edge_feature_group.add_argument(
         "--v-edge-features",
-        dest="use_v_edge_features",
-        action="store_true",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="all",
         help="Use the stored velocity-angle edge features during training.",
     )
     edge_feature_group.add_argument(
         "--no-v-edge-features",
-        dest="use_v_edge_features",
-        action="store_false",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="none",
         help="Ignore the stored velocity-angle edge features during training.",
     )
-    parser.set_defaults(use_v_edge_features=True)
+    edge_feature_group.add_argument(
+        "--v-edge-features-no-poss",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="no_poss",
+        help="Use velocity-angle edge features except on edges incident to the ball possessor.",
+    )
+    parser.set_defaults(v_edge_feature_mode="all")
     pin_memory_group = parser.add_mutually_exclusive_group()
     pin_memory_group.add_argument(
         "--pin-memory",
@@ -646,6 +706,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Disable the extended handcrafted node features during training.",
     )
     args = parser.parse_args(argv)
+    args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
+    args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
+    args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)
     if args.early_stopping_patience < 1:
         parser.error("--early-stopping-patience must be at least 1.")
     if args.early_stopping_min_epochs < 1:
@@ -730,7 +793,7 @@ def base_gnn_args(
     intended_receiver_mode: str | None,
     return_type: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
 ) -> list[str]:
     _, run_id = str(model_id).split("/", 1)
     command = [
@@ -770,7 +833,7 @@ def base_gnn_args(
     ]
     if intended_receiver_mode:
         command.extend(["--intended-receiver-mode", intended_receiver_mode])
-    return append_edge_feature_flag(command, use_v_edge_features)
+    return append_edge_feature_flag(command, v_edge_feature_mode)
 
 
 def intent_command(
@@ -783,13 +846,13 @@ def intent_command(
     intended_receiver_mode: str,
     return_type: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -813,13 +876,13 @@ def success_intent_command(
     label_dir: str,
     return_type: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, batch_size, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, batch_size, v_edge_feature_mode),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -845,13 +908,13 @@ def pass_success_command(
     intended_receiver_mode: str,
     return_type: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
         "--ipw_model_id",
         ipw_model_id,
         "--min_pass_dur",
@@ -875,14 +938,14 @@ def outcome_command(
     return_type: str,
     intended_receiver_mode: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
     diagnostic_feature_run_id: str | None = None,
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
         "--lambda_l1",
         "1e-6",
         "--start_lr",
@@ -911,13 +974,13 @@ def failure_receiver_command(
     intended_receiver_mode: str,
     return_type: str,
     batch_size: int,
-    use_v_edge_features: bool,
+    v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, use_v_edge_features),
+        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
         "--augment_blocks",
         "--shot_success",
         "unblocked",
@@ -955,6 +1018,7 @@ def build_training_commands(
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
     model_ids = build_model_ids(args, args.enabled_tasks)
+    v_edge_feature_mode = cli_v_edge_feature_mode(args)
     success_intent_feature_dir = str(get_success_intent_graph_dir(feature_root))
     success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
     commands = []
@@ -974,7 +1038,7 @@ def build_training_commands(
                 success_intent_label_dir,
                 effective_return_type,
                 batch_sizes["success_intent"],
-                bool(args.use_v_edge_features),
+                v_edge_feature_mode,
                 feature_flags,
             )
         )
@@ -1008,7 +1072,7 @@ def build_training_commands(
                     mode,
                     effective_return_type,
                     batch_sizes["pass_intent"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1026,7 +1090,7 @@ def build_training_commands(
                     mode,
                     effective_return_type,
                     batch_sizes["action_intent"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1046,7 +1110,7 @@ def build_training_commands(
                     mode,
                     effective_return_type,
                     batch_sizes["pass_success"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1063,7 +1127,7 @@ def build_training_commands(
                     effective_return_type,
                     mode,
                     batch_sizes["outcome_scoring"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
@@ -1081,7 +1145,7 @@ def build_training_commands(
                     effective_return_type,
                     mode,
                     batch_sizes["outcome_conceding"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
@@ -1098,7 +1162,7 @@ def build_training_commands(
                     mode,
                     effective_return_type,
                     batch_sizes["failure_receiver"],
-                    bool(args.use_v_edge_features),
+                    v_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1115,6 +1179,7 @@ def build_training_commands(
 
 def main() -> None:
     cli_args = parse_args()
+    v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
     python = sys.executable
     bundle_id = cli_args.bundle_id or generate_run_id("model_bundle")
     bundle_root = get_model_bundle_root(bundle_id)
@@ -1171,7 +1236,8 @@ def main() -> None:
                 "return_type": cli_args.return_type,
                 "target_family": cli_args.target_family,
                 **wrapper_diagnostic_metadata,
-                "use_v_edge_features": bool(cli_args.use_v_edge_features),
+                "use_v_edge_features": use_v_edge_features_for_mode(v_edge_feature_mode),
+                "v_edge_feature_mode": v_edge_feature_mode,
                 "device": getattr(cli_args, "device", None),
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
@@ -1242,7 +1308,8 @@ def main() -> None:
         "target_family": bundle_shared.get("target_family"),
         "return_type": bundle_shared.get("return_type"),
         **wrapper_diagnostic_metadata,
-        "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", cli_args.use_v_edge_features)),
+        "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", use_v_edge_features_for_mode(v_edge_feature_mode))),
+        "v_edge_feature_mode": bundle_shared.get("v_edge_feature_mode", v_edge_feature_mode),
         "graph_schema": dict(bundle_shared.get("graph_schema", {})),
         "success_intent_only": bool(cli_args.success_intent_only),
         "trained_tasks": list(trained_model_ids.keys()),

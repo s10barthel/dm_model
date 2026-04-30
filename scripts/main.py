@@ -22,6 +22,7 @@ from project_config import (
     generate_run_id,
     validate_return_type_for_target_family,
 )
+from models.utils import normalize_v_edge_feature_mode, use_v_edge_features_for_mode
 
 TRAINING_WRAPPER_FEATURE_DEFAULTS = {
     "xy_only": False,
@@ -122,15 +123,24 @@ def parse_args() -> argparse.Namespace:
     edge_feature_group = parser.add_mutually_exclusive_group()
     edge_feature_group.add_argument(
         "--v-edge-features",
-        dest="use_v_edge_features",
-        action="store_true",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="all",
         help="Use the stored velocity-angle edge features during training.",
     )
     edge_feature_group.add_argument(
         "--no-v-edge-features",
-        dest="use_v_edge_features",
-        action="store_false",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="none",
         help="Ignore the stored velocity-angle edge features during training.",
+    )
+    edge_feature_group.add_argument(
+        "--v-edge-features-no-poss",
+        dest="v_edge_feature_mode",
+        action="store_const",
+        const="no_poss",
+        help="Use velocity-angle edge features except on edges incident to the ball possessor.",
     )
     parser.add_argument(
         "--overwrite",
@@ -187,8 +197,10 @@ def parse_args() -> argparse.Namespace:
         "Enable the extended handcrafted node features for downstream training.",
         "Disable the extended handcrafted node features for downstream training.",
     )
-    parser.set_defaults(use_v_edge_features=True)
+    parser.set_defaults(v_edge_feature_mode="all")
     args = parser.parse_args()
+    args.v_edge_feature_mode = normalize_v_edge_feature_mode(args.v_edge_feature_mode)
+    args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
@@ -439,7 +451,16 @@ def append_training_feature_flags(command: list[str], args: argparse.Namespace) 
 
 def append_edge_feature_flag(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
-    command.append("--v-edge-features" if args.use_v_edge_features else "--no-v-edge-features")
+    mode = normalize_v_edge_feature_mode(
+        getattr(args, "v_edge_feature_mode", None),
+        use_v_edge_features=getattr(args, "use_v_edge_features", None),
+    )
+    if mode == "none":
+        command.append("--no-v-edge-features")
+    elif mode == "no_poss":
+        command.append("--v-edge-features-no-poss")
+    else:
+        command.append("--v-edge-features")
     return command
 
 

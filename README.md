@@ -192,7 +192,7 @@ Checkpoint runs also write metadata:
 - `saved/<task>/<model_run_id>/best_weights.pt`
 - `saved/bundles/<bundle_id>/metadata.json`
 
-The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `ball_z_aware`, `extend_features`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
+The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `ball_z_aware`, `extend_features`, `v_edge_feature_mode`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
 
 ## Current Artifact Contract
 
@@ -201,7 +201,7 @@ The current pipeline now follows an explicit-artifact contract:
 - `scripts/generate_relevant_features.py` can include multiple `--return_type` values in one feature run and always writes the full velocity-angle edge-feature schema.
 - Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
 - `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
-- Training decides whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
+- Training decides whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
 - `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
 
@@ -264,7 +264,7 @@ Useful options:
 - `--feature-run-id <feature_run_id>` to pin or reuse a feature run id
 - `--bundle-id <bundle_id>` to pin or reuse a model bundle id; required when `scripts/main.py` generates EPV artifacts
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
-- `--v-edge-features` / `--no-v-edge-features` to control whether training uses the stored velocity-angle edge features; default: on
+- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` to control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely; default: on
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
 - `--overwrite` to rebuild supported preprocessing and target-artifact outputs
@@ -482,11 +482,11 @@ Behavior:
 - `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
 - `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
 - `pass_success` uses a `pass_intent` checkpoint as its IPW model; train `pass_intent` in the same wrapper run or use `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>` to reuse a compatible existing checkpoint
-- an external `--pass-intent-model-id` must match the selected feature run, intended-receiver mode, graph schema, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
+- an external `--pass-intent-model-id` must match the selected feature run, intended-receiver mode, graph schema, velocity edge-feature mode, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
 - outcome model loss uses the selected `--target-family` and `--return_type`; outcome F1/ROC AUC/Brier diagnostics use canonical `goal next_10` labels for comparability across target families and return types
 - older feature runs without embedded `goal next_10` diagnostic columns can still be used if the selected run exposes `action_labels_next_10<intended_receiver_suffix>` or if you pass `--diagnostic-feature-run-id <feature_run_id>` pointing to compatible `next_10` labels
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
-- training chooses whether to use the stored velocity-angle edge features via `--v-edge-features` or `--no-v-edge-features`; default: on
+- training chooses whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; default: on
 - wrapper batch-size defaults are `256` for `action_intent`, `pass_intent`, `success_intent`, and `failure_receiver`, and `512` for `pass_success`, `outcome_scoring`, and `outcome_conceding`; `--batch-size` overrides all defaults, and per-model `--<model>-batch-size` flags take highest precedence
 - unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, and `poss_vel_aware` on, with `extend_features` and `xy_only` off
 
@@ -855,7 +855,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--success-intent-model-id <model_id>`: optional `success_intent` checkpoint forwarded to evaluation.
 - `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
-- `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
+- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the training feature profile.
 - `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
@@ -914,7 +914,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
-- `--v-edge-features` / `--no-v-edge-features`: control whether training uses the stored velocity-angle edge features. Default: on.
+- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
 - `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
 

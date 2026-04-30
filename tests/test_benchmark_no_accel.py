@@ -41,6 +41,32 @@ def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
 
+def make_velocity_edge_graph(node_dim: int = 25) -> Data:
+    x = torch.zeros((3, node_dim), dtype=torch.float32)
+    x[:, 0] = 1
+    x[0, 13] = 1
+    x[:, 7] = 7
+    x[:, 8] = 8
+    x[:, 9] = 9
+    edge_index = torch.tensor(
+        [
+            [0, 1, 1, 2],
+            [1, 0, 2, 1],
+        ],
+        dtype=torch.long,
+    )
+    edge_attr = torch.tensor(
+        [
+            [10.0, 1.0, 0.2, 0.3],
+            [10.0, 1.0, 0.4, 0.5],
+            [5.0, 1.0, 0.6, 0.7],
+            [5.0, 1.0, 0.8, 0.9],
+        ],
+        dtype=torch.float32,
+    )
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
 def make_labels() -> torch.Tensor:
     return torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
 
@@ -211,6 +237,20 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertFalse(args.accel_aware)
 
+    def test_wrapper_parse_args_accepts_possessor_masked_velocity_edges(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(
+                ["--feature-run-id", "feature_run", "--success-intent-only", "--v-edge-features-no-poss"]
+            )
+
+        self.assertEqual(args.v_edge_feature_mode, "no_poss")
+        self.assertTrue(args.use_v_edge_features)
+        self.assertTrue(args.mask_possessor_v_edge_features)
+
     def test_wrapper_parse_args_defaults_no_pin_memory_and_early_stopping(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
@@ -288,6 +328,47 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["accel_aware"])
         self.assertIn("--no-accel", commands[0])
         self.assertNotIn("--accel", commands[0])
+
+    def test_build_training_commands_emit_possessor_masked_velocity_edge_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                v_edge_feature_mode="no_poss",
+                use_v_edge_features=True,
+                mask_possessor_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                accel_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertIn("--v-edge-features-no-poss", commands[0])
+        self.assertNotIn("--no-v-edge-features", commands[0])
 
     def test_wrapper_main_records_accel_flag_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}
@@ -906,6 +987,33 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertEqual(graph_schema, {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True})
 
+    def test_feature_signature_distinguishes_possessor_masked_velocity_edge_mode(self) -> None:
+        base_args = {
+            "node_in_dim": 25,
+            "edge_in_dim": 4,
+            "add_v_edge_features": True,
+        }
+
+        all_signature = model_utils.extract_model_feature_signature({**base_args, "v_edge_feature_mode": "all"})
+        no_poss_signature = model_utils.extract_model_feature_signature({**base_args, "v_edge_feature_mode": "no_poss"})
+
+        self.assertEqual(all_signature["edge_in_dim"], 4)
+        self.assertTrue(all_signature["add_v_edge_features"])
+        self.assertNotEqual(all_signature["v_edge_feature_mode"], no_poss_signature["v_edge_feature_mode"])
+
+    def test_no_poss_velocity_edge_mode_requires_four_edge_features(self) -> None:
+        with self.assertRaises(ValueError):
+            model_utils.infer_training_edge_schema(
+                {"edge_in_dim": 2, "add_v_edge_features": False},
+                v_edge_feature_mode="no_poss",
+            )
+
+        schema = model_utils.infer_training_edge_schema(
+            {"edge_in_dim": 4, "add_v_edge_features": True},
+            v_edge_feature_mode="no_poss",
+        )
+        self.assertEqual(schema, {"edge_in_dim": 4, "add_v_edge_features": True})
+
     def test_validate_feature_graph_schema_checks_node_dimension(self) -> None:
         with self.assertRaises(ValueError):
             model_utils.validate_feature_graph_schema(
@@ -1131,6 +1239,56 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 8], torch.zeros_like(graph.x[:, 8])))
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
+
+    def test_filter_features_and_labels_masks_only_possessor_velocity_edges(self) -> None:
+        labels = make_labels()
+        args = {
+            "task": "action_intent",
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "extend_features": True,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 4,
+            "v_edge_feature_mode": "no_poss",
+        }
+
+        source_graph = make_velocity_edge_graph()
+        filtered_graphs, _ = filter_features_and_labels([source_graph], labels, args)
+        graph = filtered_graphs[0]
+
+        self.assertTrue(torch.equal(graph.edge_attr[:, :2], source_graph.edge_attr[:, :2]))
+        self.assertTrue(torch.equal(graph.edge_attr[:2, 2:4], torch.zeros((2, 2))))
+        self.assertTrue(torch.equal(graph.edge_attr[2:, 2:4], source_graph.edge_attr[2:, 2:4]))
+
+    def test_action_dataset_masks_only_possessor_velocity_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            source_graph = make_velocity_edge_graph()
+            torch.save([source_graph], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                edge_in_dim=4,
+                v_edge_feature_mode="no_poss",
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.edge_attr[:, :2], source_graph.edge_attr[:, :2]))
+        self.assertTrue(torch.equal(graph.edge_attr[:2, 2:4], torch.zeros((2, 2))))
+        self.assertTrue(torch.equal(graph.edge_attr[2:, 2:4], source_graph.edge_attr[2:, 2:4]))
 
     def test_action_dataset_loads_goal_next10_diagnostics_from_label_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

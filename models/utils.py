@@ -54,10 +54,69 @@ FEATURE_SIGNATURE_KEYS = (
     "filter_blockers",
     "sparsify",
     "max_edge_dist",
+    "v_edge_feature_mode",
     "add_v_edge_features",
     "node_in_dim",
     "edge_in_dim",
 )
+
+V_EDGE_FEATURE_MODE_ALL = "all"
+V_EDGE_FEATURE_MODE_NONE = "none"
+V_EDGE_FEATURE_MODE_NO_POSS = "no_poss"
+V_EDGE_FEATURE_MODES = (
+    V_EDGE_FEATURE_MODE_ALL,
+    V_EDGE_FEATURE_MODE_NONE,
+    V_EDGE_FEATURE_MODE_NO_POSS,
+)
+
+
+def normalize_v_edge_feature_mode(
+    v_edge_feature_mode: str | None = None,
+    *,
+    use_v_edge_features: bool | None = None,
+    mask_possessor_v_edge_features: bool | None = None,
+    add_v_edge_features: bool | None = None,
+    edge_in_dim: int | None = None,
+) -> str:
+    if v_edge_feature_mode is not None:
+        mode = str(v_edge_feature_mode).strip().replace("-", "_")
+        if mode in V_EDGE_FEATURE_MODES:
+            return mode
+        raise ValueError(
+            f"Invalid v_edge_feature_mode={v_edge_feature_mode!r}. "
+            f"Expected one of: {', '.join(V_EDGE_FEATURE_MODES)}."
+        )
+    if bool(mask_possessor_v_edge_features):
+        return V_EDGE_FEATURE_MODE_NO_POSS
+    if use_v_edge_features is not None:
+        return V_EDGE_FEATURE_MODE_ALL if bool(use_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
+    if add_v_edge_features is not None:
+        return V_EDGE_FEATURE_MODE_ALL if bool(add_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
+    if edge_in_dim is not None:
+        return V_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 2 else V_EDGE_FEATURE_MODE_NONE
+    return V_EDGE_FEATURE_MODE_ALL
+
+
+def use_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> bool:
+    return normalize_v_edge_feature_mode(v_edge_feature_mode) != V_EDGE_FEATURE_MODE_NONE
+
+
+def mask_possessor_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> bool:
+    return normalize_v_edge_feature_mode(v_edge_feature_mode) == V_EDGE_FEATURE_MODE_NO_POSS
+
+
+def normalize_v_edge_feature_args(args: dict[str, Any]) -> dict[str, Any]:
+    mode = normalize_v_edge_feature_mode(
+        args.get("v_edge_feature_mode"),
+        use_v_edge_features=args.get("use_v_edge_features"),
+        mask_possessor_v_edge_features=args.get("mask_possessor_v_edge_features"),
+        add_v_edge_features=args.get("add_v_edge_features"),
+        edge_in_dim=args.get("edge_in_dim"),
+    )
+    args["v_edge_feature_mode"] = mode
+    args["use_v_edge_features"] = use_v_edge_features_for_mode(mode)
+    args["mask_possessor_v_edge_features"] = mask_possessor_v_edge_features_for_mode(mode)
+    return args
 
 
 def is_validation_loss_improved(current_loss: float, best_loss: float, min_delta: float) -> bool:
@@ -77,6 +136,13 @@ def should_stop_early(
 
 
 def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
+    v_edge_feature_mode = normalize_v_edge_feature_mode(
+        args.get("v_edge_feature_mode"),
+        use_v_edge_features=args.get("use_v_edge_features"),
+        mask_possessor_v_edge_features=args.get("mask_possessor_v_edge_features"),
+        add_v_edge_features=args.get("add_v_edge_features"),
+        edge_in_dim=args.get("edge_in_dim"),
+    )
     signature = {
         "xy_only": bool(args.get("xy_only", False)),
         "possessor_aware": bool(args.get("possessor_aware", False)),
@@ -88,10 +154,11 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "filter_blockers": bool(args.get("filter_blockers", False)),
         "sparsify": args.get("sparsify", "none"),
         "max_edge_dist": args.get("max_edge_dist", 10),
+        "v_edge_feature_mode": v_edge_feature_mode,
         "node_in_dim": int(args.get("node_in_dim", 0)),
         "edge_in_dim": int(args.get("edge_in_dim", 2)),
     }
-    signature["add_v_edge_features"] = bool(args.get("add_v_edge_features", signature["edge_in_dim"] > 2))
+    signature["add_v_edge_features"] = use_v_edge_features_for_mode(v_edge_feature_mode)
     return signature
 
 
@@ -135,6 +202,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
+    normalize_v_edge_feature_args(args)
 
     legacy_context = infer_legacy_model_context(model_id)
     target_family = metadata.get("target_family")
@@ -368,6 +436,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
+        normalize_v_edge_feature_args(args)
 
         if args["model"] in ["gcn", "gin", "gat"]:  # GNN models
             model = GNN(args).to(device)
@@ -515,10 +584,12 @@ def validate_feature_graph_schema(
 
 def infer_training_edge_schema(
     feature_schema: dict[str, int | bool],
-    use_v_edge_features: bool,
+    use_v_edge_features: bool | None = None,
+    v_edge_feature_mode: str | None = None,
 ) -> dict[str, int | bool]:
+    mode = normalize_v_edge_feature_mode(v_edge_feature_mode, use_v_edge_features=use_v_edge_features)
     feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
-    required_edge_dim = 4 if use_v_edge_features else 2
+    required_edge_dim = 4 if use_v_edge_features_for_mode(mode) else 2
     if feature_edge_dim < required_edge_dim:
         raise ValueError(
             "Selected feature artifacts do not provide the requested edge-feature schema: "
@@ -526,7 +597,7 @@ def infer_training_edge_schema(
         )
     return {
         "edge_in_dim": required_edge_dim,
-        "add_v_edge_features": bool(use_v_edge_features),
+        "add_v_edge_features": use_v_edge_features_for_mode(mode),
     }
 
 

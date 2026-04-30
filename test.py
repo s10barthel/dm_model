@@ -125,6 +125,8 @@ if __name__ == "__main__":
         "sparsify": model_args.sparsify,
         "max_edge_dist": model_args.max_edge_dist,
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
+        "v_edge_feature_mode": getattr(model_args, "v_edge_feature_mode", "all"),
+        "mask_possessor_v_edge_features": bool(getattr(model_args, "mask_possessor_v_edge_features", False)),
         "train": False,
         "diagnostic_label_dir": diagnostic_label_dir,
         "require_goal_next10_diagnostics": requires_goal_next10_diagnostics(model_args.task),

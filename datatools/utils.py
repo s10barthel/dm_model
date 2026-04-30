@@ -1111,6 +1111,25 @@ def adapt_graph_edge_features(graph: Data, edge_in_dim: int | None = None) -> Da
     return graph
 
 
+def mask_possessor_velocity_edge_features(graph: Data, possessor_index: int) -> Data:
+    if graph is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
+        return graph
+    if int(graph.edge_attr.shape[1]) < 4:
+        return graph
+
+    edge_index = graph.edge_index
+    incident_edges = (edge_index[0] == int(possessor_index)) | (edge_index[1] == int(possessor_index))
+    graph.edge_attr[incident_edges, 2:4] = 0
+    return graph
+
+
+def should_mask_possessor_velocity_edge_features(args: Dict[str, Any]) -> bool:
+    mode = args.get("v_edge_feature_mode")
+    if mode is not None:
+        return str(mode).strip().replace("-", "_") == "no_poss"
+    return bool(args.get("mask_possessor_v_edge_features", False))
+
+
 def filter_features_and_labels(
     features: List[Data],
     labels: torch.Tensor,
@@ -1138,6 +1157,8 @@ def filter_features_and_labels(
             possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
         except RuntimeError:
             continue
+        if should_mask_possessor_velocity_edge_features(args):
+            graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
 
         if args["xy_only"]:
             graph.x[7:12] = 0

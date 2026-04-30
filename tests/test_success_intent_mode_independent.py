@@ -694,6 +694,84 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     train_wrapper.build_training_commands(args)
 
+    def test_external_pass_intent_accepts_matching_possessor_masked_velocity_edge_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            source_signature = {
+                **train_wrapper.WRAPPER_FEATURE_DEFAULTS,
+                "v_edge_feature_mode": "no_poss",
+            }
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+                v_edge_feature_mode="no_poss",
+                mask_possessor_v_edge_features=True,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "get_model_record",
+                    return_value=make_pass_intent_record(feature_signature=source_signature),
+                ),
+            ):
+                commands, model_ids, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual(set(model_ids.keys()), {"pass_success"})
+        self.assertIn("--v-edge-features-no-poss", commands[0])
+
+    def test_external_pass_intent_rejects_incompatible_velocity_edge_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            source_signature = {
+                **train_wrapper.WRAPPER_FEATURE_DEFAULTS,
+                "v_edge_feature_mode": "all",
+            }
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_intent_model_id="pass_intent/old",
+                v_edge_feature_mode="no_poss",
+                mask_possessor_v_edge_features=True,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "get_model_record",
+                    return_value=make_pass_intent_record(feature_signature=source_signature),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    train_wrapper.build_training_commands(args)
+
     def test_external_pass_intent_rejects_incompatible_feature_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)
