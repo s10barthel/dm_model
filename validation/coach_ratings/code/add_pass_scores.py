@@ -7,7 +7,7 @@ COACH_RATINGS_ROOT = Path(__file__).resolve().parents[1]
 DM_MODEL_ROOT = Path(__file__).resolve().parents[3]
 
 COACH_RATINGS_PATH = COACH_RATINGS_ROOT / "output" / "preprocessed_coach_ratings.csv"
-PASS_SCORES_PATH = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye" / "hawkeye_data.csv"
+PASS_SCORES_PATH = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye" / "hawkeye_component_20260430T093826_929736_42dec1e2" / "hawkeye_data.csv"
 OUTPUT_PATH = COACH_RATINGS_ROOT / "output" / "coach_ratings.csv"
 
 KEY_COLUMNS = ["id", "uefa_player_id"]

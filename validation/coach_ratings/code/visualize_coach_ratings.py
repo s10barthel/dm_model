@@ -10,7 +10,7 @@ import pandas as pd
 from PIL import Image
 
 
-DM_MODEL_ROOT = Path(__file__).resolve().parents[2]
+DM_MODEL_ROOT = Path(__file__).resolve().parents[3]
 DATATOOLS_ROOT = DM_MODEL_ROOT / "datatools"
 if str(DATATOOLS_ROOT) not in sys.path:
     sys.path.insert(0, str(DATATOOLS_ROOT))
@@ -34,7 +34,7 @@ from viz_snapshot import SnapshotVisualizer
 COACH_RATINGS_PATH = DM_MODEL_ROOT / "validation" / "coach_ratings" / "output" / "coach_ratings.csv"
 DEFAULT_TRACKING_CSV = DM_MODEL_ROOT / "hawkeye_data" / "centroid_data_team.csv"
 DEFAULT_BALL_CSV = DM_MODEL_ROOT / "hawkeye_data" / "ball_data_selected.csv"
-DEFAULT_COMPONENT_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye"
+DEFAULT_COMPONENT_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye" / "hawkeye_component_20260430T093826_929736_42dec1e2"
 DEFAULT_OUTPUT_DIR = DM_MODEL_ROOT / "validation" / "coach_ratings" / "visualizations"
 BALLRECEIPT_ATOL = 1e-9
 ANIMATION_FPS = 25.0
