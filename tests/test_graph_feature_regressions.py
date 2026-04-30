@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import torch
 from torch_geometric.data import Data
@@ -14,7 +15,8 @@ from datatools.benchmark import build_benchmark_export
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import graph_feature
 from datatools.match import Match
-from inference import inference_gnn
+from datatools.utils import filter_features_and_labels
+from inference import inference_gnn, resolve_match_graphs
 from scripts import run_relevant_models
 
 
@@ -66,6 +68,19 @@ def make_inference_graph() -> Data:
     )
     edge_attr = torch.ones((edge_index.shape[1], 2), dtype=torch.float32)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def make_marked_inference_graph(marker: float) -> Data:
+    graph = make_inference_graph()
+    graph.x[0, 3] = marker
+    return graph
+
+
+def make_model_mode_graph() -> Data:
+    graph = make_inference_graph()
+    graph.edge_attr = torch.ones((graph.edge_index.shape[1], 4), dtype=torch.float32)
+    graph.node_ids = ["home_10", "home_11", "home_12", "away_20"]
+    return graph
 
 
 def make_inference_labels(*, success: bool = False) -> torch.Tensor:
@@ -544,6 +559,143 @@ class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
 
         self.assertEqual(row.index.tolist(), ["home_11", "home_12"])
         self.assertNotIn("home_10", row.index)
+
+    def test_filter_features_aligns_by_feature_action_index(self) -> None:
+        labels = torch.zeros((3, len(LABEL_COLUMNS)), dtype=torch.float32)
+        labels[:, 0] = torch.tensor([1.0, 2.0, 3.0])
+        labels[:, 1] = 1.0
+        labels[:, 4] = 4.0
+        labels[:, 5] = 1.0
+        labels[:, 6] = 1.0
+        labels[:, LABEL_INDEX["success"]] = 1.0
+        args = DummyNodeModel("success_intent", logits=[0.0, 0.0, 0.0, 0.0]).args
+
+        filtered_graphs, filtered_labels = filter_features_and_labels(
+            [make_marked_inference_graph(20.0), make_marked_inference_graph(30.0)],
+            labels,
+            args,
+            event_indices=[3],
+            feature_action_indices=np.array([2, 3]),
+        )
+
+        self.assertEqual(filtered_labels[:, 0].tolist(), [3.0])
+        self.assertEqual(float(filtered_graphs[0].x[0, 3]), 30.0)
+
+    def test_filter_features_rejects_mismatched_rows_without_feature_action_index(self) -> None:
+        labels = torch.zeros((3, len(LABEL_COLUMNS)), dtype=torch.float32)
+        args = DummyNodeModel("success_intent", logits=[0.0, 0.0, 0.0, 0.0]).args
+
+        with self.assertRaisesRegex(ValueError, "not row-aligned"):
+            filter_features_and_labels(
+                [make_marked_inference_graph(20.0), make_marked_inference_graph(30.0)],
+                labels,
+                args,
+            )
+
+    def test_resolve_match_graphs_uses_runtime_feature_root_and_distinct_cache_keys(self) -> None:
+        model = DummyNodeModel("success_intent", logits=[0.0, 0.0, 0.0, 0.0])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root_a = Path(tmpdir) / "feature_a"
+            root_b = Path(tmpdir) / "feature_b"
+            for root, marker, action_index in [(root_a, 10.0, 10.0), (root_b, 20.0, 20.0)]:
+                graph_dir = root / "action_graphs_success_intent"
+                label_dir = root / "success_intent_labels"
+                graph_dir.mkdir(parents=True)
+                label_dir.mkdir(parents=True)
+                torch.save([make_marked_inference_graph(marker)], graph_dir / "match.pt")
+                labels = torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
+                labels[0, 0] = action_index
+                torch.save(labels, label_dir / "match.pt")
+
+            model.args["feature_dir"] = str(root_a / "action_graphs_success_intent")
+            match = SimpleNamespace(
+                match_id="match",
+                runtime_feature_root=root_b,
+                graph_features_0=None,
+                graph_features_1=None,
+                graph_features_by_dir={},
+                graph_feature_action_indices_by_dir={},
+            )
+
+            graphs_b, action_indices_b = resolve_match_graphs(match, model, post_action=False)
+            match.runtime_feature_root = root_a
+            graphs_a, action_indices_a = resolve_match_graphs(match, model, post_action=False)
+
+        self.assertEqual(float(graphs_b[0].x[0, 3]), 20.0)
+        self.assertEqual(action_indices_b.tolist(), [20])
+        self.assertEqual(float(graphs_a[0].x[0, 3]), 10.0)
+        self.assertEqual(action_indices_a.tolist(), [10])
+        self.assertEqual(len(match.graph_features_by_dir), 2)
+
+    def test_run_success_intent_inference_uses_saved_labels_and_restores_match_state(self) -> None:
+        match = SimpleNamespace(
+            actions=pd.DataFrame([{"action_id": 123}], index=[10]),
+            labels=torch.tensor([[10.0]], dtype=torch.float32),
+            intended_receiver_stats={"source": "original"},
+            runtime_feature_root=Path("original_feature"),
+        )
+        original_actions = match.actions.copy()
+        original_labels = match.labels.clone()
+        original_runtime_feature_root = match.runtime_feature_root
+        success_labels = torch.tensor([[10.0]], dtype=torch.float32)
+        feature_root = Path("feature_root")
+
+        with (
+            patch.object(run_relevant_models, "load_success_intent_labels", return_value=success_labels) as load_labels_mock,
+            patch.object(run_relevant_models, "inference_gnn", return_value=(pd.DataFrame({"home_11": [0.9]}, index=[10]), None)),
+        ):
+            result = run_relevant_models.run_success_intent_inference(
+                match,
+                model=object(),
+                return_type="disc_0.9",
+                device="cpu",
+                feature_root=feature_root,
+            )
+
+        self.assertEqual(result.loc[10, "home_11"], 0.9)
+        load_labels_mock.assert_called_once_with(match, feature_root)
+        pd.testing.assert_frame_equal(match.actions, original_actions)
+        self.assertTrue(torch.equal(match.labels, original_labels))
+        self.assertEqual(match.intended_receiver_stats, {"source": "original"})
+        self.assertEqual(match.runtime_feature_root, original_runtime_feature_root)
+
+    def test_stored_model_mode_failed_pass_intent_matches_direct_recompute(self) -> None:
+        match = Match.__new__(Match)
+        match.actions = pd.DataFrame(
+            {
+                "action_type": ["pass"],
+                "success": [False],
+                "receive_frame_id": [12],
+                "receiver_id": ["away_20"],
+                "intent_id": ["home_10"],
+            },
+            index=[101],
+        )
+        match.actions.attrs["intended_receiver_stats"] = {}
+        model = DummyNodeModel("success_intent", logits=[0.0, 5.0, 1.0, -1.0])
+        model.args["edge_in_dim"] = 4
+        model.args["add_v_edge_features"] = True
+
+        angle_only_actions = match.actions.copy()
+        stored_model_actions = angle_only_actions.copy()
+        stored_model_actions["intent_id"] = ["home_11"]
+
+        with (
+            patch("models.utils.load_model", return_value=model),
+            patch("datatools.graph_feature.construct_graph_for_action", return_value=make_model_mode_graph()),
+            patch("datatools.match.utils.filter_features_and_labels", side_effect=lambda graphs, labels, *_args, **_kwargs: (graphs, labels)),
+        ):
+            direct_model_actions = match._apply_intended_receiver_model(
+                angle_only_actions.copy(),
+                "success_intent/test",
+            )
+
+        pd.testing.assert_series_equal(
+            direct_model_actions.loc[stored_model_actions.index, "intent_id"],
+            stored_model_actions["intent_id"],
+            check_names=False,
+        )
 
 
 class ComponentExportRegressionTests(unittest.TestCase):

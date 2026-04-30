@@ -45,7 +45,9 @@ class Match(ABC):
             self.match_id = str(self.lineup["stats_perform_match_id"].iloc[0])
         elif "game_id" in self.events.columns and not self.events.empty:
             self.match_id = str(self.events["game_id"].iloc[0])
+        self.runtime_feature_root = None
         self.graph_features_by_dir: Dict[str, object] = {}
+        self.graph_feature_action_indices_by_dir: Dict[str, object] = {}
         self.events = utils.sanitize_expected_goal(self.events)
         self.events = merge_xt_annotations(self.events, self.match_id)
         self.events = merge_goal_distance_annotations(self.events, self.match_id)

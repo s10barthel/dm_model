@@ -18,7 +18,7 @@ from datatools.graph_feature import construct_graph_features, summarize_ball_tra
 from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
-from inference import inference_gnn
+from inference import inference_gnn, load_success_intent_labels
 from models.utils import (
     load_model,
     resolve_model_selection,
@@ -79,6 +79,7 @@ def load_match(
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
+    match.runtime_feature_root = feature_root
     resolved_action_path = get_resolved_action_path(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -109,6 +110,35 @@ def load_match(
         )
 
     return match
+
+
+def run_success_intent_component(
+    match: Match,
+    model: object,
+    feature_root: Path,
+    device: str,
+    action_index: int,
+) -> pd.Series:
+    labels = load_success_intent_labels(match, feature_root)
+    saved_action_indices = {int(action_index_i) for action_index_i in labels[:, 0].detach().cpu().numpy().astype(int)}
+    if int(action_index) not in saved_action_indices:
+        action = match.actions.loc[action_index]
+        action_id = action.get("action_id", action_index)
+        raise ValueError(
+            f"Action index {action_index} (action_id={action_id}) is not present in saved success-intent labels. "
+            "The success-intent component is only available for successful pass actions in the selected feature run."
+        )
+
+    original_labels = match.labels.clone() if isinstance(match.labels, torch.Tensor) else match.labels
+    original_runtime_feature_root = getattr(match, "runtime_feature_root", None)
+    try:
+        match.runtime_feature_root = Path(feature_root)
+        match.labels = labels
+        probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
+        return probs.loc[action_index]
+    finally:
+        match.labels = original_labels
+        match.runtime_feature_root = original_runtime_feature_root
 
 
 def describe_action_subset_exclusion(match: Match, event_index: int) -> str:
@@ -366,8 +396,17 @@ def main() -> None:
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
                 component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[action_index]
         else:
-            probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
-            component_prob_rows[component_name] = probs.loc[action_index]
+            if component_name == "intended_recipient":
+                component_prob_rows[component_name] = run_success_intent_component(
+                    match,
+                    model,
+                    feature_root,
+                    device,
+                    action_index,
+                )
+            else:
+                probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
+                component_prob_rows[component_name] = probs.loc[action_index]
 
     component_prob_rows["pass_score"] = compute_pass_score(
         pass_success=component_prob_rows["pass_success"],

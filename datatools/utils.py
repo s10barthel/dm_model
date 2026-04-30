@@ -1135,15 +1135,46 @@ def filter_features_and_labels(
     labels: torch.Tensor,
     args: Dict[str, Any],
     event_indices: np.ndarray = None,
+    feature_action_indices: np.ndarray | torch.Tensor | list[int] | None = None,
 ) -> Tuple[List[Data], torch.Tensor]:
     filtered_features = []
     filtered_labels = []
+    event_index_set = None if event_indices is None else {int(event_index) for event_index in event_indices}
+
+    feature_lookup: dict[int, int] | None = None
+    if feature_action_indices is not None:
+        feature_action_indices = np.asarray(feature_action_indices, dtype=int)
+        if len(feature_action_indices) != len(features):
+            raise ValueError(
+                "Feature action-index count does not match graph count: "
+                f"feature_action_indices={len(feature_action_indices)}, features={len(features)}."
+            )
+        feature_lookup = {}
+        duplicates = set()
+        for feature_pos, action_index in enumerate(feature_action_indices.tolist()):
+            action_index = int(action_index)
+            if action_index in feature_lookup:
+                duplicates.add(action_index)
+            feature_lookup[action_index] = feature_pos
+        if duplicates:
+            sample = sorted(duplicates)[:5]
+            raise ValueError(f"Feature action indexes contain duplicates, for example: {sample}.")
+    elif len(features) != len(labels):
+        raise ValueError(
+            "Graph features and labels are not row-aligned and no feature action indexes were provided: "
+            f"features={len(features)}, labels={len(labels)}."
+        )
 
     for i in range(len(labels)):
-        if event_indices is not None and labels[i, 0].item() not in event_indices:
+        action_index = int(labels[i, 0].item())
+        if event_index_set is not None and action_index not in event_index_set:
             continue
 
-        graph: Data = features[i]
+        feature_pos = feature_lookup.get(action_index) if feature_lookup is not None else i
+        if feature_pos is None:
+            continue
+
+        graph: Data = features[feature_pos]
         graph_labels: torch.Tensor = labels[i]
 
         if graph is None:
@@ -1205,6 +1236,9 @@ def filter_features_and_labels(
 
         filtered_features.append(graph)
         filtered_labels.append(graph_labels)
+
+    if not filtered_labels:
+        raise ValueError("No usable graph/label pairs remain after filtering and alignment.")
 
     return filtered_features, torch.stack(filtered_labels, axis=0)
 

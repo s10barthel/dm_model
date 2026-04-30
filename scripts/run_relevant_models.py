@@ -14,8 +14,7 @@ import torch
 
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
-from datatools.success_intent import build_success_intent_resolved_actions
-from inference import inference_gnn
+from inference import inference_gnn, load_success_intent_labels
 from models.utils import (
     get_model_provenance,
     infer_feature_graph_schema,
@@ -81,6 +80,7 @@ def load_match(
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
+    match.runtime_feature_root = feature_root
     resolved_action_path = get_resolved_action_path(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -218,22 +218,18 @@ def run_success_intent_inference(
     model: object,
     return_type: str | None,
     device: str,
+    feature_root: Path | None = None,
 ) -> pd.DataFrame:
+    del return_type
     original_actions = match.actions.copy()
     original_labels = match.labels.clone() if isinstance(match.labels, torch.Tensor) else match.labels
     original_stats = dict(getattr(match, "intended_receiver_stats", {}))
+    original_runtime_feature_root = getattr(match, "runtime_feature_root", None)
 
     try:
-        resolved_actions = build_success_intent_resolved_actions(original_actions)
-        labels = match.construct_labels(
-            discount_xg=True,
-            relabel_intended_receivers=False,
-            resolved_actions=resolved_actions,
-            return_type=return_type,
-        )
-        if labels.numel() == 0:
-            raise ValueError("No usable success_intent labels were produced for this match.")
-        match.labels = labels
+        if feature_root is not None:
+            match.runtime_feature_root = Path(feature_root)
+        match.labels = load_success_intent_labels(match, feature_root)
         success_intent, _ = inference_gnn(match, model, device=device, post_action=False)
         if success_intent.empty:
             raise ValueError("No usable success_intent inference rows were produced for this match.")
@@ -242,6 +238,7 @@ def run_success_intent_inference(
         match.actions = original_actions
         match.labels = original_labels
         match.intended_receiver_stats = original_stats
+        match.runtime_feature_root = original_runtime_feature_root
 
 
 def resolve_match_ids(split: str, requested_match_ids: list[str] | None, feature_dir: Path) -> list[str]:
@@ -415,6 +412,7 @@ def main() -> None:
                         success_intent_model,
                         return_type=return_type,
                         device=device,
+                        feature_root=feature_root,
                     )
                     save_component_table(success_intent, match.actions, match_output_dir / "success_intent.parquet")
                 except Exception as exc:
