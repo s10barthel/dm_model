@@ -1,3 +1,5 @@
+import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -5,9 +7,16 @@ import pandas as pd
 
 COACH_RATINGS_ROOT = Path(__file__).resolve().parents[1]
 DM_MODEL_ROOT = Path(__file__).resolve().parents[3]
+DATATOOLS_ROOT = DM_MODEL_ROOT / "datatools"
+if str(DATATOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(DATATOOLS_ROOT))
+if str(DM_MODEL_ROOT) not in sys.path:
+    sys.path.insert(0, str(DM_MODEL_ROOT))
+
+from hawkeye import load_hawkeye_component_run
 
 COACH_RATINGS_PATH = COACH_RATINGS_ROOT / "output" / "preprocessed_coach_ratings.csv"
-PASS_SCORES_PATH = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye" / "hawkeye_component_20260430T093826_929736_42dec1e2" / "hawkeye_data.csv"
+HAWKEYE_COMPONENT_RUNS_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye"
 OUTPUT_PATH = COACH_RATINGS_ROOT / "output" / "coach_ratings.csv"
 
 KEY_COLUMNS = ["id", "uefa_player_id"]
@@ -40,6 +49,25 @@ HAWKEYE_NUMERIC_COLUMNS = [
     "outcome_conceding_success",
     "outcome_conceding_failure",
 ]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--component-id",
+        required=True,
+        help="Hawkeye component run id under data/component_runs/hawkeye.",
+    )
+    return parser.parse_args()
+
+
+def resolve_component_dir(component_id: str) -> Path:
+    component_dir = HAWKEYE_COMPONENT_RUNS_DIR / str(component_id)
+    if not component_dir.is_dir():
+        raise NotADirectoryError(
+            f"--component-id must name a Hawkeye component-run directory, got: {component_dir}"
+        )
+    return component_dir
 
 
 def validate_required_columns(df: pd.DataFrame, required_columns: list[str], label: str) -> None:
@@ -77,6 +105,12 @@ def normalize_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFr
 def read_csv(path: Path, label: str) -> pd.DataFrame:
     print(f"Loading {label}: {path}")
     return pd.read_csv(path)
+
+
+def read_pass_scores(component_dir: Path) -> pd.DataFrame:
+    print(f"Loading Pass scores: {component_dir / 'hawkeye_data.parquet'}")
+    pass_scores_df, _ = load_hawkeye_component_run(component_dir)
+    return pass_scores_df
 
 
 def get_scored_row_mask(df: pd.DataFrame) -> tuple[pd.Series, int]:
@@ -262,12 +296,15 @@ def print_summary(summary: dict[str, int]) -> None:
 
 
 def main() -> int:
+    args = parse_args()
+    component_dir = resolve_component_dir(args.component_id)
+
     coach_ratings_df = read_csv(COACH_RATINGS_PATH, "Coach ratings")
     coach_ratings_df = normalize_key_columns(coach_ratings_df, "Coach ratings")
     coach_ratings_df = coach_ratings_df.dropna(subset=KEY_COLUMNS).copy()
     scored_mask, ignored_unscored_rows = get_scored_row_mask(coach_ratings_df)
 
-    pass_scores_df = read_csv(PASS_SCORES_PATH, "Pass scores")
+    pass_scores_df = read_pass_scores(component_dir)
     pass_features_df, pass_stats = prepare_pass_score_features(pass_scores_df)
 
     output_df = merge_pass_scores(coach_ratings_df, pass_features_df, scored_mask)

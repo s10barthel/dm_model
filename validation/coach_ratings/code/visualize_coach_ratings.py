@@ -4,6 +4,9 @@ import argparse
 import sys
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -34,7 +37,7 @@ from viz_snapshot import SnapshotVisualizer
 COACH_RATINGS_PATH = DM_MODEL_ROOT / "validation" / "coach_ratings" / "output" / "coach_ratings.csv"
 DEFAULT_TRACKING_CSV = DM_MODEL_ROOT / "hawkeye_data" / "centroid_data_team.csv"
 DEFAULT_BALL_CSV = DM_MODEL_ROOT / "hawkeye_data" / "ball_data_selected.csv"
-DEFAULT_COMPONENT_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye" / "hawkeye_component_20260430T093826_929736_42dec1e2"
+HAWKEYE_COMPONENT_RUNS_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye"
 DEFAULT_OUTPUT_DIR = DM_MODEL_ROOT / "validation" / "coach_ratings" / "visualizations"
 BALLRECEIPT_ATOL = 1e-9
 ANIMATION_FPS = 25.0
@@ -58,9 +61,9 @@ def parse_args() -> argparse.Namespace:
         help="Hawkeye ball-tracking CSV.",
     )
     parser.add_argument(
-        "--component-dir",
-        default=str(DEFAULT_COMPONENT_DIR),
-        help="Hawkeye component-run directory containing hawkeye_data.parquet and metadata.json.",
+        "--component-id",
+        required=True,
+        help="Hawkeye component run id under data/component_runs/hawkeye.",
     )
     parser.add_argument(
         "--show-trajectories",
@@ -153,9 +156,16 @@ def resolve_selected_situation_ids(
     return selected_ids
 
 
-def load_component_export(component_dir: Path) -> tuple[pd.DataFrame, dict]:
+def resolve_component_dir(component_id: str) -> Path:
+    component_dir = HAWKEYE_COMPONENT_RUNS_DIR / str(component_id)
     if not component_dir.is_dir():
-        raise NotADirectoryError(f"--component-dir must point to a directory, got: {component_dir}")
+        raise NotADirectoryError(
+            f"--component-id must name a Hawkeye component-run directory, got: {component_dir}"
+        )
+    return component_dir
+
+
+def load_component_export(component_dir: Path) -> tuple[pd.DataFrame, dict]:
     return load_hawkeye_component_run(component_dir)
 
 
@@ -372,7 +382,7 @@ def save_ballreceipt_snapshot(
 
 def main() -> None:
     args = parse_args()
-    component_dir = Path(args.component_dir).expanduser()
+    component_dir = resolve_component_dir(args.component_id)
     component_export, component_metadata = load_component_export(component_dir)
     freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", True))
 
