@@ -1212,8 +1212,8 @@ def filter_features_and_labels(
             graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
 
         if args["xy_only"]:
-            graph.x[7:12] = 0
-            graph.x[13:19] = 0
+            graph.x[:, 7:12] = 0
+            graph.x[:,13:19] = 0
 
         if not args["possessor_aware"]:
             assert not args["extend_features"]
