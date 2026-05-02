@@ -78,6 +78,9 @@ def main() -> None:
             "outcome_conceding": args.outcome_conceding_model_id,
         },
         require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
     )
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     component_run_id = args.run_id or generate_run_id("skillcorner_component")
@@ -204,6 +207,9 @@ def main() -> None:
         "return_type": shared_context["return_type"],
         "target_family": shared_context["target_family"],
         "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
+        "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
+        "source_return_types": shared_context.get("source_return_types", {}),
+        "source_target_families": shared_context.get("source_target_families", {}),
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
         "processed_matches": processed_matches,

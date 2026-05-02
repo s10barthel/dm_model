@@ -84,6 +84,9 @@ def main() -> None:
             "outcome_conceding": args.outcome_conceding_model_id,
         },
         require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
     )
     component_run_id = args.run_id or generate_run_id("benchmark_component")
     output_parent = Path(args.output_dir) if args.output_dir else BENCHMARK_COMPONENT_RUNS_DIR
@@ -180,6 +183,9 @@ def main() -> None:
         "return_type": shared_context["return_type"],
         "target_family": shared_context["target_family"],
         "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
+        "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
+        "source_return_types": shared_context.get("source_return_types", {}),
+        "source_target_families": shared_context.get("source_target_families", {}),
         "requested_modifications": [int(value) for value in (args.modification or [])],
         "limit": args.limit,
         "selected_modifications": [int(value) for value in selected_modifications],

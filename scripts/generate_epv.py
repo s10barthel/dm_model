@@ -19,6 +19,7 @@ from models.utils import (
     get_model_provenance,
     load_model,
     resolve_model_selection,
+    resolve_runtime_return_type,
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
@@ -26,6 +27,7 @@ from project_config import (
     EPV_DIR,
     EPV_MATCH_DIR,
     EVENT_SYNCED_DIR,
+    INTENDED_RECEIVER_MODES,
     ensure_project_dirs,
     resolve_feature_root,
 )
@@ -48,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
+    parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES, help="Runtime resolved-action mode.")
+    parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--device", default="cuda:0")
@@ -86,6 +90,9 @@ def resolve_epv_model_selection(args: argparse.Namespace) -> tuple[dict[str, str
             "outcome_conceding": args.outcome_conceding_model_id,
         },
         require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
     )
 
 
@@ -205,13 +212,18 @@ def main() -> None:
         args.feature_run_id,
         shared_context,
         bundle,
-        str(shared_context["intended_receiver_mode"]),
+        args.intended_receiver_mode,
         graph_schema,
         context="Selected EPV feature artifacts",
     )
+    runtime_return_type = resolve_runtime_return_type(shared_context, args.return_type)
     shared_context = dict(shared_context)
     shared_context["feature_run_id"] = runtime_feature_context["feature_run_id"]
     shared_context["runtime_feature_run_id"] = runtime_feature_context["feature_run_id"]
+    shared_context["intended_receiver_mode"] = runtime_feature_context["intended_receiver_mode"]
+    shared_context["runtime_intended_receiver_mode"] = runtime_feature_context["intended_receiver_mode"]
+    shared_context["return_type"] = runtime_return_type
+    shared_context["runtime_return_type"] = runtime_return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
     feature_schema = runtime_feature_context["feature_schema"]
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
@@ -243,11 +255,16 @@ def main() -> None:
         "model_records": model_records,
         "feature_run_id": shared_context["feature_run_id"],
         "runtime_feature_run_id": shared_context["runtime_feature_run_id"],
+        "runtime_intended_receiver_mode": shared_context["runtime_intended_receiver_mode"],
+        "runtime_return_type": shared_context["runtime_return_type"],
         "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
         "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
+        "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
+        "source_return_types": shared_context.get("source_return_types", {}),
+        "source_target_families": shared_context.get("source_target_families", {}),
         "intended_receiver_mode": shared_context["intended_receiver_mode"],
         "return_type": shared_context["return_type"],
-        "source_target_family": shared_context["target_family"],
+        "source_target_family": shared_context.get("target_family"),
         "graph_schema": graph_schema,
         "feature_schema": feature_schema,
         "skipped_export_matches": skipped_export_matches,

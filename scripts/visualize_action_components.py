@@ -22,12 +22,14 @@ from inference import inference_gnn, load_success_intent_labels
 from models.utils import (
     load_model,
     resolve_model_selection,
+    resolve_runtime_return_type,
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
 from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
+    INTENDED_RECEIVER_MODES,
     get_action_graph_dir,
     get_resolved_action_path,
 )
@@ -54,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
+    parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES, help="Runtime resolved-action mode.")
+    parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -337,8 +341,10 @@ def main() -> None:
             "outcome_conceding": args.outcome_conceding_model_id,
         },
         require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
     )
-    intended_receiver_mode = shared_context["intended_receiver_mode"]
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
@@ -361,21 +367,27 @@ def main() -> None:
         args.feature_run_id,
         shared_context,
         bundle,
-        str(intended_receiver_mode),
+        args.intended_receiver_mode,
         graph_schema,
         context="Selected visualization feature artifacts",
     )
     feature_run_id = str(runtime_feature_context["feature_run_id"])
+    intended_receiver_mode = str(runtime_feature_context["intended_receiver_mode"])
+    return_type = resolve_runtime_return_type(shared_context, args.return_type)
     feature_root = Path(runtime_feature_context["feature_root"])
     shared_context = dict(shared_context)
     shared_context["feature_run_id"] = feature_run_id
     shared_context["runtime_feature_run_id"] = feature_run_id
+    shared_context["intended_receiver_mode"] = intended_receiver_mode
+    shared_context["runtime_intended_receiver_mode"] = intended_receiver_mode
+    shared_context["return_type"] = return_type
+    shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
 
     match = load_match(
         args.match_id,
         intended_receiver_mode=intended_receiver_mode,
-        return_type=shared_context["return_type"],
+        return_type=return_type,
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
     )

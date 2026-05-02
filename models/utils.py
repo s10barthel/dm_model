@@ -28,6 +28,7 @@ from xgboost import XGBClassifier
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from project_config import (
+    FEATURE_RUNS_DIR,
     SAVED_DIR,
     get_action_graph_dir,
     get_model_bundle_root,
@@ -68,6 +69,8 @@ V_EDGE_FEATURE_MODES = (
     V_EDGE_FEATURE_MODE_NONE,
     V_EDGE_FEATURE_MODE_NO_POSS,
 )
+RUNTIME_INTENDED_RECEIVER_MODE_PREFERENCE = ("model", "original", "angle_only")
+DEFAULT_RUNTIME_RETURN_TYPE = "disc_0.9"
 
 
 def normalize_v_edge_feature_mode(
@@ -626,6 +629,7 @@ def validate_model_record_consistency(
     require_feature_run_id: bool = True,
     require_intended_receiver_mode: bool = True,
     require_return_type: bool = True,
+    require_target_family: bool = True,
     outcome_tasks: tuple[str, ...] = ("outcome_scoring", "outcome_conceding"),
 ) -> dict[str, Any]:
     if not model_records:
@@ -657,7 +661,12 @@ def validate_model_record_consistency(
             "Selected model checkpoints do not agree on intended_receiver_mode: "
             f"{details}."
         )
-    shared["intended_receiver_mode"] = next(iter(intended_modes)) if intended_modes else None
+    shared["intended_receiver_mode"] = next(iter(intended_modes)) if len(intended_modes) == 1 else None
+    shared["source_intended_receiver_modes"] = {
+        task: record.get("intended_receiver_mode")
+        for task, record in model_records.items()
+        if record.get("intended_receiver_mode") not in (None, "unknown")
+    }
 
     outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
     return_type_records = outcome_records if outcome_records else model_records
@@ -669,7 +678,12 @@ def validate_model_record_consistency(
             "Selected model checkpoints do not agree on return_type: "
             f"{details}."
         )
-    shared["return_type"] = next(iter(return_types)) if return_types else None
+    shared["return_type"] = next(iter(return_types)) if len(return_types) == 1 else None
+    shared["source_return_types"] = {
+        task: record.get("return_type")
+        for task, record in model_records.items()
+        if record.get("return_type")
+    }
 
     shared["graph_schema"] = aggregate_graph_schemas(
         {task: record["graph_schema"] for task, record in model_records.items()}
@@ -677,13 +691,18 @@ def validate_model_record_consistency(
 
     target_families = {record.get("target_family") for record in outcome_records.values()}
     target_families.discard(None)
-    if len(target_families) > 1:
+    if require_target_family and len(target_families) > 1:
         details = ", ".join(f"{task}={record.get('target_family')}" for task, record in outcome_records.items())
         raise ValueError(
             "Selected outcome checkpoints do not agree on target_family: "
             f"{details}."
         )
-    shared["target_family"] = next(iter(target_families)) if target_families else None
+    shared["target_family"] = next(iter(target_families)) if len(target_families) == 1 else None
+    shared["source_target_families"] = {
+        task: record.get("target_family")
+        for task, record in model_records.items()
+        if record.get("target_family")
+    }
 
     return shared
 
@@ -695,6 +714,7 @@ def resolve_model_selection(
     require_feature_run_id: bool = True,
     require_intended_receiver_mode: bool = True,
     require_return_type: bool = True,
+    require_target_family: bool = True,
 ) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
     explicit_model_ids = explicit_model_ids or {}
 
@@ -714,6 +734,7 @@ def resolve_model_selection(
         require_feature_run_id=require_feature_run_id,
         require_intended_receiver_mode=require_intended_receiver_mode,
         require_return_type=require_return_type,
+        require_target_family=require_target_family,
     )
     shared["model_records"] = model_records
 
@@ -723,17 +744,17 @@ def resolve_model_selection(
                 f"Bundle {bundle_id!r} feature_run_id={bundle['feature_run_id']!r} does not match the selected model ids "
                 f"(feature_run_id={shared['feature_run_id']!r})."
             )
-        if bundle.get("intended_receiver_mode") and shared.get("intended_receiver_mode") and bundle["intended_receiver_mode"] != shared["intended_receiver_mode"]:
+        if require_intended_receiver_mode and bundle.get("intended_receiver_mode") and shared.get("intended_receiver_mode") and bundle["intended_receiver_mode"] != shared["intended_receiver_mode"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} intended_receiver_mode={bundle['intended_receiver_mode']!r} does not match the "
                 f"selected model ids (intended_receiver_mode={shared['intended_receiver_mode']!r})."
             )
-        if bundle.get("return_type") and shared.get("return_type") and bundle["return_type"] != shared["return_type"]:
+        if require_return_type and bundle.get("return_type") and shared.get("return_type") and bundle["return_type"] != shared["return_type"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} return_type={bundle['return_type']!r} does not match the selected model ids "
                 f"(return_type={shared['return_type']!r})."
             )
-        if bundle.get("target_family") and shared.get("target_family") and bundle["target_family"] != shared["target_family"]:
+        if require_target_family and bundle.get("target_family") and shared.get("target_family") and bundle["target_family"] != shared["target_family"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} target_family={bundle['target_family']!r} does not match the selected model ids "
                 f"(target_family={shared['target_family']!r})."
@@ -823,6 +844,18 @@ def _feature_run_sort_key(feature_run_id: str, metadata: dict[str, Any] | None) 
     return (str((metadata or {}).get("created_at") or ""), str(feature_run_id))
 
 
+def all_runtime_feature_run_ids() -> list[str]:
+    if not FEATURE_RUNS_DIR.exists():
+        return []
+    return sorted(path.name for path in FEATURE_RUNS_DIR.iterdir() if path.is_dir())
+
+
+def _runtime_mode_candidates(intended_receiver_mode: str | None) -> list[str]:
+    if intended_receiver_mode:
+        return [str(intended_receiver_mode)]
+    return list(RUNTIME_INTENDED_RECEIVER_MODE_PREFERENCE)
+
+
 def validate_runtime_feature_run(
     feature_run_id: str,
     intended_receiver_mode: str,
@@ -831,6 +864,7 @@ def validate_runtime_feature_run(
     *,
     context: str = "Selected feature artifacts",
 ) -> dict[str, Any]:
+    del source_feature_metadata
     resolved_feature_run_id = resolve_feature_run_id(feature_run_id, required=True, allow_latest=False)
     feature_root = get_feature_run_root(str(resolved_feature_run_id))
     metadata = load_feature_run_metadata(str(resolved_feature_run_id), required=False) or {}
@@ -850,87 +884,126 @@ def validate_runtime_feature_run(
     feature_schema = infer_feature_graph_schema(get_action_graph_dir(feature_root))
     validate_feature_graph_schema(feature_schema, required_graph_schema, context=context)
 
-    if intended_receiver_mode == "model":
-        runtime_model_id = metadata.get("intended_receiver_model_id")
-        source_model_ids = {
-            source_metadata.get("intended_receiver_model_id")
-            for source_metadata in source_feature_metadata.values()
-            if source_metadata.get("intended_receiver_model_id")
-        }
-        source_model_ids.discard(None)
-        if source_model_ids and (runtime_model_id is None or source_model_ids != {runtime_model_id}):
-            details = ", ".join(f"{run_id}={meta.get('intended_receiver_model_id')!r}" for run_id, meta in source_feature_metadata.items())
-            raise ValueError(
-                f"Feature run {resolved_feature_run_id!r} intended_receiver_model_id={runtime_model_id!r} "
-                f"does not match source feature runs: {details}."
-            )
-
     return {
         "feature_run_id": str(resolved_feature_run_id),
         "feature_root": feature_root,
+        "intended_receiver_mode": str(intended_receiver_mode),
         "feature_schema": feature_schema,
         "metadata": metadata,
     }
+
+
+def _resolve_runtime_feature_run_candidate(
+    feature_run_id: str,
+    intended_receiver_mode: str | None,
+    required_graph_schema: dict[str, int | bool],
+    *,
+    context: str,
+) -> dict[str, Any]:
+    rejected: list[str] = []
+    for mode in _runtime_mode_candidates(intended_receiver_mode):
+        try:
+            return validate_runtime_feature_run(
+                feature_run_id,
+                mode,
+                required_graph_schema,
+                {},
+                context=context,
+            )
+        except Exception as exc:
+            rejected.append(f"{mode}: {type(exc).__name__}: {exc}")
+    raise ValueError(
+        f"Feature run {feature_run_id!r} is not compatible with any requested runtime mode. "
+        f"Rejected modes: {'; '.join(rejected)}"
+    )
+
+
+def resolve_runtime_return_type(
+    shared_context: dict[str, Any],
+    explicit_return_type: str | None = None,
+    *,
+    preferred_task: str = "outcome_scoring",
+    fallback: str = DEFAULT_RUNTIME_RETURN_TYPE,
+) -> str:
+    if explicit_return_type:
+        return str(explicit_return_type)
+
+    source_return_types = shared_context.get("source_return_types", {})
+    if isinstance(source_return_types, dict) and source_return_types.get(preferred_task):
+        return str(source_return_types[preferred_task])
+
+    return_type = shared_context.get("return_type")
+    return str(return_type) if return_type else fallback
 
 
 def resolve_runtime_feature_run_context(
     explicit_feature_run_id: str | None,
     shared_context: dict[str, Any],
     bundle: dict[str, Any] | None,
-    intended_receiver_mode: str,
+    intended_receiver_mode: str | None,
     required_graph_schema: dict[str, int | bool],
     *,
     context: str = "Selected feature artifacts",
 ) -> dict[str, Any]:
     candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
-    source_feature_metadata = {
-        feature_run_id: (load_feature_run_metadata(feature_run_id, required=False) or {})
-        for feature_run_id in candidate_ids
-        if get_feature_run_root(feature_run_id).exists()
-    }
 
     if explicit_feature_run_id:
-        resolved = validate_runtime_feature_run(
+        resolved = _resolve_runtime_feature_run_candidate(
             str(explicit_feature_run_id),
             intended_receiver_mode,
             required_graph_schema,
-            source_feature_metadata,
             context=context,
         )
         resolved["selection"] = "explicit"
         resolved["candidate_feature_run_ids"] = candidate_ids
         return resolved
 
-    if not candidate_ids:
-        raise ValueError("No source feature runs are available for runtime feature selection. Pass --feature-run-id.")
+    def select_compatible(feature_run_ids: list[str], selection: str) -> tuple[dict[str, Any] | None, list[str]]:
+        compatible: list[dict[str, Any]] = []
+        rejected: list[str] = []
+        for feature_run_id in feature_run_ids:
+            try:
+                resolved = _resolve_runtime_feature_run_candidate(
+                    feature_run_id,
+                    intended_receiver_mode,
+                    required_graph_schema,
+                    context=context,
+                )
+            except Exception as exc:
+                rejected.append(f"{feature_run_id}: {type(exc).__name__}: {exc}")
+                continue
+            compatible.append(resolved)
+        if not compatible:
+            return None, rejected
+        compatible.sort(key=lambda item: _feature_run_sort_key(str(item["feature_run_id"]), item.get("metadata")))
+        selected = compatible[-1]
+        selected["selection"] = selection
+        selected["candidate_feature_run_ids"] = candidate_ids
+        return selected, rejected
 
-    compatible: list[dict[str, Any]] = []
-    rejected: list[str] = []
-    for feature_run_id in candidate_ids:
-        try:
-            resolved = validate_runtime_feature_run(
-                feature_run_id,
-                intended_receiver_mode,
-                required_graph_schema,
-                source_feature_metadata,
-                context=context,
-            )
-        except Exception as exc:
-            rejected.append(f"{feature_run_id}: {type(exc).__name__}: {exc}")
-            continue
-        compatible.append(resolved)
+    candidate_selection, rejected_candidates = select_compatible(candidate_ids, "newest_compatible")
+    if candidate_selection is not None:
+        return candidate_selection
 
-    if not compatible:
-        raise ValueError(
-            "No compatible runtime feature run could be selected from model source feature runs. "
-            f"Rejected candidates: {'; '.join(rejected)}"
-        )
+    all_candidate_ids = [
+        feature_run_id
+        for feature_run_id in all_runtime_feature_run_ids()
+        if feature_run_id not in set(candidate_ids)
+    ]
+    fallback_selection, rejected_fallbacks = select_compatible(
+        all_candidate_ids,
+        "newest_compatible_all_feature_runs",
+    )
+    if fallback_selection is not None:
+        return fallback_selection
 
-    compatible.sort(key=lambda item: _feature_run_sort_key(str(item["feature_run_id"]), item.get("metadata")))
-    selected = compatible[-1]
-    selected["selection"] = "newest_compatible"
-    selected["candidate_feature_run_ids"] = candidate_ids
-    return selected
+    rejected = rejected_candidates + rejected_fallbacks
+    if not rejected:
+        raise ValueError("No runtime feature runs are available. Pass --feature-run-id after generating compatible features.")
+    raise ValueError(
+        "No compatible runtime feature run could be selected. "
+        f"Rejected candidates: {'; '.join(rejected)}"
+    )
 
 
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:

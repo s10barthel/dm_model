@@ -888,6 +888,72 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
         )
 
+    def test_validate_model_record_consistency_accepts_all_mixed_metadata_when_relaxed(self) -> None:
+        model_records = {
+            "action_intent": make_model_record(
+                "action_intent",
+                feature_run_id="feature_action",
+                intended_receiver_mode="model",
+                return_type="next_5",
+            ),
+            "pass_success": make_model_record(
+                "pass_success",
+                feature_run_id="feature_pass",
+                intended_receiver_mode="original",
+                return_type="disc_0.9",
+            ),
+            "outcome_scoring": make_model_record(
+                "outcome_scoring",
+                feature_run_id="feature_score",
+                intended_receiver_mode="model",
+                return_type="disc_0.5",
+                target_family="epv",
+            ),
+            "outcome_conceding": make_model_record(
+                "outcome_conceding",
+                feature_run_id="feature_concede",
+                intended_receiver_mode="angle_only",
+                return_type="in_3",
+                target_family="xt",
+            ),
+        }
+
+        shared = model_utils.validate_model_record_consistency(
+            model_records,
+            require_feature_run_id=False,
+            require_intended_receiver_mode=False,
+            require_return_type=False,
+            require_target_family=False,
+        )
+
+        self.assertIsNone(shared["feature_run_id"])
+        self.assertIsNone(shared["intended_receiver_mode"])
+        self.assertIsNone(shared["return_type"])
+        self.assertIsNone(shared["target_family"])
+        self.assertEqual(
+            shared["source_intended_receiver_modes"],
+            {
+                "action_intent": "model",
+                "pass_success": "original",
+                "outcome_scoring": "model",
+                "outcome_conceding": "angle_only",
+            },
+        )
+        self.assertEqual(shared["source_return_types"]["outcome_scoring"], "disc_0.5")
+        self.assertEqual(shared["source_target_families"]["outcome_conceding"], "xt")
+
+    def test_resolve_runtime_return_type_prefers_outcome_scoring_when_outcomes_disagree(self) -> None:
+        shared = {
+            "return_type": None,
+            "source_return_types": {
+                "pass_success": "disc_0.9",
+                "outcome_scoring": "disc_0.5",
+                "outcome_conceding": "in_3",
+            },
+        }
+
+        self.assertEqual(model_utils.resolve_runtime_return_type(shared), "disc_0.5")
+
     def test_resolve_model_selection_relaxed_accepts_bundle_plus_override_mixed_feature_runs(self) -> None:
         resolved_model_ids = {
             "pass_intent": "pass_intent/old",
@@ -914,6 +980,9 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 bundle_id="bundle_under_test",
                 explicit_model_ids={"pass_intent": "pass_intent/old"},
                 require_feature_run_id=False,
+                require_intended_receiver_mode=False,
+                require_return_type=False,
+                require_target_family=False,
             )
 
         self.assertEqual(selected_model_ids, resolved_model_ids)
@@ -924,6 +993,58 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             shared["source_feature_run_ids"],
             {"pass_intent": "feature_old", "pass_success": "feature_new"},
         )
+
+    def test_resolve_model_selection_relaxed_accepts_bundle_metadata_mismatches(self) -> None:
+        resolved_model_ids = {
+            "outcome_scoring": "outcome_scoring/score",
+            "outcome_conceding": "outcome_conceding/concede",
+        }
+        bundle = {
+            "bundle_id": "bundle_under_test",
+            "feature_run_id": "feature_bundle",
+            "intended_receiver_mode": "original",
+            "return_type": "next_10",
+            "target_family": "goal",
+            "model_ids": resolved_model_ids,
+        }
+        model_records = {
+            "outcome_scoring": make_model_record(
+                "outcome_scoring",
+                feature_run_id="feature_score",
+                intended_receiver_mode="model",
+                return_type="disc_0.5",
+                target_family="epv",
+            ),
+            "outcome_conceding": make_model_record(
+                "outcome_conceding",
+                feature_run_id="feature_concede",
+                intended_receiver_mode="angle_only",
+                return_type="in_3",
+                target_family="xt",
+            ),
+        }
+
+        with (
+            patch.object(model_utils, "resolve_bundle_model_ids", return_value=(resolved_model_ids, bundle)),
+            patch.object(model_utils, "get_model_records", return_value=model_records),
+        ):
+            selected_model_ids, shared, selected_bundle = model_utils.resolve_model_selection(
+                required_tasks=["outcome_scoring", "outcome_conceding"],
+                bundle_id="bundle_under_test",
+                require_feature_run_id=False,
+                require_intended_receiver_mode=False,
+                require_return_type=False,
+                require_target_family=False,
+            )
+
+        self.assertEqual(selected_model_ids, resolved_model_ids)
+        self.assertEqual(selected_bundle, bundle)
+        self.assertEqual(shared["feature_run_id"], "feature_bundle")
+        self.assertEqual(shared["intended_receiver_mode"], "original")
+        self.assertEqual(shared["return_type"], "next_10")
+        self.assertEqual(shared["target_family"], "goal")
+        self.assertEqual(shared["source_return_types"]["outcome_scoring"], "disc_0.5")
+        self.assertEqual(shared["source_target_families"]["outcome_conceding"], "xt")
 
     def test_resolve_model_selection_uses_outcome_return_type_for_mixed_bundle(self) -> None:
         required_tasks = [
@@ -1044,6 +1165,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             }
 
             with (
+                patch.object(model_utils, "FEATURE_RUNS_DIR", root),
                 patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
                 patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
@@ -1083,6 +1205,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             }
 
             with (
+                patch.object(model_utils, "FEATURE_RUNS_DIR", root),
                 patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
                 patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
@@ -1099,6 +1222,46 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(runtime["feature_run_id"], "feature_new")
         self.assertEqual(runtime["selection"], "newest_compatible")
 
+    def test_resolve_runtime_feature_run_context_falls_back_to_all_feature_runs_and_prefers_model_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._make_runtime_feature_run(root, "feature_old")
+            feature_new = self._make_runtime_feature_run(root, "feature_new", mode="original")
+            model_utils.get_resolved_action_dir("model", root=feature_new).mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "feature_old": {
+                    "created_at": "2026-04-01T00:00:00",
+                    "intended_receiver_modes": ["model"],
+                },
+                "feature_new": {
+                    "created_at": "2026-04-02T00:00:00",
+                    "intended_receiver_modes": ["original", "model"],
+                },
+            }
+            schemas = {
+                "feature_old": {"node_in_dim": 25, "edge_in_dim": 2, "add_v_edge_features": False},
+                "feature_new": {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+            }
+
+            with (
+                patch.object(model_utils, "FEATURE_RUNS_DIR", root),
+                patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
+                patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
+                patch.object(model_utils, "infer_feature_graph_schema", side_effect=lambda path: schemas[Path(path).parent.name]),
+            ):
+                runtime = model_utils.resolve_runtime_feature_run_context(
+                    None,
+                    {"source_feature_run_ids": {"pass_success": "feature_old"}},
+                    None,
+                    None,
+                    {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                )
+
+        self.assertEqual(runtime["feature_run_id"], "feature_new")
+        self.assertEqual(runtime["intended_receiver_mode"], "model")
+        self.assertEqual(runtime["selection"], "newest_compatible_all_feature_runs")
+
     def test_resolve_runtime_feature_run_context_rejects_incompatible_graph_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1113,6 +1276,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             schemas = {"feature_old": {"node_in_dim": 25, "edge_in_dim": 2, "add_v_edge_features": False}}
 
             with (
+                patch.object(model_utils, "FEATURE_RUNS_DIR", root),
                 patch.object(model_utils, "resolve_feature_run_id", side_effect=lambda run_id, **_kwargs: str(run_id)),
                 patch.object(model_utils, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(model_utils, "load_feature_run_metadata", side_effect=lambda run_id, required=False: metadata.get(str(run_id))),
@@ -1152,7 +1316,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         {},
                     )
 
-    def test_validate_runtime_feature_run_rejects_model_mode_intended_receiver_mismatch(self) -> None:
+    def test_validate_runtime_feature_run_allows_model_mode_intended_receiver_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             self._make_runtime_feature_run(root, "feature_runtime")
@@ -1174,13 +1338,15 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                     return_value={"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
                 ),
             ):
-                with self.assertRaises(ValueError):
-                    model_utils.validate_runtime_feature_run(
-                        "feature_runtime",
-                        "model",
-                        {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
-                        {"feature_source": {"intended_receiver_model_id": "success_intent/source"}},
-                    )
+                runtime = model_utils.validate_runtime_feature_run(
+                    "feature_runtime",
+                    "model",
+                    {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+                    {"feature_source": {"intended_receiver_model_id": "success_intent/source"}},
+                )
+
+        self.assertEqual(runtime["feature_run_id"], "feature_runtime")
+        self.assertEqual(runtime["intended_receiver_mode"], "model")
 
     def test_resolve_bundle_model_ids_still_rejects_missing_required_tasks(self) -> None:
         with patch.object(

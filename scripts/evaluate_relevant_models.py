@@ -46,6 +46,9 @@ def main() -> None:
             "outcome_conceding": args.outcome_conceding_model_id,
         },
         require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
     )
     python = sys.executable
     model_ids = [
