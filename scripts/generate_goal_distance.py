@@ -12,13 +12,15 @@ if str(ROOT) not in sys.path:
 
 import pandas as pd
 
-from datatools.goal_distance import annotate_match_goal_distance
+from datatools.goal_distance import GOAL_DISTANCE_MAX_VALUE, annotate_match_goal_distance
 from project_config import (
     EVENT_SYNCED_DIR,
     GOAL_DISTANCE_DIR,
     GOAL_DISTANCE_MATCH_DIR,
     ensure_project_dirs,
 )
+
+GOAL_DISTANCE_TARGET_RANGE = [0.0, GOAL_DISTANCE_MAX_VALUE]
 
 
 def parse_args() -> argparse.Namespace:
@@ -141,7 +143,8 @@ def main() -> None:
         "export_match_ids": processed_export_ids,
         "eligible_action_types": ["pass", "cross", "shot"],
         "target_name": "goal_distance",
-        "target_range": [0.0, 100.0],
+        "target_range": GOAL_DISTANCE_TARGET_RANGE,
+        "target_scale": GOAL_DISTANCE_MAX_VALUE,
         "goal_center_xy": [105.0, 34.0],
         "max_raw_distance": float((105.0**2 + 34.0**2) ** 0.5),
         "skipped_export_matches": skipped_export_matches + skipped_export_write_matches,

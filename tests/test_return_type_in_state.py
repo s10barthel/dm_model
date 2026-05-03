@@ -13,9 +13,17 @@ import pandas as pd
 import torch
 
 import project_config
+from datatools.goal_distance import (
+    GOAL_DISTANCE_GOAL_X,
+    GOAL_DISTANCE_GOAL_Y,
+    GOAL_DISTANCE_MAX_RAW,
+    GOAL_DISTANCE_MAX_VALUE,
+    goal_distance_from_xy,
+)
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import utils
 from models.utils import calc_binary_metrics, get_outcome_diagnostic_targets, get_outcome_targets
+from scripts.generate_goal_distance import GOAL_DISTANCE_TARGET_RANGE
 from scripts import main as main_script
 from scripts import train_relevant_models as train_wrapper
 
@@ -66,6 +74,48 @@ def make_epv_events(rows: list[tuple[str, str, float]]) -> pd.DataFrame:
             for spadl_type, object_id, epv in rows
         ]
     )
+
+
+class GoalDistanceScaleTest(unittest.TestCase):
+    def test_goal_center_returns_max_value(self) -> None:
+        values = goal_distance_from_xy(
+            pd.Series([GOAL_DISTANCE_GOAL_X]),
+            pd.Series([GOAL_DISTANCE_GOAL_Y]),
+        )
+
+        self.assertAlmostEqual(float(values[0]), GOAL_DISTANCE_MAX_VALUE)
+
+    def test_opposite_corners_return_zero(self) -> None:
+        values = goal_distance_from_xy(
+            pd.Series([0.0, 0.0]),
+            pd.Series([0.0, 68.0]),
+        )
+
+        self.assertEqual(values.tolist(), [0.0, 0.0])
+
+    def test_midfield_point_is_bounded_and_uses_expected_formula(self) -> None:
+        x = 52.5
+        y = 34.0
+        values = goal_distance_from_xy(pd.Series([x]), pd.Series([y]))
+        expected = GOAL_DISTANCE_MAX_VALUE * (
+            1.0 - math.hypot(GOAL_DISTANCE_GOAL_X - x, GOAL_DISTANCE_GOAL_Y - y) / GOAL_DISTANCE_MAX_RAW
+        )
+
+        self.assertGreater(float(values[0]), 0.0)
+        self.assertLess(float(values[0]), GOAL_DISTANCE_MAX_VALUE)
+        self.assertAlmostEqual(float(values[0]), expected)
+
+    def test_nan_coordinates_remain_nan(self) -> None:
+        values = goal_distance_from_xy(
+            pd.Series([np.nan, GOAL_DISTANCE_GOAL_X]),
+            pd.Series([GOAL_DISTANCE_GOAL_Y, np.nan]),
+        )
+
+        self.assertTrue(np.isnan(values[0]))
+        self.assertTrue(np.isnan(values[1]))
+
+    def test_generated_metadata_target_range_uses_bounded_scale(self) -> None:
+        self.assertEqual(GOAL_DISTANCE_TARGET_RANGE, [0.0, GOAL_DISTANCE_MAX_VALUE])
 
 
 class ReturnTypeValidationTests(unittest.TestCase):
