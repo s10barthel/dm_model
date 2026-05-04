@@ -539,14 +539,18 @@ Useful options:
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
 
-### 7. Visualize one action at a time
+### 7. Visualize action components
 
 ```powershell
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --player-id DFL-OBJ-... --spadl-type pass --success false --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --start-x-gt 50 --end-x-lt 105 --bundle-id <bundle_id>
 ```
 
 `--action-id` refers to the `action_id` column in `data/event_synced/<match_id>.csv`.
+You can provide one or more explicit `--action-id`, `--row-index`, or `--original-event-id` values, or omit them and select rows only with CSV filters.
 
 Inputs:
 
@@ -571,8 +575,10 @@ Useful options:
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--show-trajectories` to render dashed recent player trajectories
-- `--row-index <index>` to use the legacy internal modeled-action row index instead of the CSV `action_id`
-- `--original-event-id <sportec_event_id>` to look up the action by the raw Sportec event id
+- `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
+- `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
+- `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
+- all CSV filters are off by default, enabled filters are combined with AND logic, and unprocessed/problematic rows are skipped with warnings instead of stopping the whole batch
 
 ### 8. Run frame-level inference on HawkEye data
 
@@ -605,12 +611,14 @@ To visualize one HawkEye situation as MP4s:
 
 ```powershell
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 ```
 
 `scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. If you want the old direct-inference behavior, use:
 
 ```powershell
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 ```
 
 ### 9. Run benchmark inference on local benchmark data
@@ -679,6 +687,7 @@ To visualize one SkillCorner possession as MP4s:
 
 ```powershell
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index_1> --index <player_possession_index_2>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 ```
 

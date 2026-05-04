@@ -38,21 +38,39 @@ from project_config import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", required=True)
-    identifier_group = parser.add_mutually_exclusive_group(required=True)
-    identifier_group.add_argument(
+    parser.add_argument(
         "--action-id",
+        action="append",
         type=int,
-        help="Action id from data/event_synced/<match_id>.csv.",
+        help="Action id from data/event_synced/<match_id>.csv. Repeat to visualize multiple actions.",
     )
-    identifier_group.add_argument(
+    parser.add_argument(
         "--row-index",
+        action="append",
         type=int,
-        help="Legacy modeled-action row index used by earlier versions of this script.",
+        help="Legacy modeled-action row index used by earlier versions of this script. Repeat to visualize multiple rows.",
     )
-    identifier_group.add_argument(
+    parser.add_argument(
         "--original-event-id",
-        help="Original Sportec event id from the original_event_id column.",
+        action="append",
+        help="Original Sportec event id from the original_event_id column. Repeat to visualize multiple events.",
     )
+    parser.add_argument("--player-id", action="append", help="Filter by player_id. Repeat for OR within this column.")
+    parser.add_argument("--object-id", action="append", help="Filter by object_id. Repeat for OR within this column.")
+    parser.add_argument(
+        "--advanced-position",
+        action="append",
+        help="Filter by advanced_position. Repeat for OR within this column.",
+    )
+    parser.add_argument("--team-id", action="append", help="Filter by team_id. Repeat for OR within this column.")
+    parser.add_argument("--spadl-type", action="append", help="Filter by spadl_type. Repeat for OR within this column.")
+    parser.add_argument("--success", action="append", type=parse_bool, help="Filter by success true/false.")
+    parser.add_argument("--offside", action="append", type=parse_bool, help="Filter by offside true/false.")
+    parser.add_argument("--next-type", action="append", help="Filter by next_type. Repeat for OR within this column.")
+    for column in ("start_x", "start_y", "end_x", "end_y"):
+        option_name = column.replace("_", "-")
+        parser.add_argument(f"--{option_name}-lt", type=float, help=f"Filter to rows where {column} is lower than this value.")
+        parser.add_argument(f"--{option_name}-gt", type=float, help=f"Filter to rows where {column} is higher than this value.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
@@ -67,6 +85,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations"))
     return parser.parse_args()
+
+
+def parse_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got {value!r}.")
+
+
+EXACT_FILTERS = {
+    "player_id": "player_id",
+    "object_id": "object_id",
+    "advanced_position": "advanced_position",
+    "team_id": "team_id",
+    "spadl_type": "spadl_type",
+    "success": "success",
+    "offside": "offside",
+    "next_type": "next_type",
+}
+
+NUMERIC_FILTER_COLUMNS = ("start_x", "start_y", "end_x", "end_y")
 
 
 def load_match(
@@ -193,38 +236,114 @@ def build_not_modeled_error(match: Match, match_id: str, identifier_desc: str, e
     )
 
 
-def resolve_action_index(match: Match, args: argparse.Namespace) -> tuple[int, str]:
+def warn_skip(message: str) -> None:
+    print(f"Skipping: {message}", file=sys.stderr)
+
+
+def _dedupe_ordered(values: list[int]) -> list[int]:
+    seen: set[int] = set()
+    deduped: list[int] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _resolve_candidate_event_indices(match: Match, args: argparse.Namespace) -> list[int]:
     match_id = match.match_id or args.match_id
+    candidates: list[int] = []
+    has_explicit_selectors = any([args.action_id, args.row_index, args.original_event_id])
 
-    if args.row_index is not None:
-        event_index = int(args.row_index)
+    if not has_explicit_selectors:
+        return [int(index) for index in match.events.index.tolist()]
+
+    for event_index in args.row_index or []:
         identifier_desc = f"Row index {event_index}"
-        if event_index not in match.events.index:
-            raise KeyError(f"{identifier_desc} is not present in match {match_id}.")
-        if event_index not in match.actions.index:
-            raise build_not_modeled_error(match, match_id, identifier_desc, event_index)
-        return event_index, str(int(match.actions.at[event_index, "action_id"]))
+        if int(event_index) not in match.events.index:
+            warn_skip(f"{identifier_desc} is not present in match {match_id}.")
+            continue
+        candidates.append(int(event_index))
 
-    if args.action_id is not None:
-        identifier_desc = f"CSV action_id {args.action_id}"
-        matches = match.events.index[match.events["action_id"] == args.action_id].tolist()
-    else:
-        requested_original_event_id = str(args.original_event_id)
+    for action_id in args.action_id or []:
+        identifier_desc = f"CSV action_id {action_id}"
+        matches = match.events.index[match.events["action_id"] == int(action_id)].tolist()
+        if not matches:
+            warn_skip(f"{identifier_desc} is not present in match {match_id}.")
+            continue
+        if len(matches) > 1:
+            warn_skip(f"{identifier_desc} is not unique in match {match_id}.")
+            continue
+        candidates.append(int(matches[0]))
+
+    for original_event_id in args.original_event_id or []:
+        requested_original_event_id = str(original_event_id)
         identifier_desc = f"Original event id {requested_original_event_id}"
         matches = match.events.index[
             match.events["original_event_id"].astype("string") == requested_original_event_id
         ].tolist()
+        if not matches:
+            warn_skip(f"{identifier_desc} is not present in match {match_id}.")
+            continue
+        if len(matches) > 1:
+            warn_skip(f"{identifier_desc} is not unique in match {match_id}.")
+            continue
+        candidates.append(int(matches[0]))
 
-    if not matches:
-        raise KeyError(f"{identifier_desc} is not present in match {match_id}.")
-    if len(matches) > 1:
-        raise ValueError(f"{identifier_desc} is not unique in match {match_id}.")
+    return _dedupe_ordered(candidates)
 
-    event_index = int(matches[0])
-    if event_index not in match.actions.index:
-        raise build_not_modeled_error(match, match_id, identifier_desc, event_index)
 
-    return event_index, str(int(match.actions.at[event_index, "action_id"]))
+def _filter_mask_for_events(events: pd.DataFrame, args: argparse.Namespace) -> pd.Series:
+    mask = pd.Series(True, index=events.index)
+
+    for attr_name, column in EXACT_FILTERS.items():
+        requested_values = getattr(args, attr_name, None)
+        if not requested_values:
+            continue
+        if column in {"success", "offside"}:
+            normalized_values = {bool(value) for value in requested_values}
+            column_values = events[column].map(lambda value: value if pd.isna(value) else bool(value))
+            mask &= column_values.isin(normalized_values)
+        else:
+            normalized_values = {str(value) for value in requested_values}
+            mask &= events[column].astype("string").isin(normalized_values)
+
+    for column in NUMERIC_FILTER_COLUMNS:
+        values = pd.to_numeric(events[column], errors="coerce")
+        lower_than = getattr(args, f"{column}_lt")
+        higher_than = getattr(args, f"{column}_gt")
+        if lower_than is not None:
+            mask &= values < float(lower_than)
+        if higher_than is not None:
+            mask &= values > float(higher_than)
+
+    return mask
+
+
+def resolve_action_indices(match: Match, args: argparse.Namespace) -> list[tuple[int, str]]:
+    match_id = match.match_id or args.match_id
+    candidate_event_indices = _resolve_candidate_event_indices(match, args)
+    if not candidate_event_indices:
+        return []
+
+    filter_mask = _filter_mask_for_events(match.events, args)
+    selected: list[tuple[int, str]] = []
+    for event_index in candidate_event_indices:
+        if event_index not in filter_mask.index or not bool(filter_mask.at[event_index]):
+            continue
+        if event_index not in match.actions.index:
+            reason = describe_action_subset_exclusion(match, event_index)
+            event = match.events.loc[event_index]
+            warn_skip(
+                f"row index {event_index} in match {match_id} "
+                f"(action_id={event.get('action_id')}, original_event_id={event.get('original_event_id')}, "
+                f"spadl_type={event.get('spadl_type')}) is not part of the modeled action subset: {reason}."
+            )
+            continue
+        selected.append((event_index, str(int(match.actions.at[event_index, "action_id"]))))
+
+    return selected
 
 
 def resolve_highlight_players(
@@ -321,6 +440,75 @@ def render_component(
     plt.close(fig)
 
 
+def render_action_components(
+    match: Match,
+    loaded_models: dict[str, object],
+    feature_root: Path,
+    device: str,
+    action_index: int,
+    display_action_id: str,
+    output_dir: Path,
+    show_trajectories: bool = False,
+) -> None:
+    component_prob_rows: dict[str, pd.Series] = {}
+
+    for component_name, model in loaded_models.items():
+        if component_name.startswith("outcome_"):
+            failure_probs, success_probs = inference_gnn(
+                match,
+                model,
+                device=device,
+                post_action=False,
+                event_indices=[action_index],
+            )
+            for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
+                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[action_index]
+        else:
+            if component_name == "intended_recipient":
+                component_prob_rows[component_name] = run_success_intent_component(
+                    match,
+                    model,
+                    feature_root,
+                    device,
+                    action_index,
+                )
+            else:
+                probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
+                component_prob_rows[component_name] = probs.loc[action_index]
+
+    component_prob_rows["pass_score"] = compute_pass_score(
+        pass_success=component_prob_rows["pass_success"],
+        outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
+        outcome_scoring_failure=component_prob_rows["outcome_scoring_failure"],
+        outcome_conceding_success=component_prob_rows["outcome_conceding_success"],
+        outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
+    )
+
+    component_order = ["action_intent", "pass_intent"]
+    if "intended_recipient" in component_prob_rows:
+        component_order.append("intended_recipient")
+    component_order.extend(
+        [
+            "pass_success",
+            "outcome_scoring_success",
+            "outcome_scoring_failure",
+            "outcome_conceding_success",
+            "outcome_conceding_failure",
+            "pass_score",
+        ]
+    )
+    for component_name in component_order:
+        render_component(
+            match=match,
+            action_index=action_index,
+            display_action_id=display_action_id,
+            component_name=component_name,
+            probs=component_prob_rows[component_name],
+            output_path=output_dir / f"{component_name}.png",
+            show_trajectories=show_trajectories,
+        )
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -391,68 +579,33 @@ def main() -> None:
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
     )
-    action_index, display_action_id = resolve_action_index(match, args)
-    output_dir = Path(args.output_dir) / args.match_id / display_action_id
+    selected_actions = resolve_action_indices(match, args)
+    if not selected_actions:
+        raise ValueError("No matching modeled actions were selected.")
 
-    component_prob_rows: dict[str, pd.Series] = {}
-
-    for component_name, model in loaded_models.items():
-        if component_name.startswith("outcome_"):
-            failure_probs, success_probs = inference_gnn(
-                match,
-                model,
+    saved_dirs: list[Path] = []
+    for action_index, display_action_id in selected_actions:
+        output_dir = Path(args.output_dir) / args.match_id / display_action_id
+        try:
+            render_action_components(
+                match=match,
+                loaded_models=loaded_models,
+                feature_root=feature_root,
                 device=device,
-                post_action=False,
-                event_indices=[action_index],
+                action_index=action_index,
+                display_action_id=display_action_id,
+                output_dir=output_dir,
+                show_trajectories=args.show_trajectories,
             )
-            for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
-                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[action_index]
-        else:
-            if component_name == "intended_recipient":
-                component_prob_rows[component_name] = run_success_intent_component(
-                    match,
-                    model,
-                    feature_root,
-                    device,
-                    action_index,
-                )
-            else:
-                probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
-                component_prob_rows[component_name] = probs.loc[action_index]
+        except Exception as exc:
+            warn_skip(f"action_id={display_action_id} in match {args.match_id} failed during rendering: {exc}")
+            continue
+        saved_dirs.append(output_dir)
+        print(f"Saved component plots to {output_dir}")
 
-    component_prob_rows["pass_score"] = compute_pass_score(
-        pass_success=component_prob_rows["pass_success"],
-        outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
-        outcome_scoring_failure=component_prob_rows["outcome_scoring_failure"],
-        outcome_conceding_success=component_prob_rows["outcome_conceding_success"],
-        outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
-    )
-
-    component_order = ["action_intent", "pass_intent"]
-    if "intended_recipient" in component_prob_rows:
-        component_order.append("intended_recipient")
-    component_order.extend(
-        [
-            "pass_success",
-            "outcome_scoring_success",
-            "outcome_scoring_failure",
-            "outcome_conceding_success",
-            "outcome_conceding_failure",
-            "pass_score",
-        ]
-    )
-    for component_name in component_order:
-        render_component(
-            match=match,
-            action_index=action_index,
-            display_action_id=display_action_id,
-            component_name=component_name,
-            probs=component_prob_rows[component_name],
-            output_path=output_dir / f"{component_name}.png",
-            show_trajectories=args.show_trajectories,
-        )
-
-    print(f"Saved component plots to {output_dir}")
+    if not saved_dirs:
+        raise RuntimeError("All selected actions were skipped or failed during rendering.")
+    print(f"Saved component plots for {len(saved_dirs)} action(s).")
 
 
 if __name__ == "__main__":

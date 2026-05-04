@@ -33,7 +33,13 @@ from project_config import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", required=True)
-    parser.add_argument("--index", type=int, required=True, help="SkillCorner player_possession index to visualize.")
+    parser.add_argument(
+        "--index",
+        action="append",
+        type=int,
+        required=True,
+        help="SkillCorner player_possession index to visualize. Repeat to visualize multiple possessions.",
+    )
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
@@ -41,6 +47,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     return parser.parse_args()
+
+
+def resolve_indices(args: argparse.Namespace) -> list[int]:
+    seen: set[int] = set()
+    indices: list[int] = []
+    for index in args.index:
+        if index in seen:
+            continue
+        seen.add(index)
+        indices.append(index)
+    return indices
 
 
 def render_frame_image(
@@ -141,39 +158,34 @@ def _probs_for_component_frame(
     return build_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
 
-def main() -> None:
-    args = parse_args()
-    output_dir = Path(args.output_dir) / str(args.match_id) / str(args.index)
+def render_possession(
+    args: argparse.Namespace,
+    context,
+    component_tables: dict[str, pd.DataFrame],
+    possession_index: int,
+) -> Path:
+    output_dir = Path(args.output_dir) / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.component_dir:
-        component_dir = Path(args.component_dir)
-    else:
-        component_run_id = resolve_named_component_run_id("skillcorner_component", args.component_run_id, required=False)
-        component_dir = (
-            get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
-        )
-
-    context = build_skillcorner_match_context(args.match_id, args.input_dir)
-    possession, _ = build_skillcorner_possession(context, args.index)
+    possession, _ = build_skillcorner_possession(context, possession_index)
     if possession.frame_meta.empty:
-        raise ValueError(f"Player-possession {args.index} in match {args.match_id} does not have any addressable frames.")
+        raise ValueError(f"Player-possession {possession_index} in match {args.match_id} does not have any addressable frames.")
 
-    component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
+    possession_component_tables = {name: table.copy() for name, table in component_tables.items()}
     frame_ids = [int(frame_id) for frame_id in possession.frame_meta.index.tolist()]
     component_names = [*COMPONENT_COLUMNS, "pass_score"]
 
     for component_name in COMPONENT_COLUMNS:
-        component_table = component_tables[component_name]
-        component_table = component_table.loc[component_table["index"] == int(args.index)].copy()
+        component_table = possession_component_tables[component_name]
+        component_table = component_table.loc[component_table["index"] == int(possession_index)].copy()
         if not component_table.empty:
             component_table = component_table.sort_values("frame").drop_duplicates(subset=["frame"], keep="last")
             component_table = component_table.set_index("frame")
-        component_tables[component_name] = component_table
+        possession_component_tables[component_name] = component_table
 
     for component_name in component_names:
         def iter_component_images():
             for frame_id in frame_ids:
-                probs = _probs_for_component_frame(component_name, component_tables, frame_id)
+                probs = _probs_for_component_frame(component_name, possession_component_tables, frame_id)
                 yield render_frame_image(
                     possession,
                     frame_id,
@@ -186,7 +198,34 @@ def main() -> None:
         output_path = output_dir / f"{component_name}.{suffix}"
         save_animation(iter_component_images(), output_path, fps=float(possession.fps), gif=args.gif)
 
-    print(f"Saved SkillCorner animations to {output_dir}")
+    return output_dir
+
+
+def main() -> None:
+    args = parse_args()
+    if args.component_dir:
+        component_dir = Path(args.component_dir)
+    else:
+        component_run_id = resolve_named_component_run_id("skillcorner_component", args.component_run_id, required=False)
+        component_dir = (
+            get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
+        )
+
+    context = build_skillcorner_match_context(args.match_id, args.input_dir)
+    component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
+
+    output_dirs: list[Path] = []
+    for possession_index in resolve_indices(args):
+        output_dir = render_possession(
+            args=args,
+            context=context,
+            component_tables=component_tables,
+            possession_index=possession_index,
+        )
+        output_dirs.append(output_dir)
+        print(f"Saved SkillCorner animations to {output_dir}")
+
+    print(f"Saved SkillCorner animations for {len(output_dirs)} possession(s).")
 
 
 if __name__ == "__main__":

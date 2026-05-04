@@ -30,8 +30,12 @@ from project_config import DATA_ROOT, PROJECT_ROOT
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--situation-id", default=None, help="Hawkeye situation id to visualize.")
-    parser.add_argument("--action-id", default=None, help="Alias for --situation-id.")
+    parser.add_argument(
+        "--situation-id",
+        action="append",
+        help="Hawkeye situation id to visualize. Repeat to visualize multiple situations.",
+    )
+    parser.add_argument("--action-id", action="append", help="Alias for --situation-id. Repeat to visualize multiple situations.")
     parser.add_argument(
         "--tracking-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"),
@@ -53,6 +57,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "hawkeye"))
     parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
+
+
+def resolve_situation_ids(args: argparse.Namespace) -> list[str]:
+    situation_ids = [str(value) for value in (args.situation_id or [])]
+    situation_ids.extend(str(value) for value in (args.action_id or []))
+    if not situation_ids:
+        raise ValueError("Please provide --situation-id (or --action-id) for Hawkeye visualization.")
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for situation_id in situation_ids:
+        if situation_id in seen:
+            continue
+        seen.add(situation_id)
+        deduped.append(situation_id)
+    return deduped
 
 
 def render_frame_image(
@@ -111,31 +131,21 @@ def render_frame_image(
     return image
 
 
-def main() -> None:
-    args = parse_args()
-    situation_id = args.situation_id or args.action_id
-    if not situation_id:
-        raise ValueError("Please provide --situation-id (or --action-id) for Hawkeye visualization.")
-
-    device = args.device if torch.cuda.is_available() else "cpu"
+def render_situation(
+    situation_id: str,
+    tracking: pd.DataFrame,
+    ball: pd.DataFrame,
+    model_specs: dict[str, object],
+    graph_schema: dict[str, object],
+    args: argparse.Namespace,
+    device: str,
+) -> Path:
     output_dir = Path(args.output_dir) / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
-    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
     if situation_tracking.empty:
         raise KeyError(f"Hawkeye situation id {situation_id} was not found in {args.tracking_csv}.")
 
-    model_specs = load_hawkeye_models(
-        action_intent_model_id=args.action_intent_model_id,
-        pass_intent_model_id=args.pass_intent_model_id,
-        pass_success_model_id=args.pass_success_model_id,
-        outcome_scoring_model_id=args.outcome_scoring_model_id,
-        outcome_conceding_model_id=args.outcome_conceding_model_id,
-        device=device,
-    )
-    graph_schema = validate_model_graph_schemas(model_specs)
     situation, _, _ = build_hawkeye_situation(
         situation_tracking,
         ball,
@@ -190,7 +200,41 @@ def main() -> None:
         output_path = output_dir / f"{component_name}.{suffix}"
         save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
 
-    print(f"Saved Hawkeye animations to {output_dir}")
+    return output_dir
+
+
+def main() -> None:
+    args = parse_args()
+    situation_ids = resolve_situation_ids(args)
+    device = args.device if torch.cuda.is_available() else "cpu"
+
+    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    model_specs = load_hawkeye_models(
+        action_intent_model_id=args.action_intent_model_id,
+        pass_intent_model_id=args.pass_intent_model_id,
+        pass_success_model_id=args.pass_success_model_id,
+        outcome_scoring_model_id=args.outcome_scoring_model_id,
+        outcome_conceding_model_id=args.outcome_conceding_model_id,
+        device=device,
+    )
+    graph_schema = validate_model_graph_schemas(model_specs)
+
+    output_dirs: list[Path] = []
+    for situation_id in situation_ids:
+        output_dir = render_situation(
+            situation_id=situation_id,
+            tracking=tracking,
+            ball=ball,
+            model_specs=model_specs,
+            graph_schema=graph_schema,
+            args=args,
+            device=device,
+        )
+        output_dirs.append(output_dir)
+        print(f"Saved Hawkeye animations to {output_dir}")
+
+    print(f"Saved Hawkeye animations for {len(output_dirs)} situation(s).")
 
 
 if __name__ == "__main__":
