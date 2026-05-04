@@ -410,6 +410,7 @@ def validate_external_pass_intent_model_id(
     feature_flags: dict[str, bool],
     resolved_feature_run_id: str,
 ) -> str | None:
+    del feature_flags, resolved_feature_run_id
     pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
     if not pass_intent_model_id:
         return None
@@ -424,48 +425,10 @@ def validate_external_pass_intent_model_id(
         mismatches.append(f"task={record.get('task')!r}")
     if not record.get("has_weights"):
         mismatches.append("missing best_weights.pt or best_model.json")
-    if record.get("feature_run_id") != resolved_feature_run_id:
-        mismatches.append(f"feature_run_id={record.get('feature_run_id')!r}, expected {resolved_feature_run_id!r}")
-    if record.get("intended_receiver_mode") != args.intended_receiver_mode:
-        mismatches.append(
-            f"intended_receiver_mode={record.get('intended_receiver_mode')!r}, "
-            f"expected {args.intended_receiver_mode!r}"
-        )
-
-    expected_v_edge_feature_mode = cli_v_edge_feature_mode(args)
-    expected_use_v_edge_features = use_v_edge_features_for_mode(expected_v_edge_feature_mode)
-    expected_graph_schema = {
-        "edge_in_dim": 4 if expected_use_v_edge_features else 2,
-        "add_v_edge_features": expected_use_v_edge_features,
-    }
-    graph_schema = record.get("graph_schema", {})
-    normalized_graph_schema = {
-        "edge_in_dim": int(graph_schema.get("edge_in_dim", 0)),
-        "add_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
-    }
-    if normalized_graph_schema != expected_graph_schema:
-        mismatches.append(f"graph_schema={normalized_graph_schema!r}, expected {expected_graph_schema!r}")
-
-    feature_signature = record.get("feature_signature", {})
-    actual_v_edge_feature_mode = normalize_v_edge_feature_mode(
-        feature_signature.get("v_edge_feature_mode"),
-        add_v_edge_features=normalized_graph_schema["add_v_edge_features"],
-        edge_in_dim=normalized_graph_schema["edge_in_dim"],
-    )
-    if actual_v_edge_feature_mode != expected_v_edge_feature_mode:
-        mismatches.append(
-            f"feature_signature.v_edge_feature_mode={actual_v_edge_feature_mode!r}, "
-            f"expected {expected_v_edge_feature_mode!r}"
-        )
-    for key, expected in feature_flags.items():
-        if key not in feature_signature:
-            mismatches.append(f"feature_signature.{key}=missing, expected {bool(expected)!r}")
-        elif bool(feature_signature[key]) != bool(expected):
-            mismatches.append(f"feature_signature.{key}={bool(feature_signature[key])!r}, expected {bool(expected)!r}")
 
     if mismatches:
         details = "; ".join(mismatches)
-        raise ValueError(f"External pass_intent checkpoint {pass_intent_model_id!r} is incompatible: {details}.")
+        raise ValueError(f"External pass_intent checkpoint {pass_intent_model_id!r} is invalid: {details}.")
 
     return str(pass_intent_model_id)
 
@@ -484,9 +447,10 @@ def derive_bundle_shared_context(
         model_records = get_model_records(retained_model_ids)
         shared = validate_model_record_consistency(
             model_records,
-            require_feature_run_id=True,
-            require_intended_receiver_mode=True,
+            require_feature_run_id=False,
+            require_intended_receiver_mode=False,
             require_return_type=False,
+            require_target_family=False,
         )
         graph_schema = dict(shared["graph_schema"])
         retained_modes = {
@@ -499,13 +463,17 @@ def derive_bundle_shared_context(
         }
         v_edge_feature_mode = next(iter(retained_modes)) if len(retained_modes) == 1 else "mixed"
         return {
-            "feature_run_id": shared.get("feature_run_id") or resolved_feature_run_id,
-            "intended_receiver_mode": shared.get("intended_receiver_mode"),
+            "feature_run_id": resolved_feature_run_id or shared.get("feature_run_id"),
+            "intended_receiver_mode": getattr(cli_args, "intended_receiver_mode", None),
             "return_type": cli_args.return_type,
-            "target_family": cli_args.target_family or shared.get("target_family"),
+            "target_family": cli_args.target_family,
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
             "v_edge_feature_mode": v_edge_feature_mode,
+            "source_feature_run_ids": shared.get("source_feature_run_ids", {}),
+            "source_intended_receiver_modes": shared.get("source_intended_receiver_modes", {}),
+            "source_return_types": shared.get("source_return_types", {}),
+            "source_target_families": shared.get("source_target_families", {}),
         }
 
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
@@ -1307,6 +1275,10 @@ def main() -> None:
         **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
         "return_type": bundle_shared.get("return_type"),
+        "source_feature_run_ids": bundle_shared.get("source_feature_run_ids", {}),
+        "source_intended_receiver_modes": bundle_shared.get("source_intended_receiver_modes", {}),
+        "source_return_types": bundle_shared.get("source_return_types", {}),
+        "source_target_families": bundle_shared.get("source_target_families", {}),
         **wrapper_diagnostic_metadata,
         "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", use_v_edge_features_for_mode(v_edge_feature_mode))),
         "v_edge_feature_mode": bundle_shared.get("v_edge_feature_mode", v_edge_feature_mode),

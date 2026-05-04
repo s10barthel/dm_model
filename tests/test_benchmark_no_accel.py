@@ -775,6 +775,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         cli_args = SimpleNamespace(
             return_type="disc_0.9",
             target_family="goal",
+            intended_receiver_mode="angle_only",
             use_v_edge_features=True,
         )
         model_records = {
@@ -801,6 +802,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         cli_args = SimpleNamespace(
             return_type="disc_0.9",
             target_family=None,
+            intended_receiver_mode="angle_only",
             use_v_edge_features=True,
         )
         model_records = {
@@ -823,7 +825,17 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             )
 
         self.assertEqual(shared["return_type"], "disc_0.9")
-        self.assertEqual(shared["target_family"], "xt")
+        self.assertIsNone(shared["target_family"])
+        self.assertEqual(shared["intended_receiver_mode"], "angle_only")
+        self.assertEqual(
+            shared["source_target_families"],
+            {
+                "pass_intent": "epv",
+                "pass_success": "goal",
+                "outcome_scoring": "xt",
+                "outcome_conceding": "xt",
+            },
+        )
 
     def test_validate_model_record_consistency_uses_outcome_return_types_for_shared_context(self) -> None:
         model_records = {
