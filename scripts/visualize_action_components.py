@@ -558,22 +558,36 @@ def main() -> None:
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
     output_root.mkdir(parents=True, exist_ok=True)
-    resolved_model_ids, shared_context, bundle = resolve_model_selection(
-        required_tasks=[
+    initial_component_selection = resolve_component_selection(
+        args,
+        include_intended_recipient=bool(
+            args.success_intent_model_id
+            or getattr(args, "only_intended_recipient", False)
+            or getattr(args, "no_intended_recipient", False)
+        ),
+    )
+    explicit_model_ids = {
+        "action_intent": args.action_intent_model_id,
+        "pass_intent": args.pass_intent_model_id,
+        "pass_success": args.pass_success_model_id,
+        "outcome_scoring": args.outcome_scoring_model_id,
+        "outcome_conceding": args.outcome_conceding_model_id,
+    }
+    required_model_tasks = [
+        task
+        for task in [
             "action_intent",
             "pass_intent",
             "pass_success",
             "outcome_scoring",
             "outcome_conceding",
-        ],
+        ]
+        if task in initial_component_selection.requested_component_groups
+    ]
+    resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        required_tasks=required_model_tasks,
         bundle_id=args.bundle_id,
-        explicit_model_ids={
-            "action_intent": args.action_intent_model_id,
-            "pass_intent": args.pass_intent_model_id,
-            "pass_success": args.pass_success_model_id,
-            "outcome_scoring": args.outcome_scoring_model_id,
-            "outcome_conceding": args.outcome_conceding_model_id,
-        },
+        explicit_model_ids=explicit_model_ids,
         require_feature_run_id=False,
         require_intended_receiver_mode=False,
         require_return_type=False,
@@ -591,13 +605,7 @@ def main() -> None:
         include_intended_recipient=bool(success_intent_model_id),
     )
 
-    model_ids = {
-        "action_intent": resolved_model_ids["action_intent"],
-        "pass_intent": resolved_model_ids["pass_intent"],
-        "pass_success": resolved_model_ids["pass_success"],
-        "outcome_scoring": resolved_model_ids["outcome_scoring"],
-        "outcome_conceding": resolved_model_ids["outcome_conceding"],
-    }
+    model_ids = dict(resolved_model_ids)
     if success_intent_model_id:
         model_ids["intended_recipient"] = str(success_intent_model_id)
     selected_model_ids = {

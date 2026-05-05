@@ -131,6 +131,75 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["feature_run_id"], "feature_1")
             self.assertEqual(metadata["filters"], {"spadl_type": ["pass"]})
 
+    def test_action_visualization_only_pass_success_requires_only_pass_success_model_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = make_action_args(root)
+            args.bundle_id = None
+            args.only_pass_success = True
+            args.pass_success_model_id = "pass_success/selected"
+            runtime_context = {
+                "feature_run_id": "feature_pass_success",
+                "intended_receiver_mode": "angle_only",
+                "feature_root": root / "features",
+                "selection": "explicit",
+            }
+
+            def fake_resolve_model_selection(required_tasks: list[str], **_kwargs: object):
+                self.assertEqual(required_tasks, ["pass_success"])
+                return (
+                    {"pass_success": "pass_success/selected"},
+                    {"return_type": "disc_0.9", "target_family": "goal"},
+                    None,
+                )
+
+            def fake_render_action_components(**kwargs: object) -> None:
+                self.assertEqual(kwargs["rendered_components"], ["pass_success"])
+                output_dir = Path(kwargs["output_dir"])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "pass_success.png").write_text("plot", encoding="utf-8")
+
+            with (
+                patch.object(visualize_action_components, "parse_args", return_value=args),
+                patch.object(visualize_action_components.torch.cuda, "is_available", return_value=False),
+                patch.object(
+                    visualize_action_components,
+                    "resolve_model_selection",
+                    side_effect=fake_resolve_model_selection,
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "load_model",
+                    return_value=SimpleNamespace(args={}),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": False},
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "resolve_runtime_feature_run_context",
+                    return_value=runtime_context,
+                ),
+                patch.object(visualize_action_components, "resolve_runtime_return_type", return_value="disc_0.9"),
+                patch.object(visualize_action_components, "load_match", return_value=SimpleNamespace()),
+                patch.object(visualize_action_components, "resolve_action_indices", return_value=[(7, "123")]),
+                patch.object(
+                    visualize_action_components,
+                    "render_action_components",
+                    side_effect=fake_render_action_components,
+                ),
+            ):
+                visualize_action_components.main()
+
+            output_root = root / "visualization_explicit"
+            metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue((output_root / "DFL-MAT-1" / "123" / "pass_success.png").exists())
+            self.assertEqual(metadata["model_ids"], {"pass_success": "pass_success/selected"})
+            self.assertEqual(metadata["selected_model_ids"], {"pass_success": "pass_success/selected"})
+            self.assertEqual(metadata["rendered_components"], ["pass_success"])
+
     def test_hawkeye_component_visualization_generates_run_id_and_records_component_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
