@@ -701,6 +701,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertEqual(captured_metadata["trained_tasks"], ["pass_success"])
         self.assertEqual(captured_metadata["source_model_ids"], {"pass_intent": "pass_intent/source"})
         self.assertEqual(captured_metadata["batch_sizes"], {"pass_success": 512})
+        self.assertTrue(captured_metadata["pass_success_ipw"])
 
     def test_wrapper_main_records_effective_batch_sizes_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}

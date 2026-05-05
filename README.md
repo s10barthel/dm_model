@@ -496,8 +496,9 @@ Behavior:
 - `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
 - `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
 - `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
-- `pass_success` uses a `pass_intent` checkpoint as its IPW model; train `pass_intent` in the same wrapper run or use `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>` to reuse a compatible existing checkpoint
-- an external `--pass-intent-model-id` must match the selected feature run, intended-receiver mode, graph schema, velocity edge-feature mode, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
+- `pass_success` uses inverse propensity weighting by default via `--pass-success-ipw`; it uses a `pass_intent` checkpoint as its IPW model, either from the same wrapper run or from `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>`
+- `--no-pass-success-ipw` trains `pass_success` without inverse propensity weighting; use `--no-pass-success-ipw --no-pass-intent` when you want pass-success only and do not want to train or supply a propensity model
+- an external `--pass-intent-model-id` applies only when pass-success IPW is enabled and must match the selected feature run, intended-receiver mode, graph schema, velocity edge-feature mode, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
 - outcome model loss uses the selected `--target-family` and `--return_type`; outcome F1/ROC AUC/Brier diagnostics use canonical `goal next_10` labels for comparability across target families and return types
 - older feature runs without embedded `goal next_10` diagnostic columns can still be used if the selected run exposes `action_labels_next_10<intended_receiver_suffix>` or if you pass `--diagnostic-feature-run-id <feature_run_id>` pointing to compatible `next_10` labels
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
@@ -1034,7 +1035,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
 - `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `failure_receiver`.
-- `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--no-pass-intent` is set.
+- `--pass-success-ipw` / `--no-pass-success-ipw`: enable or disable inverse propensity weighting for `pass_success` only. Default: enabled.
+- `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--pass-success-ipw --no-pass-intent` is set.
 - `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.

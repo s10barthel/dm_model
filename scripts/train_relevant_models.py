@@ -342,11 +342,19 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
     )
     if not any(enabled_tasks.values()):
         raise ValueError("At least one model must be enabled.")
+    pass_success_ipw = bool(getattr(args, "pass_success_ipw", True))
+    if args.pass_intent_model_id and not pass_success_ipw:
+        raise ValueError("--pass-intent-model-id requires --pass-success-ipw.")
     if args.pass_intent_model_id and not enabled_tasks["pass_success"]:
         raise ValueError("--pass-intent-model-id requires --pass-success.")
     if args.pass_intent_model_id and enabled_tasks["pass_intent"]:
         raise ValueError("--pass-intent-model-id requires --no-pass-intent.")
-    if enabled_tasks["pass_success"] and not enabled_tasks["pass_intent"] and not args.pass_intent_model_id:
+    if (
+        pass_success_ipw
+        and enabled_tasks["pass_success"]
+        and not enabled_tasks["pass_intent"]
+        and not args.pass_intent_model_id
+    ):
         raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
     if args.outcome_scoring_trial is not None and not enabled_tasks["outcome_scoring"]:
         raise ValueError("--outcome-scoring-trial requires --outcome-scoring.")
@@ -630,6 +638,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Existing pass_intent checkpoint to use as the pass_success IPW model when --no-pass-intent is set.",
     )
+    pass_success_ipw_group = parser.add_mutually_exclusive_group()
+    pass_success_ipw_group.add_argument(
+        "--pass-success-ipw",
+        dest="pass_success_ipw",
+        action="store_true",
+        help="Use a pass_intent checkpoint for pass_success inverse-propensity weighting.",
+    )
+    pass_success_ipw_group.add_argument(
+        "--no-pass-success-ipw",
+        dest="pass_success_ipw",
+        action="store_false",
+        help="Train pass_success without inverse-propensity weighting.",
+    )
+    parser.set_defaults(pass_success_ipw=True)
     parser.add_argument(
         "--outcome-scoring-trial",
         type=int,
@@ -1001,7 +1023,7 @@ def pass_success_command(
     model_id: str,
     feature_dir: str,
     label_dir: str,
-    ipw_model_id: str,
+    ipw_model_id: str | None,
     intended_receiver_mode: str,
     return_type: str,
     batch_size: int,
@@ -1013,8 +1035,6 @@ def pass_success_command(
         "--task",
         task,
         *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
-        "--ipw_model_id",
-        ipw_model_id,
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -1024,6 +1044,8 @@ def pass_success_command(
         "--min_lr",
         "1e-5",
     ]
+    if ipw_model_id:
+        command.extend(["--ipw_model_id", ipw_model_id])
     if physical_args is not None:
         command = append_physical_xpass_flags(command, physical_args)
     return append_low_level_feature_flags(command, feature_flags)
@@ -1123,10 +1145,15 @@ def build_training_commands(
     success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
     commands = []
     trained_model_ids: dict[str, str] = {}
-    external_pass_intent_model_id = validate_external_pass_intent_model_id(
-        args,
-        feature_flags,
-        resolved_feature_run_id,
+    pass_success_ipw = bool(getattr(args, "pass_success_ipw", True))
+    external_pass_intent_model_id = (
+        validate_external_pass_intent_model_id(
+            args,
+            feature_flags,
+            resolved_feature_run_id,
+        )
+        if pass_success_ipw
+        else None
     )
 
     if args.enabled_tasks["success_intent"]:
@@ -1197,8 +1224,10 @@ def build_training_commands(
             trained_model_ids["action_intent"] = model_ids["action_intent"]
 
         if args.enabled_tasks["pass_success"]:
-            ipw_model_id = model_ids["pass_intent"] if args.enabled_tasks["pass_intent"] else external_pass_intent_model_id
-            if ipw_model_id is None:
+            ipw_model_id = (
+                model_ids["pass_intent"] if args.enabled_tasks["pass_intent"] else external_pass_intent_model_id
+            ) if pass_success_ipw else None
+            if pass_success_ipw and ipw_model_id is None:
                 raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
             commands.append(
                 pass_success_command(
@@ -1343,6 +1372,7 @@ def main() -> None:
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
                 "physical_xpass": physical_xpass_settings(cli_args),
+                "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
                 "training_feature_flags": feature_flags,
                 "batch_sizes": trained_batch_sizes,
                 "success_intent_only": bool(cli_args.success_intent_only),
@@ -1405,6 +1435,7 @@ def main() -> None:
         "training_feature_flags": feature_flags,
         "batch_sizes": trained_batch_sizes,
         "physical_xpass": physical_xpass_settings(cli_args),
+        "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
         "device": getattr(cli_args, "device", None),
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,

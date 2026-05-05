@@ -54,6 +54,7 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
         accel_aware=None,
         extend_features=None,
         pass_intent_model_id=None,
+        pass_success_ipw=True,
         diagnostic_feature_run_id=None,
     )
     for key, value in overrides.items():
@@ -118,6 +119,54 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
             args.enabled_tasks,
             make_enabled_tasks(),
         )
+        self.assertTrue(args.pass_success_ipw)
+
+    def test_parse_args_disables_pass_success_ipw(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(
+                [
+                    "--feature-run-id",
+                    "feature_run",
+                    "--return_type",
+                    "disc_0.9",
+                    "--intended-receiver-mode",
+                    "original",
+                    "--no-pass-success-ipw",
+                    "--no-pass-intent",
+                    "--no-outcome-scoring",
+                    "--no-outcome-conceding",
+                ]
+            )
+
+        self.assertFalse(args.pass_success_ipw)
+
+    def test_pass_intent_model_id_rejected_when_pass_success_ipw_disabled(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--return_type",
+                        "disc_0.9",
+                        "--intended-receiver-mode",
+                        "original",
+                        "--no-pass-intent",
+                        "--no-pass-success-ipw",
+                        "--pass-intent-model-id",
+                        "pass_intent/old",
+                        "--no-outcome-scoring",
+                        "--no-outcome-conceding",
+                    ]
+                )
 
     def test_success_intent_only_parse_args_does_not_require_mode(self) -> None:
         with (
@@ -664,6 +713,99 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         self.assertEqual(set(model_ids.keys()), {"pass_success"})
         pass_success_args = commands[0]
         self.assertEqual(pass_success_args[pass_success_args.index("--ipw_model_id") + 1], "pass_intent/old")
+
+    def test_pass_success_defaults_to_same_run_pass_intent_for_ipw(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_intent", "pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(
+                    train_wrapper,
+                    "build_model_ids",
+                    return_value={"pass_intent": "pass_intent/new", "pass_success": "pass_success/new"},
+                ),
+            ):
+                commands, model_ids, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual(set(model_ids.keys()), {"pass_intent", "pass_success"})
+        pass_success_args = commands[1]
+        self.assertEqual(pass_success_args[pass_success_args.index("--ipw_model_id") + 1], "pass_intent/new")
+
+    def test_pass_success_omits_ipw_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_success"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_success_ipw=False,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(train_wrapper, "get_model_record", side_effect=AssertionError("unexpected IPW validation")),
+            ):
+                commands, model_ids, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual(set(model_ids.keys()), {"pass_success"})
+        self.assertNotIn("--ipw_model_id", commands[0])
+
+    def test_pass_success_ipw_toggle_does_not_affect_other_model_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            common_overrides = dict(
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_success=False,
+                    success_intent=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_intent"],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+            )
+            enabled_args = make_training_args("feature_run", pass_success_ipw=True, **common_overrides)
+            disabled_args = make_training_args("feature_run", pass_success_ipw=False, **common_overrides)
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+                patch.object(train_wrapper, "build_model_ids", return_value={"pass_intent": "pass_intent/new"}),
+            ):
+                enabled_commands, _, _, _, _ = train_wrapper.build_training_commands(enabled_args)
+                disabled_commands, _, _, _, _ = train_wrapper.build_training_commands(disabled_args)
+
+        self.assertEqual(enabled_commands, disabled_commands)
 
     def test_external_pass_intent_accepts_mismatched_graph_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
