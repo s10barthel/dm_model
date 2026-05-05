@@ -14,7 +14,7 @@ from project_config import GOAL_DISTANCE_DIR, GOAL_DISTANCE_MATCH_DIR
 GOAL_DISTANCE_GOAL_X = config.FIELD_SIZE[0]
 GOAL_DISTANCE_GOAL_Y = config.FIELD_SIZE[1] / 2
 GOAL_DISTANCE_MAX_RAW = float(np.hypot(config.FIELD_SIZE[0], config.FIELD_SIZE[1] / 2))
-GOAL_DISTANCE_MAX_VALUE = 0.5
+GOAL_DISTANCE_MAX_VALUE = 1.0
 
 
 def goal_distance_from_xy(start_x: pd.Series, start_y: pd.Series) -> np.ndarray:

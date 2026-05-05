@@ -246,8 +246,10 @@ class InStateLabelingTests(unittest.TestCase):
             [
                 ("pass", "home_1", 0.10),
                 ("pass", "home_1", 0.20),
-                ("pass", "away_1", 0.60),
+                ("interception", "home_1", 0.90),
                 ("shot", "home_1", 0.40),
+                ("pass", "away_1", 0.60),
+                ("pass", "away_1", 0.30),
             ]
         )
 
@@ -256,38 +258,46 @@ class InStateLabelingTests(unittest.TestCase):
 
         self.assertEqual(float(next_labeled.at[0, "scores_xT"]), 0.40)
         self.assertEqual(float(next_labeled.at[0, "concedes_xT"]), 0.60)
-        self.assertAlmostEqual(float(disc_labeled.at[0, "scores_xT"]), 0.30)
-        self.assertAlmostEqual(float(disc_labeled.at[0, "concedes_xT"]), 0.30)
+        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**4 * 0.60) * (1 - 0.5**5 * 0.30)
+        self.assertAlmostEqual(float(disc_labeled.at[0, "scores_xT"]), expected_scoring)
+        self.assertAlmostEqual(float(disc_labeled.at[0, "concedes_xT"]), expected_conceding)
 
-    def test_discounted_goal_distance_returns_sum_future_values(self) -> None:
+    def test_discounted_goal_distance_returns_probability_product(self) -> None:
         events = make_goal_distance_events(
             [
                 ("pass", "home_1", 0.10),
                 ("pass", "home_1", 0.20),
-                ("pass", "away_1", 0.60),
+                ("interception", "home_1", 0.90),
                 ("shot", "home_1", 0.40),
+                ("pass", "away_1", 0.60),
             ]
         )
 
         labeled = utils.label_discounted_goal_distance_returns(events, gamma=0.5)
 
-        self.assertAlmostEqual(float(labeled.at[0, "scores_goal_distance"]), 0.30)
-        self.assertAlmostEqual(float(labeled.at[0, "concedes_goal_distance"]), 0.30)
+        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**4 * 0.60)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_goal_distance"]), expected_scoring)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_goal_distance"]), expected_conceding)
 
-    def test_discounted_epv_returns_sum_future_values(self) -> None:
+    def test_discounted_epv_returns_probability_product(self) -> None:
         events = make_epv_events(
             [
                 ("pass", "home_1", 0.10),
                 ("pass", "home_1", 0.20),
-                ("pass", "away_1", 0.60),
+                ("interception", "home_1", 0.90),
                 ("shot", "home_1", 0.40),
+                ("pass", "away_1", 0.60),
             ]
         )
 
         labeled = utils.label_discounted_epv_returns(events, gamma=0.5)
 
-        self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), 0.30)
-        self.assertAlmostEqual(float(labeled.at[0, "concedes_epv"]), 0.30)
+        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**4 * 0.60)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), expected_scoring)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_epv"]), expected_conceding)
 
     def test_label_future_max_value_skip1_matches_next_3_example(self) -> None:
         events = make_xt_events(
@@ -308,7 +318,7 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertEqual(labeled["scores_xT"].round(2).tolist(), [0.15, 0.15, 0.00, 0.00, 0.15, 0.00, 0.00, 0.00])
         self.assertEqual(labeled["concedes_xT"].round(2).tolist(), [0.00, 0.20, 0.20, 0.15, 0.05, 0.05, 0.00, 0.00])
 
-    def test_label_discounted_future_sum_value_skip1_skips_first_non_shot_without_consuming_rank(self) -> None:
+    def test_label_discounted_future_probability_value_skip1_skips_first_non_shot(self) -> None:
         events = make_xt_events(
             [
                 ("pass", "home_1", 0.10),
@@ -321,8 +331,23 @@ class InStateLabelingTests(unittest.TestCase):
 
         labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True)
 
-        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.80)
-        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.025)
+        expected_scoring = 1 - (1 - 0.5**2 * 0.70) * (1 - 0.5**3 * 0.20)
+        expected_conceding = 1 - (1 - 0.5**4 * 0.10)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_scoring)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), expected_conceding)
+
+    def test_discounted_future_probability_value_rejects_out_of_range_values(self) -> None:
+        for invalid_value in [-0.1, 1.2]:
+            with self.subTest(invalid_value=invalid_value):
+                events = make_xt_events(
+                    [
+                        ("pass", "home_1", 0.10),
+                        ("pass", "home_1", invalid_value),
+                    ]
+                )
+
+                with self.assertRaisesRegex(ValueError, "xT values.*\\[0, 1\\]"):
+                    utils.label_discounted_xt_returns(events, gamma=0.5)
 
     def test_skip1_next_and_discounted_xt_helpers_do_not_skip_first_rated_shot(self) -> None:
         events = make_xt_events(

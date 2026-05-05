@@ -361,7 +361,7 @@ Outputs:
   - `data/goal_distance/goal_distance.csv`
   - `data/goal_distance/metadata.json`
   - `data/goal_distance/matches/*.csv`
-  - raw `goal_distance` values are bounded to `[0.0, 0.5]`
+  - raw `goal_distance` values are bounded to `[0.0, 1.0]`
 - for EPV:
   - `data/epv/epv.csv`
   - `data/epv/metadata.json`
@@ -775,22 +775,21 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
-  - `disc_<gamma>` uses `sum(gamma^k * xT)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
+  - `disc_<gamma>` combines future eligible xT values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * xT)`
+  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
 - goal_distance:
-  - raw `goal_distance` is a bounded proximity-to-goal score in `[0.0, 0.5]`, using `0.5 * (1 - raw_distance / sqrt(105^2 + 34^2))`
+  - raw `goal_distance` is a bounded proximity-to-goal score in `[0.0, 1.0]`, using `1.0 * (1 - raw_distance / sqrt(105^2 + 34^2))`
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
-  - `disc_<gamma>` uses `sum(gamma^k * goal_distance)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
-  - for `disc_0.5`, the infinite discounted upper bound is `0.5 / (1 - 0.5) = 1.0`
+  - `disc_<gamma>` combines future eligible goal-distance values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * goal_distance)`
+  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
 - EPV:
   - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the EPV value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_epv` / `concedes_epv` is non-zero
-  - `disc_<gamma>` uses `sum(gamma^k * epv)` over future eligible actions until the stop condition
-  - `disc_<gamma>_skip1` skips the first rated future non-shot action and then sums the remaining eligible actions with weights `1, gamma, gamma^2, ...`
+  - `disc_<gamma>` combines future eligible EPV values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * epv)`
+  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
 
 ### Where to switch targets
 

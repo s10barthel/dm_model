@@ -481,6 +481,85 @@ def label_discounted_future_sum_value(
     return events
 
 
+def label_discounted_future_probability_value(
+    events: pd.DataFrame,
+    value_col: str,
+    scores_col: str,
+    concedes_col: str,
+    gamma: float = 0.95,
+    eligible_types: tuple[str, ...] | None = None,
+    skip_first: bool = False,
+) -> pd.DataFrame:
+    events = events.copy()
+    eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
+
+    if value_col not in events.columns:
+        events[value_col] = np.nan
+    events[value_col] = pd.to_numeric(events[value_col], errors="coerce")
+    events[scores_col] = 0.0
+    events[concedes_col] = 0.0
+
+    if events.empty or "spadl_type" not in events.columns or "object_id" not in events.columns:
+        return events
+
+    expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
+    expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
+    teams = events["object_id"].astype(str).str[:4]
+    goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    team_values = teams.to_numpy(dtype=object)
+    value_array = events[value_col].to_numpy(dtype=float)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
+    eligible_array = (
+        events["spadl_type"].isin(eligible_types).to_numpy(dtype=bool)
+        & np.isfinite(value_array)
+        & np.isin(team_values, ["home", "away"])
+    )
+
+    score_loc = events.columns.get_loc(scores_col)
+    concede_loc = events.columns.get_loc(concedes_col)
+    period_loc = events.columns.get_loc("period_id")
+
+    for row_pos in range(len(events)):
+        period_i = events.iat[row_pos, period_loc]
+        team_i = team_values[row_pos]
+        prob_not_scoring = 1.0
+        prob_not_conceding = 1.0
+        first_eligible_seen = False
+
+        if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
+            events.iat[row_pos, score_loc] = 0.0
+            events.iat[row_pos, concede_loc] = 0.0
+            continue
+
+        for future_pos in range(row_pos + 1, len(events)):
+            if eligible_array[future_pos]:
+                skip_current = False
+                if not first_eligible_seen:
+                    first_eligible_seen = True
+                    skip_current = skip_first and not shot_array[future_pos]
+
+                if not skip_current:
+                    value = float(value_array[future_pos])
+                    if value < 0.0 or value > 1.0:
+                        raise ValueError(
+                            f"{value_col} values used for discounted probability returns must be in [0, 1]; "
+                            f"found range [{value:.6g}, {value:.6g}] at row {future_pos}."
+                        )
+                    candidate = (gamma ** (future_pos - row_pos)) * value
+                    if team_values[future_pos] == team_i:
+                        prob_not_scoring *= 1.0 - candidate
+                    else:
+                        prob_not_conceding *= 1.0 - candidate
+
+            if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
+                break
+
+        events.iat[row_pos, score_loc] = float(1.0 - prob_not_scoring)
+        events.iat[row_pos, concede_loc] = float(1.0 - prob_not_conceding)
+
+    return events
+
+
 def label_discounted_future_max_value(
     events: pd.DataFrame,
     value_col: str,
@@ -524,7 +603,7 @@ def label_discounted_xt_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_sum_value(
+    return label_discounted_future_probability_value(
         events,
         value_col="xT",
         scores_col="scores_xT",
@@ -605,7 +684,7 @@ def label_discounted_epv_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_sum_value(
+    return label_discounted_future_probability_value(
         events,
         value_col="epv",
         scores_col="scores_epv",
@@ -637,7 +716,7 @@ def label_discounted_goal_distance_returns(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_sum_value(
+    return label_discounted_future_probability_value(
         events,
         value_col="goal_distance",
         scores_col="scores_goal_distance",
