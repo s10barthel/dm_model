@@ -32,6 +32,7 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
+from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
+    add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created SkillCorner visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SKILLCORNER_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
@@ -169,6 +171,7 @@ def render_possession(
     component_tables: dict[str, pd.DataFrame],
     possession_index: int,
     output_root: Path,
+    rendered_components: list[str],
 ) -> Path:
     output_dir = output_root / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,7 +181,7 @@ def render_possession(
 
     possession_component_tables = {name: table.copy() for name, table in component_tables.items()}
     frame_ids = [int(frame_id) for frame_id in possession.frame_meta.index.tolist()]
-    component_names = [*COMPONENT_COLUMNS, "pass_score"]
+    component_names = list(rendered_components)
 
     for component_name in COMPONENT_COLUMNS:
         component_table = possession_component_tables[component_name]
@@ -209,6 +212,7 @@ def render_possession(
 
 def main() -> None:
     args = parse_args()
+    component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("skillcorner_visualization")
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
@@ -235,6 +239,7 @@ def main() -> None:
             component_tables=component_tables,
             possession_index=possession_index,
             output_root=output_root,
+            rendered_components=component_selection.rendered_components,
         )
         output_dirs.append(output_dir)
         rendered_possessions.append(
@@ -265,6 +270,10 @@ def main() -> None:
         "gif": bool(args.gif),
         "show_trajectories": bool(args.show_trajectories),
         "source_models": component_metadata.get("models", {}),
+        "requested_component_groups": component_selection.requested_component_groups,
+        "disabled_component_groups": component_selection.disabled_component_groups,
+        "rendered_components": component_selection.rendered_components,
+        "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved SkillCorner animations for {len(output_dirs)} possession(s).")

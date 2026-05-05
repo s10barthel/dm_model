@@ -560,6 +560,7 @@ Useful options:
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-outcome-scoring
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --player-id DFL-OBJ-... --spadl-type pass --success false --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --start-x-gt 50 --end-x-lt 105 --bundle-id <bundle_id>
@@ -592,6 +593,9 @@ Useful options:
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--run-id <visualization_run_id>` to pin the created visualization run id instead of auto-generating one
+- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
+- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
+- `--only-pass-score` also requires pass-success, outcome-scoring, and outcome-conceding to be selected, because pass score is derived from those components
 - `--show-trajectories` to render dashed recent player trajectories
 - `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
@@ -631,6 +635,7 @@ To visualize one HawkEye situation as MP4s:
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --only-pass-success --only-outcome-scoring --only-outcome-conceding --only-pass-score
 ```
 
 `scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. Each invocation writes to `data/visualizations/hawkeye/<visualization_run_id>/` and records the source component run in `metadata.json`. If you want the old direct-inference behavior, use:
@@ -639,6 +644,7 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --only-outcome-scoring
 ```
 
 ### 9. Run benchmark inference on local benchmark data
@@ -676,6 +682,7 @@ To visualize one benchmark state as PNGs:
 python scripts/visualize_benchmark.py --modification 1 --game-state 1
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id>
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --run-id benchmark_visualization_20260420T123456_abcdef12
+python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --no-pass-intent --no-pass-score
 ```
 
 Benchmark visualizations are written under `data/visualizations/benchmark/<visualization_run_id>/` with `metadata.json` recording the source benchmark component run.
@@ -713,6 +720,7 @@ python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_po
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index_1> --index <player_possession_index_2>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --run-id skillcorner_visualization_20260414T123456_abcdef12
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --only-pass-intent
 ```
 
 SkillCorner visualizations are written under `data/visualizations/skillcorner/<visualization_run_id>/` with `metadata.json` recording the source SkillCorner component run.
@@ -1147,6 +1155,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `intended-recipient`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -1159,6 +1168,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_benchmark.py`
 
@@ -1170,6 +1180,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <visualization_run_id>`: pin the created benchmark visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/benchmark`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/run_and_visualize_hawkeye.py`
 
@@ -1189,6 +1200,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: `outcome_conceding/20`.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/visualize_skillcorner.py`
 
@@ -1201,6 +1213,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/skillcorner`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ## Script I/O Reference
 

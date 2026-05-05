@@ -18,12 +18,11 @@ from datatools.hawkeye import (
     build_hawkeye_situation,
     clean_hawkeye_ball,
     clean_hawkeye_tracking,
-    infer_hawkeye_components,
     load_hawkeye_ball,
-    load_hawkeye_models,
     load_hawkeye_tracking,
 )
-from models.utils import validate_model_graph_schemas
+from inference import inference_gnn
+from models.utils import load_model, validate_model_graph_schemas
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
@@ -32,6 +31,7 @@ from project_config import (
     generate_run_id,
     write_run_metadata,
 )
+from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
     parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
+    add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
@@ -147,6 +148,7 @@ def render_situation(
     args: argparse.Namespace,
     device: str,
     output_root: Path,
+    rendered_components: list[str],
 ) -> Path:
     output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -160,18 +162,54 @@ def render_situation(
         freeze_ballreceipt=args.freeze_ballreceipt,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
     )
-    components = infer_hawkeye_components(situation, model_specs, device=device)
+    components: dict[str, pd.DataFrame] = {}
+    if situation.labels.numel() != 0 and situation.graph_features_0:
+        if "action_intent" in model_specs:
+            components["action_intent"], _ = inference_gnn(
+                situation,
+                model_specs["action_intent"],
+                device=device,
+                post_action=False,
+            )
+        if "pass_intent" in model_specs:
+            components["pass_intent"], _ = inference_gnn(
+                situation,
+                model_specs["pass_intent"],
+                device=device,
+                post_action=False,
+            )
+        if "pass_success" in model_specs:
+            components["pass_success"], _ = inference_gnn(
+                situation,
+                model_specs["pass_success"],
+                device=device,
+                post_action=False,
+            )
+        if "outcome_scoring" in model_specs:
+            scoring_failure, scoring_success = inference_gnn(
+                situation,
+                model_specs["outcome_scoring"],
+                device=device,
+                post_action=False,
+            )
+            components["outcome_scoring_success"] = scoring_success
+            components["outcome_scoring_failure"] = scoring_failure
+        if "outcome_conceding" in model_specs:
+            conceding_failure, conceding_success = inference_gnn(
+                situation,
+                model_specs["outcome_conceding"],
+                device=device,
+                post_action=False,
+            )
+            components["outcome_conceding_success"] = conceding_success
+            components["outcome_conceding_failure"] = conceding_failure
 
     component_frames: dict[str, pd.DataFrame | None] = {
-        "action_intent": components.get("action_intent"),
-        "pass_intent": components.get("pass_intent"),
-        "pass_success": components.get("pass_success"),
-        "outcome_scoring_success": components.get("outcome_scoring_success"),
-        "outcome_scoring_failure": components.get("outcome_scoring_failure"),
-        "outcome_conceding_success": components.get("outcome_conceding_success"),
-        "outcome_conceding_failure": components.get("outcome_conceding_failure"),
+        component_name: components.get(component_name)
+        for component_name in rendered_components
+        if component_name != "pass_score"
     }
-    if all(
+    if "pass_score" in rendered_components and all(
         component_frames[name] is not None
         for name in [
             "pass_success",
@@ -188,11 +226,11 @@ def render_situation(
             outcome_conceding_success=component_frames["outcome_conceding_success"],
             outcome_conceding_failure=component_frames["outcome_conceding_failure"],
         )
-    else:
-        component_frames["pass_score"] = None
 
     frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
-    for component_name, component_table in component_frames.items():
+    for component_name in rendered_components:
+        component_table = component_frames.get(component_name)
+
         def iter_component_images():
             for frame_id in frame_ids:
                 frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
@@ -213,6 +251,7 @@ def render_situation(
 
 def main() -> None:
     args = parse_args()
+    component_selection = resolve_component_selection(args)
     situation_ids = resolve_situation_ids(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
@@ -229,14 +268,15 @@ def main() -> None:
         "outcome_scoring": args.outcome_scoring_model_id,
         "outcome_conceding": args.outcome_conceding_model_id,
     }
-    model_specs = load_hawkeye_models(
-        action_intent_model_id=args.action_intent_model_id,
-        pass_intent_model_id=args.pass_intent_model_id,
-        pass_success_model_id=args.pass_success_model_id,
-        outcome_scoring_model_id=args.outcome_scoring_model_id,
-        outcome_conceding_model_id=args.outcome_conceding_model_id,
-        device=device,
-    )
+    selected_model_ids = {
+        name: model_id
+        for name, model_id in model_ids.items()
+        if name in component_selection.requested_component_groups
+    }
+    model_specs = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
+    missing = [name for name, model in model_specs.items() if model is None]
+    if missing:
+        raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
     graph_schema = validate_model_graph_schemas(model_specs)
 
     output_dirs: list[Path] = []
@@ -251,6 +291,7 @@ def main() -> None:
             args=args,
             device=device,
             output_root=output_root,
+            rendered_components=component_selection.rendered_components,
         )
         output_dirs.append(output_dir)
         rendered_situations.append(
@@ -271,6 +312,11 @@ def main() -> None:
         "output_dir": str(output_root.resolve()),
         "status": "completed",
         "model_ids": model_ids,
+        "selected_model_ids": selected_model_ids,
+        "requested_component_groups": component_selection.requested_component_groups,
+        "disabled_component_groups": component_selection.disabled_component_groups,
+        "rendered_components": component_selection.rendered_components,
+        "disabled_components": component_selection.disabled_components,
         "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
         "requested_action_ids": [str(value) for value in (args.action_id or [])],
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],

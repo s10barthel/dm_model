@@ -35,6 +35,7 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
+from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
+    add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     return parser.parse_args()
@@ -158,6 +160,7 @@ def _probs_for_component_frame(
 
 def main() -> None:
     args = parse_args()
+    component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
@@ -179,7 +182,7 @@ def main() -> None:
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    component_names = [*COMPONENT_COLUMNS, "pass_score"]
+    component_names = component_selection.rendered_components
     rendered_situations: list[dict[str, object]] = []
 
     for situation_id in situation_ids:
@@ -244,6 +247,10 @@ def main() -> None:
         "show_trajectories": bool(args.show_trajectories),
         "freeze_ballreceipt": freeze_ballreceipt,
         "source_models": component_metadata.get("models", {}),
+        "requested_component_groups": component_selection.requested_component_groups,
+        "disabled_component_groups": component_selection.disabled_component_groups,
+        "rendered_components": component_selection.rendered_components,
+        "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye visualization run id: {visualization_run_id}")

@@ -39,6 +39,7 @@ from project_config import (
     get_resolved_action_path,
     write_run_metadata,
 )
+from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
+    add_component_selection_args(parser, include_intended_recipient=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(VISUALIZATION_DIR))
     return parser.parse_args()
@@ -476,7 +478,19 @@ def render_action_components(
     show_trajectories: bool = False,
     show_physical_xpass: bool = False,
     physical_cache_dir: Path | str | None = None,
+    rendered_components: list[str] | None = None,
 ) -> None:
+    rendered_components = rendered_components or [
+        "action_intent",
+        "pass_intent",
+        "intended_recipient",
+        "pass_success",
+        "outcome_scoring_success",
+        "outcome_scoring_failure",
+        "outcome_conceding_success",
+        "outcome_conceding_failure",
+        "pass_score",
+    ]
     component_prob_rows: dict[str, pd.Series] = {}
 
     for component_name, model in loaded_models.items():
@@ -511,28 +525,18 @@ def render_action_components(
             action_index,
         )
 
-    component_prob_rows["pass_score"] = compute_pass_score(
-        pass_success=component_prob_rows["pass_success"],
-        outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
-        outcome_scoring_failure=component_prob_rows["outcome_scoring_failure"],
-        outcome_conceding_success=component_prob_rows["outcome_conceding_success"],
-        outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
-    )
+    if "pass_score" in rendered_components:
+        component_prob_rows["pass_score"] = compute_pass_score(
+            pass_success=component_prob_rows["pass_success"],
+            outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
+            outcome_scoring_failure=component_prob_rows["outcome_scoring_failure"],
+            outcome_conceding_success=component_prob_rows["outcome_conceding_success"],
+            outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
+        )
 
-    component_order = ["action_intent", "pass_intent"]
-    if "intended_recipient" in component_prob_rows:
-        component_order.append("intended_recipient")
-    component_order.extend(
-        [
-            "pass_success",
-            "player_cum_prob",
-            "outcome_scoring_success",
-            "outcome_scoring_failure",
-            "outcome_conceding_success",
-            "outcome_conceding_failure",
-            "pass_score",
-        ]
-    )
+    component_order = list(rendered_components)
+    if show_physical_xpass:
+        component_order.append("player_cum_prob")
     for component_name in component_order:
         if component_name not in component_prob_rows:
             continue
@@ -578,6 +582,14 @@ def main() -> None:
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
+    if not success_intent_model_id and (
+        getattr(args, "only_intended_recipient", False) or getattr(args, "no_intended_recipient", False)
+    ):
+        raise ValueError("--only-intended-recipient/--no-intended-recipient require a selected success_intent model.")
+    component_selection = resolve_component_selection(
+        args,
+        include_intended_recipient=bool(success_intent_model_id),
+    )
 
     model_ids = {
         "action_intent": resolved_model_ids["action_intent"],
@@ -588,7 +600,12 @@ def main() -> None:
     }
     if success_intent_model_id:
         model_ids["intended_recipient"] = str(success_intent_model_id)
-    loaded_models = {name: load_model(model_id, device) for name, model_id in model_ids.items()}
+    selected_model_ids = {
+        name: model_id
+        for name, model_id in model_ids.items()
+        if name in component_selection.requested_component_groups
+    }
+    loaded_models = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
@@ -646,6 +663,7 @@ def main() -> None:
                 show_trajectories=args.show_trajectories,
                 show_physical_xpass=args.show_physical_xpass,
                 physical_cache_dir=physical_cache_dir,
+                rendered_components=component_selection.rendered_components,
             )
         except Exception as exc:
             skipped_actions.append(
@@ -688,7 +706,12 @@ def main() -> None:
         "rendered_actions": rendered_actions,
         "skipped_actions": skipped_actions,
         "model_ids": model_ids,
+        "selected_model_ids": selected_model_ids,
         "success_intent_model_id": str(success_intent_model_id) if success_intent_model_id else None,
+        "requested_component_groups": component_selection.requested_component_groups,
+        "disabled_component_groups": component_selection.disabled_component_groups,
+        "rendered_components": component_selection.rendered_components,
+        "disabled_components": component_selection.disabled_components,
         "feature_run_id": feature_run_id,
         "runtime_feature_run_id": feature_run_id,
         "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
