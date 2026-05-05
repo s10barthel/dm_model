@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +24,13 @@ from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
     COMPONENT_DIR,
-    DATA_ROOT,
     PROJECT_ROOT,
+    SKILLCORNER_VISUALIZATION_DIR,
+    generate_run_id,
     get_skillcorner_component_run_root,
+    load_run_metadata,
     resolve_named_component_run_id,
+    write_run_metadata,
 )
 
 
@@ -43,7 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
-    parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "skillcorner"))
+    parser.add_argument("--run-id", help="Pin the created SkillCorner visualization run id. Default: auto-generate one.")
+    parser.add_argument("--output-dir", default=str(SKILLCORNER_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     return parser.parse_args()
@@ -163,8 +168,9 @@ def render_possession(
     context,
     component_tables: dict[str, pd.DataFrame],
     possession_index: int,
+    output_root: Path,
 ) -> Path:
-    output_dir = Path(args.output_dir) / str(args.match_id) / str(possession_index)
+    output_dir = output_root / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
     possession, _ = build_skillcorner_possession(context, possession_index)
     if possession.frame_meta.empty:
@@ -203,6 +209,11 @@ def render_possession(
 
 def main() -> None:
     args = parse_args()
+    visualization_run_id = args.run_id or generate_run_id("skillcorner_visualization")
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / visualization_run_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    component_run_id = None
     if args.component_dir:
         component_dir = Path(args.component_dir)
     else:
@@ -213,19 +224,52 @@ def main() -> None:
 
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
+    component_metadata = load_run_metadata(component_dir, required=False) or {}
 
     output_dirs: list[Path] = []
+    rendered_possessions: list[dict[str, object]] = []
     for possession_index in resolve_indices(args):
         output_dir = render_possession(
             args=args,
             context=context,
             component_tables=component_tables,
             possession_index=possession_index,
+            output_root=output_root,
         )
         output_dirs.append(output_dir)
+        rendered_possessions.append(
+            {
+                "match_id": str(args.match_id),
+                "index": int(possession_index),
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": [str(path.resolve()) for path in sorted(output_dir.glob("*")) if path.is_file()],
+            }
+        )
         print(f"Saved SkillCorner animations to {output_dir}")
 
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "component_run_id": component_run_id,
+        "component_dir": str(component_dir.resolve()),
+        "component_metadata_run_id": component_metadata.get("run_id"),
+        "match_id": str(args.match_id),
+        "requested_indices": [int(value) for value in (args.index or [])],
+        "rendered_possessions": rendered_possessions,
+        "input_dir": str(Path(args.input_dir).resolve()),
+        "gif": bool(args.gif),
+        "show_trajectories": bool(args.show_trajectories),
+        "source_models": component_metadata.get("models", {}),
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved SkillCorner animations for {len(output_dirs)} possession(s).")
+    print(f"SkillCorner visualization run id: {visualization_run_id}")
+    print(f"SkillCorner visualization metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

@@ -126,16 +126,18 @@ The main output directories are:
 - `data/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
 - `data/component_runs/benchmark/<component_run_id>` for versioned benchmark exports
 - `data/component_runs/skillcorner/<component_run_id>` for versioned SkillCorner exports
+- `data/visualizations/<visualization_run_id>` and visualization subfamilies for versioned rendered outputs and metadata
 - `saved/<task>/<model_run_id>` for trained checkpoint runs
 - `saved/bundles/<bundle_id>` for machine-readable training bundle manifests
 
 ## Run-Id Workflow
 
-There are now three different versioned artifact families:
+There are now four different versioned artifact families:
 
 - `feature_run_id` for generated Sportec graph/label artifacts under `data/features/runs/...`
 - `model_id = <task>/<model_run_id>` for trained checkpoints under `saved/<task>/...`
 - `component_run_id` for exported predictions under `data/component_runs/...`
+- `visualization_run_id` for rendered plots/animations under `data/visualizations/...`
 
 Feature and component runs use explicit `latest.json` pointers:
 
@@ -144,6 +146,8 @@ Feature and component runs use explicit `latest.json` pointers:
 - `data/component_runs/hawkeye/latest.json`
 - `data/component_runs/benchmark/latest.json`
 - `data/component_runs/skillcorner/latest.json`
+
+Visualization runs do not use `latest.json`; the source `component_run_id` or model ids are recorded in each visualization run's `metadata.json`.
 
 Checkpoint runs are referenced explicitly as `model_id = <task>/<model_run_id>`. The retained wrappers now prefer one of these two explicit handoff styles:
 
@@ -187,6 +191,13 @@ The external-data adapters follow the same pattern:
 - `data/component_runs/skillcorner/<component_run_id>/<match_id>/*.parquet`
 - `data/component_runs/skillcorner/<component_run_id>/metadata.json`
 
+Visualization run roots contain rendered media plus `metadata.json`:
+
+- `data/visualizations/<visualization_run_id>/metadata.json`
+- `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
+- `data/visualizations/benchmark/<visualization_run_id>/metadata.json`
+- `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
+
 Checkpoint runs also write metadata:
 
 - `saved/<task>/<model_run_id>/args.json`
@@ -205,6 +216,7 @@ The current pipeline now follows an explicit-artifact contract:
 - `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
 - Training decides whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
 - `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied.
+- Visualization scripts write versioned run folders with `metadata.json`; component-based visualizers record the selected `component_run_id` or explicit component directory, and direct model-based visualizers record the model ids used.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
 
 
@@ -546,6 +558,7 @@ Useful options:
 ```powershell
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --player-id DFL-OBJ-... --spadl-type pass --success false --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --start-x-gt 50 --end-x-lt 105 --bundle-id <bundle_id>
@@ -562,20 +575,22 @@ Inputs:
 
 Outputs:
 
-- `data/visualizations/<match_id>/<action_id>/action_intent.png`
-- `data/visualizations/<match_id>/<action_id>/pass_intent.png`
-- `data/visualizations/<match_id>/<action_id>/pass_success.png`
-- `data/visualizations/<match_id>/<action_id>/outcome_scoring_success.png`
-- `data/visualizations/<match_id>/<action_id>/outcome_scoring_failure.png`
-- `data/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
-- `data/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
-- `data/visualizations/<match_id>/<action_id>/pass_score.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
+- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
 - optionally `intended_recipient.png` when a `success_intent` checkpoint is supplied
+- `data/visualizations/<visualization_run_id>/metadata.json`
 
 Useful options:
 
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
+- `--run-id <visualization_run_id>` to pin the created visualization run id instead of auto-generating one
 - `--show-trajectories` to render dashed recent player trajectories
 - `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
@@ -614,13 +629,15 @@ To visualize one HawkEye situation as MP4s:
 ```powershell
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 ```
 
-`scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. If you want the old direct-inference behavior, use:
+`scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. Each invocation writes to `data/visualizations/hawkeye/<visualization_run_id>/` and records the source component run in `metadata.json`. If you want the old direct-inference behavior, use:
 
 ```powershell
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 ```
 
 ### 9. Run benchmark inference on local benchmark data
@@ -657,7 +674,10 @@ To visualize one benchmark state as PNGs:
 ```powershell
 python scripts/visualize_benchmark.py --modification 1 --game-state 1
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id>
+python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --run-id benchmark_visualization_20260420T123456_abcdef12
 ```
+
+Benchmark visualizations are written under `data/visualizations/benchmark/<visualization_run_id>/` with `metadata.json` recording the source benchmark component run.
 
 ### 10. Run frame-level inference on SkillCorner data
 
@@ -691,7 +711,10 @@ To visualize one SkillCorner possession as MP4s:
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index_1> --index <player_possession_index_2>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --run-id skillcorner_visualization_20260414T123456_abcdef12
 ```
+
+SkillCorner visualizations are written under `data/visualizations/skillcorner/<visualization_run_id>/` with `metadata.json` recording the source SkillCorner component run.
 
 ## Outcome Target Selection
 
@@ -1120,7 +1143,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
-- `--output-dir <path>`: visualization root directory. Default: `data/visualizations`.
+- `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations`.
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -1131,7 +1155,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
-- `--output-dir <path>`: visualization root directory. Default: `data/visualizations/hawkeye`.
+- `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 
 ### `scripts/visualize_benchmark.py`
 
@@ -1140,7 +1165,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--game-state {1,2}`: restrict visualization to one or more game states. Default: both game states present in the selected run.
 - `--component-run-id <component_run_id>`: versioned benchmark component run to visualize. Default: latest successful benchmark component run.
 - `--component-dir <path>`: explicit benchmark component-run root override. Default: none; when set it overrides `--component-run-id`.
-- `--output-dir <path>`: visualization root directory. Default: `data/visualizations/benchmark`.
+- `--run-id <visualization_run_id>`: pin the created benchmark visualization run id. Default: auto-generate one.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/benchmark`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 
 ### `scripts/run_and_visualize_hawkeye.py`
@@ -1159,7 +1185,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: `pass_success/20`.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: `outcome_scoring/20`.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: `outcome_conceding/20`.
-- `--output-dir <path>`: visualization root directory. Default: `data/visualizations/hawkeye`.
+- `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 
 ### `scripts/visualize_skillcorner.py`
 
@@ -1168,7 +1195,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--input-dir <path>`: SkillCorner data root. Default: `skillcorner_data`.
 - `--component-run-id <component_run_id>`: versioned SkillCorner component run to visualize. Default: latest successful SkillCorner component run.
 - `--component-dir <path>`: explicit component-run root override. Default: none; when set it overrides `--component-run-id`.
-- `--output-dir <path>`: visualization root directory. Default: `data/visualizations/skillcorner`.
+- `--run-id <visualization_run_id>`: pin the created SkillCorner visualization run id. Default: auto-generate one.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/skillcorner`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
 
@@ -1299,15 +1327,16 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/<match_id>.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
-  - `data/visualizations/<match_id>/<action_id>/action_intent.png`
-  - `data/visualizations/<match_id>/<action_id>/pass_intent.png`
-  - `data/visualizations/<match_id>/<action_id>/pass_success.png`
-  - `data/visualizations/<match_id>/<action_id>/outcome_scoring_success.png`
-  - `data/visualizations/<match_id>/<action_id>/outcome_scoring_failure.png`
-  - `data/visualizations/<match_id>/<action_id>/outcome_conceding_success.png`
-  - `data/visualizations/<match_id>/<action_id>/outcome_conceding_failure.png`
-  - `data/visualizations/<match_id>/<action_id>/pass_score.png`
-  - optionally `data/visualizations/<match_id>/<action_id>/intended_recipient.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
+  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
+  - optionally `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/intended_recipient.png`
+  - `data/visualizations/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_hawkeye.py`
 
@@ -1328,8 +1357,9 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `hawkeye_data/centroid_data_team.csv`
   - `hawkeye_data/ball_data_selected.csv`
 - Outputs:
-  - `data/visualizations/hawkeye/<situation_id>/*.mp4`
-  - or `data/visualizations/hawkeye/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.mp4`
+  - or `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_benchmark.py`
 
@@ -1352,7 +1382,8 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `benchmark/modification_<n>/game_state_2.csv`
   - `benchmark/modification_<n>/modification.csv`
 - Outputs:
-  - `data/visualizations/benchmark/modification_<n>/game_state_<m>/*.png`
+  - `data/visualizations/benchmark/<visualization_run_id>/modification_<n>/game_state_<m>/*.png`
+  - `data/visualizations/benchmark/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_and_visualize_hawkeye.py`
 
@@ -1361,8 +1392,9 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `hawkeye_data/ball_data_selected.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
-  - `data/visualizations/hawkeye/<situation_id>/*.mp4`
-  - or `data/visualizations/hawkeye/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.mp4`
+  - or `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_skillcorner.py`
 
@@ -1389,5 +1421,6 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `skillcorner_data/<match_id>_match.json`
   - `skillcorner_data/<match_id>_dynamic_events.csv`
 - Outputs:
-  - `data/visualizations/skillcorner/<match_id>/<index>/*.mp4`
-  - or `data/visualizations/skillcorner/<match_id>/<index>/*.gif`
+  - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.mp4`
+  - or `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.gif`
+  - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`

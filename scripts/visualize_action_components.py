@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,9 +32,12 @@ from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODES,
+    VISUALIZATION_DIR,
+    generate_run_id,
     get_action_graph_dir,
     get_physical_xpass_dir,
     get_resolved_action_path,
+    write_run_metadata,
 )
 
 
@@ -87,7 +91,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
-    parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations"))
+    parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
+    parser.add_argument("--output-dir", default=str(VISUALIZATION_DIR))
     return parser.parse_args()
 
 
@@ -114,6 +119,22 @@ EXACT_FILTERS = {
 }
 
 NUMERIC_FILTER_COLUMNS = ("start_x", "start_y", "end_x", "end_y")
+
+
+def selected_filter_metadata(args: argparse.Namespace) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    for attr_name in EXACT_FILTERS:
+        value = getattr(args, attr_name, None)
+        if value:
+            filters[attr_name] = value
+    for column in NUMERIC_FILTER_COLUMNS:
+        lower_than = getattr(args, f"{column}_lt")
+        higher_than = getattr(args, f"{column}_gt")
+        if lower_than is not None:
+            filters[f"{column}_lt"] = float(lower_than)
+        if higher_than is not None:
+            filters[f"{column}_gt"] = float(higher_than)
+    return filters
 
 
 def load_match(
@@ -529,6 +550,10 @@ def render_action_components(
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
+    visualization_run_id = args.run_id or generate_run_id("visualization")
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / visualization_run_id
+    output_root.mkdir(parents=True, exist_ok=True)
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
         required_tasks=[
             "action_intent",
@@ -605,8 +630,10 @@ def main() -> None:
         raise ValueError("No matching modeled actions were selected.")
 
     saved_dirs: list[Path] = []
+    rendered_actions: list[dict[str, object]] = []
+    skipped_actions: list[dict[str, object]] = []
     for action_index, display_action_id in selected_actions:
-        output_dir = Path(args.output_dir) / args.match_id / display_action_id
+        output_dir = output_root / args.match_id / display_action_id
         try:
             render_action_components(
                 match=match,
@@ -621,14 +648,61 @@ def main() -> None:
                 physical_cache_dir=physical_cache_dir,
             )
         except Exception as exc:
+            skipped_actions.append(
+                {
+                    "match_id": args.match_id,
+                    "action_index": int(action_index),
+                    "action_id": str(display_action_id),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             warn_skip(f"action_id={display_action_id} in match {args.match_id} failed during rendering: {exc}")
             continue
         saved_dirs.append(output_dir)
+        rendered_actions.append(
+            {
+                "match_id": args.match_id,
+                "action_index": int(action_index),
+                "action_id": str(display_action_id),
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": [str(path.resolve()) for path in sorted(output_dir.glob("*.png"))],
+            }
+        )
         print(f"Saved component plots to {output_dir}")
 
     if not saved_dirs:
         raise RuntimeError("All selected actions were skipped or failed during rendering.")
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "match_id": args.match_id,
+        "requested_action_ids": [int(value) for value in (args.action_id or [])],
+        "requested_row_indexes": [int(value) for value in (args.row_index or [])],
+        "requested_original_event_ids": [str(value) for value in (args.original_event_id or [])],
+        "filters": selected_filter_metadata(args),
+        "rendered_actions": rendered_actions,
+        "skipped_actions": skipped_actions,
+        "model_ids": model_ids,
+        "success_intent_model_id": str(success_intent_model_id) if success_intent_model_id else None,
+        "feature_run_id": feature_run_id,
+        "runtime_feature_run_id": feature_run_id,
+        "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
+        "intended_receiver_mode": intended_receiver_mode,
+        "return_type": return_type,
+        "graph_schema": graph_schema,
+        "show_trajectories": bool(args.show_trajectories),
+        "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_cache_dir": str(physical_cache_dir),
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved component plots for {len(saved_dirs)} action(s).")
+    print(f"Visualization run id: {visualization_run_id}")
+    print(f"Visualization metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

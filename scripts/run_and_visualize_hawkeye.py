@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +26,12 @@ from datatools.hawkeye import (
 from models.utils import validate_model_graph_schemas
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
-from project_config import DATA_ROOT, PROJECT_ROOT
+from project_config import (
+    HAWKEYE_VISUALIZATION_DIR,
+    PROJECT_ROOT,
+    generate_run_id,
+    write_run_metadata,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,7 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id", default="pass_success/20")
     parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
     parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
-    parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "hawkeye"))
+    parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
+    parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
     return parser.parse_args()
 
@@ -139,8 +146,9 @@ def render_situation(
     graph_schema: dict[str, object],
     args: argparse.Namespace,
     device: str,
+    output_root: Path,
 ) -> Path:
-    output_dir = Path(args.output_dir) / str(situation_id)
+    output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
     if situation_tracking.empty:
@@ -207,9 +215,20 @@ def main() -> None:
     args = parse_args()
     situation_ids = resolve_situation_ids(args)
     device = args.device if torch.cuda.is_available() else "cpu"
+    visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / visualization_run_id
+    output_root.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    model_ids = {
+        "action_intent": args.action_intent_model_id,
+        "pass_intent": args.pass_intent_model_id,
+        "pass_success": args.pass_success_model_id,
+        "outcome_scoring": args.outcome_scoring_model_id,
+        "outcome_conceding": args.outcome_conceding_model_id,
+    }
     model_specs = load_hawkeye_models(
         action_intent_model_id=args.action_intent_model_id,
         pass_intent_model_id=args.pass_intent_model_id,
@@ -221,6 +240,7 @@ def main() -> None:
     graph_schema = validate_model_graph_schemas(model_specs)
 
     output_dirs: list[Path] = []
+    rendered_situations: list[dict[str, object]] = []
     for situation_id in situation_ids:
         output_dir = render_situation(
             situation_id=situation_id,
@@ -230,11 +250,42 @@ def main() -> None:
             graph_schema=graph_schema,
             args=args,
             device=device,
+            output_root=output_root,
         )
         output_dirs.append(output_dir)
+        rendered_situations.append(
+            {
+                "situation_id": str(situation_id),
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": [str(path.resolve()) for path in sorted(output_dir.glob("*")) if path.is_file()],
+            }
+        )
         print(f"Saved Hawkeye animations to {output_dir}")
 
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "model_ids": model_ids,
+        "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
+        "requested_action_ids": [str(value) for value in (args.action_id or [])],
+        "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
+        "rendered_situations": rendered_situations,
+        "tracking_csv": str(Path(args.tracking_csv).resolve()),
+        "ball_csv": str(Path(args.ball_csv).resolve()),
+        "freeze_ballreceipt": bool(args.freeze_ballreceipt),
+        "gif": bool(args.gif),
+        "show_trajectories": bool(args.show_trajectories),
+        "graph_schema": graph_schema,
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved Hawkeye animations for {len(output_dirs)} situation(s).")
+    print(f"Hawkeye visualization run id: {visualization_run_id}")
+    print(f"Hawkeye visualization metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

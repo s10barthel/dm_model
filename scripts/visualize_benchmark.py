@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,10 +25,12 @@ from datatools.benchmark import (
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
-    DATA_ROOT,
+    BENCHMARK_VISUALIZATION_DIR,
     PROJECT_ROOT,
+    generate_run_id,
     get_benchmark_component_run_root,
     resolve_named_component_run_id,
+    write_run_metadata,
 )
 
 
@@ -38,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--game-state", action="append", type=int, choices=[1, 2], help="Restrict visualization to one or more benchmark game states.")
     parser.add_argument("--component-run-id", default=None, help="Optional versioned benchmark component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit benchmark component-run root override.")
-    parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "benchmark"))
+    parser.add_argument("--run-id", help="Pin the created benchmark visualization run id. Default: auto-generate one.")
+    parser.add_argument("--output-dir", default=str(BENCHMARK_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
     return parser.parse_args()
 
@@ -135,6 +139,11 @@ def _probs_for_component_frame(
 
 def main() -> None:
     args = parse_args()
+    visualization_run_id = args.run_id or generate_run_id("benchmark_visualization")
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / visualization_run_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    component_run_id = None
     if args.component_dir:
         component_dir = Path(args.component_dir)
     else:
@@ -149,8 +158,8 @@ def main() -> None:
         requested_game_states=args.game_state,
     )
 
-    output_root = Path(args.output_dir)
     component_names = [*COMPONENT_COLUMNS, "pass_score"]
+    rendered_states: list[dict[str, object]] = []
 
     for modification_id, game_state_id in state_pairs:
         modification_data = load_benchmark_modification_data(modification_id, args.input_dir)
@@ -177,6 +186,36 @@ def main() -> None:
             image.save(output_dir / f"{component_name}.png")
 
         print(f"Saved benchmark visualizations to {output_dir}")
+        rendered_states.append(
+            {
+                "modification": int(modification_id),
+                "game_state": int(game_state_id),
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": [str((output_dir / f"{name}.png").resolve()) for name in component_names],
+            }
+        )
+
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "component_run_id": component_run_id,
+        "component_dir": str(component_dir.resolve()),
+        "component_metadata_run_id": component_metadata.get("run_id"),
+        "requested_modifications": [int(value) for value in (args.modification or [])],
+        "requested_game_states": [int(value) for value in (args.game_state or [])],
+        "rendered_states": rendered_states,
+        "input_dir": str(Path(args.input_dir).resolve()),
+        "show_trajectories": bool(args.show_trajectories),
+        "source_models": component_metadata.get("models", {}),
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
+    print(f"Benchmark visualization run id: {visualization_run_id}")
+    print(f"Benchmark visualization metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

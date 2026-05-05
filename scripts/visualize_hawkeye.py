@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +28,12 @@ from datatools.hawkeye import (
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
-    DATA_ROOT,
+    HAWKEYE_VISUALIZATION_DIR,
     PROJECT_ROOT,
+    generate_run_id,
     get_hawkeye_component_run_root,
     resolve_named_component_run_id,
+    write_run_metadata,
 )
 
 
@@ -53,7 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
-    parser.add_argument("--output-dir", default=str(DATA_ROOT / "visualizations" / "hawkeye"))
+    parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
+    parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     return parser.parse_args()
 
 
@@ -154,6 +158,11 @@ def _probs_for_component_frame(
 
 def main() -> None:
     args = parse_args()
+    visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
+    output_parent = Path(args.output_dir)
+    output_root = output_parent / visualization_run_id
+    output_root.mkdir(parents=True, exist_ok=True)
+    component_run_id = None
     if args.component_dir:
         component_dir = Path(args.component_dir)
     else:
@@ -170,8 +179,8 @@ def main() -> None:
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    output_root = Path(args.output_dir)
     component_names = [*COMPONENT_COLUMNS, "pass_score"]
+    rendered_situations: list[dict[str, object]] = []
 
     for situation_id in situation_ids:
         situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
@@ -206,6 +215,39 @@ def main() -> None:
             save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
 
         print(f"Saved Hawkeye animations to {output_dir}")
+        rendered_situations.append(
+            {
+                "situation_id": str(situation_id),
+                "frame_ids": frame_ids,
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": [str((output_dir / f"{name}.{suffix}").resolve()) for name in component_names],
+            }
+        )
+
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "component_run_id": component_run_id,
+        "component_dir": str(component_dir.resolve()),
+        "component_metadata_run_id": component_metadata.get("run_id"),
+        "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
+        "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
+        "rendered_situations": rendered_situations,
+        "tracking_csv": str(Path(args.tracking_csv).resolve()),
+        "ball_csv": str(Path(args.ball_csv).resolve()),
+        "gif": bool(args.gif),
+        "show_trajectories": bool(args.show_trajectories),
+        "freeze_ballreceipt": freeze_ballreceipt,
+        "source_models": component_metadata.get("models", {}),
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
+    print(f"Hawkeye visualization run id: {visualization_run_id}")
+    print(f"Hawkeye visualization metadata: {metadata_path}")
 
 
 if __name__ == "__main__":
