@@ -5,6 +5,8 @@ import torch.nn as nn
 from torch_geometric.data import Batch
 from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
 
+from physical_pass_model import PHYSICAL_XPASS_LOGIT_ATTR, PHYSICAL_XPASS_VARIANTS, physical_xpass_model_variant
+
 
 class Encoder(nn.Module):
     def __init__(self, args: dict):
@@ -87,6 +89,15 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.args = args
+        self.physical_variant = physical_xpass_model_variant(args)
+        self.use_physical_xpass = (
+            args.get("task") == "pass_success"
+            and bool(args.get("use_physical_xpass", False))
+            and self.physical_variant in PHYSICAL_XPASS_VARIANTS
+        )
+        self.physical_eps = float(args.get("physical_eps", 1e-4))
+        self.residual_clip_value = args.get("residual_clip_value", None)
+        self.latest_delta_gat = None
         node_in_dim = args["node_emb_dim"]
         graph_in_dim = args["graph_emb_dim"]
         mlp_dims = [args.get("mlp_h1_dim", 32), args.get("mlp_h2_dim", 8)]
@@ -127,6 +138,10 @@ class Decoder(nn.Module):
 
         elif args["gnn_task"] in ["node_binary", "node_regression"]:
             # pass_success, outcome_{scoring/conceding/return}, intent_return(_oppo_agn)
+            if self.use_physical_xpass and args.get("include_out", False):
+                raise ValueError("include_out=True is not supported with physical xPass.")
+            if self.use_physical_xpass and self.physical_variant == "gat_plus_phys_feature":
+                node_in_dim += 1
             self.nodewise_mlp = nn.Sequential(
                 nn.Linear(node_in_dim, mlp_dims[0]),
                 nn.ReLU(),
@@ -141,6 +156,15 @@ class Decoder(nn.Module):
                     nn.Linear(mlp_dims[0], mlp_dims[1]),
                     nn.ReLU(),
                     nn.Linear(mlp_dims[1], out_dim),
+                )
+            if self.use_physical_xpass and self.physical_variant in {
+                "gat_phys_logit_offset",
+                "gat_phys_logit_offset_regularized",
+            }:
+                self.physical_beta0 = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+                self.physical_beta1 = nn.Parameter(
+                    torch.tensor(1.0, dtype=torch.float32),
+                    requires_grad=bool(args.get("learn_physical_scale", True)),
                 )
 
         elif args["gnn_task"] in ["graph_binary", "graph_multiclass", "graph_regression"]:
@@ -170,6 +194,7 @@ class Decoder(nn.Module):
         graph_embeddings: torch.Tensor = None,
         batch_indices: torch.Tensor = None,
         batch_dests: torch.Tensor = None,
+        physical_xpass_logit: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Arguments:
@@ -200,9 +225,36 @@ class Decoder(nn.Module):
                 nodewise_dests = batch_dests[batch_indices]  # [N, d]
                 node_inputs = torch.cat([node_inputs, nodewise_dests], -1)  # [N, x+z+d] or [N, z+d]
 
+            if self.use_physical_xpass:
+                if physical_xpass_logit is None:
+                    raise ValueError("physical_xpass_logit is required for this pass-success model variant.")
+                physical_xpass_logit = physical_xpass_logit.to(device=node_inputs.device, dtype=node_inputs.dtype).reshape(-1)
+                if physical_xpass_logit.shape[0] != node_inputs.shape[0]:
+                    raise ValueError(
+                        "physical_xpass_logit shape does not match node logits: "
+                        f"{tuple(physical_xpass_logit.shape)} vs node_count={node_inputs.shape[0]}."
+                    )
+                if not torch.isfinite(physical_xpass_logit).all():
+                    raise ValueError("physical_xpass_logit contains non-finite values.")
+                if self.physical_variant == "gat_plus_phys_feature":
+                    node_inputs = torch.cat([node_inputs, physical_xpass_logit.unsqueeze(-1)], -1)
+
             node_outputs = self.nodewise_mlp(node_inputs)  # [N, 1] or [N, 2]
             if node_outputs.shape[-1] == 1:
                 node_outputs = node_outputs.squeeze(-1)  # [N]
+
+            if self.use_physical_xpass and self.physical_variant in {
+                "gat_phys_logit_offset",
+                "gat_phys_logit_offset_regularized",
+            }:
+                delta_gat = node_outputs
+                if self.residual_clip_value is not None:
+                    clip_value = float(self.residual_clip_value)
+                    delta_gat = clip_value * torch.tanh(delta_gat / clip_value)
+                self.latest_delta_gat = delta_gat
+                node_outputs = self.physical_beta0 + self.physical_beta1 * physical_xpass_logit + delta_gat
+            else:
+                self.latest_delta_gat = node_outputs
 
             if not self.args["include_out"]:
                 return node_outputs
@@ -249,7 +301,14 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
                 out: [B] tensor.
         """
         node_embeddings, graph_embeddings = self.encoder(batch_graphs)
-        return self.decoder(batch_graphs.x, node_embeddings, graph_embeddings, batch_graphs.batch, batch_dests)
+        return self.decoder(
+            batch_graphs.x,
+            node_embeddings,
+            graph_embeddings,
+            batch_graphs.batch,
+            batch_dests,
+            getattr(batch_graphs, PHYSICAL_XPASS_LOGIT_ATTR, None),
+        )
 
     def forward_grid(self, batch_graphs: Batch, grid_features: torch.Tensor) -> torch.Tensor:
         """

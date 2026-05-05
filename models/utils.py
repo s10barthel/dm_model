@@ -1386,6 +1386,24 @@ def run_epoch(
 
                 target = get_label_slice(batch_labels, "success")
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
+                residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
+                if (
+                    args.task == "pass_success"
+                    and residual_lambda > 0
+                    and getattr(args, "use_physical_xpass", False)
+                    and getattr(args, "model_variant", None)
+                    in {"gat_phys_logit_offset", "gat_phys_logit_offset_regularized"}
+                ):
+                    delta_gat = unwrap_model(model).decoder.latest_delta_gat
+                    if delta_gat is None:
+                        raise ValueError("Residual regularization requested, but decoder did not expose latest_delta_gat.")
+                    delta_observed = []
+                    for graph_index in index_range:
+                        delta_observed.append(delta_gat[batch == graph_index][intent[graph_index]])
+                    residual_l2 = torch.stack(delta_observed).pow(2).mean()
+                    pred_loss = pred_loss + residual_lambda * residual_l2
+                    metrics.setdefault("residual_l2", 0)
+                    metrics["residual_l2"] += residual_l2.item() * batch_graphs.num_graphs
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()

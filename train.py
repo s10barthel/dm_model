@@ -37,6 +37,7 @@ from models.utils import (
     unwrap_model,
     validate_target_flags,
 )
+from physical_pass_model import model_uses_physical_xpass, validate_physical_xpass_args
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     generate_model_run_id,
@@ -45,6 +46,7 @@ from project_config import (
     get_augmented_feature_dir,
     get_augmented_label_dir,
     get_model_run_root,
+    get_physical_xpass_dir,
     get_success_intent_graph_dir,
     get_success_intent_label_dir,
     infer_target_family,
@@ -115,6 +117,42 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
+parser.add_argument("--use_physical_xpass", action="store_true", default=False, help="Use precomputed accessible-space player_cum_prob for pass_success.")
+parser.add_argument(
+    "--model-variant",
+    dest="model_variant",
+    choices=["gat_baseline", "gat_plus_phys_feature", "gat_phys_logit_offset", "gat_phys_logit_offset_regularized"],
+    default="gat_phys_logit_offset",
+    help="Pass-success architecture variant for physical xPass experiments.",
+)
+parser.add_argument("--physical-cache-dir", default=None, help="Physical xPass sidecar directory containing metadata.json and matches/*.parquet.")
+parser.add_argument("--physical-eps", type=float, default=1e-4, help="Clamping epsilon for physical probabilities before logit conversion.")
+physical_scale_group = parser.add_mutually_exclusive_group()
+physical_scale_group.add_argument(
+    "--learn-physical-scale",
+    dest="learn_physical_scale",
+    action="store_true",
+    help="Learn beta1 in beta0 + beta1 * logit(player_cum_prob) + delta_gat.",
+)
+physical_scale_group.add_argument(
+    "--fixed-physical-scale",
+    dest="learn_physical_scale",
+    action="store_false",
+    help="Freeze beta1 at 1.0 in the physical logit offset.",
+)
+parser.set_defaults(learn_physical_scale=True)
+parser.add_argument(
+    "--residual-regularization-lambda",
+    type=float,
+    default=0.0,
+    help="Optional L2 penalty on the observed-target GAT residual.",
+)
+parser.add_argument(
+    "--residual-clip-value",
+    type=float,
+    default=None,
+    help="Optional tanh bound c for delta_gat = c * tanh(raw_delta / c).",
+)
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
@@ -413,6 +451,8 @@ if __name__ == "__main__":
     args.model_id = f"{args.task}/{args.run_id}"
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
+    if args.use_physical_xpass and args.physical_cache_dir is None:
+        args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
     label_intended_receiver_mode = (
         args.intended_receiver_mode
         if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
@@ -464,6 +504,14 @@ if __name__ == "__main__":
     args.edge_in_dim = int(training_schema["edge_in_dim"])
     args.add_v_edge_features = bool(training_schema["add_v_edge_features"])
     args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)
+    validate_physical_xpass_args(args)
+    if model_uses_physical_xpass(args):
+        physical_cache_dir = Path(args.physical_cache_dir)
+        if not physical_cache_dir.exists():
+            raise FileNotFoundError(
+                f"Physical xPass sidecars not found at {physical_cache_dir}. "
+                "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> before training with --use_physical_xpass."
+            )
 
     # Load model
     args_dict = vars(args)
@@ -512,6 +560,17 @@ if __name__ == "__main__":
             "valid_feature_dir": args.valid_feature_dir,
             "valid_label_dir": args.valid_label_dir,
             "ipw_feature_dir": args.ipw_feature_dir,
+            "physical_cache_dir": args.physical_cache_dir,
+        },
+        "physical_xpass": {
+            "enabled": bool(model_uses_physical_xpass(args)),
+            "model_variant": args.model_variant,
+            "source": "accessible_space_player_cum_prob",
+            "physical_cache_dir": args.physical_cache_dir,
+            "physical_eps": float(args.physical_eps),
+            "learn_physical_scale": bool(args.learn_physical_scale),
+            "residual_regularization_lambda": float(args.residual_regularization_lambda or 0.0),
+            "residual_clip_value": args.residual_clip_value,
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
@@ -568,6 +627,9 @@ if __name__ == "__main__":
         "mask_possessor_v_edge_features": args.mask_possessor_v_edge_features,
         "diagnostic_label_dir": args.diagnostic_label_dir,
         "require_goal_next10_diagnostics": args.require_goal_next10_diagnostics,
+        "use_physical_xpass": model_uses_physical_xpass(args),
+        "physical_cache_dir": args.physical_cache_dir,
+        "physical_eps": args.physical_eps,
     }
     train_dataset = ActionDataset(
         train_match_ids,
@@ -600,17 +662,20 @@ if __name__ == "__main__":
     loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": args.pin_memory}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
+        ipw_dataset_args = dict(common_dataset_args)
+        ipw_dataset_args["use_physical_xpass"] = False
+        ipw_dataset_args["physical_cache_dir"] = None
         ipw_train_dataset = ActionDataset(
             train_match_ids,
             feature_dir=args.ipw_feature_dir,
             label_dir=args.label_dir,
-            **common_dataset_args,
+            **ipw_dataset_args,
         )
         ipw_valid_dataset = ActionDataset(
             valid_match_ids,
             feature_dir=args.ipw_feature_dir,
             label_dir=args.label_dir,
-            **common_dataset_args,
+            **ipw_dataset_args,
         )
         if len(ipw_train_dataset) == 0 or len(ipw_valid_dataset) == 0:
             raise ValueError("No usable samples remained for inverse-propensity weighting.")

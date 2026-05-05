@@ -187,6 +187,36 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     return command
 
 
+def append_physical_xpass_flags(command: list[str], args: argparse.Namespace) -> list[str]:
+    command = list(command)
+    if bool(getattr(args, "use_physical_xpass", False)):
+        command.append("--use_physical_xpass")
+    command.extend(["--model-variant", str(getattr(args, "model_variant", "gat_phys_logit_offset"))])
+    if getattr(args, "physical_cache_dir", None):
+        command.extend(["--physical-cache-dir", str(args.physical_cache_dir)])
+    command.extend(["--physical-eps", str(getattr(args, "physical_eps", 1e-4))])
+    command.append("--learn-physical-scale" if bool(getattr(args, "learn_physical_scale", True)) else "--fixed-physical-scale")
+    residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
+    if residual_lambda:
+        command.extend(["--residual-regularization-lambda", str(residual_lambda)])
+    residual_clip_value = getattr(args, "residual_clip_value", None)
+    if residual_clip_value is not None:
+        command.extend(["--residual-clip-value", str(residual_clip_value)])
+    return command
+
+
+def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "use_physical_xpass": bool(getattr(args, "use_physical_xpass", False)),
+        "model_variant": str(getattr(args, "model_variant", "gat_phys_logit_offset")),
+        "physical_cache_dir": getattr(args, "physical_cache_dir", None),
+        "physical_eps": float(getattr(args, "physical_eps", 1e-4)),
+        "learn_physical_scale": bool(getattr(args, "learn_physical_scale", True)),
+        "residual_regularization_lambda": float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0),
+        "residual_clip_value": getattr(args, "residual_clip_value", None),
+    }
+
+
 def cli_v_edge_feature_mode(args: argparse.Namespace) -> str:
     return normalize_v_edge_feature_mode(
         getattr(args, "v_edge_feature_mode", None),
@@ -724,6 +754,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Enable the extended handcrafted node features during training.",
         "Disable the extended handcrafted node features during training.",
     )
+    parser.add_argument(
+        "--use_physical_xpass",
+        "--use-physical-xpass",
+        dest="use_physical_xpass",
+        action="store_true",
+        default=False,
+        help="Use precomputed accessible-space player_cum_prob for pass_success only.",
+    )
+    parser.add_argument(
+        "--model-variant",
+        choices=["gat_baseline", "gat_plus_phys_feature", "gat_phys_logit_offset", "gat_phys_logit_offset_regularized"],
+        default="gat_phys_logit_offset",
+        help="Physical xPass pass_success architecture variant.",
+    )
+    parser.add_argument("--physical-cache-dir", default=None, help="Override physical xPass sidecar directory.")
+    parser.add_argument("--physical-eps", type=float, default=1e-4, help="Physical probability clamp epsilon.")
+    physical_scale_group = parser.add_mutually_exclusive_group()
+    physical_scale_group.add_argument(
+        "--learn-physical-scale",
+        dest="learn_physical_scale",
+        action="store_true",
+        help="Learn beta1 for the physical logit offset.",
+    )
+    physical_scale_group.add_argument(
+        "--fixed-physical-scale",
+        dest="learn_physical_scale",
+        action="store_false",
+        help="Freeze beta1 at 1.0 for the physical logit offset.",
+    )
+    parser.set_defaults(learn_physical_scale=True)
+    parser.add_argument(
+        "--residual-regularization-lambda",
+        type=float,
+        default=0.0,
+        help="Optional L2 penalty on the observed-target GAT residual in pass_success.",
+    )
+    parser.add_argument(
+        "--residual-clip-value",
+        type=float,
+        default=None,
+        help="Optional tanh bound for the pass_success residual.",
+    )
     args = parser.parse_args(argv)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
@@ -734,6 +806,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--early-stopping-min-epochs must be at least 1.")
     if args.early_stopping_min_delta < 0:
         parser.error("--early-stopping-min-delta must be non-negative.")
+    if not (0.0 < args.physical_eps < 0.5):
+        parser.error("--physical-eps must be between 0 and 0.5.")
+    if args.residual_regularization_lambda < 0:
+        parser.error("--residual-regularization-lambda must be non-negative.")
+    if args.residual_clip_value is not None and args.residual_clip_value <= 0:
+        parser.error("--residual-clip-value must be positive when provided.")
     validate_batch_size_args(args, parser)
     try:
         resolve_wrapper_feature_flags(args)
@@ -929,6 +1007,7 @@ def pass_success_command(
     batch_size: int,
     v_edge_feature_mode: str,
     feature_flags: dict[str, bool],
+    physical_args: argparse.Namespace | None = None,
 ) -> list[str]:
     command = [
         "--task",
@@ -945,6 +1024,8 @@ def pass_success_command(
         "--min_lr",
         "1e-5",
     ]
+    if physical_args is not None:
+        command = append_physical_xpass_flags(command, physical_args)
     return append_low_level_feature_flags(command, feature_flags)
 
 
@@ -1131,6 +1212,7 @@ def build_training_commands(
                     batch_sizes["pass_success"],
                     v_edge_feature_mode,
                     feature_flags,
+                    args,
                 )
             )
             trained_model_ids["pass_success"] = model_ids["pass_success"]
@@ -1260,6 +1342,7 @@ def main() -> None:
                 "device": getattr(cli_args, "device", None),
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
+                "physical_xpass": physical_xpass_settings(cli_args),
                 "training_feature_flags": feature_flags,
                 "batch_sizes": trained_batch_sizes,
                 "success_intent_only": bool(cli_args.success_intent_only),
@@ -1321,6 +1404,7 @@ def main() -> None:
         "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
         "training_feature_flags": feature_flags,
         "batch_sizes": trained_batch_sizes,
+        "physical_xpass": physical_xpass_settings(cli_args),
         "device": getattr(cli_args, "device", None),
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,

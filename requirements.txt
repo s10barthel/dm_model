@@ -2,6 +2,7 @@ numpy
 pandas
 tqdm
 ipywidgets
+accessible-space>=2.0.15,<3
 fastparquet
 pyarrow
 scipy

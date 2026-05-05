@@ -66,6 +66,8 @@ DEFAULT_INTENDED_RECEIVER_MODE = INTENDED_RECEIVER_MODE_ANGLE_ONLY
 use_intended_receiver_model = False
 DEFAULT_INTENDED_RECEIVER_MODEL_ID = "success_intent/00"
 SUCCESS_INTENT_GRAPH_DIR = FEATURE_DIR / "action_graphs_success_intent"
+PHYSICAL_XPASS_DIR_NAME = "physical_xpass"
+PHYSICAL_XPASS_MATCH_DIR_NAME = "matches"
 
 RELEVANT_MODEL_IDS = {
     INTENDED_RECEIVER_MODE_ORIGINAL: {
@@ -284,6 +286,23 @@ def get_post_action_graph_dir(root: Path | None = None) -> Path:
 def get_success_intent_graph_dir(root: Path | None = None) -> Path:
     root = Path(root) if root is not None else FEATURE_DIR
     return root / SUCCESS_INTENT_GRAPH_DIR.name
+
+
+def get_physical_xpass_dir(root: Path | None = None) -> Path:
+    root = Path(root) if root is not None else FEATURE_DIR
+    return root / PHYSICAL_XPASS_DIR_NAME
+
+
+def get_physical_xpass_metadata_path(root: Path | None = None) -> Path:
+    return get_physical_xpass_dir(root=root) / "metadata.json"
+
+
+def get_physical_xpass_match_dir(root: Path | None = None) -> Path:
+    return get_physical_xpass_dir(root=root) / PHYSICAL_XPASS_MATCH_DIR_NAME
+
+
+def get_physical_xpass_match_path(match_id: str, root: Path | None = None) -> Path:
+    return get_physical_xpass_match_dir(root=root) / f"{match_id}.parquet"
 
 
 def get_feature_run_root(run_id: str) -> Path:

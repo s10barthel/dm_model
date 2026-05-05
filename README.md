@@ -30,6 +30,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
   - [`--return_type` Applies To All Outcome Target Families](#return_type-applies-to-all-outcome-target-families)
   - [Where to switch targets](#where-to-switch-targets)
 - [Intended-Receiver Workflow](#intended-receiver-workflow)
+- [physical_xpass_workflow](#physical_xpass_workflow)
 - [EPV Workflow](#epv-workflow)
 - [Notes](#notes)
 - [CLI Reference](#cli-reference)
@@ -160,6 +161,7 @@ The feature run root mirrors the old flat layout, but inside one dedicated run f
 - `data/features/runs/<feature_run_id>/action_labels_<return_type>*.pt`
 - `data/features/runs/<feature_run_id>/action_labels_intent_train_<return_type>*.pt`
 - `data/features/runs/<feature_run_id>/resolved_actions*.parquet`
+- `data/features/runs/<feature_run_id>/physical_xpass/matches/*.parquet` when physical xPass sidecars are precomputed
 - `data/features/runs/<feature_run_id>/metadata.json`
 
 The component run root contains one folder per processed match:
@@ -830,6 +832,82 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 
 `success_intent` is the teammate-selection intended-receiver model. It is trained from observed successful-pass receivers (`receiver_id`) and does not belong to any intended-receiver mode. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling; it is not the intended-teammate model itself.
 
+## physical_xpass_workflow
+
+Physical xPass adds a precompute-first pass-success signal from Jonas Bischofberger's `accessible-space` package. The stored signal is `simulation_result.player_cum_prob`: for each pass action and each candidate teammate, it estimates the physical probability that that specific player intercepts/receives the simulated pass trajectory. It is stored as a sidecar under the feature run, not appended to the graph tensors:
+
+- `data/features/runs/<feature_run_id>/physical_xpass/metadata.json`
+- `data/features/runs/<feature_run_id>/physical_xpass/matches/<match_id>.parquet`
+
+Generate sidecars once for a feature run:
+
+```powershell
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id>
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100
+```
+
+The generator uses existing preprocessed graph data: `graph.node_ids`, player positions and velocities, teammate flags, and the possessor flag. No additional raw Sportec processing is needed. Each match parquet is wide: one row per pass action, with player-id columns holding `player_cum_prob`; non-candidate players can be missing/NaN.
+
+Train pass success with the recommended default:
+
+```powershell
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass
+```
+
+Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing, training fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
+
+The main model variant is a prior-like logit offset:
+
+```text
+logit_final = beta0 + beta1 * logit(player_cum_prob) + delta_gat
+```
+
+`beta0` starts at `0.0`, `beta1` starts at `1.0`, and `delta_gat` is the residual correction learned by the GAT. This is not fully Bayesian updating, but it gives the physical model privileged baseline status: the GAT learns when observed data systematically correct that physical baseline.
+
+Physical flags:
+
+- `--use_physical_xpass`: enable sidecar loading and physical pass-success integration.
+- `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the architecture. `gat_baseline` is unchanged; `gat_plus_phys_feature` concatenates `logit(player_cum_prob)` as an ablation; `gat_phys_logit_offset` is the recommended offset model; `gat_phys_logit_offset_regularized` is the offset model with optional residual safeguards.
+- `--physical-cache-dir`: override the physical sidecar directory. By default it uses `<feature_run_root>/physical_xpass`.
+- `--physical-eps 1e-4`: clamp probabilities to `[eps, 1-eps]` before taking logits.
+- `--learn-physical-scale` / `--fixed-physical-scale`: learn `beta1` or freeze it at `1.0`; default is learned.
+- `--residual-regularization-lambda`: optional L2 penalty on the observed-target residual `delta_gat`.
+- `--residual-clip-value`: optional tanh bound, `delta_gat = c * tanh(raw_delta / c)`.
+
+The physical simulation uses `normalize=True` by default, then the loader clamps before `logit`. `accessible-space` notes that probabilities/possibilities are not always perfectly normalized because normalization is numerically difficult across players and the ball trajectory. Requesting normalization reduces that issue; clipping then prevents infinite logits from exact 0 or 1 values.
+
+Compare these runs:
+
+```powershell
+# Baseline GAT
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --model-variant gat_baseline
+
+# Physical feature ablation
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_plus_phys_feature
+
+# Recommended physical logit offset
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset
+
+# Offset + residual L2
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --residual-regularization-lambda 0.01
+
+# Offset + residual clipping
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --residual-clip-value 2.0
+```
+
+Tuning L2/clipping as ablations means training otherwise comparable runs where only the residual constraint changes. Start with no L2 and no clipping (`residual_regularization_lambda=0.0`, `residual_clip_value=None`) to see the clean offset effect, then test whether constraining the residual improves calibration or hypothetical-pass maps.
+
+`include_out=True` is not supported initially because `player_cum_prob` is player-indexed and has no natural out-of-play node. IPW remains active when configured: the final observed-target BCE is still weighted by `batch_ipw`.
+
+For visualization:
+
+```powershell
+python scripts/visualize_action_components.py --bundle-id <bundle_id> --match-id <match_id> --action-id <action_id> --show-physical-xpass
+```
+
+This renders `player_cum_prob.png` next to the other component plots. Use `--physical-cache-dir <path>` if the physical sidecars live outside the selected feature run.
+
 ## EPV Workflow
 
 EPV is a bootstrapped target family: first train the source component models on an existing feature run, then use those checkpoints to generate EPV sidecars, refresh labels in a derived feature run, and finally train the outcome models on `--target-family epv`.
@@ -904,6 +982,17 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--overwrite`: overwrite existing EPV outputs. Default: off.
 
+### `scripts/generate_physical_xpass.py`
+
+- `--feature-run-id <feature_run_id>`: feature run whose `action_graphs` should be used. Required.
+- `--match-id <id>`: restrict precomputation to one or more matches. Default: all matches in the selected split.
+- `--split {train,test,all}`: match split to precompute when `--match-id` is omitted. Default: `all`.
+- `--limit <N>`: process only the first `N` pass actions across selected matches. Default: no limit.
+- `--overwrite`: overwrite existing physical xPass match sidecars. Default: off.
+- `--return-type <return_type>` and `--intended-receiver-mode <mode>`: optional reference label directory selectors. Defaults are inferred from the feature run.
+- `--physical-eps <eps>`: clamp stored `player_cum_prob`. Default: `1e-4`.
+- `--no-normalize`: disable accessible-space normalization. Default: normalization on.
+
 ### `scripts/generate_relevant_features.py`
 
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt`, `goal_distance`, and `epv`.
@@ -928,6 +1017,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
+- `--use_physical_xpass` / `--use-physical-xpass`: enable physical xPass for `pass_success` only.
+- `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the pass-success physical xPass architecture. Default: `gat_phys_logit_offset`.
+- `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.
+- `--physical-eps <eps>`: physical probability clamp epsilon. Default: `1e-4`.
+- `--learn-physical-scale` / `--fixed-physical-scale`: learn or freeze `beta1`. Default: learned.
+- `--residual-regularization-lambda <value>`: optional observed-target residual L2. Default: `0.0`.
+- `--residual-clip-value <value>`: optional residual clipping bound. Default: unset.
 - `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
 
 ### `scripts/evaluate_relevant_models.py`
@@ -1016,6 +1112,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--show-physical-xpass`: render `player_cum_prob.png` from physical xPass sidecars. Default: off.
+- `--physical-cache-dir <path>`: physical xPass sidecar directory override for visualization.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for intended-recipient overlays.

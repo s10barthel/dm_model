@@ -14,6 +14,7 @@ from datatools.utils import (
     mask_possessor_velocity_edge_features,
     sparsify_edges,
 )
+from physical_pass_model import attach_physical_xpass_to_graph, load_physical_xpass_match
 
 
 OUTCOME_DIAGNOSTIC_TASKS = {
@@ -105,13 +106,20 @@ class ActionDataset(Dataset):
         train=True,
         diagnostic_label_dir=None,
         require_goal_next10_diagnostics=None,
+        use_physical_xpass=False,
+        physical_cache_dir=None,
+        physical_eps=1e-4,
     ):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
+        physical_cache_root = Path(physical_cache_dir) if physical_cache_dir else None
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
+        self.use_physical_xpass = bool(use_physical_xpass)
+        self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
+        self.physical_eps = float(physical_eps)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
         self.v_edge_feature_mode = str(v_edge_feature_mode).strip().replace("-", "_")
         self.mask_possessor_v_edge_features = bool(mask_possessor_v_edge_features) or self.v_edge_feature_mode == "no_poss"
@@ -121,8 +129,11 @@ class ActionDataset(Dataset):
             if require_goal_next10_diagnostics is None
             else bool(require_goal_next10_diagnostics)
         )
+        if self.use_physical_xpass and physical_cache_root is None:
+            raise ValueError("physical_cache_dir is required when use_physical_xpass=True.")
 
         features = []
+        feature_match_ids: list[str] = []
         label_tensors: list[torch.Tensor] = []
 
         for match_id in tqdm(self.requested_match_ids):
@@ -175,6 +186,7 @@ class ActionDataset(Dataset):
             match_labels = _normalize_label_width(match_labels)
 
             features.extend(match_features)
+            feature_match_ids.extend([match_id] * len(match_features))
             label_tensors.append(match_labels)
             self.loaded_match_ids.append(match_id)
 
@@ -246,6 +258,7 @@ class ActionDataset(Dataset):
 
         self.features = []
         self.labels = []
+        physical_rows_by_match: dict[str, object] = {}
 
         for i in tqdm(condition.nonzero()[:, 0].numpy()):
             graph: Data = features[i]
@@ -318,6 +331,19 @@ class ActionDataset(Dataset):
                 intent_onehot = torch.zeros(graph.x.shape[0])
                 intent_onehot[labels[i, 5].long()] = 1
                 graph.x = torch.cat([graph.x, intent_onehot.unsqueeze(1)], -1)
+
+            if self.use_physical_xpass:
+                match_id = feature_match_ids[int(i)]
+                if match_id not in physical_rows_by_match:
+                    physical_rows_by_match[match_id] = load_physical_xpass_match(physical_cache_root, match_id)
+                graph = attach_physical_xpass_to_graph(
+                    graph,
+                    graph_labels,
+                    physical_rows_by_match[match_id],
+                    match_id=match_id,
+                    eps=self.physical_eps,
+                    require_observed_target=True,
+                )
 
             self.features.append(graph)
             self.labels.append(graph_labels)

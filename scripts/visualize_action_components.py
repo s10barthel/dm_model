@@ -18,7 +18,7 @@ from datatools.graph_feature import construct_graph_features, summarize_ball_tra
 from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
-from inference import inference_gnn, load_success_intent_labels
+from inference import inference_gnn, load_success_intent_labels, resolve_match_id
 from models.utils import (
     load_model,
     resolve_model_selection,
@@ -26,11 +26,13 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
+from physical_pass_model import load_physical_xpass_component
 from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODES,
     get_action_graph_dir,
+    get_physical_xpass_dir,
     get_resolved_action_path,
 )
 
@@ -77,6 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES, help="Runtime resolved-action mode.")
     parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument("--show-physical-xpass", action="store_true", help="Render player_cum_prob.png from physical xPass sidecars.")
+    parser.add_argument("--physical-cache-dir", help="Physical xPass sidecar directory override.")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
@@ -449,6 +453,8 @@ def render_action_components(
     display_action_id: str,
     output_dir: Path,
     show_trajectories: bool = False,
+    show_physical_xpass: bool = False,
+    physical_cache_dir: Path | str | None = None,
 ) -> None:
     component_prob_rows: dict[str, pd.Series] = {}
 
@@ -476,6 +482,14 @@ def render_action_components(
                 probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
                 component_prob_rows[component_name] = probs.loc[action_index]
 
+    if show_physical_xpass:
+        cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_physical_xpass_dir(feature_root)
+        component_prob_rows["player_cum_prob"] = load_physical_xpass_component(
+            cache_dir,
+            resolve_match_id(match),
+            action_index,
+        )
+
     component_prob_rows["pass_score"] = compute_pass_score(
         pass_success=component_prob_rows["pass_success"],
         outcome_scoring_success=component_prob_rows["outcome_scoring_success"],
@@ -490,6 +504,7 @@ def render_action_components(
     component_order.extend(
         [
             "pass_success",
+            "player_cum_prob",
             "outcome_scoring_success",
             "outcome_scoring_failure",
             "outcome_conceding_success",
@@ -498,6 +513,8 @@ def render_action_components(
         ]
     )
     for component_name in component_order:
+        if component_name not in component_prob_rows:
+            continue
         render_component(
             match=match,
             action_index=action_index,
@@ -571,6 +588,10 @@ def main() -> None:
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
+    physical_cache_dir = args.physical_cache_dir or str(get_physical_xpass_dir(feature_root))
+    pass_success_model = loaded_models.get("pass_success")
+    if pass_success_model is not None and pass_success_model.args.get("use_physical_xpass", False):
+        pass_success_model.args["physical_cache_dir"] = physical_cache_dir
 
     match = load_match(
         args.match_id,
@@ -596,6 +617,8 @@ def main() -> None:
                 display_action_id=display_action_id,
                 output_dir=output_dir,
                 show_trajectories=args.show_trajectories,
+                show_physical_xpass=args.show_physical_xpass,
+                physical_cache_dir=physical_cache_dir,
             )
         except Exception as exc:
             warn_skip(f"action_id={display_action_id} in match {args.match_id} failed during rendering: {exc}")
