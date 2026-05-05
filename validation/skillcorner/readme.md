@@ -30,6 +30,19 @@ Reads SkillCorner component parquet outputs from `data/component_runs/skillcorne
 
 The summary CSV is the row-level input for the follow-up filtering and aggregation step.
 
+Select the component run with one of:
+
+```powershell
+python validation\skillcorner\code\skillcorner_postprocessing.py --component-run-id <component_run_id>
+python validation\skillcorner\code\skillcorner_postprocessing.py --component-run-root data\component_runs\skillcorner\<component_run_id>
+```
+
+If neither option is provided, the script uses the latest SkillCorner run registered in `data/component_runs/skillcorner/latest.json`. That file is updated by `scripts/run_skillcorner.py` when it creates a run under the default output directory. To choose the run id at creation time, use:
+
+```powershell
+python scripts\run_skillcorner.py --run-id <component_run_id>
+```
+
 ### `code/skillcorner_filter.py`
 
 Reads:

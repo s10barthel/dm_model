@@ -16,9 +16,7 @@ if str(ROOT) not in sys.path:
 VALIDATION_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = VALIDATION_ROOT / "output"
 DEFAULT_SKILLCORNER_DATA_PATH = OUTPUT_DIR / "skillcorner_summary.csv"
-DEFAULT_SKILLCORNER_IDS_PATH = Path(
-    r"C:\Users\steffen.barthel\OneDrive - TSG 1899 Hoffenheim Fußball-Spielbetriebs GmbH\Dokumente\VS Code\.vscode\data\skillcorner_id.csv"
-)
+DEFAULT_SKILLCORNER_IDS_PATH = OUTPUT_DIR / "skillcorner_id.csv"
 
 SKILLCORNER_DATA_REQUIRED_COLUMNS = [
     "player_id",
