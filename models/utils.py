@@ -1006,6 +1006,47 @@ def resolve_runtime_feature_run_context(
     )
 
 
+def adapt_batch_graphs_for_model(
+    batch_graphs: Batch,
+    model_args: dict[str, Any],
+    *,
+    context: str = "Loaded model",
+) -> Batch:
+    required_node_dim = int(model_args.get("node_in_dim", 0) or 0)
+    actual_node_dim = int(batch_graphs.x.shape[1]) if getattr(batch_graphs, "x", None) is not None else 0
+    if required_node_dim and actual_node_dim < required_node_dim:
+        raise ValueError(
+            f"{context} requires node_in_dim={required_node_dim}, "
+            f"but runtime graphs provide node_in_dim={actual_node_dim}."
+        )
+
+    required_edge_dim = int(model_args.get("edge_in_dim", 0) or 0)
+    actual_edge_dim = int(batch_graphs.edge_attr.shape[1]) if getattr(batch_graphs, "edge_attr", None) is not None else 0
+    if required_edge_dim and actual_edge_dim < required_edge_dim:
+        raise ValueError(
+            f"{context} requires edge_in_dim={required_edge_dim}, "
+            f"but runtime graphs provide edge_in_dim={actual_edge_dim}."
+        )
+
+    if should_mask_possessor_v_edge_features_for_model(model_args) and actual_edge_dim >= 4 and actual_node_dim > 13:
+        possessor_nodes = batch_graphs.x[:, 13] == 1
+        incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
+        batch_graphs.edge_attr[incident_edges, 2:4] = 0
+
+    if required_edge_dim and actual_edge_dim > required_edge_dim:
+        batch_graphs.edge_attr = batch_graphs.edge_attr[:, :required_edge_dim]
+    if required_node_dim and actual_node_dim > required_node_dim:
+        batch_graphs.x = batch_graphs.x[:, :required_node_dim]
+    return batch_graphs
+
+
+def should_mask_possessor_v_edge_features_for_model(model_args: dict[str, Any]) -> bool:
+    mode = model_args.get("v_edge_feature_mode")
+    if mode is not None:
+        return normalize_v_edge_feature_mode(str(mode)) == V_EDGE_FEATURE_MODE_NO_POSS
+    return bool(model_args.get("mask_possessor_v_edge_features", False))
+
+
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:
     model = load_model(model_id, device)
     loader = DataLoader(dataset, batch_size=2048, shuffle=False, pin_memory=pin_memory)
@@ -1016,7 +1057,7 @@ def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_c
         batch_labels = batch_labels.to(device)
 
         with torch.no_grad():
-            batch_graphs.x = batch_graphs.x[:, : model.args["node_in_dim"]]
+            batch_graphs = adapt_batch_graphs_for_model(batch_graphs, model.args, context=f"IPW model {model_id!r}")
             out: torch.Tensor = model(batch_graphs)
             for graph_index in range(batch_graphs.num_graphs):
                 logits = out[(batch_graphs.batch == graph_index) & (batch_graphs.x[:, 0] == 1)]

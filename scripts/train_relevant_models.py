@@ -13,6 +13,8 @@ if str(ROOT) not in sys.path:
 
 from datatools import config
 from models.utils import (
+    infer_feature_graph_schema,
+    infer_training_edge_schema,
     get_model_record,
     get_model_records,
     mask_possessor_v_edge_features_for_mode,
@@ -409,8 +411,9 @@ def validate_external_pass_intent_model_id(
     args: argparse.Namespace,
     feature_flags: dict[str, bool],
     resolved_feature_run_id: str,
+    runtime_schema: dict[str, int | bool] | None = None,
 ) -> str | None:
-    del feature_flags, resolved_feature_run_id
+    del feature_flags
     pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
     if not pass_intent_model_id:
         return None
@@ -426,11 +429,59 @@ def validate_external_pass_intent_model_id(
     if not record.get("has_weights"):
         mismatches.append("missing best_weights.pt or best_model.json")
 
+    if runtime_schema is None:
+        feature_root = resolve_feature_root(resolved_feature_run_id)
+        runtime_schema = resolve_pass_success_runtime_schema(feature_root, cli_v_edge_feature_mode(args))
+
+    required_schema = record.get("graph_schema", {})
+    runtime_node_dim = runtime_schema.get("node_in_dim")
+    required_node_dim = required_schema.get("node_in_dim")
+    if required_node_dim is not None and runtime_node_dim is not None:
+        if int(runtime_node_dim) < int(required_node_dim):
+            mismatches.append(
+                f"requires node_in_dim={int(required_node_dim)}, "
+                f"but pass_success runtime provides node_in_dim={int(runtime_node_dim)}"
+            )
+    elif required_node_dim is not None:
+        mismatches.append(f"requires node_in_dim={int(required_node_dim)}, but pass_success runtime node schema is unknown")
+
+    runtime_edge_dim = int(runtime_schema.get("edge_in_dim", 0) or 0)
+    required_edge_dim = int(required_schema.get("edge_in_dim", 0) or 0)
+    if required_edge_dim and runtime_edge_dim < required_edge_dim:
+        suggestion = ""
+        if required_edge_dim >= 4 and runtime_edge_dim <= 2:
+            suggestion = " Use --v-edge-features or a feature run with velocity edge features."
+        mismatches.append(
+            f"requires edge_in_dim={required_edge_dim}, "
+            f"but pass_success runtime provides edge_in_dim={runtime_edge_dim}.{suggestion}"
+        )
+
     if mismatches:
         details = "; ".join(mismatches)
         raise ValueError(f"External pass_intent checkpoint {pass_intent_model_id!r} is invalid: {details}.")
 
     return str(pass_intent_model_id)
+
+
+def resolve_pass_success_runtime_schema(feature_root: Path, v_edge_feature_mode: str) -> dict[str, int | bool]:
+    action_graph_dir = get_action_graph_dir(feature_root)
+    try:
+        feature_schema = infer_feature_graph_schema(action_graph_dir)
+    except FileNotFoundError:
+        metadata = load_feature_run_metadata(Path(feature_root).name, required=False) or {}
+        metadata_schema = dict(metadata.get("graph_schema") or {})
+        metadata_edge_dim = int(metadata_schema.get("edge_in_dim", 4) or 4)
+        feature_schema = {
+            "node_in_dim": int(metadata_schema.get("node_in_dim", 25) or 25),
+            "edge_in_dim": metadata_edge_dim,
+            "add_v_edge_features": bool(metadata_schema.get("add_v_edge_features", metadata_edge_dim > 2)),
+        }
+    training_edge_schema = infer_training_edge_schema(feature_schema, v_edge_feature_mode=v_edge_feature_mode)
+    return {
+        "node_in_dim": int(feature_schema["node_in_dim"]) if feature_schema.get("node_in_dim") is not None else None,
+        "edge_in_dim": int(training_edge_schema["edge_in_dim"]),
+        "add_v_edge_features": bool(training_edge_schema["add_v_edge_features"]),
+    }
 
 
 def retained_bundle_model_ids(model_ids: dict[str, str]) -> dict[str, str]:

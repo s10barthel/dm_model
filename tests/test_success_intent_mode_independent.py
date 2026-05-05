@@ -69,6 +69,7 @@ def make_pass_intent_record(
     return_type: str = "disc_0.9",
     target_family: str | None = None,
     has_weights: bool = True,
+    node_in_dim: int = 25,
     edge_in_dim: int = 4,
     add_v_edge_features: bool = True,
     feature_signature: dict[str, object] | None = None,
@@ -81,6 +82,7 @@ def make_pass_intent_record(
         "target_family": target_family,
         "has_weights": has_weights,
         "graph_schema": {
+            "node_in_dim": node_in_dim,
             "edge_in_dim": edge_in_dim,
             "add_v_edge_features": add_v_edge_features,
         },
@@ -696,6 +698,67 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
 
         self.assertEqual(set(model_ids.keys()), {"pass_success"})
         self.assertEqual(commands[0][commands[0].index("--ipw_model_id") + 1], "pass_intent/old")
+
+    def test_external_pass_intent_accepts_smaller_ipw_schema_than_runtime(self) -> None:
+        args = make_training_args(
+            "feature_run",
+            pass_intent_model_id="pass_intent/old",
+        )
+        runtime_schema = {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True}
+
+        with patch.object(
+            train_wrapper,
+            "get_model_record",
+            return_value=make_pass_intent_record(node_in_dim=19, edge_in_dim=2, add_v_edge_features=False),
+        ):
+            resolved = train_wrapper.validate_external_pass_intent_model_id(
+                args,
+                train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+                "feature_run",
+                runtime_schema=runtime_schema,
+            )
+
+        self.assertEqual(resolved, "pass_intent/old")
+
+    def test_external_pass_intent_rejects_runtime_edge_schema_too_small(self) -> None:
+        args = make_training_args(
+            "feature_run",
+            pass_intent_model_id="pass_intent/old",
+        )
+        runtime_schema = {"node_in_dim": 25, "edge_in_dim": 2, "add_v_edge_features": False}
+
+        with patch.object(
+            train_wrapper,
+            "get_model_record",
+            return_value=make_pass_intent_record(node_in_dim=25, edge_in_dim=4, add_v_edge_features=True),
+        ):
+            with self.assertRaisesRegex(ValueError, "requires edge_in_dim=4.*Use --v-edge-features"):
+                train_wrapper.validate_external_pass_intent_model_id(
+                    args,
+                    train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+                    "feature_run",
+                    runtime_schema=runtime_schema,
+                )
+
+    def test_external_pass_intent_rejects_runtime_node_schema_too_small(self) -> None:
+        args = make_training_args(
+            "feature_run",
+            pass_intent_model_id="pass_intent/old",
+        )
+        runtime_schema = {"node_in_dim": 19, "edge_in_dim": 4, "add_v_edge_features": True}
+
+        with patch.object(
+            train_wrapper,
+            "get_model_record",
+            return_value=make_pass_intent_record(node_in_dim=25, edge_in_dim=4, add_v_edge_features=True),
+        ):
+            with self.assertRaisesRegex(ValueError, "requires node_in_dim=25"):
+                train_wrapper.validate_external_pass_intent_model_id(
+                    args,
+                    train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+                    "feature_run",
+                    runtime_schema=runtime_schema,
+                )
 
     def test_external_pass_intent_accepts_matching_possessor_masked_velocity_edge_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

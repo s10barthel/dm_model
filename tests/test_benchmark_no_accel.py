@@ -11,7 +11,7 @@ import matplotlib
 import pandas as pd
 import torch
 from PIL import Image
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from dataset import ActionDataset
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
@@ -1146,6 +1146,71 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             v_edge_feature_mode="no_poss",
         )
         self.assertEqual(schema, {"edge_in_dim": 4, "add_v_edge_features": True})
+
+    def test_adapt_batch_graphs_for_model_truncates_extra_edge_features(self) -> None:
+        batch = Batch.from_data_list([make_velocity_edge_graph()])
+        adapted = model_utils.adapt_batch_graphs_for_model(
+            batch,
+            {"node_in_dim": 25, "edge_in_dim": 2, "v_edge_feature_mode": "none"},
+            context="IPW model 'pass_intent/old'",
+        )
+
+        self.assertEqual(adapted.x.shape[1], 25)
+        self.assertEqual(adapted.edge_attr.shape[1], 2)
+
+    def test_adapt_batch_graphs_for_model_rejects_small_edge_schema(self) -> None:
+        batch = Batch.from_data_list([make_graph(edge_dim=2)])
+
+        with self.assertRaisesRegex(ValueError, "requires edge_in_dim=4"):
+            model_utils.adapt_batch_graphs_for_model(
+                batch,
+                {"node_in_dim": 25, "edge_in_dim": 4, "v_edge_feature_mode": "all"},
+                context="IPW model 'pass_intent/old'",
+            )
+
+    def test_adapt_batch_graphs_for_model_rejects_small_node_schema(self) -> None:
+        batch = Batch.from_data_list([make_graph(node_dim=19, edge_dim=4)])
+
+        with self.assertRaisesRegex(ValueError, "requires node_in_dim=25"):
+            model_utils.adapt_batch_graphs_for_model(
+                batch,
+                {"node_in_dim": 25, "edge_in_dim": 4, "v_edge_feature_mode": "all"},
+                context="IPW model 'pass_intent/old'",
+            )
+
+    def test_adapt_batch_graphs_for_model_masks_no_poss_velocity_edges(self) -> None:
+        batch = Batch.from_data_list([make_velocity_edge_graph()])
+        adapted = model_utils.adapt_batch_graphs_for_model(
+            batch,
+            {"node_in_dim": 25, "edge_in_dim": 4, "v_edge_feature_mode": "no_poss"},
+            context="IPW model 'pass_intent/old'",
+        )
+
+        self.assertTrue(torch.equal(adapted.edge_attr[:2, 2:4], torch.zeros((2, 2))))
+        self.assertTrue(torch.equal(adapted.edge_attr[2:, 2:4], torch.tensor([[0.6, 0.7], [0.8, 0.9]])))
+
+    def test_estimate_propensity_adapts_extra_edge_features_before_forward(self) -> None:
+        class FakePropensityModel:
+            args = {"node_in_dim": 25, "edge_in_dim": 2, "v_edge_feature_mode": "none"}
+
+            def __call__(self, batch_graphs):
+                self.seen_edge_dim = int(batch_graphs.edge_attr.shape[1])
+                return torch.zeros(batch_graphs.x.shape[0], dtype=torch.float32)
+
+        label = torch.zeros(len(LABEL_COLUMNS), dtype=torch.float32)
+        label[5] = 0
+        fake_model = FakePropensityModel()
+
+        with patch.object(model_utils, "load_model", return_value=fake_model):
+            likelihoods = model_utils.estimate_propensity(
+                [(make_velocity_edge_graph(), label, torch.tensor(1.0))],
+                model_id="pass_intent/old",
+                device="cpu",
+                pin_memory=False,
+            )
+
+        self.assertEqual(fake_model.seen_edge_dim, 2)
+        self.assertEqual(likelihoods.shape, (1,))
 
     def test_validate_feature_graph_schema_checks_node_dimension(self) -> None:
         with self.assertRaises(ValueError):
