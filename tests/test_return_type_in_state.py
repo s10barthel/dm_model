@@ -336,18 +336,20 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), expected_conceding)
 
-    def test_discounted_future_probability_value_rejects_out_of_range_values(self) -> None:
-        for invalid_value in [-0.1, 1.2]:
-            with self.subTest(invalid_value=invalid_value):
-                events = make_xt_events(
-                    [
-                        ("pass", "home_1", 0.10),
-                        ("pass", "home_1", invalid_value),
-                    ]
-                )
+    def test_discounted_future_probability_value_clips_out_of_range_values(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", -0.1),
+                ("pass", "home_1", 1.2),
+                ("pass", "away_1", 1.5),
+            ]
+        )
 
-                with self.assertRaisesRegex(ValueError, "xT values.*\\[0, 1\\]"):
-                    utils.label_discounted_xt_returns(events, gamma=0.5)
+        labeled = utils.label_discounted_xt_returns(events, gamma=0.5)
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 1 - (1 - 0.5**2 * 1.0))
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 1 - (1 - 0.5**3 * 1.0))
 
     def test_skip1_next_and_discounted_xt_helpers_do_not_skip_first_rated_shot(self) -> None:
         events = make_xt_events(

@@ -539,12 +539,7 @@ def label_discounted_future_probability_value(
                     skip_current = skip_first and not shot_array[future_pos]
 
                 if not skip_current:
-                    value = float(value_array[future_pos])
-                    if value < 0.0 or value > 1.0:
-                        raise ValueError(
-                            f"{value_col} values used for discounted probability returns must be in [0, 1]; "
-                            f"found range [{value:.6g}, {value:.6g}] at row {future_pos}."
-                        )
+                    value = float(np.clip(value_array[future_pos], 0.0, 1.0))
                     candidate = (gamma ** (future_pos - row_pos)) * value
                     if team_values[future_pos] == team_i:
                         prob_not_scoring *= 1.0 - candidate
