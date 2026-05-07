@@ -57,6 +57,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "poss_vel_aware": True,
     "poss_rel_vel_aware": False,
     "accel_aware": True,
+    "offside_aware": True,
     "extend_features": False,
 }
 
@@ -72,6 +73,7 @@ LOW_LEVEL_FEATURE_FLAGS = {
 
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
     "accel_aware": ("--accel", "--no-accel"),
+    "offside_aware": ("--offside", "--no-offside"),
 }
 
 MODEL_TOGGLE_SPECS = (
@@ -777,6 +779,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "accel_aware",
         "Include player-acceleration node features during training.",
         "Disable player-acceleration node features during training.",
+    )
+    add_bool_override(
+        parser,
+        "offside",
+        "offside_aware",
+        "Include the is_offside node feature during training.",
+        "Disable the is_offside node feature during training.",
     )
     add_bool_override(
         parser,

@@ -358,6 +358,16 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertFalse(args.accel_aware)
 
+    def test_wrapper_parse_args_accepts_no_offside(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(["--feature-run-id", "feature_run", "--success-intent-only", "--no-offside"])
+
+        self.assertFalse(args.offside_aware)
+
     def test_wrapper_parse_args_accepts_possessor_masked_velocity_edges(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
@@ -450,6 +460,48 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["accel_aware"])
         self.assertIn("--no-accel", commands[0])
         self.assertNotIn("--accel", commands[0])
+
+    def test_build_training_commands_emit_no_offside_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                accel_aware=None,
+                offside_aware=False,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertFalse(feature_flags["offside_aware"])
+        self.assertIn("--no-offside", commands[0])
+        self.assertNotIn("--offside", commands[0])
 
     def test_build_training_commands_default_velocity_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1693,6 +1745,32 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(filtered.x[:, 19:25], torch.zeros_like(filtered.x[:, 19:25])))
         self.assertTrue(torch.equal(filtered.x[:, 25], torch.full_like(filtered.x[:, 25], 25)))
 
+    def test_filter_features_and_labels_zeroes_offside_tail_when_disabled(self) -> None:
+        labels = make_labels()
+        args = {
+            "task": "action_intent",
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "offside_aware": False,
+            "extend_features": False,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+        }
+        graph = make_graph(node_dim=26)
+        graph.x[:, 19:25] = 19
+        graph.x[:, 25] = 25
+
+        filtered_graphs, _ = filter_features_and_labels([graph], labels, args)
+        filtered = filtered_graphs[0]
+
+        self.assertTrue(torch.equal(filtered.x[:, 19:25], torch.zeros_like(filtered.x[:, 19:25])))
+        self.assertTrue(torch.equal(filtered.x[:, 25], torch.zeros_like(filtered.x[:, 25])))
+
     def test_action_dataset_zeroes_only_accel_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_dir = Path(tmpdir) / "features"
@@ -1740,6 +1818,32 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         graph, _, _ = dataset[0]
         self.assertTrue(torch.equal(graph.x[:, 19:25], torch.zeros_like(graph.x[:, 19:25])))
         self.assertTrue(torch.equal(graph.x[:, 25], torch.full_like(graph.x[:, 25], 25)))
+
+    def test_action_dataset_zeroes_offside_tail_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            graph = make_graph(node_dim=26)
+            graph.x[:, 19:25] = 19
+            graph.x[:, 25] = 25
+            torch.save([graph], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                offside_aware=False,
+                extend_features=False,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[:, 19:25], torch.zeros_like(graph.x[:, 19:25])))
+        self.assertTrue(torch.equal(graph.x[:, 25], torch.zeros_like(graph.x[:, 25])))
 
     def test_physical_xpass_candidate_targets_ignore_offside_tail(self) -> None:
         graph = make_physical_xpass_graph()

@@ -279,7 +279,7 @@ Useful options:
 - `--bundle-id <bundle_id>` to pin or reuse a model bundle id; required when `scripts/main.py` generates EPV artifacts
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` to control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely; default: on
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
 - `--overwrite` to rebuild supported preprocessing and target-artifact outputs
 - `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
@@ -835,11 +835,12 @@ The existing low-level feature toggles on `train.py` are:
 - `--ball_z_aware`
 - `--poss_vel_aware`
 - `--poss_rel_vel_aware`
+- `--offside` / `--no-offside`
 - `--extend_features`
 
 These same controls are exposed in the wrappers as hyphenated flags on `scripts/train_relevant_models.py` and `scripts/main.py`. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
 
-`--poss-vel-aware` / `--no-poss-vel-aware` controls the ball possessor node's own velocity/speed/acceleration slots and is on by default in the wrappers. `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware` controls the relative velocity-angle columns `17:19` and is off by default in the wrappers.
+`--poss-vel-aware` / `--no-poss-vel-aware` controls the ball possessor node's own velocity/speed/acceleration slots and is on by default in the wrappers. `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware` controls the relative velocity-angle columns `17:19` and is off by default in the wrappers. `--no-offside` zeros the appended `is_offside` node-feature slot when present without changing graph width or model input dimension.
 
 If you need to preserve the old numeric naming convention for a one-off run, `train.py` still accepts `--trial <n>` and writes `saved/<task>/<nn>/` for backward compatibility.
 
@@ -993,7 +994,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--extend-features` / `--no-extend-features`: override the training feature profile.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the training feature profile.
 - `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
 - `--device <device>`: device passed to evaluation and inference stages.
@@ -1066,7 +1067,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
 - `--use_physical_xpass` / `--use-physical-xpass`: enable physical xPass for `pass_success` only.
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the pass-success physical xPass architecture. Default: `gat_phys_logit_offset`.
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.

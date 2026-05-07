@@ -36,6 +36,11 @@ def _zero_extended_node_features(graph: Data) -> None:
         graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
+def _zero_offside_node_feature(graph: Data) -> None:
+    if graph.x.shape[1] in config.NODE_FEATURE_OFFSIDE_DIMS:
+        graph.x[:, -1] = 0
+
+
 def requires_goal_next10_diagnostics(task: str | None) -> bool:
     return str(task) in OUTCOME_DIAGNOSTIC_TASKS
 
@@ -103,6 +108,7 @@ class ActionDataset(Dataset):
         poss_vel_aware=True,
         poss_rel_vel_aware=False,
         accel_aware=True,
+        offside_aware=True,
         extend_features=True,
         drop_non_blockers=False,
         sparsify="none",
@@ -322,6 +328,9 @@ class ActionDataset(Dataset):
 
             if not extend_features and task != "success_intent":
                 _zero_extended_node_features(graph)
+
+            if not offside_aware:
+                _zero_offside_node_feature(graph)
 
             if not TASK_CONFIG.at[task, "include_goals"]:
                 graph, graph_labels = drop_goal_nodes(graph, graph_labels)

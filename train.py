@@ -95,6 +95,20 @@ accel_group.add_argument(
     help="Ignore player-acceleration node features and zero that feature slot.",
 )
 parser.set_defaults(accel_aware=True)
+offside_group = parser.add_mutually_exclusive_group()
+offside_group.add_argument(
+    "--offside",
+    dest="offside_aware",
+    action="store_true",
+    help="Use the is_offside node feature when present.",
+)
+offside_group.add_argument(
+    "--no-offside",
+    dest="offside_aware",
+    action="store_false",
+    help="Ignore the is_offside node feature and zero that feature slot when present.",
+)
+parser.set_defaults(offside_aware=True)
 parser.add_argument("--extend_features", action="store_true", default=False, help="handcraft more node features")
 
 parser.add_argument("--more_dest_features", action="store_true", default=False, help="handcraft more dest features")
@@ -625,6 +639,7 @@ if __name__ == "__main__":
         "poss_vel_aware": args.poss_vel_aware,
         "poss_rel_vel_aware": args.poss_rel_vel_aware,
         "accel_aware": args.accel_aware,
+        "offside_aware": args.offside_aware,
         "extend_features": args.extend_features,
         "drop_non_blockers": args.filter_blockers,
         "sparsify": args.sparsify,

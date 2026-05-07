@@ -1228,6 +1228,11 @@ def zero_extended_node_features(graph: Data) -> None:
         graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
+def zero_offside_node_feature(graph: Data) -> None:
+    if graph.x.shape[1] in config.NODE_FEATURE_OFFSIDE_DIMS:
+        graph.x[:, -1] = 0
+
+
 def filter_features_and_labels(
     features: List[Data],
     labels: torch.Tensor,
@@ -1318,6 +1323,9 @@ def filter_features_and_labels(
 
         if not args["extend_features"] and args.get("task") != "success_intent":
             zero_extended_node_features(graph)
+
+        if not args.get("offside_aware", True):
+            zero_offside_node_feature(graph)
 
         if not config.TASK_CONFIG.at[args["task"], "include_goals"]:
             graph, graph_labels = drop_goal_nodes(graph, graph_labels)

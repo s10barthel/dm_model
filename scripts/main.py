@@ -31,6 +31,7 @@ TRAINING_WRAPPER_FEATURE_DEFAULTS = {
     "ball_z_aware": True,
     "poss_vel_aware": True,
     "poss_rel_vel_aware": False,
+    "offside_aware": True,
     "extend_features": False,
 }
 
@@ -41,6 +42,7 @@ WRAPPER_OVERRIDE_FLAGS = {
     "ball_z_aware": ("--ball-z-aware", "--no-ball-z-aware"),
     "poss_vel_aware": ("--poss-vel-aware", "--no-poss-vel-aware"),
     "poss_rel_vel_aware": ("--poss-rel-vel-aware", "--no-poss-rel-vel-aware"),
+    "offside_aware": ("--offside", "--no-offside"),
     "extend_features": ("--extend-features", "--no-extend-features"),
 }
 
@@ -198,6 +200,13 @@ def parse_args() -> argparse.Namespace:
         "poss_rel_vel_aware",
         "Train downstream models with player velocity relative to the ball possessor's velocity.",
         "Disable player velocity relative to the ball possessor's velocity for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "offside",
+        "offside_aware",
+        "Train downstream models with the is_offside node feature.",
+        "Disable the is_offside node feature for downstream training.",
     )
     add_bool_override(
         parser,
