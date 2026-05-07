@@ -30,7 +30,7 @@ from project_config import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Precompute accessible-space player_cum_prob sidecars for pass actions.")
     parser.add_argument("--feature-run-id", required=True, help="Feature run whose action graphs should be used.")
     parser.add_argument("--match-id", action="append", help="Restrict to one match id. Repeat for multiple matches.")
@@ -50,14 +50,27 @@ def parse_args() -> argparse.Namespace:
         help="Reference action-label intended-receiver mode. Defaults to angle_only when available.",
     )
     parser.add_argument("--physical-eps", type=float, default=1e-4, help="Clamp stored player_cum_prob to [eps, 1-eps].")
+    teammate_policy_group = parser.add_mutually_exclusive_group()
+    teammate_policy_group.add_argument(
+        "--ignore-teammates",
+        dest="consider_teammates",
+        action="store_false",
+        help="Simulate each candidate pass with only the target player and all opponents.",
+    )
+    teammate_policy_group.add_argument(
+        "--consider-teammates",
+        dest="consider_teammates",
+        action="store_true",
+        help="Include other attacking teammates in the physical simulation, matching the previous behavior.",
+    )
     parser.add_argument(
         "--no-normalize",
         dest="normalize",
         action="store_false",
         help="Disable accessible-space cumulative probability normalization.",
     )
-    parser.set_defaults(normalize=True)
-    args = parser.parse_args()
+    parser.set_defaults(normalize=True, consider_teammates=False)
+    args = parser.parse_args(argv)
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive.")
     if not (0.0 < args.physical_eps < 0.5):
@@ -111,6 +124,7 @@ def compute_match_rows(
     *,
     eps: float,
     normalize: bool,
+    consider_teammates: bool,
     limit: int | None,
 ) -> tuple[pd.DataFrame, int]:
     graphs = torch.load(graph_path, weights_only=False)
@@ -134,7 +148,12 @@ def compute_match_rows(
         if graph is None:
             continue
         action_index = int(label[LABEL_INDEX["action_index"]].item())
-        probs = compute_graph_player_cum_prob(graph, eps=eps, normalize=normalize)
+        probs = compute_graph_player_cum_prob(
+            graph,
+            eps=eps,
+            normalize=normalize,
+            consider_teammates=consider_teammates,
+        )
         row = {
             "match_id": str(match_id),
             "action_index": action_index,
@@ -183,6 +202,7 @@ def main() -> None:
             label_path,
             eps=args.physical_eps,
             normalize=args.normalize,
+            consider_teammates=bool(args.consider_teammates),
             limit=remaining,
         )
         if frame.empty:
@@ -206,6 +226,7 @@ def main() -> None:
         "n_actions": int(total_computed),
         "physical_eps": float(args.physical_eps),
         "normalize": bool(args.normalize),
+        "teammate_policy": "consider_teammates" if bool(args.consider_teammates) else "ignore_teammates",
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
     write_run_metadata(output_root, metadata)

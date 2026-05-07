@@ -883,6 +883,13 @@ python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --sp
 
 The generator uses existing preprocessed graph data: `graph.node_ids`, player positions and velocities, teammate flags, and the possessor flag. No additional raw Sportec processing is needed. Each match parquet is wide: one row per pass action, with player-id columns holding `player_cum_prob`; non-candidate players can be missing/NaN.
 
+By default the physical simulation uses only the target player plus all opponents:
+
+- `--ignore-teammates` is the default and excludes all non-target attacking teammates from the accessible-space simulation
+- `--consider-teammates` restores the previous behavior and includes other attacking teammates too
+
+Training and visualization simply consume whatever sidecars exist. If you want to switch teammate policy, rerun `scripts/generate_physical_xpass.py --overwrite`.
+
 Train pass success with the recommended default:
 
 ```powershell
@@ -1025,6 +1032,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--overwrite`: overwrite existing physical xPass match sidecars. Default: off.
 - `--return-type <return_type>` and `--intended-receiver-mode <mode>`: optional reference label directory selectors. Defaults are inferred from the feature run.
 - `--physical-eps <eps>`: clamp stored `player_cum_prob`. Default: `1e-4`.
+- `--ignore-teammates` / `--consider-teammates`: choose whether other attacking teammates are excluded from the physical simulation. Default: `--ignore-teammates`.
 - `--no-normalize`: disable accessible-space normalization. Default: normalization on.
 
 ### `scripts/generate_relevant_features.py`

@@ -17,6 +17,8 @@ PHYSICAL_XPASS_SOURCE = "accessible_space_player_cum_prob"
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
+PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
+PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
 PHYSICAL_MODEL_VARIANTS = {
     "gat_baseline",
     "gat_plus_phys_feature",
@@ -164,11 +166,80 @@ def _resolve_simulate_passes_fn() -> Callable[..., Any]:
     return simulate_passes_chunked
 
 
+def _build_simulation_inputs(
+    graph: Data,
+    *,
+    candidate_indices: list[int],
+    consider_teammates: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[int, int]]:
+    x = graph.x.detach().cpu().to(torch.float32)
+    player_mask = (x[:, 2] == 0) if x.shape[1] > 2 else torch.ones(x.shape[0], dtype=torch.bool)
+    player_mask &= torch.isfinite(x[:, 3:7]).all(dim=1)
+    player_indices = torch.nonzero(player_mask, as_tuple=False).flatten().tolist()
+    if not player_indices:
+        raise ValueError("No finite non-goal players found for physical xPass simulation.")
+
+    possessor_indices = torch.nonzero(x[:, 13] == 1, as_tuple=False).flatten().tolist()
+    if len(possessor_indices) != 1:
+        raise ValueError(f"Expected exactly one possessor node, found {len(possessor_indices)}.")
+    possessor_index = int(possessor_indices[0])
+    if possessor_index not in player_indices:
+        raise ValueError("Possessor node is not part of the simulated player set.")
+
+    if consider_teammates:
+        sim_player_indices = player_indices
+        player_index_to_sim_index = {node_index: sim_index for sim_index, node_index in enumerate(sim_player_indices)}
+        missing_targets = [idx for idx in candidate_indices if idx not in player_index_to_sim_index]
+        if missing_targets:
+            missing_ids = [str(graph.node_ids[idx]) for idx in missing_targets]
+            raise ValueError(f"Candidate target nodes are missing from the physical player mapping: {missing_ids}.")
+
+        player_pos = x[sim_player_indices, 3:7].numpy()
+        player_teams = np.where((x[sim_player_indices, 0].numpy() == 1), "attack", "defense").astype(object)
+        players = np.array([str(graph.node_ids[idx]) for idx in sim_player_indices], dtype=object)
+        target_index_lookup = {graph_target_index: player_index_to_sim_index[graph_target_index] for graph_target_index in candidate_indices}
+        return (
+            np.repeat(player_pos[np.newaxis, :, :], len(candidate_indices), axis=0),
+            player_teams,
+            players,
+            x[possessor_index, 3:5].numpy(),
+            np.repeat("attack", len(candidate_indices)).astype(object),
+            target_index_lookup,
+        )
+
+    defender_indices = [
+        node_index
+        for node_index in player_indices
+        if node_index != possessor_index and int(x[node_index, 0].item()) == 0
+    ]
+    frame_player_indices = [[graph_target_index] + defender_indices for graph_target_index in candidate_indices]
+    player_counts = {len(indices) for indices in frame_player_indices}
+    if len(player_counts) != 1:
+        raise ValueError(f"Physical xPass reduced simulation player count must be constant across candidates, got {sorted(player_counts)}.")
+
+    player_pos = np.stack([x[indices, 3:7].numpy() for indices in frame_player_indices], axis=0)
+    player_teams = np.array(["attack"] + ["defense"] * len(defender_indices), dtype=object)
+    players = np.array(
+        ["target_player"] + [str(graph.node_ids[idx]) for idx in defender_indices],
+        dtype=object,
+    )
+    target_index_lookup = {graph_target_index: 0 for graph_target_index in candidate_indices}
+    return (
+        player_pos,
+        player_teams,
+        players,
+        x[possessor_index, 3:5].numpy(),
+        np.repeat("attack", len(candidate_indices)).astype(object),
+        target_index_lookup,
+    )
+
+
 def compute_graph_player_cum_prob(
     graph: Data,
     *,
     eps: float = 1e-4,
     normalize: bool = True,
+    consider_teammates: bool = False,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -179,29 +250,13 @@ def compute_graph_player_cum_prob(
     if not candidate_indices:
         return result
 
-    player_mask = (graph.x[:, 2] == 0) if graph.x.shape[1] > 2 else torch.ones(graph.x.shape[0], dtype=torch.bool)
-    player_mask &= torch.isfinite(graph.x[:, 3:7]).all(dim=1)
-    player_indices = torch.nonzero(player_mask, as_tuple=False).flatten().tolist()
-    if not player_indices:
-        raise ValueError("No finite non-goal players found for physical xPass simulation.")
-
-    possessor_indices = torch.nonzero(graph.x[:, 13] == 1, as_tuple=False).flatten().tolist()
-    if len(possessor_indices) != 1:
-        raise ValueError(f"Expected exactly one possessor node, found {len(possessor_indices)}.")
-    possessor_index = int(possessor_indices[0])
-    if possessor_index not in player_indices:
-        raise ValueError("Possessor node is not part of the simulated player set.")
-
-    player_index_to_sim_index = {node_index: sim_index for sim_index, node_index in enumerate(player_indices)}
-    missing_targets = [idx for idx in candidate_indices if idx not in player_index_to_sim_index]
-    if missing_targets:
-        missing_ids = [node_ids[idx] for idx in missing_targets]
-        raise ValueError(f"Candidate target nodes are missing from the physical player mapping: {missing_ids}.")
-
     x = graph.x.detach().cpu().to(torch.float32)
-    player_pos = x[player_indices, 3:7].numpy()
-    ball_pos = x[possessor_index, 3:5].numpy()
     target_xy = x[candidate_indices, 3:5].numpy()
+    player_pos, player_teams, players, ball_pos, passer_teams, target_index_lookup = _build_simulation_inputs(
+        graph,
+        candidate_indices=candidate_indices,
+        consider_teammates=consider_teammates,
+    )
     deltas = target_xy - ball_pos[np.newaxis, :]
     distances = np.linalg.norm(deltas, axis=1)
     phis = np.arctan2(deltas[:, 1], deltas[:, 0])
@@ -212,7 +267,7 @@ def compute_graph_player_cum_prob(
         raise ValueError(f"Physical xPass candidate targets have invalid distance/angle: {bad_ids}.")
 
     frame_count = len(candidate_indices)
-    PLAYER_POS = np.repeat(player_pos[np.newaxis, :, :], frame_count, axis=0)
+    PLAYER_POS = np.asarray(player_pos, dtype=float)
     BALL_POS = np.repeat(ball_pos[np.newaxis, :], frame_count, axis=0)
     phi_grid = phis.reshape(frame_count, 1)
     v0_grid = np.repeat(
@@ -220,9 +275,7 @@ def compute_graph_player_cum_prob(
         frame_count,
         axis=0,
     )
-    player_teams = np.where((x[player_indices, 0].numpy() == 1), "attack", "defense").astype(object)
-    passer_teams = np.repeat("attack", frame_count).astype(object)
-    players = np.array([node_ids[idx] for idx in player_indices], dtype=object)
+    possessor_index = int(torch.nonzero(x[:, 13] == 1, as_tuple=False).item())
     passers = np.repeat(node_ids[possessor_index], frame_count).astype(object)
 
     simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
@@ -247,7 +300,7 @@ def compute_graph_player_cum_prob(
     )
 
     for frame_index, graph_target_index in enumerate(candidate_indices):
-        target_sim_index = player_index_to_sim_index[graph_target_index]
+        target_sim_index = target_index_lookup[graph_target_index]
         value, _ = _extract_simulation_probability(
             simulation_result,
             frame_index=frame_index,
