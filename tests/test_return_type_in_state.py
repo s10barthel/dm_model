@@ -258,10 +258,25 @@ class InStateLabelingTests(unittest.TestCase):
 
         self.assertEqual(float(next_labeled.at[0, "scores_xT"]), 0.40)
         self.assertEqual(float(next_labeled.at[0, "concedes_xT"]), 0.60)
-        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
-        expected_conceding = 1 - (1 - 0.5**4 * 0.60) * (1 - 0.5**5 * 0.30)
+        expected_scoring = 1 - (1 - 0.20) * (1 - 0.5**2 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**3 * 0.60) * (1 - 0.5**4 * 0.30)
         self.assertAlmostEqual(float(disc_labeled.at[0, "scores_xT"]), expected_scoring)
         self.assertAlmostEqual(float(disc_labeled.at[0, "concedes_xT"]), expected_conceding)
+
+    def test_discounted_future_probability_value_anchors_first_considered_row_at_one(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.70),
+                ("pass", "home_1", 0.20),
+                ("pass", "home_1", 0.30),
+            ]
+        )
+
+        labeled = utils.label_discounted_xt_returns(events, gamma=0.5)
+
+        expected_scoring = 1 - (1 - 0.70) * (1 - 0.5 * 0.20) * (1 - 0.5**2 * 0.30)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_scoring)
 
     def test_discounted_goal_distance_returns_probability_product(self) -> None:
         events = make_goal_distance_events(
@@ -276,8 +291,8 @@ class InStateLabelingTests(unittest.TestCase):
 
         labeled = utils.label_discounted_goal_distance_returns(events, gamma=0.5)
 
-        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
-        expected_conceding = 1 - (1 - 0.5**4 * 0.60)
+        expected_scoring = 1 - (1 - 0.20) * (1 - 0.5**2 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**3 * 0.60)
         self.assertAlmostEqual(float(labeled.at[0, "scores_goal_distance"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_goal_distance"]), expected_conceding)
 
@@ -294,8 +309,8 @@ class InStateLabelingTests(unittest.TestCase):
 
         labeled = utils.label_discounted_epv_returns(events, gamma=0.5)
 
-        expected_scoring = 1 - (1 - 0.5**1 * 0.20) * (1 - 0.5**3 * 0.40)
-        expected_conceding = 1 - (1 - 0.5**4 * 0.60)
+        expected_scoring = 1 - (1 - 0.20) * (1 - 0.5**2 * 0.40)
+        expected_conceding = 1 - (1 - 0.5**3 * 0.60)
         self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_epv"]), expected_conceding)
 
@@ -331,8 +346,8 @@ class InStateLabelingTests(unittest.TestCase):
 
         labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True)
 
-        expected_scoring = 1 - (1 - 0.5**2 * 0.70) * (1 - 0.5**3 * 0.20)
-        expected_conceding = 1 - (1 - 0.5**4 * 0.10)
+        expected_scoring = 1 - (1 - 0.70) * (1 - 0.5 * 0.20)
+        expected_conceding = 1 - (1 - 0.5**2 * 0.10)
         self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), expected_conceding)
 
@@ -348,8 +363,8 @@ class InStateLabelingTests(unittest.TestCase):
 
         labeled = utils.label_discounted_xt_returns(events, gamma=0.5)
 
-        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 1 - (1 - 0.5**2 * 1.0))
-        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 1 - (1 - 0.5**3 * 1.0))
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 1 - (1 - 0.5 * 1.0))
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 1 - (1 - 0.5**2 * 1.0))
 
     def test_skip1_next_and_discounted_xt_helpers_do_not_skip_first_rated_shot(self) -> None:
         events = make_xt_events(

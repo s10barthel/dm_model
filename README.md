@@ -778,23 +778,23 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `next_<N>` uses the maximum future teammate/opponent xT over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
-  - `disc_<gamma>` combines future eligible xT values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * xT)`
-  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
+  - `disc_<gamma>` combines future eligible xT values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
+  - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - goal_distance:
   - raw `goal_distance` is a bounded proximity-to-goal score in `[0.0, 1.0]`, using `1.0 * (1 - raw_distance / sqrt(105^2 + 34^2))`
   - `next_<N>` uses the maximum future teammate/opponent goal-distance value over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
-  - `disc_<gamma>` combines future eligible goal-distance values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * goal_distance)`
-  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
+  - `disc_<gamma>` combines future eligible goal-distance values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
+  - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - EPV:
   - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
   - `next_<N>_skip1` uses the same eligible-action window, but skips the first rated future action when that action is not a shot
   - `in_<N>` uses the EPV value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_epv` / `concedes_epv` is non-zero
-  - `disc_<gamma>` combines future eligible EPV values with xG-style probability-complement aggregation: `1 - product(1 - gamma^(future_event_offset) * epv)`
-  - `disc_<gamma>_skip1` uses the same discounted probability scan, but skips the first rated future non-shot action
+  - `disc_<gamma>` combines future eligible EPV values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
+  - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 
 ### Where to switch targets

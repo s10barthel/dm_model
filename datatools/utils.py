@@ -524,7 +524,8 @@ def label_discounted_future_probability_value(
         team_i = team_values[row_pos]
         prob_not_scoring = 1.0
         prob_not_conceding = 1.0
-        first_eligible_seen = False
+        skipped_first_non_shot = False
+        anchor_pos: int | None = None
 
         if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
             events.iat[row_pos, score_loc] = 0.0
@@ -534,13 +535,15 @@ def label_discounted_future_probability_value(
         for future_pos in range(row_pos + 1, len(events)):
             if eligible_array[future_pos]:
                 skip_current = False
-                if not first_eligible_seen:
-                    first_eligible_seen = True
-                    skip_current = skip_first and not shot_array[future_pos]
+                if anchor_pos is None and skip_first and not skipped_first_non_shot and not shot_array[future_pos]:
+                    skipped_first_non_shot = True
+                    skip_current = True
 
                 if not skip_current:
+                    if anchor_pos is None:
+                        anchor_pos = future_pos
                     value = float(np.clip(value_array[future_pos], 0.0, 1.0))
-                    candidate = (gamma ** (future_pos - row_pos)) * value
+                    candidate = (gamma ** (future_pos - anchor_pos)) * value
                     if team_values[future_pos] == team_i:
                         prob_not_scoring *= 1.0 - candidate
                     else:
