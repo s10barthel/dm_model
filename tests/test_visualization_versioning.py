@@ -372,14 +372,15 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             output_root = root / "benchmark_visualization_explicit"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            output_path = output_root / "modification_1_pass_score.png"
+            output_path = output_root / "modification_1" / "pass_score.png"
             self.assertTrue(output_path.exists())
+            self.assertFalse((output_root / "modification_1_pass_score.png").exists())
             self.assertFalse((output_root / "modification_1" / "game_state_2" / "pass_score.png").exists())
             self.assertEqual(metadata["component_run_id"], "benchmark_component_1")
             rendered_modification = metadata["rendered_modifications"][0]
             self.assertEqual(rendered_modification["modification"], 1)
             self.assertEqual(rendered_modification["game_states"], [1, 2])
-            self.assertEqual(rendered_modification["output_dir"], str(output_root.resolve()))
+            self.assertEqual(rendered_modification["output_dir"], str(output_path.parent.resolve()))
             self.assertIn(str(output_path.resolve()), rendered_modification["output_paths"])
 
     def test_benchmark_visualization_combines_state_images_vertically(self) -> None:

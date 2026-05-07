@@ -212,6 +212,8 @@ def main() -> None:
             )
 
         output_paths: list[str] = []
+        modification_output_dir = output_root / f"modification_{modification_id}"
+        modification_output_dir.mkdir(parents=True, exist_ok=True)
         for component_name in component_names:
             state_images: dict[int, Image.Image] = {}
             for game_state_id in (1, 2):
@@ -224,16 +226,16 @@ def main() -> None:
                     show_trajectories=args.show_trajectories,
                 )
 
-            output_path = output_root / f"modification_{modification_id}_{component_name}.png"
+            output_path = modification_output_dir / f"{component_name}.png"
             combine_state_images(state_images[1], state_images[2]).save(output_path)
             output_paths.append(str(output_path.resolve()))
 
-        print(f"Saved benchmark visualizations for modification_{modification_id} to {output_root}")
+        print(f"Saved benchmark visualizations for modification_{modification_id} to {modification_output_dir}")
         rendered_modifications.append(
             {
                 "modification": int(modification_id),
                 "game_states": [1, 2],
-                "output_dir": str(output_root.resolve()),
+                "output_dir": str(modification_output_dir.resolve()),
                 "output_paths": output_paths,
             }
         )
