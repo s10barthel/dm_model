@@ -22,7 +22,7 @@ from datatools.hawkeye import (
     load_hawkeye_tracking,
 )
 from inference import inference_gnn
-from models.utils import load_model, validate_model_graph_schemas
+from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
@@ -55,11 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
-    parser.add_argument("--action-intent-model-id", default="action_intent/00")
-    parser.add_argument("--pass-intent-model-id", default="pass_intent/20")
-    parser.add_argument("--pass-success-model-id", default="pass_success/20")
-    parser.add_argument("--outcome-scoring-model-id", default="outcome_scoring/20")
-    parser.add_argument("--outcome-conceding-model-id", default="outcome_conceding/20")
+    parser.add_argument("--bundle-id", default=None)
+    parser.add_argument("--action-intent-model-id")
+    parser.add_argument("--pass-intent-model-id")
+    parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--outcome-scoring-model-id")
+    parser.add_argument("--outcome-conceding-model-id")
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
@@ -261,13 +262,33 @@ def main() -> None:
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    model_ids = {
+    explicit_model_ids = {
         "action_intent": args.action_intent_model_id,
         "pass_intent": args.pass_intent_model_id,
         "pass_success": args.pass_success_model_id,
         "outcome_scoring": args.outcome_scoring_model_id,
         "outcome_conceding": args.outcome_conceding_model_id,
     }
+    required_model_tasks = [
+        task
+        for task in [
+            "action_intent",
+            "pass_intent",
+            "pass_success",
+            "outcome_scoring",
+            "outcome_conceding",
+        ]
+        if task in component_selection.requested_component_groups
+    ]
+    model_ids, shared_context, _ = resolve_model_selection(
+        required_tasks=required_model_tasks,
+        bundle_id=args.bundle_id,
+        explicit_model_ids=explicit_model_ids,
+        require_feature_run_id=False,
+        require_intended_receiver_mode=False,
+        require_return_type=False,
+        require_target_family=False,
+    )
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
@@ -311,8 +332,16 @@ def main() -> None:
         "output_parent": str(output_parent),
         "output_dir": str(output_root.resolve()),
         "status": "completed",
+        "bundle_id": args.bundle_id,
         "model_ids": model_ids,
         "selected_model_ids": selected_model_ids,
+        "intended_receiver_mode": shared_context.get("intended_receiver_mode"),
+        "return_type": shared_context.get("return_type"),
+        "target_family": shared_context.get("target_family"),
+        "source_feature_run_ids": shared_context.get("source_feature_run_ids", {}),
+        "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
+        "source_return_types": shared_context.get("source_return_types", {}),
+        "source_target_families": shared_context.get("source_target_families", {}),
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,

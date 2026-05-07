@@ -641,10 +641,10 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 `scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. Each invocation writes to `data/visualizations/hawkeye/<visualization_run_id>/` and records the source component run in `metadata.json`. If you want the old direct-inference behavior, use:
 
 ```powershell
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id>
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --only-outcome-scoring
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2> --bundle-id <bundle_id>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --only-outcome-scoring
 ```
 
 ### 9. Run benchmark inference on local benchmark data
@@ -1195,11 +1195,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
-- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id. Default: `action_intent/00`.
-- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id. Default: `pass_intent/20`.
-- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id. Default: `pass_success/20`.
-- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id. Default: `outcome_scoring/20`.
-- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id. Default: `outcome_conceding/20`.
+- `--bundle-id <bundle_id>`: preferred model bundle containing the enabled component checkpoints. Default: none.
+- `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id override. Default: none.
+- `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id override. Default: none.
+- `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id override. Default: none.
+- `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id override. Default: none.
+- `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id override. Default: none.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
