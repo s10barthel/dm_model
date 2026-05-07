@@ -20,14 +20,18 @@ def make_metadata(
     model_id: str | None = None,
     status: str = "completed",
     graph_schema: dict[str, object] | None = None,
+    next_action_conditions_enabled: bool | None = True,
 ) -> dict[str, object]:
-    return {
+    metadata = {
         "status": status,
         "graph_schema": graph_schema or generator.EXPECTED_GRAPH_SCHEMA.copy(),
         "return_types": return_types or ["disc_0.9"],
         "intended_receiver_modes": modes or ["original", "angle_only"],
         "intended_receiver_model_id": model_id,
     }
+    if next_action_conditions_enabled is not None:
+        metadata["next_action_conditions_enabled"] = next_action_conditions_enabled
+    return metadata
 
 
 def make_args(
@@ -36,6 +40,7 @@ def make_args(
     run_id: str | None = "derived",
     replace_model: bool = False,
     refresh_target_families: list[str] | None = None,
+    next_action_conditions_enabled: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         extend_feature_run_id="base",
@@ -46,6 +51,7 @@ def make_args(
         intended_receiver_model_id=model_id,
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
+        next_action_conditions_enabled=next_action_conditions_enabled,
     )
 
 
@@ -179,6 +185,32 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 generator.parse_args()
 
+    def test_parse_defaults_next_action_conditions_on(self) -> None:
+        with patch.object(sys, "argv", ["generate_relevant_features.py"]):
+            args = generator.parse_args()
+
+        self.assertTrue(args.next_action_conditions_enabled)
+
+    def test_parse_accepts_next_action_conditions_off(self) -> None:
+        with patch.object(sys, "argv", ["generate_relevant_features.py", "--next-action-conditions-off"]):
+            args = generator.parse_args()
+
+        self.assertFalse(args.next_action_conditions_enabled)
+
+    def test_next_action_conditions_off_propagates_to_full_generation_commands(self) -> None:
+        command = generator.with_mode_flags(
+            ["python", "datatools/graph_feature.py"],
+            SimpleNamespace(
+                return_types=[],
+                intended_receiver_model_id=None,
+                run_id=None,
+                next_action_conditions_enabled=False,
+            ),
+        )
+
+        self.assertIn("--next-action-conditions-off", command)
+        self.assertNotIn("--next-action-conditions-on", command)
+
     def test_output_run_must_not_already_exist(self) -> None:
         with self.assertRaises(FileExistsError):
             self.build_plan(make_args(["next_5"]), existing_output=True)
@@ -186,6 +218,35 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
     def test_output_run_must_not_equal_base_run(self) -> None:
         with self.assertRaises(ValueError):
             self.build_plan(make_args(["next_5"], run_id="base"))
+
+    def test_next_action_conditions_off_propagates_to_extension_commands(self) -> None:
+        metadata = make_metadata(next_action_conditions_enabled=False)
+        plan = self.build_plan(
+            make_args(["next_5"], next_action_conditions_enabled=False),
+            metadata=metadata,
+        )
+
+        self.assertFalse(plan.next_action_conditions_enabled)
+        self.assertTrue(all("--next-action-conditions-off" in command for command in plan.commands))
+        self.assertFalse(any("--next-action-conditions-on" in command for command in plan.commands))
+
+    def test_extension_rejects_next_action_condition_mismatch(self) -> None:
+        metadata = make_metadata(next_action_conditions_enabled=True)
+
+        with self.assertRaises(ValueError) as exc:
+            self.build_plan(
+                make_args(["next_5"], next_action_conditions_enabled=False),
+                metadata=metadata,
+            )
+
+        self.assertIn("same next-action condition setting", str(exc.exception))
+
+    def test_legacy_metadata_defaults_next_action_conditions_on(self) -> None:
+        metadata = make_metadata(next_action_conditions_enabled=None)
+        plan = self.build_plan(make_args(["next_5"]), metadata=metadata)
+
+        self.assertTrue(plan.next_action_conditions_enabled)
+        self.assertTrue(all("--next-action-conditions-on" in command for command in plan.commands))
 
     def test_missing_metadata_is_rejected(self) -> None:
         with self.assertRaises(FileNotFoundError):

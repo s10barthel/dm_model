@@ -60,6 +60,7 @@ class FeatureExtensionPlan:
     regenerate_model_mode: bool
     replaced_intended_receiver_model_id: str | None
     replaced_intended_receiver_modes: list[str]
+    next_action_conditions_enabled: bool
     commands: list[list[str]]
     command_steps: list[FeatureGenerationStep]
 
@@ -109,6 +110,20 @@ def parse_args() -> argparse.Namespace:
             "new derived run and regenerate only model-mode artifacts with --intended-receiver-model-id."
         ),
     )
+    next_action_group = parser.add_mutually_exclusive_group()
+    next_action_group.add_argument(
+        "--next-action-conditions-on",
+        dest="next_action_conditions_enabled",
+        action="store_true",
+        default=True,
+        help="Keep the current pass/cross next-action inclusion conditions enabled.",
+    )
+    next_action_group.add_argument(
+        "--next-action-conditions-off",
+        dest="next_action_conditions_enabled",
+        action="store_false",
+        help="Disable pass/cross next-action inclusion conditions while keeping frame requirements.",
+    )
     args = parser.parse_args()
     args.requested_return_types = resolve_requested_return_types(args.return_type) if args.return_type else []
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
@@ -139,7 +154,12 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
     if args.run_id:
         command.extend(["--run-id", args.run_id])
+    command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
     return command
+
+
+def next_action_conditions_flag(enabled: bool) -> str:
+    return "--next-action-conditions-on" if enabled else "--next-action-conditions-off"
 
 
 def full_generation_commands(python: str) -> list[FeatureGenerationStep]:
@@ -230,6 +250,10 @@ def metadata_return_types(metadata: dict[str, Any]) -> list[str]:
     raise ValueError("Base feature run metadata does not record any return_types.")
 
 
+def metadata_next_action_conditions_enabled(metadata: dict[str, Any]) -> bool:
+    return bool(metadata.get("next_action_conditions_enabled", True))
+
+
 def metadata_intended_receiver_modes(metadata: dict[str, Any]) -> list[str]:
     values = metadata.get("intended_receiver_modes")
     if not isinstance(values, list) or not values:
@@ -298,6 +322,7 @@ def extension_graph_feature_command(
     intent_train_label_source_return_type: str | None = None,
     augment_blocks_from_existing_graphs: bool = False,
     overwrite_labels: bool = False,
+    next_action_conditions_enabled: bool = True,
 ) -> list[str]:
     command = [
         python,
@@ -309,6 +334,7 @@ def extension_graph_feature_command(
         "--labels-only",
         "--run-id",
         output_run_id,
+        next_action_conditions_flag(next_action_conditions_enabled),
     ]
     if feature_variant:
         command.extend(["--feature_variant", feature_variant])
@@ -342,6 +368,7 @@ def extension_commands_for_plan(
     regenerate_model_mode: bool = False,
     refresh_existing_labels: bool = False,
     final_modes: list[str] | None = None,
+    next_action_conditions_enabled: bool = True,
 ) -> list[FeatureGenerationStep]:
     steps: list[FeatureGenerationStep] = []
     final_modes = final_modes if final_modes is not None else [*base_modes, *added_modes]
@@ -368,6 +395,7 @@ def extension_commands_for_plan(
                             intended_receiver_modes=non_model_final_modes,
                             intended_receiver_model_id=intended_receiver_model_id,
                             overwrite_labels=True,
+                            next_action_conditions_enabled=next_action_conditions_enabled,
                         ),
                     )
                 )
@@ -385,6 +413,7 @@ def extension_commands_for_plan(
                         intent_train_label_source_mode=source_mode,
                         intent_train_label_source_return_type=source_return_type,
                         overwrite_labels=True,
+                        next_action_conditions_enabled=next_action_conditions_enabled,
                     ),
                 )
             )
@@ -405,6 +434,7 @@ def extension_commands_for_plan(
                             intended_receiver_model_id=intended_receiver_model_id,
                             augment_blocks_from_existing_graphs=should_generate_model_augmented and split == "train",
                             overwrite_labels=True,
+                            next_action_conditions_enabled=next_action_conditions_enabled,
                         ),
                     )
                 )
@@ -422,6 +452,7 @@ def extension_commands_for_plan(
                         intent_train_label_source_mode=source_mode,
                         intent_train_label_source_return_type=source_return_type,
                         overwrite_labels=True,
+                        next_action_conditions_enabled=next_action_conditions_enabled,
                     ),
                 )
             )
@@ -440,6 +471,7 @@ def extension_commands_for_plan(
                         return_types=added_return_types,
                         intended_receiver_modes=added_return_modes,
                         intended_receiver_model_id=intended_receiver_model_id,
+                        next_action_conditions_enabled=next_action_conditions_enabled,
                     ),
                 )
             )
@@ -456,6 +488,7 @@ def extension_commands_for_plan(
                     feature_variant="intent_train_augmented",
                     intent_train_label_source_mode=source_mode,
                     intent_train_label_source_return_type=source_return_type,
+                    next_action_conditions_enabled=next_action_conditions_enabled,
                 ),
             )
         )
@@ -474,6 +507,7 @@ def extension_commands_for_plan(
                         intended_receiver_modes=validation_modes,
                         intended_receiver_model_id=intended_receiver_model_id,
                         augment_blocks_from_existing_graphs=(split == "train"),
+                        next_action_conditions_enabled=next_action_conditions_enabled,
                     ),
                 )
             )
@@ -490,6 +524,7 @@ def extension_commands_for_plan(
                     feature_variant="intent_train_augmented",
                     intent_train_label_source_mode=source_mode,
                     intent_train_label_source_return_type=source_return_type,
+                    next_action_conditions_enabled=next_action_conditions_enabled,
                 ),
             )
         )
@@ -516,6 +551,13 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
 
     base_return_types = metadata_return_types(base_metadata)
     base_modes = metadata_intended_receiver_modes(base_metadata)
+    base_next_action_conditions_enabled = metadata_next_action_conditions_enabled(base_metadata)
+    if args.next_action_conditions_enabled != base_next_action_conditions_enabled:
+        raise ValueError(
+            "Feature run extensions must use the same next-action condition setting as the base run; "
+            f"base next_action_conditions_enabled={base_next_action_conditions_enabled!r}, "
+            f"requested={args.next_action_conditions_enabled!r}."
+        )
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
     refresh_target_families = args_refresh_target_families(args)
 
@@ -587,6 +629,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
         refresh_existing_labels=bool(refresh_target_families),
+        next_action_conditions_enabled=base_next_action_conditions_enabled,
     )
     commands = [step.command for step in command_steps]
     return FeatureExtensionPlan(
@@ -606,6 +649,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         regenerate_model_mode=regenerate_model_mode,
         replaced_intended_receiver_model_id=replaced_model_id,
         replaced_intended_receiver_modes=replaced_modes,
+        next_action_conditions_enabled=base_next_action_conditions_enabled,
         commands=commands,
         command_steps=command_steps,
     )
@@ -625,6 +669,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
         "extension_replaced_intended_receiver_modes": plan.replaced_intended_receiver_modes,
+        "next_action_conditions_enabled": plan.next_action_conditions_enabled,
         "extension_commands": plan.commands,
         "intended_receiver_modes": plan.final_intended_receiver_modes,
         "intended_receiver_model_id": plan.intended_receiver_model_id,
@@ -713,6 +758,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_modes": args.intended_receiver_modes,
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": {"edge_in_dim": 4, "add_v_edge_features": True},
+        "next_action_conditions_enabled": args.next_action_conditions_enabled,
         "splits": ["train", "test"],
         "return_types": args.return_types,
         "return_type": args.return_types[0] if len(args.return_types) == 1 else None,

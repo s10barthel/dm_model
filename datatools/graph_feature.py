@@ -543,6 +543,22 @@ def count_invalid_graphs(graphs: List[Data | None]) -> int:
     return sum(graph is None for graph in graphs)
 
 
+def build_match_for_feature_generation(
+    events: pd.DataFrame,
+    tracking: pd.DataFrame,
+    match_lineup: pd.DataFrame,
+    args: argparse.Namespace,
+) -> Match:
+    return Match(
+        events,
+        tracking,
+        match_lineup,
+        args.action_type,
+        include_goals=True,
+        next_action_conditions_enabled=args.next_action_conditions_enabled,
+    )
+
+
 def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
@@ -1136,6 +1152,20 @@ if __name__ == "__main__":
         default=False,
         help="Overwrite existing label tensors in --labels-only mode.",
     )
+    next_action_group = parser.add_mutually_exclusive_group()
+    next_action_group.add_argument(
+        "--next-action-conditions-on",
+        dest="next_action_conditions_enabled",
+        action="store_true",
+        default=True,
+        help="Keep the current pass/cross next-action inclusion conditions enabled.",
+    )
+    next_action_group.add_argument(
+        "--next-action-conditions-off",
+        dest="next_action_conditions_enabled",
+        action="store_false",
+        help="Disable pass/cross next-action inclusion conditions while keeping frame requirements.",
+    )
     args, _ = parser.parse_known_args()
     args.return_types = resolve_requested_return_types(args.return_type)
     if args.only_intended_receiver_mode:
@@ -1249,7 +1279,7 @@ if __name__ == "__main__":
             tracking = pd.read_parquet(f"data/tracking_processed/{match_id}.parquet")
             match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id]
 
-            match = Match(events, tracking, match_lineup, args.action_type, include_goals=True)
+            match = build_match_for_feature_generation(events, tracking, match_lineup, args)
             match_date = match_dates[match_id].date()
             match_name = " vs ".join(match_lineup["contestant_name"].unique())
             print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")

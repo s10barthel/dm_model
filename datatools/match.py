@@ -36,6 +36,7 @@ class Match(ABC):
         fps: int = 25,
         include_keepers: bool = True,
         include_goals: bool = False,
+        next_action_conditions_enabled: bool = True,
     ):
         self.events = events.copy()
         self.tracking = tracking.copy()
@@ -55,6 +56,7 @@ class Match(ABC):
 
         self.action_type = action_type
         self.fps = fps
+        self.next_action_conditions_enabled = next_action_conditions_enabled
 
         object_id_map = self.events.set_index("player_id")["object_id"].drop_duplicates()
         self.lineup["object_id"] = self.lineup["player_id"].map(object_id_map)
@@ -302,15 +304,16 @@ class Match(ABC):
         self.events["y"] = self.tracking.loc[self.events["frame_id"], "ball_y"].values
 
     def filter_passes(self, failure_only=False) -> pd.DataFrame:
-        passes: pd.DataFrame = self.events[
-            self.events["spadl_type"].isin(config.PASS)
-            & self.events[["frame_id", "receive_frame_id"]].notna().all(axis=1)
-            & (
+        pass_mask = self.events["spadl_type"].isin(config.PASS) & self.events[
+            ["frame_id", "receive_frame_id"]
+        ].notna().all(axis=1)
+        if self.next_action_conditions_enabled:
+            pass_mask &= (
                 (self.events["receiver_id"] == self.events["next_player_id"])
                 | (self.events["receiver_id"] == "out")
                 | (self.events["next_type"].isin(["foul", "freekick_short"]))
             )
-        ].copy()
+        passes: pd.DataFrame = self.events[pass_mask].copy()
         passes["action_type"] = "pass"
         passes["success"] = False
         passes["blocked"] = False  # To be updated

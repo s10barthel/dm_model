@@ -4,7 +4,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import numpy as np
 import pandas as pd
@@ -130,6 +130,90 @@ def make_inference_match(labels: torch.Tensor) -> SimpleNamespace:
         graph_features_1=None,
         graph_features_by_dir={},
     )
+
+
+def make_pass_filter_events() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "spadl_type": "pass",
+                "frame_id": 10,
+                "receive_frame_id": 20,
+                "receiver_id": "home_02",
+                "next_player_id": "away_03",
+                "next_type": "interception",
+                "object_id": "home_01",
+                "offside": False,
+            },
+            {
+                "spadl_type": "cross",
+                "frame_id": 30,
+                "receive_frame_id": 40,
+                "receiver_id": "out",
+                "next_player_id": "away_04",
+                "next_type": "throw_in",
+                "object_id": "home_01",
+                "offside": False,
+            },
+            {
+                "spadl_type": "pass",
+                "frame_id": 50,
+                "receive_frame_id": 60,
+                "receiver_id": "away_05",
+                "next_player_id": "away_06",
+                "next_type": "foul",
+                "object_id": "home_01",
+                "offside": False,
+            },
+        ],
+        index=[10, 20, 30],
+    )
+
+
+def make_pass_filter_match(*, next_action_conditions_enabled: bool) -> Match:
+    match = Match.__new__(Match)
+    match.events = make_pass_filter_events()
+    match.next_action_conditions_enabled = next_action_conditions_enabled
+    return match
+
+
+class MatchPassFilterTests(unittest.TestCase):
+    def test_next_action_conditions_on_keeps_current_exclusions_and_allowances(self) -> None:
+        match = make_pass_filter_match(next_action_conditions_enabled=True)
+
+        passes = match.filter_passes()
+
+        self.assertEqual(passes.index.tolist(), [20, 30])
+        self.assertNotIn(10, passes.index)
+
+    def test_next_action_conditions_off_keeps_valid_frame_passes(self) -> None:
+        match = make_pass_filter_match(next_action_conditions_enabled=False)
+
+        passes = match.filter_passes()
+
+        self.assertEqual(passes.index.tolist(), [10, 20, 30])
+
+
+class GraphFeatureMatchConstructionTests(unittest.TestCase):
+    def test_build_match_for_feature_generation_passes_next_action_setting(self) -> None:
+        args = SimpleNamespace(action_type="all", next_action_conditions_enabled=False)
+
+        with patch.object(graph_feature, "Match") as match_class:
+            graph_feature.build_match_for_feature_generation(
+                pd.DataFrame(),
+                pd.DataFrame(),
+                pd.DataFrame(),
+                args,
+            )
+
+        match_class.assert_called_once_with(
+            ANY,
+            ANY,
+            ANY,
+            "all",
+            include_goals=True,
+            next_action_conditions_enabled=False,
+        )
 
 
 class GraphFeatureRegressionTests(unittest.TestCase):
