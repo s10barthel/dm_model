@@ -181,13 +181,17 @@ def load_benchmark_game_state(state_path: str | Path) -> pd.DataFrame:
 
     cleaned = state.copy()
     integer_cols = ["team", "player", "event_player"]
-    float_cols = ["pos_x", "pos_y", "pos_z", "smooth_x_speed", "smooth_y_speed"]
+    required_float_cols = ["pos_x", "pos_y", "smooth_x_speed", "smooth_y_speed"]
+    float_cols = [*required_float_cols, "pos_z"]
     for column in integer_cols:
         cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce").astype("Int64")
     for column in float_cols:
         cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
     cleaned["playing_direction_event"] = _coerce_bool_series(cleaned["playing_direction_event"], "playing_direction_event")
-    cleaned = cleaned.dropna(subset=integer_cols + float_cols).copy()
+    cleaned = cleaned.dropna(subset=integer_cols + required_float_cols).copy()
+    ball_missing_z = (cleaned["team"] == 0) & (cleaned["player"] == 0) & cleaned["pos_z"].isna()
+    if ball_missing_z.any():
+        raise ValueError("Benchmark ball row must contain a valid pos_z value.")
     for column in integer_cols:
         cleaned[column] = cleaned[column].astype(int)
 

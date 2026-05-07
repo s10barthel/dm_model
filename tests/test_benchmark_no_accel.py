@@ -14,6 +14,7 @@ from PIL import Image
 from torch_geometric.data import Batch, Data
 
 from dataset import ActionDataset
+from datatools.benchmark import build_benchmark_state, load_benchmark_game_state
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
@@ -174,6 +175,96 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         if with_resolved_actions:
             model_utils.get_resolved_action_dir(mode, root=feature_root).mkdir(parents=True, exist_ok=True)
         return feature_root
+
+    @staticmethod
+    def _write_benchmark_state_csv(path: Path, *, ball_pos_z: float | None = 0.13) -> None:
+        pd.DataFrame(
+            [
+                {
+                    "team": 1,
+                    "player": 21,
+                    "pos_x": 47.63,
+                    "pos_y": -25.64,
+                    "pos_z": pd.NA,
+                    "smooth_x_speed": -0.71,
+                    "smooth_y_speed": -0.15,
+                    "event_player": 21,
+                    "playing_direction_event": True,
+                },
+                {
+                    "team": 1,
+                    "player": 13,
+                    "pos_x": 40.69,
+                    "pos_y": -16.03,
+                    "pos_z": pd.NA,
+                    "smooth_x_speed": 5.13,
+                    "smooth_y_speed": 1.95,
+                    "event_player": 21,
+                    "playing_direction_event": True,
+                },
+                {
+                    "team": 2,
+                    "player": 20,
+                    "pos_x": 30.0,
+                    "pos_y": -18.92,
+                    "pos_z": pd.NA,
+                    "smooth_x_speed": 4.06,
+                    "smooth_y_speed": -3.69,
+                    "event_player": 21,
+                    "playing_direction_event": True,
+                },
+                {
+                    "team": 0,
+                    "player": 0,
+                    "pos_x": 47.4,
+                    "pos_y": -25.34,
+                    "pos_z": ball_pos_z,
+                    "smooth_x_speed": 0.05,
+                    "smooth_y_speed": 1.89,
+                    "event_player": 21,
+                    "playing_direction_event": True,
+                },
+            ]
+        ).to_csv(path, index=False)
+
+    def test_benchmark_loader_preserves_players_with_blank_pos_z(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "game_state_1.csv"
+            self._write_benchmark_state_csv(state_path)
+
+            loaded = load_benchmark_game_state(state_path)
+
+        possessor_rows = loaded.loc[(loaded["team"] != 0) & loaded["player"].eq(loaded["event_player"])]
+        self.assertEqual(len(possessor_rows), 1)
+        self.assertTrue(pd.isna(possessor_rows.iloc[0]["pos_z"]))
+        self.assertEqual(len(loaded), 4)
+
+    def test_benchmark_state_builds_when_player_pos_z_is_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "game_state_1.csv"
+            self._write_benchmark_state_csv(state_path)
+            loaded = load_benchmark_game_state(state_path)
+
+        state, export_rows, stats = build_benchmark_state(
+            loaded,
+            modification_id=49,
+            game_state_id=1,
+            higher_state_id=1,
+            build_graphs=False,
+        )
+
+        self.assertEqual(state.possessor_player, 21)
+        self.assertEqual(state.possessor_team, 1)
+        self.assertEqual(len(export_rows), 4)
+        self.assertEqual(stats["total_frames"], 1)
+
+    def test_benchmark_loader_rejects_blank_ball_pos_z(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = Path(tmpdir) / "game_state_1.csv"
+            self._write_benchmark_state_csv(state_path, ball_pos_z=None)
+
+            with self.assertRaisesRegex(ValueError, "ball row.*pos_z"):
+                load_benchmark_game_state(state_path)
 
     def test_benchmark_identifier_columns_export_as_nullable_integers(self) -> None:
         table = pd.DataFrame(
