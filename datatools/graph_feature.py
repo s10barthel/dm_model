@@ -47,12 +47,63 @@ from project_config import (
     validate_intended_receiver_mode,
 )
 
-BASE_NODE_FEATURE_DIM = 19
-EXTENDED_NODE_FEATURE_DIM = 25
+OFFSIDE_NODE_FEATURE_DIM = 1
+BASE_NODE_FEATURE_DIM = config.NODE_FEATURE_CORE_DIM + OFFSIDE_NODE_FEATURE_DIM
+EXTENDED_NODE_FEATURE_DIM = config.NODE_FEATURE_EXTENDED_END + OFFSIDE_NODE_FEATURE_DIM
 BASE_EDGE_FEATURE_DIM = 2
 VELOCITY_EDGE_FEATURE_EXTRA_DIM = 2
 SUCCESS_INTENT_EXTRA_DIM = 4
 SUCCESS_INTENT_WINDOW_SECONDS = 1.0
+
+
+def calculate_offside_flags(
+    player_x: np.ndarray,
+    ball_x: np.ndarray,
+    is_teammate: np.ndarray,
+    is_goal: np.ndarray,
+) -> np.ndarray:
+    player_x = np.asarray(player_x, dtype=float)
+    ball_x = np.asarray(ball_x, dtype=float).reshape(player_x.shape[0])
+    is_teammate = np.asarray(is_teammate).astype(bool)
+    is_goal = np.asarray(is_goal).astype(bool)
+
+    is_offside = np.zeros(player_x.shape, dtype=int)
+    finite_player_x = np.isfinite(player_x)
+    non_goal = ~is_goal
+    half_line_x = config.FIELD_SIZE[0] / 2
+
+    for team_is_teammate, attacks_right in [(True, True), (False, False)]:
+        team_mask = (is_teammate == team_is_teammate) & non_goal & finite_player_x
+        opponent_mask = (is_teammate != team_is_teammate) & non_goal & finite_player_x
+
+        for t in range(player_x.shape[0]):
+            if not np.isfinite(ball_x[t]):
+                continue
+
+            opponent_x = player_x[t, opponent_mask[t]]
+            if opponent_x.size < 2:
+                continue
+
+            if attacks_right:
+                second_last_opponent_x = np.partition(opponent_x, -2)[-2]
+                offside_mask = (
+                    team_mask[t]
+                    & (player_x[t] > half_line_x)
+                    & (player_x[t] > ball_x[t])
+                    & (player_x[t] > second_last_opponent_x)
+                )
+            else:
+                second_last_opponent_x = np.partition(opponent_x, 1)[1]
+                offside_mask = (
+                    team_mask[t]
+                    & (player_x[t] < half_line_x)
+                    & (player_x[t] < ball_x[t])
+                    & (player_x[t] < second_last_opponent_x)
+                )
+
+            is_offside[t, offside_mask] = 1
+
+    return is_offside
 
 
 def calculate_event_features(
@@ -103,6 +154,7 @@ def calculate_event_features(
     player_vy = snapshot[player_cols[3::6]].values
     player_speeds = snapshot[player_cols[4::6]].values
     player_accels = snapshot[player_cols[5::6]].values
+    ball_x = snapshot["ball_x"].values if "ball_x" in snapshot.columns else np.full(seq_len, np.nan)
 
     if possessor.endswith("out"):
         poss_x = snapshot["ball_x"].values
@@ -123,6 +175,7 @@ def calculate_event_features(
         poss_y = config.FIELD_SIZE[1] - poss_y
         poss_vx = -poss_vx
         poss_vy = -poss_vy
+        ball_x = config.FIELD_SIZE[0] - ball_x
 
     goal_x = config.FIELD_SIZE[0]
     goal_y = config.FIELD_SIZE[1] / 2
@@ -136,6 +189,7 @@ def calculate_event_features(
     is_possessor = np.tile((np.array(players) == possessor).astype(int), (seq_len, 1))
     poss_dx, poss_dy, poss_dists = utils.calc_dist(player_x, player_y, poss_x, poss_y)
     poss_vangles = utils.calc_angle(player_vx, player_vy, poss_vx, poss_vy, eps=eps)
+    is_offside = calculate_offside_flags(player_x, ball_x, is_teammate, is_goal)
 
     event_features = [
         # Binary features
@@ -191,6 +245,8 @@ def calculate_event_features(
                 potential_blockers[np.newaxis, :],
             ]
         )
+
+    event_features.append(is_offside)
 
     return np.stack(event_features, axis=-1)  # [T, N, x]
 
@@ -437,25 +493,37 @@ def construct_graph_for_frame(
         return None
     if extra_node_features is not None:
         extra = torch.tensor(np.asarray(extra_node_features, dtype=float), dtype=torch.float32).unsqueeze(0)
-        event_features = torch.cat([event_features, extra.repeat(event_features.shape[0], 1)], dim=1)
+        offside_feature = event_features[:, -OFFSIDE_NODE_FEATURE_DIM:]
+        event_features = torch.cat(
+            [
+                event_features[:, :-OFFSIDE_NODE_FEATURE_DIM],
+                extra.repeat(event_features.shape[0], 1),
+                offside_feature,
+            ],
+            dim=1,
+        )
     missing_players = match.max_players - event_features.shape[0]
     if missing_players > 0:
         padding_features = -torch.ones((missing_players, feature_dim))
         event_features = torch.cat([event_features, padding_features], 0)
 
-    node_mask = event_features[:, 0] != -1
+    node_mask = event_features[:, config.NODE_FEATURE_IS_TEAMMATE] != -1
     node_attr = event_features[node_mask]
-    distances = torch.cdist(node_attr[:, 3:5], node_attr[:, 3:5], p=2)
-    teammates = (node_attr[:, 0].unsqueeze(-1) == node_attr[:, 0].unsqueeze(-2)).float()
+    xy_slice = slice(config.NODE_FEATURE_X, config.NODE_FEATURE_Y + 1)
+    distances = torch.cdist(node_attr[:, xy_slice], node_attr[:, xy_slice], p=2)
+    teammates = (
+        node_attr[:, config.NODE_FEATURE_IS_TEAMMATE].unsqueeze(-1)
+        == node_attr[:, config.NODE_FEATURE_IS_TEAMMATE].unsqueeze(-2)
+    ).float()
     edge_index, _ = dense_to_sparse(torch.ones_like(distances))
     distances = distances[edge_index[0], edge_index[1]]
     teammates = teammates[edge_index[0], edge_index[1]]
     edge_features = [distances, teammates]
     if add_v_edge_features:
-        src_vx = node_attr[edge_index[0], 5]
-        src_vy = node_attr[edge_index[0], 6]
-        dst_vx = node_attr[edge_index[1], 5]
-        dst_vy = node_attr[edge_index[1], 6]
+        src_vx = node_attr[edge_index[0], config.NODE_FEATURE_VX]
+        src_vy = node_attr[edge_index[0], config.NODE_FEATURE_VY]
+        dst_vx = node_attr[edge_index[1], config.NODE_FEATURE_VX]
+        dst_vy = node_attr[edge_index[1], config.NODE_FEATURE_VY]
         src_speed = torch.sqrt(src_vx.square() + src_vy.square()).clamp_min(1e-6)
         dst_speed = torch.sqrt(dst_vx.square() + dst_vy.square()).clamp_min(1e-6)
         vel_cos = torch.clamp((src_vx * dst_vx + src_vy * dst_vy) / (src_speed * dst_speed), -1.0, 1.0)

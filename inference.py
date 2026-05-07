@@ -12,6 +12,7 @@ from torch_geometric.data import Batch, Data
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
+from datatools import config
 from datatools.config import FIELD_SIZE, TASK_CONFIG
 from datatools.match import Match
 from datatools.utils import (
@@ -248,8 +249,9 @@ def inference_gnn(
 
             if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
-                batch = batch[graphs.x[:, 0] == 1]
-                out = out[graphs.x[:, 0] == 1]  # [N',]
+                teammate_mask = graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+                batch = batch[teammate_mask]
+                out = out[teammate_mask]  # [N',]
 
             if "receiver" in model.args["task"] and model.args["include_out"]:
                 batch = torch.cat([batch, torch.unique(graphs.batch)])
@@ -327,7 +329,7 @@ def inference_gnn_posterior(
         event_indices,
         feature_action_indices=feature_action_indices,
     )
-    include_goals = (graphs[0].x[:, 2] == 1).any().item()
+    include_goals = (graphs[0].x[:, config.NODE_FEATURE_IS_GOAL] == 1).any().item()
     posteriors = []
 
     for data_index in tqdm(range(len(graphs)), desc="failure_posterior"):
@@ -426,7 +428,7 @@ def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, tor
         event_index = int(labels[data_index, 0].item())
 
         receive_probs_i = F.softmax(logits_i, dim=-1)  # [G, P(+1)]
-        n_teammates = torch.sum(graph_i.x[:, 0] == 1).item()
+        n_teammates = torch.sum(graph_i.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).item()
         receive_probs[event_index] = receive_probs_i.reshape(grid_size[1], grid_size[0], -1)
 
         success_probs_i = receive_probs_i[:, :n_teammates].sum(axis=1)

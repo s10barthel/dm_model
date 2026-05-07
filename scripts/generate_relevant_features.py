@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
     generate_run_id,
@@ -32,7 +33,8 @@ from project_config import (
     write_run_metadata,
 )
 
-EXPECTED_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
+EXPECTED_GRAPH_SCHEMA = {"node_in_dim": infer_node_feature_dim(extend=True), "edge_in_dim": 4, "add_v_edge_features": True}
+EXPECTED_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
 REFRESH_TARGET_FAMILIES = ("xt", "goal_distance", "epv")
 
 
@@ -61,6 +63,7 @@ class FeatureExtensionPlan:
     replaced_intended_receiver_model_id: str | None
     replaced_intended_receiver_modes: list[str]
     next_action_conditions_enabled: bool
+    graph_schema: dict[str, Any]
     commands: list[list[str]]
     command_steps: list[FeatureGenerationStep]
 
@@ -234,9 +237,20 @@ def full_generation_commands(python: str) -> list[FeatureGenerationStep]:
 def normalize_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
-    return {
+    normalized = {
         "edge_in_dim": int(schema.get("edge_in_dim", -1)),
         "add_v_edge_features": bool(schema.get("add_v_edge_features", False)),
+    }
+    if schema.get("node_in_dim") is not None:
+        normalized["node_in_dim"] = int(schema["node_in_dim"])
+    return normalized
+
+
+def normalize_edge_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = normalize_graph_schema(schema)
+    return {
+        "edge_in_dim": int(normalized.get("edge_in_dim", -1)),
+        "add_v_edge_features": bool(normalized.get("add_v_edge_features", False)),
     }
 
 
@@ -544,9 +558,10 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         raise ValueError(f"Feature run {base_run_id} is not completed; status={base_metadata.get('status')!r}.")
 
     graph_schema = normalize_graph_schema(base_metadata.get("graph_schema"))
-    if graph_schema != EXPECTED_GRAPH_SCHEMA:
+    if normalize_edge_graph_schema(graph_schema) != EXPECTED_EDGE_GRAPH_SCHEMA:
         raise ValueError(
-            f"Feature run {base_run_id} has graph_schema={graph_schema!r}; expected {EXPECTED_GRAPH_SCHEMA!r}."
+            f"Feature run {base_run_id} has graph_schema={graph_schema!r}; expected edge schema "
+            f"{EXPECTED_EDGE_GRAPH_SCHEMA!r}."
         )
 
     base_return_types = metadata_return_types(base_metadata)
@@ -650,6 +665,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         replaced_intended_receiver_model_id=replaced_model_id,
         replaced_intended_receiver_modes=replaced_modes,
         next_action_conditions_enabled=base_next_action_conditions_enabled,
+        graph_schema=copy.deepcopy(graph_schema),
         commands=commands,
         command_steps=command_steps,
     )
@@ -673,7 +689,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_commands": plan.commands,
         "intended_receiver_modes": plan.final_intended_receiver_modes,
         "intended_receiver_model_id": plan.intended_receiver_model_id,
-        "graph_schema": EXPECTED_GRAPH_SCHEMA.copy(),
+        "graph_schema": copy.deepcopy(plan.graph_schema),
         "splits": ["train", "test"],
         "return_types": plan.final_return_types,
         "return_type": plan.final_return_types[0] if len(plan.final_return_types) == 1 else None,
@@ -757,7 +773,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "command": subprocess.list2cmdline(sys.argv),
         "intended_receiver_modes": args.intended_receiver_modes,
         "intended_receiver_model_id": args.intended_receiver_model_id,
-        "graph_schema": {"edge_in_dim": 4, "add_v_edge_features": True},
+        "graph_schema": EXPECTED_GRAPH_SCHEMA.copy(),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
         "splits": ["train", "test"],
         "return_types": args.return_types,

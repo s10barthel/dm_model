@@ -217,7 +217,14 @@ class Match(ABC):
                 graph_action_indices.append(int(action_index))
                 filtered_node_ids = getattr(filtered_graphs[0], "node_ids", [])
                 graph_teammate_ids.append(
-                    [node_id for node_id, is_teammate in zip(filtered_node_ids, filtered_graphs[0].x[:, 0].tolist()) if is_teammate == 1]
+                    [
+                        node_id
+                        for node_id, is_teammate in zip(
+                            filtered_node_ids,
+                            filtered_graphs[0].x[:, config.NODE_FEATURE_IS_TEAMMATE].tolist(),
+                        )
+                        if is_teammate == 1
+                    ]
                 )
         finally:
             self.actions = previous_actions
@@ -243,7 +250,10 @@ class Match(ABC):
                 logits = model(batch_graphs)
 
             for graph_index, action_index in enumerate(graph_action_indices):
-                teammate_logits = logits[(batch_graphs.batch == graph_index) & (batch_graphs.x[:, 0] == 1)]
+                teammate_logits = logits[
+                    (batch_graphs.batch == graph_index)
+                    & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                ]
                 if teammate_logits.numel() == 0:
                     continue
 

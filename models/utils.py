@@ -25,6 +25,7 @@ from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 from xgboost import XGBClassifier
 
+from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from project_config import (
@@ -1030,8 +1031,12 @@ def adapt_batch_graphs_for_model(
             f"but runtime graphs provide edge_in_dim={actual_edge_dim}."
         )
 
-    if should_mask_possessor_v_edge_features_for_model(model_args) and actual_edge_dim >= 4 and actual_node_dim > 13:
-        possessor_nodes = batch_graphs.x[:, 13] == 1
+    if (
+        should_mask_possessor_v_edge_features_for_model(model_args)
+        and actual_edge_dim >= 4
+        and actual_node_dim > config.NODE_FEATURE_IS_POSSESSOR
+    ):
+        possessor_nodes = batch_graphs.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
         incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
         batch_graphs.edge_attr[incident_edges, 2:4] = 0
 
@@ -1062,7 +1067,10 @@ def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_c
             batch_graphs = adapt_batch_graphs_for_model(batch_graphs, model.args, context=f"IPW model {model_id!r}")
             out: torch.Tensor = model(batch_graphs)
             for graph_index in range(batch_graphs.num_graphs):
-                logits = out[(batch_graphs.batch == graph_index) & (batch_graphs.x[:, 0] == 1)]
+                logits = out[
+                    (batch_graphs.batch == graph_index)
+                    & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                ]
                 probs = nn.Softmax(dim=0)(logits).cpu().detach().numpy()
                 likelihoods.append(probs[int(batch_labels[graph_index, 5].item())])
 
@@ -1174,17 +1182,18 @@ def build_dest_features(graphs: Batch, dest_xy: torch.Tensor, oppo_aware=True) -
     feat: torch.Tensor = graphs.x
     batch: torch.Tensor = graphs.batch
 
-    poss_mask = feat[:, 13] == 1
-    team_mask = (feat[:, 0] == 1) & (feat[:, 2] == 0)
-    oppo_mask = (feat[:, 0] == 0) & (feat[:, 2] == 0)
+    poss_mask = feat[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
+    team_mask = (feat[:, config.NODE_FEATURE_IS_TEAMMATE] == 1) & (feat[:, config.NODE_FEATURE_IS_GOAL] == 0)
+    oppo_mask = (feat[:, config.NODE_FEATURE_IS_TEAMMATE] == 0) & (feat[:, config.NODE_FEATURE_IS_GOAL] == 0)
 
     dest_feat = []
 
     for graph_idx in range(B):
         graph_mask = batch == graph_idx
-        poss_xy = feat[graph_mask & poss_mask, 3:5]  # [1, 2]
-        team_xy = feat[graph_mask & team_mask, 3:5]  # [team, 2]
-        oppo_xy = feat[graph_mask & oppo_mask, 3:5]  # [oppo, 2]
+        xy_slice = slice(config.NODE_FEATURE_X, config.NODE_FEATURE_Y + 1)
+        poss_xy = feat[graph_mask & poss_mask, xy_slice]  # [1, 2]
+        team_xy = feat[graph_mask & team_mask, xy_slice]  # [team, 2]
+        oppo_xy = feat[graph_mask & oppo_mask, xy_slice]  # [oppo, 2]
 
         poss_dx = dest_xy[:, 0] - poss_xy[0, 0]
         poss_dy = dest_xy[:, 1] - poss_xy[0, 1]
@@ -1350,18 +1359,26 @@ def run_epoch(
                 ]:
                     # Only take teammate nodes
                     assert not args.include_out
-                    pred_i = out[(batch == graph_index) & (batch_graphs.x[:, 0] == 1)]  # [N_i]
+                    pred_i = out[
+                        (batch == graph_index)
+                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                    ]  # [N_i]
                     target_i = target[graph_index]
 
                 elif args.task == "failure_receiver":
                     # Only take opponent nodes
                     if args.include_out:
                         ball_out_mask = torch.ones(batch_graphs.num_graphs).bool().to(device)
-                        failure_mask = torch.cat([batch_graphs.x[:, 0] == 0, ball_out_mask])
+                        failure_mask = torch.cat(
+                            [batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0, ball_out_mask]
+                        )
                     else:
-                        failure_mask = batch_graphs.x[:, 0] == 0
+                        failure_mask = batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0
                     pred_i = out[(batch == graph_index) & failure_mask]
-                    n_teammates = ((batch_graphs.batch == graph_index) & (batch_graphs.x[:, 0] == 1)).sum()
+                    n_teammates = (
+                        (batch_graphs.batch == graph_index)
+                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                    ).sum()
                     target_i = target[graph_index] - n_teammates
 
                 else:  # pass_receiver, dest_receiver

@@ -384,6 +384,7 @@ python scripts/generate_relevant_features.py --return_type disc_0.9
 python scripts/generate_relevant_features.py --return_type disc_0.9 --return_type next_5 --return_type next_3
 python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
+python scripts/generate_relevant_features.py --return_type disc_0.9 --next-action-conditions-off
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
@@ -398,7 +399,7 @@ Inputs:
 - optional sidecars from `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types, refreshed target labels, and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts.
+Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types, refreshed target labels, and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts. Extension runs must use the same `--next-action-conditions-on/off` setting as the base run because copied graph tensors cannot change pass/cross action filtering.
 
 Behavior:
 
@@ -406,6 +407,7 @@ Behavior:
 - `model` is included only when `--intended-receiver-model-id` is supplied
 - graphs are written once per run and always include the full velocity-angle edge-feature schema
 - labels are written for every requested `--return_type`
+- pass/cross filtering keeps the current next-action consistency conditions by default; `--next-action-conditions-off` keeps valid synced pass/cross actions even when `receiver_id` does not match `next_player_id`, the receiver is not `out`, and the next action is not `foul` or `freekick_short`
 
 Useful options:
 
@@ -414,6 +416,7 @@ Useful options:
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
+- `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
 - `--replace-intended-receiver-model` with `--extend-feature-run-id` and `--intended-receiver-model-id` to regenerate copied model-mode artifacts with a different `success_intent` checkpoint in the derived run
 
 Terminal output progression:
@@ -1046,6 +1049,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.
 - `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
+- `--next-action-conditions-on` / `--next-action-conditions-off`: keep or disable the pass/cross next-action consistency filter. Default: on. Derived runs must match the base run's setting.
 
 ### `scripts/train_relevant_models.py`
 

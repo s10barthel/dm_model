@@ -10,6 +10,7 @@ import pandas as pd
 import torch
 from torch_geometric.data import Data
 
+from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from project_config import get_physical_xpass_match_path
 
@@ -103,10 +104,14 @@ def _node_ids(graph: Data) -> list[str]:
 
 
 def _candidate_target_indices(graph: Data) -> list[int]:
-    teammate = graph.x[:, 0] == 1
-    possessor = graph.x[:, 13] == 1
-    goal = graph.x[:, 2] == 1 if graph.x.shape[1] > 2 else torch.zeros(graph.x.shape[0], dtype=torch.bool)
-    finite_xy = torch.isfinite(graph.x[:, 3:5]).all(dim=1)
+    teammate = graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+    possessor = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
+    goal = (
+        graph.x[:, config.NODE_FEATURE_IS_GOAL] == 1
+        if graph.x.shape[1] > config.NODE_FEATURE_IS_GOAL
+        else torch.zeros(graph.x.shape[0], dtype=torch.bool)
+    )
+    finite_xy = torch.isfinite(graph.x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]).all(dim=1)
     mask = teammate & (~possessor) & (~goal) & finite_xy
     return torch.nonzero(mask, as_tuple=False).flatten().tolist()
 
@@ -173,13 +178,17 @@ def _build_simulation_inputs(
     consider_teammates: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[int, int]]:
     x = graph.x.detach().cpu().to(torch.float32)
-    player_mask = (x[:, 2] == 0) if x.shape[1] > 2 else torch.ones(x.shape[0], dtype=torch.bool)
-    player_mask &= torch.isfinite(x[:, 3:7]).all(dim=1)
+    player_mask = (
+        (x[:, config.NODE_FEATURE_IS_GOAL] == 0)
+        if x.shape[1] > config.NODE_FEATURE_IS_GOAL
+        else torch.ones(x.shape[0], dtype=torch.bool)
+    )
+    player_mask &= torch.isfinite(x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1]).all(dim=1)
     player_indices = torch.nonzero(player_mask, as_tuple=False).flatten().tolist()
     if not player_indices:
         raise ValueError("No finite non-goal players found for physical xPass simulation.")
 
-    possessor_indices = torch.nonzero(x[:, 13] == 1, as_tuple=False).flatten().tolist()
+    possessor_indices = torch.nonzero(x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1, as_tuple=False).flatten().tolist()
     if len(possessor_indices) != 1:
         raise ValueError(f"Expected exactly one possessor node, found {len(possessor_indices)}.")
     possessor_index = int(possessor_indices[0])
@@ -194,15 +203,19 @@ def _build_simulation_inputs(
             missing_ids = [str(graph.node_ids[idx]) for idx in missing_targets]
             raise ValueError(f"Candidate target nodes are missing from the physical player mapping: {missing_ids}.")
 
-        player_pos = x[sim_player_indices, 3:7].numpy()
-        player_teams = np.where((x[sim_player_indices, 0].numpy() == 1), "attack", "defense").astype(object)
+        player_pos = x[sim_player_indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy()
+        player_teams = np.where(
+            (x[sim_player_indices, config.NODE_FEATURE_IS_TEAMMATE].numpy() == 1),
+            "attack",
+            "defense",
+        ).astype(object)
         players = np.array([str(graph.node_ids[idx]) for idx in sim_player_indices], dtype=object)
         target_index_lookup = {graph_target_index: player_index_to_sim_index[graph_target_index] for graph_target_index in candidate_indices}
         return (
             np.repeat(player_pos[np.newaxis, :, :], len(candidate_indices), axis=0),
             player_teams,
             players,
-            x[possessor_index, 3:5].numpy(),
+            x[possessor_index, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1].numpy(),
             np.repeat("attack", len(candidate_indices)).astype(object),
             target_index_lookup,
         )
@@ -210,14 +223,17 @@ def _build_simulation_inputs(
     defender_indices = [
         node_index
         for node_index in player_indices
-        if node_index != possessor_index and int(x[node_index, 0].item()) == 0
+        if node_index != possessor_index and int(x[node_index, config.NODE_FEATURE_IS_TEAMMATE].item()) == 0
     ]
     frame_player_indices = [[graph_target_index] + defender_indices for graph_target_index in candidate_indices]
     player_counts = {len(indices) for indices in frame_player_indices}
     if len(player_counts) != 1:
         raise ValueError(f"Physical xPass reduced simulation player count must be constant across candidates, got {sorted(player_counts)}.")
 
-    player_pos = np.stack([x[indices, 3:7].numpy() for indices in frame_player_indices], axis=0)
+    player_pos = np.stack(
+        [x[indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy() for indices in frame_player_indices],
+        axis=0,
+    )
     player_teams = np.array(["attack"] + ["defense"] * len(defender_indices), dtype=object)
     players = np.array(
         ["target_player"] + [str(graph.node_ids[idx]) for idx in defender_indices],
@@ -228,7 +244,7 @@ def _build_simulation_inputs(
         player_pos,
         player_teams,
         players,
-        x[possessor_index, 3:5].numpy(),
+        x[possessor_index, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1].numpy(),
         np.repeat("attack", len(candidate_indices)).astype(object),
         target_index_lookup,
     )
@@ -251,7 +267,7 @@ def compute_graph_player_cum_prob(
         return result
 
     x = graph.x.detach().cpu().to(torch.float32)
-    target_xy = x[candidate_indices, 3:5].numpy()
+    target_xy = x[candidate_indices, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1].numpy()
     player_pos, player_teams, players, ball_pos, passer_teams, target_index_lookup = _build_simulation_inputs(
         graph,
         candidate_indices=candidate_indices,
@@ -275,7 +291,7 @@ def compute_graph_player_cum_prob(
         frame_count,
         axis=0,
     )
-    possessor_index = int(torch.nonzero(x[:, 13] == 1, as_tuple=False).item())
+    possessor_index = int(torch.nonzero(x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1, as_tuple=False).item())
     passers = np.repeat(node_ids[possessor_index], frame_count).astype(object)
 
     simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()

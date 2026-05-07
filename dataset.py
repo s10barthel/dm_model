@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 from torch_geometric.data import Data
 from tqdm import tqdm
 
+from datatools import config
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     adapt_graph_edge_features,
@@ -28,6 +29,11 @@ OUTCOME_DIAGNOSTIC_TASKS = {
     "dest_conceding",
 }
 DIAGNOSTIC_IDENTITY_COLUMNS = ("action_index", "is_pass", "is_dribble", "is_shot", "success")
+
+
+def _zero_extended_node_features(graph: Data) -> None:
+    if graph.x.shape[1] >= config.NODE_FEATURE_MIN_EXTENDED_DIM:
+        graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
 def requires_goal_next10_diagnostics(task: str | None) -> bool:
@@ -236,7 +242,9 @@ class ActionDataset(Dataset):
                     if graph is None or receiver_index < 0 or receiver_index >= graph.x.shape[0]:
                         oppo_received.append(False)
                     else:
-                        oppo_received.append(bool((graph.x[receiver_index, 0] == 0).item()))
+                        oppo_received.append(
+                            bool((graph.x[receiver_index, config.NODE_FEATURE_IS_TEAMMATE] == 0).item())
+                        )
                 shot_failure = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["success"]] == 0) & torch.tensor(oppo_received)
             elif shot_success_type == "unblocked":
                 shot_failure = (labels[:, 3] == 1) & (labels[:, LABEL_INDEX["blocked"]] == 1)
@@ -270,15 +278,15 @@ class ActionDataset(Dataset):
             graph = adapt_graph_edge_features(graph, getattr(self, "edge_in_dim", None))
 
             try:
-                possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
+                possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
             except RuntimeError:
                 continue
             if self.mask_possessor_v_edge_features:
                 graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
 
             if task == "failure_receiver" and inplay_only:
-                n_teammates = int((graph.x[:, 0] == 1).sum().item())
-                n_opponents = int((graph.x[:, 0] == 0).sum().item())
+                n_teammates = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).sum().item())
+                n_opponents = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0).sum().item())
                 receiver_index = int(graph_labels[6].item()) - n_teammates
 
                 # Skip mislabeled failures where the recorded receiver is not an opponent
@@ -286,31 +294,34 @@ class ActionDataset(Dataset):
                     continue
 
             if xy_only:  # Do not refer to handcrafted features
-                graph.x[7:12] = 0
-                graph.x[13:19] = 0
+                graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0
+                graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
             if not possessor_aware:  # Do not refer to possessor-related features
                 assert not extend_features
-                graph.x[:, 13:] = 0
+                graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
             if not poss_vel_aware:  # Ignore the ball possessor's own velocity features
                 if possessor_aware:
-                    graph.x[graph.x[:, 13] == 1, 5:9] = 0
+                    graph.x[
+                        graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1,
+                        config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1,
+                    ] = 0
 
             if not poss_rel_vel_aware:  # Ignore player velocity relative to the ball possessor's velocity
-                graph.x[:, 17:19] = 0
+                graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
 
             if not keeper_aware:  # Do not distinguish between goalkeepers and outfield players
-                graph.x[:, 1] = 0
+                graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
 
             if not ball_z_aware:  # Set the ball height for every action as 0
-                graph.x[:, 12] = 0
+                graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
 
             if not accel_aware:  # Ignore player-acceleration features without changing graph width
-                graph.x[:, 8] = 0
+                graph.x[:, config.NODE_FEATURE_ACCEL] = 0
 
             if not extend_features and task != "success_intent":
-                graph.x[:, 19:] = 0
+                _zero_extended_node_features(graph)
 
             if not TASK_CONFIG.at[task, "include_goals"]:
                 graph, graph_labels = drop_goal_nodes(graph, graph_labels)
@@ -320,12 +331,16 @@ class ActionDataset(Dataset):
 
             if drop_non_blockers:
                 assert possessor_aware
-                possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
-                graph, graph_labels = drop_non_blocker_nodes(graph, graph_labels, 13)
+                possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
+                graph, graph_labels = drop_non_blocker_nodes(
+                    graph,
+                    graph_labels,
+                    config.NODE_FEATURE_IS_POSSESSOR,
+                )
 
             if sparsify == "distance":
                 assert possessor_aware
-                possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
+                possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
                 graph = sparsify_edges(graph, "distance", possessor_index, max_edge_dist)
             elif sparsify == "delaunay" and graph.x.shape[0] > 3:
                 graph = sparsify_edges(graph, "delaunay")

@@ -8,17 +8,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import matplotlib
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
 from torch_geometric.data import Batch, Data
 
 from dataset import ActionDataset
+from datatools import config
 from datatools.benchmark import build_benchmark_state, load_benchmark_game_state
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
+from physical_pass_model import _candidate_target_indices, compute_graph_player_cum_prob
 from scripts import run_benchmark
 from scripts import train_relevant_models as train_wrapper
 
@@ -70,6 +73,29 @@ def make_velocity_edge_graph(node_dim: int = 25) -> Data:
         dtype=torch.float32,
     )
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def make_physical_xpass_graph(node_dim: int = 26) -> Data:
+    x = torch.zeros((5, node_dim), dtype=torch.float32)
+    x[:, config.NODE_FEATURE_IS_TEAMMATE] = torch.tensor([1, 1, 1, 0, 1], dtype=torch.float32)
+    x[:, config.NODE_FEATURE_IS_GOAL] = torch.tensor([0, 0, 1, 0, 0], dtype=torch.float32)
+    x[:, config.NODE_FEATURE_IS_POSSESSOR] = torch.tensor([1, 0, 0, 0, 0], dtype=torch.float32)
+    x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1] = torch.tensor(
+        [
+            [40.0, 34.0, 1.0, 0.0],
+            [70.0, 34.0, 2.0, 0.5],
+            [105.0, 34.0, 0.0, 0.0],
+            [55.0, 45.0, -1.0, 0.0],
+            [float("nan"), 30.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    x[:, -1] = torch.tensor([0, 1, 1, 0, 1], dtype=torch.float32)
+    return Data(
+        x=x,
+        edge_index=torch.empty((2, 0), dtype=torch.long),
+        node_ids=["possessor", "target", "home_goal", "defender", "bad_xy"],
+    )
 
 
 def make_labels() -> torch.Tensor:
@@ -1642,6 +1668,31 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
 
+    def test_filter_features_and_labels_preserves_offside_tail_without_extended_features(self) -> None:
+        labels = make_labels()
+        args = {
+            "task": "action_intent",
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "extend_features": False,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+        }
+        graph = make_graph(node_dim=26)
+        graph.x[:, 19:25] = 19
+        graph.x[:, 25] = 25
+
+        filtered_graphs, _ = filter_features_and_labels([graph], labels, args)
+        filtered = filtered_graphs[0]
+
+        self.assertTrue(torch.equal(filtered.x[:, 19:25], torch.zeros_like(filtered.x[:, 19:25])))
+        self.assertTrue(torch.equal(filtered.x[:, 25], torch.full_like(filtered.x[:, 25], 25)))
+
     def test_action_dataset_zeroes_only_accel_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_dir = Path(tmpdir) / "features"
@@ -1664,6 +1715,62 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 8], torch.zeros_like(graph.x[:, 8])))
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
+
+    def test_action_dataset_preserves_offside_tail_without_extended_features(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            graph = make_graph(node_dim=26)
+            graph.x[:, 19:25] = 19
+            graph.x[:, 25] = 25
+            torch.save([graph], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                extend_features=False,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[:, 19:25], torch.zeros_like(graph.x[:, 19:25])))
+        self.assertTrue(torch.equal(graph.x[:, 25], torch.full_like(graph.x[:, 25], 25)))
+
+    def test_physical_xpass_candidate_targets_ignore_offside_tail(self) -> None:
+        graph = make_physical_xpass_graph()
+
+        self.assertEqual(_candidate_target_indices(graph), [1])
+
+    def test_physical_xpass_simulation_inputs_use_stable_prefix_with_new_tail(self) -> None:
+        graph = make_physical_xpass_graph()
+        calls = []
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            target_player_index = list(kwargs["players"]).index("target_player")
+            target_xy = kwargs["PLAYER_POS"][0, target_player_index, :2]
+            distance = float(np.linalg.norm(target_xy - kwargs["BALL_POS"][0]))
+            probabilities = np.full((1, kwargs["PLAYER_POS"].shape[1], 1, 1), 0.1, dtype=float)
+            probabilities[0, target_player_index, 0, 0] = 0.73
+            return SimpleNamespace(player_cum_prob=probabilities, r_grid=np.array([distance], dtype=float))
+
+        result = compute_graph_player_cum_prob(
+            graph,
+            simulate_passes_fn=fake_simulate_passes,
+            consider_teammates=False,
+        )
+
+        self.assertEqual(result["target"], 0.73)
+        self.assertTrue(result.drop(index="target").isna().all())
+        self.assertEqual(len(calls), 1)
+        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 0], [70.0, 34.0, 2.0, 0.5])
+        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 1], [55.0, 45.0, -1.0, 0.0])
+        np.testing.assert_allclose(calls[0]["BALL_POS"][0], [40.0, 34.0])
 
     def test_action_dataset_splits_possessor_and_relative_velocity_masks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

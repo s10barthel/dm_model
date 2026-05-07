@@ -9,7 +9,7 @@ from unittest.mock import ANY, patch
 import numpy as np
 import pandas as pd
 import torch
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from datatools.benchmark import build_benchmark_export
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
@@ -17,6 +17,7 @@ from datatools import graph_feature
 from datatools.match import Match
 from datatools.utils import filter_features_and_labels
 from inference import inference_gnn, resolve_match_graphs
+from models import utils as model_utils
 from scripts import run_relevant_models
 
 
@@ -28,6 +29,60 @@ def make_minimal_match() -> SimpleNamespace:
         labels=None,
         label_post_actions=lambda actions: actions,
     )
+
+
+def _player_columns(object_id: str, x: float, y: float = 34.0) -> dict[str, float]:
+    return {
+        f"{object_id}_x": x,
+        f"{object_id}_y": y,
+        f"{object_id}_vx": 0.0,
+        f"{object_id}_vy": 0.0,
+        f"{object_id}_speed": 0.0,
+        f"{object_id}_accel": 0.0,
+    }
+
+
+def make_offside_match_and_snapshot(
+    *,
+    ball_x: float | None = 60.0,
+    include_goals: bool = True,
+    home_positions: dict[str, float] | None = None,
+    away_positions: dict[str, float] | None = None,
+) -> tuple[SimpleNamespace, pd.DataFrame]:
+    home_positions = home_positions or {"home_1": 75.0, "home_2": 65.0, "home_3": 50.0}
+    away_positions = away_positions or {"away_1": 15.0, "away_2": 70.0, "away_3": 80.0}
+
+    row: dict[str, float | int] = {"phase_id": 1}
+    if ball_x is not None:
+        row["ball_x"] = ball_x
+    row["ball_y"] = 34.0
+    row["ball_z"] = 0.0
+
+    for object_id, x in home_positions.items():
+        row.update(_player_columns(object_id, x))
+    if include_goals:
+        row.update(_player_columns("home_goal", 105.0))
+
+    for object_id, x in away_positions.items():
+        row.update(_player_columns(object_id, x))
+    if include_goals:
+        row.update(_player_columns("away_goal", 0.0))
+
+    snapshot = pd.DataFrame([row], index=pd.Index([10], name="frame_id"))
+    match = SimpleNamespace(
+        include_keepers=True,
+        include_goals=include_goals,
+        phases=pd.DataFrame(
+            [
+                {
+                    "phase_id": 1,
+                    "active_players": list(home_positions) + list(away_positions),
+                    "active_keepers": ["home_3", "away_3"],
+                }
+            ]
+        ).set_index("phase_id"),
+    )
+    return match, snapshot
 
 
 class DummyNodeModel(torch.nn.Module):
@@ -217,6 +272,73 @@ class GraphFeatureMatchConstructionTests(unittest.TestCase):
 
 
 class GraphFeatureRegressionTests(unittest.TestCase):
+    def test_node_feature_dimensions_include_offside_tail(self) -> None:
+        self.assertEqual(graph_feature.infer_node_feature_dim(extend=False), 20)
+        self.assertEqual(graph_feature.infer_node_feature_dim(extend=True), 26)
+        self.assertEqual(graph_feature.infer_node_feature_dim(extend=False, feature_variant="success_intent"), 24)
+
+    def test_offside_flags_both_teams_and_excludes_goal_nodes(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot()
+
+        features = graph_feature.calculate_event_features(match, snapshot, "home_1", extend=False)[0]
+
+        self.assertEqual(features.shape[1], 20)
+        self.assertEqual(features[:, -1].tolist(), [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+
+    def test_offside_uses_strict_level_comparisons(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot(
+            home_positions={"home_1": 70.0, "home_2": 60.0, "home_3": 50.0},
+            away_positions={"away_1": 60.0, "away_2": 70.0, "away_3": 80.0},
+        )
+
+        features = graph_feature.calculate_event_features(match, snapshot, "home_1", extend=False)[0]
+
+        self.assertEqual(features[:, -1].tolist(), [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def test_offside_rotates_away_possession_to_left_to_right(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot(
+            ball_x=45.0,
+            home_positions={"home_1": 95.0, "home_2": 85.0, "home_3": 65.0},
+            away_positions={"away_1": 30.0, "away_2": 100.0, "away_3": 95.0},
+        )
+
+        features = graph_feature.calculate_event_features(match, snapshot, "away_1", extend=False, rotate_to_ltr=True)[0]
+
+        self.assertEqual(features[:, -1].tolist(), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    def test_offside_returns_zero_without_ball_x_or_two_opponents(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot(ball_x=None)
+
+        missing_ball_features = graph_feature.calculate_event_features(match, snapshot, "home_1", extend=False)[0]
+
+        sparse_match, sparse_snapshot = make_offside_match_and_snapshot(
+            include_goals=False,
+            home_positions={"home_1": 75.0},
+            away_positions={"away_1": 80.0},
+        )
+        sparse_features = graph_feature.calculate_event_features(sparse_match, sparse_snapshot, "home_1", extend=False)[0]
+
+        self.assertEqual(missing_ball_features[:, -1].tolist(), [0.0] * 8)
+        self.assertEqual(sparse_features[:, -1].tolist(), [0.0, 0.0])
+
+    def test_old_model_prefix_truncates_new_offside_tail(self) -> None:
+        x = torch.arange(26, dtype=torch.float32).reshape(1, 26)
+        graph = Data(
+            x=x,
+            edge_index=torch.tensor([[0], [0]], dtype=torch.long),
+            edge_attr=torch.ones((1, 2), dtype=torch.float32),
+        )
+        batch = Batch.from_data_list([graph])
+
+        adapted = model_utils.adapt_batch_graphs_for_model(
+            batch,
+            {"node_in_dim": 25, "edge_in_dim": 2, "v_edge_feature_mode": "none"},
+            context="old model",
+        )
+
+        self.assertEqual(adapted.x.shape[1], 25)
+        torch.testing.assert_close(adapted.x[0], torch.arange(25, dtype=torch.float32))
+
     def test_construct_graph_features_requires_labels_or_action_indices(self) -> None:
         match = make_minimal_match()
 

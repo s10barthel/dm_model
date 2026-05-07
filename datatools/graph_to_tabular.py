@@ -5,6 +5,7 @@ from typing import List, Optional
 import torch
 from torch_geometric.data import Data
 
+from datatools import config
 from project_config import resolve_effective_return_type
 
 
@@ -17,7 +18,7 @@ def graph_to_tabular(
     """
     Build tabular features by concatenating possessor node features and intent node features.
 
-    Possessor node is detected via graph.x[:, 13] == 1.
+    Possessor node is detected via the stable is_possessor node feature.
     Intent node index is stored in labels[:, 5].
     """
     if len(graphs) != len(labels):
@@ -33,7 +34,7 @@ def graph_to_tabular(
             continue
 
         node_features = graph.x
-        poss_mask = node_features[:, 13] == 1
+        poss_mask = node_features[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
         poss_indices = torch.nonzero(poss_mask, as_tuple=False).view(-1)
 
         if poss_indices.numel() == 0:

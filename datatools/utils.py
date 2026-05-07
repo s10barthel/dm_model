@@ -1138,21 +1138,21 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
 
 
 def drop_opponent_nodes(graph: Data, labels: torch.Tensor) -> Tuple[Data, torch.Tensor]:
-    node_mask = graph.x[:, 0] == 1
+    node_mask = graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
     return drop_nodes(graph, labels, node_mask)
 
 
 def drop_goal_nodes(graph: Data, labels: torch.Tensor) -> Tuple[Data, torch.Tensor]:
-    node_mask = graph.x[:, 2] == 0
+    node_mask = graph.x[:, config.NODE_FEATURE_IS_GOAL] == 0
     return drop_nodes(graph, labels, node_mask)
 
 
 def drop_non_blocker_nodes(
-    graph: Data, labels: torch.Tensor, poss_flag_index=13, buffer_x=5
+    graph: Data, labels: torch.Tensor, poss_flag_index=config.NODE_FEATURE_IS_POSSESSOR, buffer_x=5
 ) -> Tuple[Data, torch.Tensor]:
-    poss_or_oppo = (graph.x[:, poss_flag_index] == 1) | (graph.x[:, 0] == 0)
-    poss_x = graph.x[graph.x[:, poss_flag_index] == 1, 3].item()
-    node_mask = poss_or_oppo & (graph.x[:, 3] > poss_x - buffer_x)
+    poss_or_oppo = (graph.x[:, poss_flag_index] == 1) | (graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0)
+    poss_x = graph.x[graph.x[:, poss_flag_index] == 1, config.NODE_FEATURE_X].item()
+    node_mask = poss_or_oppo & (graph.x[:, config.NODE_FEATURE_X] > poss_x - buffer_x)
     return drop_nodes(graph, labels, node_mask)
 
 
@@ -1167,8 +1167,7 @@ def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max
         graph.edge_attr = graph.edge_attr[passer_edges | close_edges]
 
     elif how == "delaunay":
-        # xy = graph.x[:, 1:3] if graph.x.shape[1] < 18 else graph.x[:, 3:5]
-        xy = graph.x[:, 3:5]
+        xy = graph.x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]
         tri_pts = Delaunay(xy.cpu().detach().numpy()).simplices
         tri_edges = np.concatenate((tri_pts[:, :2], tri_pts[:, 1:], tri_pts[:, ::2]), axis=0)
         tri_edges = np.unique(tri_edges, axis=0).tolist()
@@ -1222,6 +1221,11 @@ def should_mask_possessor_velocity_edge_features(args: Dict[str, Any]) -> bool:
     if mode is not None:
         return str(mode).strip().replace("-", "_") == "no_poss"
     return bool(args.get("mask_possessor_v_edge_features", False))
+
+
+def zero_extended_node_features(graph: Data) -> None:
+    if graph.x.shape[1] >= config.NODE_FEATURE_MIN_EXTENDED_DIM:
+        graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
 def filter_features_and_labels(
@@ -1279,38 +1283,41 @@ def filter_features_and_labels(
             graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
 
         try:
-            possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
+            possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
         except RuntimeError:
             continue
         if should_mask_possessor_velocity_edge_features(args):
             graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
 
         if args["xy_only"]:
-            graph.x[:, 7:12] = 0
-            graph.x[:,13:19] = 0
+            graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0
+            graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
         if not args["possessor_aware"]:
             assert not args["extend_features"]
-            graph.x[:, 13:] = 0
+            graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
         if not args["poss_vel_aware"]:
             if args["possessor_aware"]:
-                graph.x[graph.x[:, 13] == 1, 5:9] = 0
+                graph.x[
+                    graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1,
+                    config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1,
+                ] = 0
 
         if not args.get("poss_rel_vel_aware", False):
-            graph.x[:, 17:19] = 0
+            graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
 
         if not args["keeper_aware"]:
-            graph.x[:, 1] = 0
+            graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
 
         if not args["ball_z_aware"]:
-            graph.x[:, 12] = 0
+            graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
 
         if not args.get("accel_aware", True):
-            graph.x[:, 8] = 0
+            graph.x[:, config.NODE_FEATURE_ACCEL] = 0
 
         if not args["extend_features"] and args.get("task") != "success_intent":
-            graph.x[:, 19:] = 0
+            zero_extended_node_features(graph)
 
         if not config.TASK_CONFIG.at[args["task"], "include_goals"]:
             graph, graph_labels = drop_goal_nodes(graph, graph_labels)
@@ -1320,12 +1327,12 @@ def filter_features_and_labels(
 
         if "filter_blockers" in args and args["filter_blockers"]:
             assert args["possessor_aware"]
-            possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
+            possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
             graph, graph_labels = drop_non_blocker_nodes(graph, graph_labels)
 
         if args["sparsify"] == "distance":
             assert args["possessor_aware"]
-            possessor_index = torch.nonzero(graph.x[:, 13] == 1).item()
+            possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
             graph = sparsify_edges(graph, "distance", possessor_index, args["max_edge_dist"])
         elif args["sparsify"] == "delaunay" and graph.x.shape[0] > 3:
             graph = sparsify_edges(graph, "delaunay")
