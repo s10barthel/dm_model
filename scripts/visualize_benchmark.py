@@ -14,7 +14,6 @@ import pandas as pd
 from PIL import Image
 
 from datatools.benchmark import (
-    COMPONENT_COLUMNS,
     build_benchmark_component_tables,
     build_benchmark_state,
     build_benchmark_visualization_probs,
@@ -104,6 +103,17 @@ def render_state_image(
     return image
 
 
+def combine_state_images(top_image: Image.Image, bottom_image: Image.Image) -> Image.Image:
+    top_rgb = top_image.convert("RGB")
+    bottom_rgb = bottom_image.convert("RGB")
+    width = max(top_rgb.width, bottom_rgb.width)
+    height = top_rgb.height + bottom_rgb.height
+    combined = Image.new("RGB", (width, height), "white")
+    combined.paste(top_rgb, (0, 0))
+    combined.paste(bottom_rgb, (0, top_rgb.height))
+    return combined
+
+
 def _row_for_frame(component_table: pd.DataFrame, frame_id: int) -> pd.Series | None:
     if component_table.empty or frame_id not in component_table.index:
         return None
@@ -162,41 +172,74 @@ def main() -> None:
     )
 
     component_names = component_selection.rendered_components
-    rendered_states: list[dict[str, object]] = []
-
+    pairs_by_modification: dict[int, set[int]] = {}
     for modification_id, game_state_id in state_pairs:
-        modification_data = load_benchmark_modification_data(modification_id, args.input_dir)
-        state, _, _ = build_benchmark_state(
-            modification_data[f"game_state_{game_state_id}"],
-            modification_id=int(modification_id),
-            game_state_id=int(game_state_id),
-            higher_state_id=int(modification_data["higher_state_id"]),
-            build_graphs=False,
-        )
-        component_tables = build_benchmark_component_tables(component_export, state)
-        frame_id = int(state.frame_meta.index.min())
-        output_dir = output_root / f"modification_{modification_id}" / f"game_state_{game_state_id}"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        pairs_by_modification.setdefault(int(modification_id), set()).add(int(game_state_id))
 
-        for component_name in component_names:
-            probs = _probs_for_component_frame(component_name, component_tables, frame_id)
-            image = render_state_image(
-                state,
-                component_name,
-                probs,
-                show_trajectories=args.show_trajectories,
+    rendered_modifications: list[dict[str, object]] = []
+    skipped_modifications: list[dict[str, object]] = []
+
+    for modification_id in sorted(pairs_by_modification):
+        available_game_states = pairs_by_modification[modification_id]
+        if not {1, 2} <= available_game_states:
+            skipped_modifications.append(
+                {
+                    "modification": int(modification_id),
+                    "available_game_states": sorted(int(value) for value in available_game_states),
+                    "reason": "paired_visualization_requires_game_states_1_and_2",
+                }
             )
-            image.save(output_dir / f"{component_name}.png")
+            print(
+                f"Skipping modification_{modification_id}: paired benchmark visualization requires "
+                "both game_state_1 and game_state_2."
+            )
+            continue
 
-        print(f"Saved benchmark visualizations to {output_dir}")
-        rendered_states.append(
+        modification_data = load_benchmark_modification_data(modification_id, args.input_dir)
+        state_contexts: dict[int, tuple[object, dict[str, pd.DataFrame], int]] = {}
+        for game_state_id in (1, 2):
+            state, _, _ = build_benchmark_state(
+                modification_data[f"game_state_{game_state_id}"],
+                modification_id=int(modification_id),
+                game_state_id=int(game_state_id),
+                higher_state_id=int(modification_data["higher_state_id"]),
+                build_graphs=False,
+            )
+            state_contexts[game_state_id] = (
+                state,
+                build_benchmark_component_tables(component_export, state),
+                int(state.frame_meta.index.min()),
+            )
+
+        output_paths: list[str] = []
+        for component_name in component_names:
+            state_images: dict[int, Image.Image] = {}
+            for game_state_id in (1, 2):
+                state, component_tables, frame_id = state_contexts[game_state_id]
+                probs = _probs_for_component_frame(component_name, component_tables, frame_id)
+                state_images[game_state_id] = render_state_image(
+                    state,
+                    component_name,
+                    probs,
+                    show_trajectories=args.show_trajectories,
+                )
+
+            output_path = output_root / f"modification_{modification_id}_{component_name}.png"
+            combine_state_images(state_images[1], state_images[2]).save(output_path)
+            output_paths.append(str(output_path.resolve()))
+
+        print(f"Saved benchmark visualizations for modification_{modification_id} to {output_root}")
+        rendered_modifications.append(
             {
                 "modification": int(modification_id),
-                "game_state": int(game_state_id),
-                "output_dir": str(output_dir.resolve()),
-                "output_paths": [str((output_dir / f"{name}.png").resolve()) for name in component_names],
+                "game_states": [1, 2],
+                "output_dir": str(output_root.resolve()),
+                "output_paths": output_paths,
             }
         )
+
+    if not rendered_modifications:
+        raise ValueError("No benchmark modifications with both game_state_1 and game_state_2 were available to visualize.")
 
     metadata = {
         "run_id": visualization_run_id,
@@ -211,7 +254,8 @@ def main() -> None:
         "component_metadata_run_id": component_metadata.get("run_id"),
         "requested_modifications": [int(value) for value in (args.modification or [])],
         "requested_game_states": [int(value) for value in (args.game_state or [])],
-        "rendered_states": rendered_states,
+        "rendered_modifications": rendered_modifications,
+        "skipped_modifications": skipped_modifications,
         "input_dir": str(Path(args.input_dir).resolve()),
         "show_trajectories": bool(args.show_trajectories),
         "source_models": component_metadata.get("models", {}),

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
+from PIL import Image
 
 from scripts import run_and_visualize_hawkeye
 from scripts import visualize_action_components
@@ -322,13 +323,13 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["rendered_components"], ["pass_success"])
             self.assertIn("pass_score", metadata["disabled_components"])
 
-    def test_benchmark_visualization_nests_outputs_under_run_id(self) -> None:
+    def test_benchmark_visualization_writes_paired_outputs_under_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             args = SimpleNamespace(
                 input_dir=str(root / "benchmark"),
                 modification=[1],
-                game_state=[2],
+                game_state=[1, 2],
                 component_run_id="benchmark_component_1",
                 component_dir=None,
                 run_id="benchmark_visualization_explicit",
@@ -348,15 +349,15 @@ class VisualizationVersioningTests(unittest.TestCase):
                     visualize_benchmark,
                     "load_benchmark_component_run",
                     return_value=(
-                        pd.DataFrame({"modification": [1], "game_state": [2]}),
+                        pd.DataFrame({"modification": [1, 1], "game_state": [1, 2]}),
                         {"run_id": "benchmark_component_1", "models": {"pass_intent": "pass_intent/1"}},
                     ),
                 ),
-                patch.object(visualize_benchmark, "resolve_benchmark_component_states", return_value=[(1, 2)]),
+                patch.object(visualize_benchmark, "resolve_benchmark_component_states", return_value=[(1, 1), (1, 2)]),
                 patch.object(
                     visualize_benchmark,
                     "load_benchmark_modification_data",
-                    return_value={"game_state_2": pd.DataFrame(), "higher_state_id": 2},
+                    return_value={"game_state_1": pd.DataFrame(), "game_state_2": pd.DataFrame(), "higher_state_id": 2},
                 ),
                 patch.object(
                     visualize_benchmark,
@@ -365,20 +366,31 @@ class VisualizationVersioningTests(unittest.TestCase):
                 ),
                 patch.object(visualize_benchmark, "build_benchmark_component_tables", return_value={}),
                 patch.object(visualize_benchmark, "_probs_for_component_frame", return_value=pd.Series(dtype=float)),
-                patch.object(visualize_benchmark, "render_state_image", return_value=FakeImage()),
+                patch.object(visualize_benchmark, "render_state_image", return_value=Image.new("RGB", (10, 8), "white")),
             ):
                 visualize_benchmark.main()
 
             output_root = root / "benchmark_visualization_explicit"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            output_path = output_root / "modification_1" / "game_state_2" / "pass_score.png"
+            output_path = output_root / "modification_1_pass_score.png"
             self.assertTrue(output_path.exists())
+            self.assertFalse((output_root / "modification_1" / "game_state_2" / "pass_score.png").exists())
             self.assertEqual(metadata["component_run_id"], "benchmark_component_1")
-            rendered_state = metadata["rendered_states"][0]
-            self.assertEqual(rendered_state["modification"], 1)
-            self.assertEqual(rendered_state["game_state"], 2)
-            self.assertEqual(rendered_state["output_dir"], str(output_path.parent.resolve()))
-            self.assertIn(str(output_path.resolve()), rendered_state["output_paths"])
+            rendered_modification = metadata["rendered_modifications"][0]
+            self.assertEqual(rendered_modification["modification"], 1)
+            self.assertEqual(rendered_modification["game_states"], [1, 2])
+            self.assertEqual(rendered_modification["output_dir"], str(output_root.resolve()))
+            self.assertIn(str(output_path.resolve()), rendered_modification["output_paths"])
+
+    def test_benchmark_visualization_combines_state_images_vertically(self) -> None:
+        top = Image.new("RGB", (4, 3), "red")
+        bottom = Image.new("RGB", (6, 2), "blue")
+
+        combined = visualize_benchmark.combine_state_images(top, bottom)
+
+        self.assertEqual(combined.size, (6, 5))
+        self.assertEqual(combined.getpixel((0, 0)), (255, 0, 0))
+        self.assertEqual(combined.getpixel((0, 3)), (0, 0, 255))
 
     def test_skillcorner_visualization_records_component_id_and_possession_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -447,6 +459,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 device="cpu",
                 show_trajectories=False,
                 gif=True,
+                bundle_id=None,
                 action_intent_model_id="action_intent/1",
                 pass_intent_model_id="pass_intent/1",
                 pass_success_model_id="pass_success/1",
@@ -480,6 +493,21 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "resolve_model_selection",
+                    return_value=(
+                        {
+                            "action_intent": "action_intent/1",
+                            "pass_intent": "pass_intent/1",
+                            "pass_success": "pass_success/1",
+                            "outcome_scoring": "outcome_scoring/1",
+                            "outcome_conceding": "outcome_conceding/1",
+                        },
+                        {},
+                        None,
+                    ),
+                ),
                 patch.object(run_and_visualize_hawkeye, "load_model", return_value=SimpleNamespace()),
                 patch.object(
                     run_and_visualize_hawkeye,
@@ -508,6 +536,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 device="cpu",
                 show_trajectories=False,
                 gif=False,
+                bundle_id=None,
                 action_intent_model_id="action_intent/1",
                 pass_intent_model_id="pass_intent/1",
                 pass_success_model_id="pass_success/1",
@@ -522,6 +551,10 @@ class VisualizationVersioningTests(unittest.TestCase):
             def fake_load_model(model_id: str, _device: str) -> SimpleNamespace:
                 loaded_ids.append(model_id)
                 return SimpleNamespace()
+
+            def fake_resolve_model_selection(required_tasks: list[str], **_kwargs: object):
+                self.assertEqual(required_tasks, ["outcome_scoring"])
+                return ({"outcome_scoring": "outcome_scoring/1"}, {}, None)
 
             def fake_render_situation(
                 situation_id: str,
@@ -549,6 +582,11 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "resolve_model_selection",
+                    side_effect=fake_resolve_model_selection,
+                ),
                 patch.object(run_and_visualize_hawkeye, "load_model", side_effect=fake_load_model),
                 patch.object(
                     run_and_visualize_hawkeye,
