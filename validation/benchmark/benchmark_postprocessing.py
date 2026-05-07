@@ -17,7 +17,8 @@ from project_config import get_benchmark_component_run_root, resolve_named_compo
 
 VALIDATION_ROOT = Path(__file__).resolve().parent
 INPUT_FILENAME = "benchmark_data.csv"
-OUTPUT_PATH = VALIDATION_ROOT / "benchmark_summary.csv"
+OUTPUT_FILENAME = "benchmark_summary.csv"
+SUMMARY_TEXT_FILENAME = "benchmark_summary.txt"
 
 REQUIRED_COLUMNS = [
     "modification",
@@ -38,6 +39,16 @@ OUTPUT_COLUMNS = [
     "higher_state_id",
     "model_rating",
     "agreement",
+]
+TEXT_SUMMARY_KEYS = [
+    "modifications_total",
+    "modifications_with_game_state_value_1",
+    "modifications_with_game_state_value_2",
+    "modifications_with_both_game_states",
+    "draws",
+    "agreements",
+    "disagreements",
+    "output_rows",
 ]
 
 
@@ -62,7 +73,14 @@ def validate_required_columns(
         raise ValueError(f"{label} is missing required columns: {missing_text}")
 
 
-def load_benchmark_df(component_run_id: str | None) -> tuple[pd.DataFrame, Path, str]:
+def resolve_benchmark_run_root(component_run_id: str | None, output_dir: str | Path | None = None) -> tuple[Path, str]:
+    if output_dir is not None:
+        run_root = Path(output_dir)
+        resolved_run_id = str(component_run_id or run_root.name)
+        if not run_root.exists():
+            raise FileNotFoundError(f"Benchmark component run directory not found at {run_root}.")
+        return run_root, resolved_run_id
+
     resolved_run_id = resolve_named_component_run_id(
         "benchmark_component",
         component_run_id,
@@ -70,13 +88,20 @@ def load_benchmark_df(component_run_id: str | None) -> tuple[pd.DataFrame, Path,
     )
     if resolved_run_id is None:
         raise FileNotFoundError("No benchmark component run id could be resolved.")
+    return get_benchmark_component_run_root(resolved_run_id), resolved_run_id
 
-    input_path = get_benchmark_component_run_root(resolved_run_id) / INPUT_FILENAME
+
+def load_benchmark_df(
+    component_run_id: str | None,
+    output_dir: str | Path | None = None,
+) -> tuple[pd.DataFrame, Path, str, Path]:
+    run_root, resolved_run_id = resolve_benchmark_run_root(component_run_id, output_dir=output_dir)
+    input_path = run_root / INPUT_FILENAME
     if not input_path.exists():
         raise FileNotFoundError(f"Benchmark input CSV not found at {input_path}.")
 
     print(f"Loading benchmark input: {input_path}")
-    return pd.read_csv(input_path), input_path, resolved_run_id
+    return pd.read_csv(input_path), input_path, resolved_run_id, run_root
 
 
 def coerce_numeric_columns(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
@@ -252,22 +277,41 @@ def print_summary(stats: dict[str, int]) -> None:
         print(f"  {key}: {value}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def format_text_summary(stats: dict[str, int]) -> str:
+    lines = [f"{key}: {stats[key]}" for key in TEXT_SUMMARY_KEYS]
+    return "\n".join(lines) + "\n"
 
-    benchmark_df, input_path, resolved_run_id = load_benchmark_df(args.component_run_id)
+
+def run_benchmark_postprocessing(
+    component_run_id: str | None = None,
+    output_dir: str | Path | None = None,
+) -> tuple[pd.DataFrame, dict[str, int], Path, Path]:
+    benchmark_df, input_path, resolved_run_id, run_root = load_benchmark_df(
+        component_run_id,
+        output_dir=output_dir,
+    )
     validate_required_columns(benchmark_df, REQUIRED_COLUMNS, "Benchmark input")
     benchmark_df = coerce_numeric_columns(benchmark_df, NUMERIC_COLUMNS)
 
     summary_df, stats = build_benchmark_summary(benchmark_df)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    summary_df.to_csv(OUTPUT_PATH, index=False)
+    summary_path = run_root / OUTPUT_FILENAME
+    text_summary_path = run_root / SUMMARY_TEXT_FILENAME
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_df.to_csv(summary_path, index=False)
+    text_summary_path.write_text(format_text_summary(stats), encoding="utf-8")
 
     print(f"Resolved benchmark component run id: {resolved_run_id}")
     print(f"Source benchmark CSV: {input_path}")
-    print(f"Saved benchmark summary to: {OUTPUT_PATH}")
+    print(f"Saved benchmark summary to: {summary_path}")
+    print(f"Saved benchmark summary text to: {text_summary_path}")
     print_summary(stats)
+    return summary_df, stats, summary_path, text_summary_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    run_benchmark_postprocessing(args.component_run_id)
     return 0
 
 

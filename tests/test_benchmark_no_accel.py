@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ from models.gnn import GNN
 from physical_pass_model import _candidate_target_indices, compute_graph_player_cum_prob
 from scripts import run_benchmark
 from scripts import train_relevant_models as train_wrapper
+from validation.benchmark import benchmark_postprocessing as benchmark_post
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -257,6 +259,79 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             ]
         ).to_csv(path, index=False)
 
+    @staticmethod
+    def _make_benchmark_postprocessing_df() -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "modification": 1,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.6,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
+                    "modification": 1,
+                    "game_state": 2,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.2,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
+                    "modification": 2,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.1,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
+                    "modification": 2,
+                    "game_state": 2,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.4,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
+                    "modification": 3,
+                    "game_state": 1,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.3,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
+                    "modification": 3,
+                    "game_state": 2,
+                    "higher_state_id": 1,
+                    "pass_intent": 1.0,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 0.3,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+            ]
+        )
+
     def test_benchmark_loader_preserves_players_with_blank_pos_z(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "game_state_1.csv"
@@ -315,6 +390,82 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertIn("1,10,10", csv_export)
         self.assertNotIn("1.0", csv_export)
         self.assertNotIn("10.0", csv_export)
+
+    def test_benchmark_postprocessing_counts_agreements_disagreements_and_draws(self) -> None:
+        summary_df, stats = benchmark_post.build_benchmark_summary(self._make_benchmark_postprocessing_df())
+
+        self.assertEqual(summary_df["model_rating"].tolist(), [1, 2, 0])
+        self.assertEqual(summary_df["agreement"].tolist()[:2], [1, 0])
+        self.assertTrue(pd.isna(summary_df.loc[2, "agreement"]))
+        self.assertEqual(stats["modifications_total"], 3)
+        self.assertEqual(stats["modifications_with_game_state_value_1"], 3)
+        self.assertEqual(stats["modifications_with_game_state_value_2"], 3)
+        self.assertEqual(stats["modifications_with_both_game_states"], 3)
+        self.assertEqual(stats["draws"], 1)
+        self.assertEqual(stats["agreements"], 1)
+        self.assertEqual(stats["disagreements"], 1)
+        self.assertEqual(stats["output_rows"], 3)
+
+    def test_benchmark_postprocessing_writes_run_summary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_root = Path(tmpdir) / "benchmark_component_test"
+            run_root.mkdir()
+            self._make_benchmark_postprocessing_df().to_csv(run_root / "benchmark_data.csv", index=False)
+
+            summary_df, stats, summary_path, text_summary_path = benchmark_post.run_benchmark_postprocessing(
+                "benchmark_component_test",
+                output_dir=run_root,
+            )
+
+            self.assertEqual(summary_path, run_root / "benchmark_summary.csv")
+            self.assertEqual(text_summary_path, run_root / "benchmark_summary.txt")
+            self.assertTrue(summary_path.exists())
+            self.assertTrue(text_summary_path.exists())
+            self.assertEqual(pd.read_csv(summary_path).shape[0], len(summary_df))
+            self.assertEqual(stats["agreements"], 1)
+            self.assertEqual(stats["disagreements"], 1)
+            self.assertEqual(
+                text_summary_path.read_text(encoding="utf-8").splitlines(),
+                [
+                    "modifications_total: 3",
+                    "modifications_with_game_state_value_1: 3",
+                    "modifications_with_game_state_value_2: 3",
+                    "modifications_with_both_game_states: 3",
+                    "draws: 1",
+                    "agreements: 1",
+                    "disagreements: 1",
+                    "output_rows: 3",
+                ],
+            )
+
+    def test_benchmark_runs_ledger_creates_and_replaces_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = Path(tmpdir) / "benchmark_runs.csv"
+
+            run_benchmark.update_benchmark_runs_ledger(
+                "run_a",
+                {"agreements": 3, "disagreements": 1},
+                ledger_path=ledger_path,
+            )
+            run_benchmark.update_benchmark_runs_ledger(
+                "run_a",
+                {"agreements": 1, "disagreements": 1},
+                ledger_path=ledger_path,
+            )
+            run_benchmark.update_benchmark_runs_ledger(
+                "run_b",
+                {"agreements": 0, "disagreements": 0},
+                ledger_path=ledger_path,
+            )
+
+            ledger = pd.read_csv(ledger_path)
+
+        self.assertEqual(ledger.columns.tolist(), ["run_id", "agreements", "disagreements", "performance"])
+        self.assertEqual(ledger["run_id"].tolist(), ["run_a", "run_b"])
+        self.assertEqual(ledger.loc[0, "agreements"], 1)
+        self.assertEqual(ledger.loc[0, "disagreements"], 1)
+        self.assertTrue(math.isclose(ledger.loc[0, "performance"], 0.5))
+        self.assertTrue(pd.isna(ledger.loc[1, "performance"]))
 
     def test_figure_to_rgb_image_tight_false_keeps_canvas_size_stable_when_text_extents_change(self) -> None:
         fig_short, ax_short = plt.subplots(figsize=(4, 3))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,11 @@ from project_config import (
     write_latest_run,
     write_run_metadata,
 )
+from validation.benchmark.benchmark_postprocessing import run_benchmark_postprocessing
+
+
+BENCHMARK_RUNS_LEDGER_FILENAME = "benchmark_runs.csv"
+BENCHMARK_RUNS_LEDGER_COLUMNS = ["run_id", "agreements", "disagreements", "performance"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +68,45 @@ def _coerce_benchmark_identifier_columns(table: pd.DataFrame) -> pd.DataFrame:
         if column in normalized.columns:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce").astype("Int64")
     return normalized
+
+
+def update_benchmark_runs_ledger(
+    run_id: str,
+    stats: dict[str, int],
+    ledger_path: str | Path | None = None,
+) -> Path:
+    path = Path(ledger_path) if ledger_path is not None else BENCHMARK_COMPONENT_RUNS_DIR / BENCHMARK_RUNS_LEDGER_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    agreements = int(stats["agreements"])
+    disagreements = int(stats["disagreements"])
+    comparable_total = agreements + disagreements
+    performance = math.nan if comparable_total == 0 else agreements / comparable_total
+    row = pd.DataFrame(
+        [
+            {
+                "run_id": str(run_id),
+                "agreements": agreements,
+                "disagreements": disagreements,
+                "performance": performance,
+            }
+        ],
+        columns=BENCHMARK_RUNS_LEDGER_COLUMNS,
+    )
+
+    if path.exists():
+        ledger = pd.read_csv(path)
+        for column in BENCHMARK_RUNS_LEDGER_COLUMNS:
+            if column not in ledger.columns:
+                ledger[column] = pd.NA
+        ledger = ledger[BENCHMARK_RUNS_LEDGER_COLUMNS].copy()
+        ledger = ledger.loc[ledger["run_id"].astype(str).ne(str(run_id))]
+        ledger = pd.concat([ledger, row], ignore_index=True)
+    else:
+        ledger = row
+
+    ledger.to_csv(path, index=False)
+    return path
 
 
 def main() -> None:
@@ -205,9 +250,16 @@ def main() -> None:
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == BENCHMARK_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("benchmark_component", component_run_id)
+    _, postprocessing_stats, summary_path, text_summary_path = run_benchmark_postprocessing(
+        component_run_id,
+        output_dir=output_dir,
+    )
+    ledger_path = update_benchmark_runs_ledger(component_run_id, postprocessing_stats)
 
     print(f"Benchmark component run id: {component_run_id}")
     print(f"Saved benchmark components to {parquet_path} and {csv_path}")
+    print(f"Saved benchmark summary to {summary_path} and {text_summary_path}")
+    print(f"Updated benchmark runs ledger at {ledger_path}")
     if skipped_modification_errors or skipped_state_errors:
         print(
             f"Skipped {len(skipped_modification_errors)} modifications and "
