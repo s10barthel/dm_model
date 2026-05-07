@@ -55,6 +55,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "keeper_aware": True,
     "ball_z_aware": True,
     "poss_vel_aware": True,
+    "poss_rel_vel_aware": False,
     "accel_aware": True,
     "extend_features": False,
 }
@@ -65,6 +66,7 @@ LOW_LEVEL_FEATURE_FLAGS = {
     "keeper_aware": "--keeper_aware",
     "ball_z_aware": "--ball_z_aware",
     "poss_vel_aware": "--poss_vel_aware",
+    "poss_rel_vel_aware": "--poss_rel_vel_aware",
     "extend_features": "--extend_features",
 }
 
@@ -167,7 +169,7 @@ def add_bool_override(
 
 def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
     resolved_flags = {
-        name: WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name) is None else bool(getattr(args, name))
+        name: WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
         for name in WRAPPER_FEATURE_DEFAULTS
     }
     if not resolved_flags["possessor_aware"] and resolved_flags["extend_features"]:
@@ -759,8 +761,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser,
         "poss-vel-aware",
         "poss_vel_aware",
-        "Include possessor-velocity relation features during training.",
-        "Disable possessor-velocity relation features during training.",
+        "Include the ball possessor's own velocity features during training.",
+        "Disable the ball possessor's own velocity features during training.",
+    )
+    add_bool_override(
+        parser,
+        "poss-rel-vel-aware",
+        "poss_rel_vel_aware",
+        "Include player velocity relative to the ball possessor's velocity during training.",
+        "Disable player velocity relative to the ball possessor's velocity during training.",
     )
     add_bool_override(
         parser,

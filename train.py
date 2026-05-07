@@ -74,7 +74,13 @@ parser.add_argument("--xy_only", action="store_true", default=False, help="only 
 parser.add_argument("--possessor_aware", action="store_true", default=False, help="use possessor features")
 parser.add_argument("--keeper_aware", action="store_true", default=False, help="distinguish keeper & goal nodes")
 parser.add_argument("--ball_z_aware", action="store_true", default=False, help="consider the ball height")
-parser.add_argument("--poss_vel_aware", action="store_true", default=False, help="consider possessor's velocity")
+parser.add_argument("--poss_vel_aware", action="store_true", default=False, help="consider the possessor's own velocity")
+parser.add_argument(
+    "--poss_rel_vel_aware",
+    action="store_true",
+    default=False,
+    help="consider player velocity relative to the possessor's velocity",
+)
 accel_group = parser.add_mutually_exclusive_group()
 accel_group.add_argument(
     "--accel",
@@ -617,6 +623,7 @@ if __name__ == "__main__":
         "keeper_aware": args.keeper_aware,
         "ball_z_aware": args.ball_z_aware,
         "poss_vel_aware": args.poss_vel_aware,
+        "poss_rel_vel_aware": args.poss_rel_vel_aware,
         "accel_aware": args.accel_aware,
         "extend_features": args.extend_features,
         "drop_non_blockers": args.filter_blockers,

@@ -30,6 +30,7 @@ TRAINING_WRAPPER_FEATURE_DEFAULTS = {
     "keeper_aware": True,
     "ball_z_aware": True,
     "poss_vel_aware": True,
+    "poss_rel_vel_aware": False,
     "extend_features": False,
 }
 
@@ -39,6 +40,7 @@ WRAPPER_OVERRIDE_FLAGS = {
     "keeper_aware": ("--keeper-aware", "--no-keeper-aware"),
     "ball_z_aware": ("--ball-z-aware", "--no-ball-z-aware"),
     "poss_vel_aware": ("--poss-vel-aware", "--no-poss-vel-aware"),
+    "poss_rel_vel_aware": ("--poss-rel-vel-aware", "--no-poss-rel-vel-aware"),
     "extend_features": ("--extend-features", "--no-extend-features"),
 }
 
@@ -58,7 +60,7 @@ def add_bool_override(
 
 def resolve_training_feature_overrides(args: argparse.Namespace) -> dict[str, bool]:
     resolved_flags = {
-        name: TRAINING_WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name) is None else bool(getattr(args, name))
+        name: TRAINING_WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
         for name in TRAINING_WRAPPER_FEATURE_DEFAULTS
     }
     if not resolved_flags["possessor_aware"] and resolved_flags["extend_features"]:
@@ -187,8 +189,15 @@ def parse_args() -> argparse.Namespace:
         parser,
         "poss-vel-aware",
         "poss_vel_aware",
-        "Train downstream models with possessor-velocity relation features.",
-        "Disable possessor-velocity relation features for downstream training.",
+        "Train downstream models with the ball possessor's own velocity features.",
+        "Disable the ball possessor's own velocity features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "poss-rel-vel-aware",
+        "poss_rel_vel_aware",
+        "Train downstream models with player velocity relative to the ball possessor's velocity.",
+        "Disable player velocity relative to the ball possessor's velocity for downstream training.",
     )
     add_bool_override(
         parser,
@@ -441,7 +450,7 @@ def append_bundle_flag(command: list[str], bundle_id: str | None) -> list[str]:
 def append_training_feature_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
     for name, (enabled_flag, disabled_flag) in WRAPPER_OVERRIDE_FLAGS.items():
-        value = getattr(args, name)
+        value = getattr(args, name, None)
         if value is True:
             command.append(enabled_flag)
         elif value is False:

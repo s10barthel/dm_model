@@ -95,6 +95,7 @@ class ActionDataset(Dataset):
         keeper_aware=True,
         ball_z_aware=True,
         poss_vel_aware=True,
+        poss_rel_vel_aware=False,
         accel_aware=True,
         extend_features=True,
         drop_non_blockers=False,
@@ -292,9 +293,11 @@ class ActionDataset(Dataset):
                 assert not extend_features
                 graph.x[:, 13:] = 0
 
-            if not poss_vel_aware:  # Ignore the features related to the ball possessor's velocity
+            if not poss_vel_aware:  # Ignore the ball possessor's own velocity features
                 if possessor_aware:
                     graph.x[graph.x[:, 13] == 1, 5:9] = 0
+
+            if not poss_rel_vel_aware:  # Ignore player velocity relative to the ball possessor's velocity
                 graph.x[:, 17:19] = 0
 
             if not keeper_aware:  # Do not distinguish between goalkeepers and outfield players

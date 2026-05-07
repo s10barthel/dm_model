@@ -1296,6 +1296,8 @@ def filter_features_and_labels(
         if not args["poss_vel_aware"]:
             if args["possessor_aware"]:
                 graph.x[graph.x[:, 13] == 1, 5:9] = 0
+
+        if not args.get("poss_rel_vel_aware", False):
             graph.x[:, 17:19] = 0
 
         if not args["keeper_aware"]:

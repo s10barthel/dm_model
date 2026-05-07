@@ -34,9 +34,13 @@ def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
     x = torch.zeros((2, node_dim), dtype=torch.float32)
     x[:, 0] = 1
     x[0, 13] = 1
+    x[:, 5] = 5
+    x[:, 6] = 6
     x[:, 7] = 7
     x[:, 8] = 8
     x[:, 9] = 9
+    x[:, 17] = 17
+    x[:, 18] = 18
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     edge_attr = torch.ones((edge_index.shape[1], edge_dim), dtype=torch.float32)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
@@ -406,6 +410,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 keeper_aware=None,
                 ball_z_aware=None,
                 poss_vel_aware=None,
+                poss_rel_vel_aware=None,
                 accel_aware=False,
                 extend_features=None,
             )
@@ -419,6 +424,90 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["accel_aware"])
         self.assertIn("--no-accel", commands[0])
         self.assertNotIn("--accel", commands[0])
+
+    def test_build_training_commands_default_velocity_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                accel_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertTrue(feature_flags["poss_vel_aware"])
+        self.assertFalse(feature_flags["poss_rel_vel_aware"])
+        self.assertIn("--poss_vel_aware", commands[0])
+        self.assertNotIn("--poss_rel_vel_aware", commands[0])
+
+    def test_build_training_commands_forward_split_velocity_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=False,
+                poss_rel_vel_aware=True,
+                accel_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertFalse(feature_flags["poss_vel_aware"])
+        self.assertTrue(feature_flags["poss_rel_vel_aware"])
+        self.assertNotIn("--poss_vel_aware", commands[0])
+        self.assertIn("--poss_rel_vel_aware", commands[0])
 
     def test_build_training_commands_emit_possessor_masked_velocity_edge_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -448,6 +537,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 keeper_aware=None,
                 ball_z_aware=None,
                 poss_vel_aware=None,
+                poss_rel_vel_aware=None,
                 accel_aware=None,
                 extend_features=None,
             )
@@ -1574,6 +1664,72 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 8], torch.zeros_like(graph.x[:, 8])))
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
+
+    def test_action_dataset_splits_possessor_and_relative_velocity_masks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                poss_vel_aware=False,
+                poss_rel_vel_aware=True,
+            )
+
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[0, 5:9], torch.zeros(4)))
+        self.assertTrue(torch.equal(graph.x[1, 5:9], torch.tensor([5.0, 6.0, 7.0, 8.0])))
+        self.assertTrue(torch.equal(graph.x[:, 17], torch.full_like(graph.x[:, 17], 17)))
+        self.assertTrue(torch.equal(graph.x[:, 18], torch.full_like(graph.x[:, 18], 18)))
+
+    def test_action_dataset_default_masks_relative_velocity_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+            )
+
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[0, 5:9], torch.tensor([5.0, 6.0, 7.0, 8.0])))
+        self.assertTrue(torch.equal(graph.x[:, 17:19], torch.zeros_like(graph.x[:, 17:19])))
+
+    def test_action_dataset_can_mask_both_possessor_velocity_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                poss_vel_aware=False,
+                poss_rel_vel_aware=False,
+            )
+
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[0, 5:9], torch.zeros(4)))
+        self.assertTrue(torch.equal(graph.x[:, 17:19], torch.zeros_like(graph.x[:, 17:19])))
 
     def test_filter_features_and_labels_masks_only_possessor_velocity_edges(self) -> None:
         labels = make_labels()
