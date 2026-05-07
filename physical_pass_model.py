@@ -171,6 +171,22 @@ def _resolve_simulate_passes_fn() -> Callable[..., Any]:
     return simulate_passes_chunked
 
 
+def _validate_simulation_contract(
+    *,
+    players: np.ndarray,
+    passers: np.ndarray,
+    exclude_passer: bool,
+) -> None:
+    if not exclude_passer:
+        return
+    missing_passers = [str(passer) for passer in np.asarray(passers, dtype=object).tolist() if passer not in players.tolist()]
+    if missing_passers:
+        raise ValueError(
+            "accessible-space requires every passer id to be present in the simulation players array when "
+            f"exclude_passer=True. Missing passers: {missing_passers}."
+        )
+
+
 def _build_simulation_inputs(
     graph: Data,
     *,
@@ -225,7 +241,7 @@ def _build_simulation_inputs(
         for node_index in player_indices
         if node_index != possessor_index and int(x[node_index, config.NODE_FEATURE_IS_TEAMMATE].item()) == 0
     ]
-    frame_player_indices = [[graph_target_index] + defender_indices for graph_target_index in candidate_indices]
+    frame_player_indices = [[possessor_index, graph_target_index] + defender_indices for graph_target_index in candidate_indices]
     player_counts = {len(indices) for indices in frame_player_indices}
     if len(player_counts) != 1:
         raise ValueError(f"Physical xPass reduced simulation player count must be constant across candidates, got {sorted(player_counts)}.")
@@ -234,12 +250,12 @@ def _build_simulation_inputs(
         [x[indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy() for indices in frame_player_indices],
         axis=0,
     )
-    player_teams = np.array(["attack"] + ["defense"] * len(defender_indices), dtype=object)
+    player_teams = np.array(["attack", "attack"] + ["defense"] * len(defender_indices), dtype=object)
     players = np.array(
-        ["target_player"] + [str(graph.node_ids[idx]) for idx in defender_indices],
+        [str(graph.node_ids[possessor_index]), "target_player"] + [str(graph.node_ids[idx]) for idx in defender_indices],
         dtype=object,
     )
-    target_index_lookup = {graph_target_index: 0 for graph_target_index in candidate_indices}
+    target_index_lookup = {graph_target_index: 1 for graph_target_index in candidate_indices}
     return (
         player_pos,
         player_teams,
@@ -293,6 +309,7 @@ def compute_graph_player_cum_prob(
     )
     possessor_index = int(torch.nonzero(x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1, as_tuple=False).item())
     passers = np.repeat(node_ids[possessor_index], frame_count).astype(object)
+    _validate_simulation_contract(players=players, passers=passers, exclude_passer=True)
 
     simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
     simulation_result = simulate_passes_fn(
