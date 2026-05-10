@@ -45,6 +45,27 @@ def requires_goal_next10_diagnostics(task: str | None) -> bool:
     return str(task) in OUTCOME_DIAGNOSTIC_TASKS
 
 
+def _increment_count(counts: dict[str, int], key: str) -> None:
+    counts[key] = int(counts.get(key, 0)) + 1
+
+
+def pass_success_observed_target_invalid_reason(graph: Data, labels: torch.Tensor) -> str | None:
+    target_index = int(labels[LABEL_INDEX["intent_index"]].item())
+    if target_index < 0 or target_index >= int(graph.x.shape[0]):
+        return "target_index_out_of_bounds"
+
+    target = graph.x[target_index]
+    if int(target[config.NODE_FEATURE_IS_TEAMMATE].item()) != 1:
+        return "target_not_teammate"
+    if int(target[config.NODE_FEATURE_IS_POSSESSOR].item()) == 1:
+        return "target_is_possessor"
+    if graph.x.shape[1] > config.NODE_FEATURE_IS_GOAL and int(target[config.NODE_FEATURE_IS_GOAL].item()) == 1:
+        return "target_is_goal"
+    if not bool(torch.isfinite(target[config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]).all().item()):
+        return "target_nonfinite_xy"
+    return None
+
+
 def _has_label_columns(labels: torch.Tensor, columns: tuple[str, ...]) -> bool:
     return labels.shape[1] > max(LABEL_INDEX[column] for column in columns)
 
@@ -130,6 +151,7 @@ class ActionDataset(Dataset):
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
+        self.skipped_rows: dict[str, int] = {}
         self.use_physical_xpass = bool(use_physical_xpass)
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
         self.physical_eps = float(physical_eps)
@@ -280,12 +302,14 @@ class ActionDataset(Dataset):
             graph_labels: torch.Tensor = labels[i]
 
             if graph is None:
+                _increment_count(self.skipped_rows, "graph_none")
                 continue
             graph = adapt_graph_edge_features(graph, getattr(self, "edge_in_dim", None))
 
             try:
                 possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
             except RuntimeError:
+                _increment_count(self.skipped_rows, "missing_or_ambiguous_possessor")
                 continue
             if self.mask_possessor_v_edge_features:
                 graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
@@ -297,6 +321,7 @@ class ActionDataset(Dataset):
 
                 # Skip mislabeled failures where the recorded receiver is not an opponent
                 if receiver_index < 0 or receiver_index >= n_opponents:
+                    _increment_count(self.skipped_rows, "invalid_failure_receiver")
                     continue
 
             if xy_only:  # Do not refer to handcrafted features
@@ -346,6 +371,12 @@ class ActionDataset(Dataset):
                     graph_labels,
                     config.NODE_FEATURE_IS_POSSESSOR,
                 )
+
+            if task == "pass_success":
+                invalid_reason = pass_success_observed_target_invalid_reason(graph, graph_labels)
+                if invalid_reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_pass_success_target:{invalid_reason}")
+                    continue
 
             if sparsify == "distance":
                 assert possessor_aware

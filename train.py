@@ -318,6 +318,19 @@ def log_skipped_matches(name: str, dataset: ActionDataset, trial_path: str, max_
         printlog(f"  ... and {len(skipped) - max_items} more", trial_path)
 
 
+def log_skipped_rows(name: str, dataset: ActionDataset, trial_path: str, max_items: int = 10) -> None:
+    skipped = getattr(dataset, "skipped_rows", {})
+    if not skipped:
+        return
+
+    total = sum(int(count) for count in skipped.values())
+    printlog(f"Skipped {total} {name} rows during dataset assembly.", trial_path)
+    for reason, count in sorted(skipped.items())[:max_items]:
+        printlog(f"  {reason}: {int(count)}", trial_path)
+    if len(skipped) > max_items:
+        printlog(f"  ... and {len(skipped) - max_items} more", trial_path)
+
+
 def resolve_training_device(requested_device: str | None) -> str:
     if requested_device:
         device = str(requested_device)
@@ -667,6 +680,8 @@ if __name__ == "__main__":
     )
     log_skipped_matches("training", train_dataset, trial_path)
     log_skipped_matches("validation", valid_dataset, trial_path)
+    log_skipped_rows("training", train_dataset, trial_path)
+    log_skipped_rows("validation", valid_dataset, trial_path)
     if len(train_dataset) == 0:
         raise ValueError("No usable training samples remained after loading graph and label artifacts.")
     if len(valid_dataset) == 0:

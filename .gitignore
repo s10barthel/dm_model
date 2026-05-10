@@ -22,6 +22,7 @@ tests/*.py
 !tests/test_return_type_in_state.py
 !tests/test_graph_feature_regressions.py
 !tests/test_feature_run_extension.py
+!tests/test_physical_xpass.py
 !tests/test_skillcorner_postprocessing.py
 !tests/test_skillcorner_filter.py
 !tests/test_visualization_versioning.py
