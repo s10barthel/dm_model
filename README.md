@@ -892,8 +892,9 @@ Generate sidecars once for a feature run:
 
 ```powershell
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id>
-python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite
-python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite --speed-aggregation package_max --num-workers auto --physical-batch-size 16
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite --num-workers 1
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100 --num-workers 1
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --reuse-cache-dir data/features/runs/<old_feature_run_id>/physical_xpass --overwrite
 ```
 
@@ -907,7 +908,22 @@ python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --ov
 
 By default, `--consider-teammates` includes all finite non-goal players in the AS-default max simulation. Use `--ignore-teammates` to compute each candidate with only the passer, the target teammate, and all defenders; in that reduced mode, the passer is present only so `accessible-space` can exclude it from interception competition. These two policies produce different sidecar semantics and are not interchangeable.
 
-`--reuse-cache-dir` can copy compatible rows from an existing physical xPass cache and compute only missing or hash-mismatched actions. Reuse requires the same source, teammate policy, AS-default parameters, and `physical_eps`. New rows include `physical_state_hash`; rows from compatible caches without a hash are reused under a trust-metadata policy and counted in metadata. Old target-location caches cannot be reused.
+Speed aggregation has two modes:
+
+- `--speed-aggregation package_max` is the default and fastest path. It passes the full AS/DAS speed grid, `3..30 m/s` with 15 speeds, into `accessible-space` in one call per compatible batch using `v0_prob_aggregation_mode="max"`.
+- `--speed-aggregation exact_separate_speed` preserves the older exact semantics by simulating each speed separately, then taking the max over speeds, angles, and on-pitch ray distances.
+
+Before a full regeneration, compare the modes on a sample:
+
+```powershell
+python scripts/compare_physical_xpass_speed_modes.py --feature-run-id <feature_run_id> --limit 200 --num-workers auto
+```
+
+The report is written under `data/features/runs/<feature_run_id>/physical_xpass/comparisons/` and includes runtime, speedup, absolute-difference quantiles, correlations, and top-option agreement. If `package_max` differs too much for your use case, regenerate with `--speed-aggregation exact_separate_speed`.
+
+`--num-workers auto` resolves to 6 workers on a 16-logical-core machine. `--worker-thread-limit 1` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` per worker to avoid oversubscription. `--limit` is only allowed with `--num-workers 1`, so limited smoke tests stay deterministic.
+
+`--reuse-cache-dir` can copy compatible rows from an existing physical xPass cache and compute only missing or hash-mismatched actions. Reuse requires the same source, teammate policy, speed aggregation, AS-default parameters, and `physical_eps`. New rows include `physical_state_hash`; rows from compatible caches without a hash are reused under a trust-metadata policy and counted in metadata. Old target-location caches cannot be reused.
 
 Train pass success with the recommended default:
 
@@ -917,7 +933,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing during training or normal Sportec feature-run inference, the run fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
 
-Benchmark, HawkEye, and SkillCorner runtime states do not have reusable Sportec match sidecars. When a physical pass-success checkpoint is used there and no sidecar exists for the synthetic state id, inference computes physical xPass online from the in-memory graph. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new checkpoints use the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the checkpoint's expected source.
+Benchmark, HawkEye, and SkillCorner runtime states do not have reusable Sportec match sidecars. When a physical pass-success checkpoint is used there and no sidecar exists for the synthetic state id, inference computes physical xPass online from the in-memory graph. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new checkpoints use the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the checkpoint's expected source and speed aggregation.
 
 The main model variant is a prior-like logit offset:
 

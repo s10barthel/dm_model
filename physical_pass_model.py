@@ -25,6 +25,13 @@ PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
+PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX = "package_max"
+PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED = "exact_separate_speed"
+PHYSICAL_XPASS_SPEED_AGGREGATIONS = {
+    PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+    PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+}
+PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION = PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX
 PHYSICAL_MODEL_VARIANTS = {
     "gat_baseline",
     "gat_plus_phys_feature",
@@ -69,16 +76,20 @@ AS_DEFAULT_EXCLUDE_PASSER = False
 
 def physical_xpass_as_default_metadata(
     teammate_policy: str = PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+    *,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
             f"Unsupported teammate_policy={teammate_policy!r}. "
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
         )
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     return {
         "metric": "max_player_cum_prob",
         "source": PHYSICAL_XPASS_SOURCE,
         "teammate_policy": teammate_policy,
+        "speed_aggregation": speed_aggregation,
         "coordinate_system": "centered_pitch",
         "n_angles": AS_DEFAULT_N_ANGLES,
         "phi_offset": AS_DEFAULT_PHI_OFFSET,
@@ -98,7 +109,11 @@ def physical_xpass_as_default_metadata(
         "inertial_seconds": AS_DEFAULT_INERTIAL_SECONDS,
         "tol_distance": AS_DEFAULT_TOL_DISTANCE,
         "use_approx_two_point": AS_DEFAULT_USE_APPROX_TWO_POINT,
-        "v0_prob_aggregation_mode": AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
+        "v0_prob_aggregation_mode": (
+            "max"
+            if speed_aggregation == PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX
+            else AS_DEFAULT_V0_PROB_AGGREGATION_MODE
+        ),
         "normalize": AS_DEFAULT_NORMALIZE,
         "use_efficient_sigmoid": AS_DEFAULT_USE_EFFICIENT_SIGMOID,
         "factor": AS_DEFAULT_FACTOR,
@@ -108,7 +123,24 @@ def physical_xpass_as_default_metadata(
     }
 
 
-def validate_physical_xpass_cache_metadata(cache_dir: str | Path, *, expected_source: str | None = None) -> dict[str, Any]:
+def normalize_physical_xpass_speed_aggregation(value: str | None) -> str:
+    if value is None:
+        return PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED
+    value = str(value)
+    if value not in PHYSICAL_XPASS_SPEED_AGGREGATIONS:
+        raise ValueError(
+            f"Unsupported physical_xpass_speed_aggregation={value!r}. "
+            f"Expected one of {sorted(PHYSICAL_XPASS_SPEED_AGGREGATIONS)}."
+        )
+    return value
+
+
+def validate_physical_xpass_cache_metadata(
+    cache_dir: str | Path,
+    *,
+    expected_source: str | None = None,
+    expected_speed_aggregation: str | None = None,
+) -> dict[str, Any]:
     metadata_path = Path(cache_dir) / "metadata.json"
     expected_source = expected_source or PHYSICAL_XPASS_SOURCE
     if expected_source not in PHYSICAL_XPASS_SOURCES:
@@ -130,6 +162,14 @@ def validate_physical_xpass_cache_metadata(cache_dir: str | Path, *, expected_so
             f"Physical xPass sidecars at {cache_dir} use incompatible source {source!r}; "
             f"expected {expected_source!r}. {rerun_message}"
         )
+    if expected_speed_aggregation is not None and source == PHYSICAL_XPASS_SOURCE:
+        actual_speed_aggregation = normalize_physical_xpass_speed_aggregation(metadata.get("speed_aggregation"))
+        expected_speed_aggregation = normalize_physical_xpass_speed_aggregation(expected_speed_aggregation)
+        if actual_speed_aggregation != expected_speed_aggregation:
+            raise ValueError(
+                f"Physical xPass sidecars at {cache_dir} use incompatible speed_aggregation "
+                f"{actual_speed_aggregation!r}; expected {expected_speed_aggregation!r}. {rerun_message}"
+            )
     return metadata
 
 
@@ -179,6 +219,13 @@ def physical_xpass_teammate_policy(args: Any, *, source: str | None = None) -> s
     return policy
 
 
+def physical_xpass_speed_aggregation(args: Any) -> str:
+    value = _get_arg(args, "physical_xpass_speed_aggregation", None)
+    if value is None:
+        value = _get_arg(args, "speed_aggregation", None)
+    return normalize_physical_xpass_speed_aggregation(value)
+
+
 def model_uses_physical_xpass(args: Any) -> bool:
     task = _get_arg(args, "task", None)
     return task == "pass_success" and physical_xpass_enabled(args) and physical_xpass_model_variant(args) in PHYSICAL_XPASS_VARIANTS
@@ -196,6 +243,8 @@ def validate_physical_xpass_args(args: Any) -> None:
         raise ValueError("--residual-regularization-lambda must be non-negative.")
     if residual_clip_value is not None and float(residual_clip_value) <= 0:
         raise ValueError("--residual-clip-value must be positive when provided.")
+    if _get_arg(args, "physical_xpass_speed_aggregation", None) is not None or _get_arg(args, "speed_aggregation", None) is not None:
+        physical_xpass_speed_aggregation(args)
     if physical_xpass_enabled(args) and _get_arg(args, "task", None) != "pass_success":
         raise ValueError("--use_physical_xpass is only supported for task=pass_success.")
     if physical_xpass_enabled(args) and variant == "gat_baseline":
@@ -556,6 +605,100 @@ def _on_pitch_mask(simulation_result: Any, frame_index: int = 0) -> np.ndarray:
     )
 
 
+def _update_as_default_maxima_from_simulation_result(
+    *,
+    maxima: dict[int, float],
+    simulation_result: Any,
+    candidate_indices: list[int],
+    target_index_lookup: dict[int, tuple[int, int]],
+    frame_count: int,
+    player_count: int,
+) -> None:
+    player_cum_prob = np.asarray(getattr(simulation_result, "player_cum_prob", None), dtype=float)
+    if player_cum_prob.ndim != 4:
+        raise ValueError(
+            "accessible-space simulation_result.player_cum_prob must be 4D "
+            f"[frame, player, angle, distance], got shape={player_cum_prob.shape}."
+        )
+    if (
+        player_cum_prob.shape[0] != frame_count
+        or player_cum_prob.shape[1] != player_count
+        or player_cum_prob.shape[2] != AS_DEFAULT_N_ANGLES
+    ):
+        raise ValueError(
+            "Unexpected player_cum_prob shape for AS-default physical xPass: "
+            f"{player_cum_prob.shape}, frames={frame_count}, players={player_count}, "
+            f"n_angles={AS_DEFAULT_N_ANGLES}."
+        )
+    for graph_target_index in candidate_indices:
+        frame_index, target_sim_index = target_index_lookup[graph_target_index]
+        on_pitch = _on_pitch_mask(simulation_result, frame_index=frame_index)
+        if on_pitch.shape != player_cum_prob.shape[2:]:
+            raise ValueError(
+                f"On-pitch mask shape {on_pitch.shape} does not match "
+                f"player_cum_prob grid {player_cum_prob.shape[2:]}."
+            )
+        values = np.where(on_pitch, player_cum_prob[frame_index, target_sim_index, :, :], np.nan)
+        if np.isfinite(values).any():
+            maxima[graph_target_index] = max(maxima[graph_target_index], float(np.nanmax(values)))
+
+
+def _as_default_simulation_kwargs(
+    *,
+    PLAYER_POS: np.ndarray,
+    BALL_POS: np.ndarray,
+    phi_grid: np.ndarray,
+    v0_grid: np.ndarray,
+    passer_teams: np.ndarray,
+    player_teams: np.ndarray,
+    players: np.ndarray,
+    passers: np.ndarray,
+    exclude_passer: bool,
+    playing_direction: np.ndarray,
+    use_progress_bar: bool,
+    chunk_size: int,
+    v0_prob_aggregation_mode: str,
+) -> dict[str, Any]:
+    return {
+        "PLAYER_POS": PLAYER_POS,
+        "BALL_POS": BALL_POS,
+        "phi_grid": phi_grid,
+        "v0_grid": v0_grid,
+        "passer_teams": passer_teams,
+        "player_teams": player_teams,
+        "players": players,
+        "passers": passers,
+        "exclude_passer": bool(exclude_passer),
+        "respect_offside": AS_DEFAULT_RESPECT_OFFSIDE,
+        "playing_direction": playing_direction,
+        "x_pitch_min": -FIELD_SIZE[0] / 2.0,
+        "x_pitch_max": FIELD_SIZE[0] / 2.0,
+        "y_pitch_min": -FIELD_SIZE[1] / 2.0,
+        "y_pitch_max": FIELD_SIZE[1] / 2.0,
+        "use_progress_bar": use_progress_bar,
+        "chunk_size": chunk_size,
+        "fields_to_return": ("player_cum_prob",),
+        "normalize": AS_DEFAULT_NORMALIZE,
+        "pass_start_location_offset": AS_DEFAULT_PASS_START_LOCATION_OFFSET,
+        "time_offset_ball": AS_DEFAULT_TIME_OFFSET_BALL,
+        "radial_gridsize": AS_DEFAULT_RADIAL_GRIDSIZE,
+        "b0": AS_DEFAULT_B0,
+        "b1": AS_DEFAULT_B1,
+        "player_velocity": AS_DEFAULT_PLAYER_VELOCITY,
+        "keep_inertial_velocity": AS_DEFAULT_KEEP_INERTIAL_VELOCITY,
+        "use_max": AS_DEFAULT_USE_MAX,
+        "v_max": AS_DEFAULT_V_MAX,
+        "a_max": AS_DEFAULT_A_MAX,
+        "inertial_seconds": AS_DEFAULT_INERTIAL_SECONDS,
+        "tol_distance": AS_DEFAULT_TOL_DISTANCE,
+        "use_approx_two_point": AS_DEFAULT_USE_APPROX_TWO_POINT,
+        "v0_prob_aggregation_mode": v0_prob_aggregation_mode,
+        "use_efficient_sigmoid": AS_DEFAULT_USE_EFFICIENT_SIGMOID,
+        "factor": AS_DEFAULT_FACTOR,
+        "factor2": AS_DEFAULT_FACTOR2,
+    }
+
+
 def _compute_as_default_max_from_simulation_inputs(
     *,
     node_ids: list[str],
@@ -572,7 +715,9 @@ def _compute_as_default_max_from_simulation_inputs(
     simulate_passes_fn: Callable[..., Any] | None,
     use_progress_bar: bool,
     chunk_size: int,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
 ) -> pd.Series:
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     result = pd.Series(np.nan, index=node_ids, dtype=float)
     frame_count = int(player_pos.shape[0])
     PLAYER_POS = np.asarray(player_pos, dtype=float)
@@ -595,72 +740,59 @@ def _compute_as_default_max_from_simulation_inputs(
 
     simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
     maxima = {node_index: -np.inf for node_index in candidate_indices}
-    for speed in v0_values:
+    if speed_aggregation == PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX:
         simulation_result = simulate_passes_fn(
-            PLAYER_POS=PLAYER_POS,
-            BALL_POS=BALL_POS,
-            phi_grid=phi_grid,
-            v0_grid=np.full((frame_count, 1), float(speed), dtype=float),
-            passer_teams=passer_teams,
-            player_teams=player_teams,
-            players=players,
-            passers=passers,
-            exclude_passer=bool(exclude_passer),
-            respect_offside=AS_DEFAULT_RESPECT_OFFSIDE,
-            playing_direction=np.repeat(float(playing_direction), frame_count),
-            x_pitch_min=-FIELD_SIZE[0] / 2.0,
-            x_pitch_max=FIELD_SIZE[0] / 2.0,
-            y_pitch_min=-FIELD_SIZE[1] / 2.0,
-            y_pitch_max=FIELD_SIZE[1] / 2.0,
-            use_progress_bar=use_progress_bar,
-            chunk_size=chunk_size,
-            fields_to_return=("player_cum_prob",),
-            normalize=AS_DEFAULT_NORMALIZE,
-            pass_start_location_offset=AS_DEFAULT_PASS_START_LOCATION_OFFSET,
-            time_offset_ball=AS_DEFAULT_TIME_OFFSET_BALL,
-            radial_gridsize=AS_DEFAULT_RADIAL_GRIDSIZE,
-            b0=AS_DEFAULT_B0,
-            b1=AS_DEFAULT_B1,
-            player_velocity=AS_DEFAULT_PLAYER_VELOCITY,
-            keep_inertial_velocity=AS_DEFAULT_KEEP_INERTIAL_VELOCITY,
-            use_max=AS_DEFAULT_USE_MAX,
-            v_max=AS_DEFAULT_V_MAX,
-            a_max=AS_DEFAULT_A_MAX,
-            inertial_seconds=AS_DEFAULT_INERTIAL_SECONDS,
-            tol_distance=AS_DEFAULT_TOL_DISTANCE,
-            use_approx_two_point=AS_DEFAULT_USE_APPROX_TWO_POINT,
-            v0_prob_aggregation_mode=AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
-            use_efficient_sigmoid=AS_DEFAULT_USE_EFFICIENT_SIGMOID,
-            factor=AS_DEFAULT_FACTOR,
-            factor2=AS_DEFAULT_FACTOR2,
+            **_as_default_simulation_kwargs(
+                PLAYER_POS=PLAYER_POS,
+                BALL_POS=BALL_POS,
+                phi_grid=phi_grid,
+                v0_grid=np.repeat(v0_values[np.newaxis, :], frame_count, axis=0),
+                passer_teams=passer_teams,
+                player_teams=player_teams,
+                players=players,
+                passers=passers,
+                exclude_passer=exclude_passer,
+                playing_direction=np.repeat(float(playing_direction), frame_count),
+                use_progress_bar=use_progress_bar,
+                chunk_size=chunk_size,
+                v0_prob_aggregation_mode="max",
+            )
         )
-        player_cum_prob = np.asarray(getattr(simulation_result, "player_cum_prob", None), dtype=float)
-        if player_cum_prob.ndim != 4:
-            raise ValueError(
-                "accessible-space simulation_result.player_cum_prob must be 4D "
-                f"[frame, player, angle, distance], got shape={player_cum_prob.shape}."
-            )
-        if (
-            player_cum_prob.shape[0] != frame_count
-            or player_cum_prob.shape[1] != len(players)
-            or player_cum_prob.shape[2] != AS_DEFAULT_N_ANGLES
-        ):
-            raise ValueError(
-                "Unexpected player_cum_prob shape for AS-default physical xPass: "
-                f"{player_cum_prob.shape}, frames={frame_count}, players={len(players)}, "
-                f"n_angles={AS_DEFAULT_N_ANGLES}."
-            )
-        for graph_target_index in candidate_indices:
-            frame_index, target_sim_index = target_index_lookup[graph_target_index]
-            on_pitch = _on_pitch_mask(simulation_result, frame_index=frame_index)
-            if on_pitch.shape != player_cum_prob.shape[2:]:
-                raise ValueError(
-                    f"On-pitch mask shape {on_pitch.shape} does not match "
-                    f"player_cum_prob grid {player_cum_prob.shape[2:]}."
+        _update_as_default_maxima_from_simulation_result(
+            maxima=maxima,
+            simulation_result=simulation_result,
+            candidate_indices=candidate_indices,
+            target_index_lookup=target_index_lookup,
+            frame_count=frame_count,
+            player_count=len(players),
+        )
+    else:
+        for speed in v0_values:
+            simulation_result = simulate_passes_fn(
+                **_as_default_simulation_kwargs(
+                    PLAYER_POS=PLAYER_POS,
+                    BALL_POS=BALL_POS,
+                    phi_grid=phi_grid,
+                    v0_grid=np.full((frame_count, 1), float(speed), dtype=float),
+                    passer_teams=passer_teams,
+                    player_teams=player_teams,
+                    players=players,
+                    passers=passers,
+                    exclude_passer=exclude_passer,
+                    playing_direction=np.repeat(float(playing_direction), frame_count),
+                    use_progress_bar=use_progress_bar,
+                    chunk_size=chunk_size,
+                    v0_prob_aggregation_mode=AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
                 )
-            values = np.where(on_pitch, player_cum_prob[frame_index, target_sim_index, :, :], np.nan)
-            if np.isfinite(values).any():
-                maxima[graph_target_index] = max(maxima[graph_target_index], float(np.nanmax(values)))
+            )
+            _update_as_default_maxima_from_simulation_result(
+                maxima=maxima,
+                simulation_result=simulation_result,
+                candidate_indices=candidate_indices,
+                target_index_lookup=target_index_lookup,
+                frame_count=frame_count,
+                player_count=len(players),
+            )
 
     for graph_target_index, value in maxima.items():
         if math.isfinite(value):
@@ -673,6 +805,7 @@ def compute_graph_max_player_cum_prob_as_defaults(
     *,
     eps: float = 1e-4,
     consider_teammates: bool = False,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -719,7 +852,166 @@ def compute_graph_max_player_cum_prob_as_defaults(
         simulate_passes_fn=simulate_passes_fn,
         use_progress_bar=use_progress_bar,
         chunk_size=chunk_size,
+        speed_aggregation=speed_aggregation,
     )
+
+
+def compute_graphs_max_player_cum_prob_as_defaults(
+    graphs: list[Data],
+    *,
+    eps: float = 1e-4,
+    consider_teammates: bool = False,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    simulate_passes_fn: Callable[..., Any] | None = None,
+    use_progress_bar: bool = False,
+    chunk_size: int = 150,
+    batch_size: int = 16,
+) -> list[pd.Series]:
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
+    if not consider_teammates:
+        return [
+            compute_graph_max_player_cum_prob_as_defaults(
+                graph,
+                eps=eps,
+                consider_teammates=False,
+                speed_aggregation=speed_aggregation,
+                simulate_passes_fn=simulate_passes_fn,
+                use_progress_bar=use_progress_bar,
+                chunk_size=chunk_size,
+            )
+            for graph in graphs
+        ]
+
+    simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
+    batch_size = max(1, int(batch_size))
+    results: list[pd.Series | None] = [None] * len(graphs)
+    prepared_groups: dict[tuple[tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
+    for graph_index, graph in enumerate(graphs):
+        node_ids = _node_ids(graph)
+        candidate_indices = _candidate_target_indices(graph)
+        result = pd.Series(np.nan, index=node_ids, dtype=float)
+        if not candidate_indices:
+            results[graph_index] = result
+            continue
+        player_pos, player_teams, players, ball_pos, raw_target_lookup, possessor_index = _full_as_default_simulation_inputs(
+            graph,
+            candidate_indices=candidate_indices,
+        )
+        key = (tuple(str(player) for player in players.tolist()), tuple(str(team) for team in player_teams.tolist()))
+        prepared_groups.setdefault(key, []).append(
+            {
+                "graph_index": graph_index,
+                "node_ids": node_ids,
+                "candidate_indices": candidate_indices,
+                "player_pos": player_pos,
+                "player_teams": player_teams,
+                "players": players,
+                "ball_pos": ball_pos,
+                "target_lookup": raw_target_lookup,
+                "passer": node_ids[possessor_index],
+                "playing_direction": _infer_playing_direction_from_centered_players(player_pos, player_teams),
+            }
+        )
+
+    for group_frames in prepared_groups.values():
+        for batch_start in range(0, len(group_frames), batch_size):
+            batch = group_frames[batch_start : batch_start + batch_size]
+            players = np.asarray(batch[0]["players"], dtype=object)
+            player_teams = np.asarray(batch[0]["player_teams"], dtype=object)
+            player_pos = np.stack([np.asarray(item["player_pos"], dtype=float) for item in batch], axis=0)
+            ball_pos = np.stack([np.asarray(item["ball_pos"], dtype=float) for item in batch], axis=0)
+            frame_count = len(batch)
+            phi_grid = np.repeat(
+                np.linspace(
+                    AS_DEFAULT_PHI_OFFSET,
+                    2.0 * np.pi + AS_DEFAULT_PHI_OFFSET,
+                    AS_DEFAULT_N_ANGLES,
+                    endpoint=False,
+                    dtype=float,
+                )[np.newaxis, :],
+                frame_count,
+                axis=0,
+            )
+            passers = np.asarray([item["passer"] for item in batch], dtype=object)
+            passer_teams = np.repeat("attack", frame_count).astype(object)
+            playing_direction = np.asarray([float(item["playing_direction"]) for item in batch], dtype=float)
+            _validate_simulation_contract(players=players, passers=passers, exclude_passer=False)
+            maxima: dict[int, float] = {}
+            target_index_lookup: dict[int, tuple[int, int]] = {}
+            target_keys: dict[int, tuple[int, int]] = {}
+            next_target_key = 0
+            for frame_index, item in enumerate(batch):
+                for graph_target_index, sim_index in item["target_lookup"].items():
+                    target_key = next_target_key
+                    next_target_key += 1
+                    maxima[target_key] = -np.inf
+                    target_index_lookup[target_key] = (frame_index, int(sim_index))
+                    target_keys[target_key] = (int(item["graph_index"]), int(graph_target_index))
+
+            v0_values = np.linspace(AS_DEFAULT_V0_MIN, AS_DEFAULT_V0_MAX, AS_DEFAULT_N_V0, dtype=float)
+            if speed_aggregation == PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX:
+                simulation_results = [
+                    simulate_passes_fn(
+                        **_as_default_simulation_kwargs(
+                            PLAYER_POS=player_pos,
+                            BALL_POS=ball_pos,
+                            phi_grid=phi_grid,
+                            v0_grid=np.repeat(v0_values[np.newaxis, :], frame_count, axis=0),
+                            passer_teams=passer_teams,
+                            player_teams=player_teams,
+                            players=players,
+                            passers=passers,
+                            exclude_passer=False,
+                            playing_direction=playing_direction,
+                            use_progress_bar=use_progress_bar,
+                            chunk_size=chunk_size,
+                            v0_prob_aggregation_mode="max",
+                        )
+                    )
+                ]
+            else:
+                simulation_results = [
+                    simulate_passes_fn(
+                        **_as_default_simulation_kwargs(
+                            PLAYER_POS=player_pos,
+                            BALL_POS=ball_pos,
+                            phi_grid=phi_grid,
+                            v0_grid=np.full((frame_count, 1), float(speed), dtype=float),
+                            passer_teams=passer_teams,
+                            player_teams=player_teams,
+                            players=players,
+                            passers=passers,
+                            exclude_passer=False,
+                            playing_direction=playing_direction,
+                            use_progress_bar=use_progress_bar,
+                            chunk_size=chunk_size,
+                            v0_prob_aggregation_mode=AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
+                        )
+                    )
+                    for speed in v0_values
+                ]
+
+            for simulation_result in simulation_results:
+                _update_as_default_maxima_from_simulation_result(
+                    maxima=maxima,
+                    simulation_result=simulation_result,
+                    candidate_indices=list(maxima.keys()),
+                    target_index_lookup=target_index_lookup,
+                    frame_count=frame_count,
+                    player_count=len(players),
+                )
+
+            for item in batch:
+                graph_index = int(item["graph_index"])
+                if results[graph_index] is None:
+                    results[graph_index] = pd.Series(np.nan, index=item["node_ids"], dtype=float)
+            for target_key, value in maxima.items():
+                graph_index, graph_target_index = target_keys[target_key]
+                if math.isfinite(value):
+                    node_id = graphs[graph_index].node_ids[graph_target_index]
+                    results[graph_index].loc[str(node_id)] = float(np.clip(value, float(eps), 1.0 - float(eps)))
+
+    return [result if result is not None else pd.Series(dtype=float) for result in results]
 
 
 def compute_graph_player_cum_prob(
@@ -728,6 +1020,7 @@ def compute_graph_player_cum_prob(
     eps: float = 1e-4,
     normalize: bool = True,
     consider_teammates: bool = False,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -738,6 +1031,7 @@ def compute_graph_player_cum_prob(
         graph,
         eps=eps,
         consider_teammates=consider_teammates,
+        speed_aggregation=speed_aggregation,
         simulate_passes_fn=simulate_passes_fn,
         use_progress_bar=use_progress_bar,
         chunk_size=chunk_size,
@@ -831,6 +1125,7 @@ def compute_graph_physical_xpass_for_source(
     source: str,
     eps: float = 1e-4,
     teammate_policy: str | None = None,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -861,6 +1156,7 @@ def compute_graph_physical_xpass_for_source(
         graph,
         eps=eps,
         consider_teammates=consider_teammates,
+        speed_aggregation=speed_aggregation,
         simulate_passes_fn=simulate_passes_fn,
         use_progress_bar=use_progress_bar,
         chunk_size=chunk_size,
@@ -993,6 +1289,7 @@ def attach_physical_xpass_online_to_graphs(
     source: str,
     eps: float = 1e-4,
     teammate_policy: str | None = None,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     require_observed_target: bool = False,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
@@ -1006,6 +1303,7 @@ def attach_physical_xpass_online_to_graphs(
             source=source,
             eps=eps,
             teammate_policy=teammate_policy,
+            speed_aggregation=speed_aggregation,
             simulate_passes_fn=simulate_passes_fn,
             use_progress_bar=use_progress_bar,
             chunk_size=chunk_size,

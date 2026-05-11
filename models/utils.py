@@ -196,10 +196,13 @@ def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, An
     if isinstance(physical_metadata, dict):
         source = physical_metadata.get("source")
         teammate_policy = physical_metadata.get("teammate_policy")
+        speed_aggregation = physical_metadata.get("speed_aggregation")
         if source:
             args["physical_xpass_source"] = str(source)
         if teammate_policy:
             args["physical_xpass_teammate_policy"] = str(teammate_policy)
+        if speed_aggregation:
+            args["physical_xpass_speed_aggregation"] = str(speed_aggregation)
     return args
 
 

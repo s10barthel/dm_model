@@ -25,6 +25,7 @@ from physical_pass_model import (
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graphs,
     model_uses_physical_xpass,
+    physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
     validate_physical_xpass_cache_metadata,
@@ -110,7 +111,14 @@ def _allows_online_physical_xpass(match: Match) -> bool:
     )
 
 
-def _record_online_physical_xpass(match: Match, model: GNN, *, source: str, graph_count: int) -> None:
+def _record_online_physical_xpass(
+    match: Match,
+    model: GNN,
+    *,
+    source: str,
+    speed_aggregation: str,
+    graph_count: int,
+) -> None:
     stats = getattr(match, "physical_xpass_runtime_stats", None)
     if stats is None:
         stats = {}
@@ -120,6 +128,7 @@ def _record_online_physical_xpass(match: Match, model: GNN, *, source: str, grap
         task,
         {
             "source": source,
+            "speed_aggregation": speed_aggregation,
             "model_id": model.args.get("model_id"),
             "online_graphs": 0,
         },
@@ -134,6 +143,7 @@ def attach_physical_xpass_for_inference(
     model: GNN,
 ) -> list[Data]:
     source = physical_xpass_source(model.args)
+    speed_aggregation = physical_xpass_speed_aggregation(model.args)
     eps = float(model.args.get("physical_eps", 1e-4))
     teammate_policy = physical_xpass_teammate_policy(model.args, source=source)
     feature_root = _runtime_feature_root(match)
@@ -144,7 +154,11 @@ def attach_physical_xpass_for_inference(
         physical_cache_dir = str(get_physical_xpass_dir(feature_root))
 
     try:
-        validate_physical_xpass_cache_metadata(physical_cache_dir, expected_source=source)
+        validate_physical_xpass_cache_metadata(
+            physical_cache_dir,
+            expected_source=source,
+            expected_speed_aggregation=speed_aggregation,
+        )
         return attach_physical_xpass_to_graphs(
             graphs,
             labels,
@@ -163,9 +177,16 @@ def attach_physical_xpass_for_inference(
         source=source,
         eps=eps,
         teammate_policy=teammate_policy,
+        speed_aggregation=speed_aggregation,
         require_observed_target=False,
     )
-    _record_online_physical_xpass(match, model, source=source, graph_count=len(attached))
+    _record_online_physical_xpass(
+        match,
+        model,
+        source=source,
+        speed_aggregation=speed_aggregation,
+        graph_count=len(attached),
+    )
     return attached
 
 

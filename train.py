@@ -40,6 +40,7 @@ from models.utils import (
 from physical_pass_model import (
     PHYSICAL_XPASS_SOURCE,
     model_uses_physical_xpass,
+    normalize_physical_xpass_speed_aggregation,
     validate_physical_xpass_args,
     validate_physical_xpass_cache_metadata,
 )
@@ -564,6 +565,9 @@ if __name__ == "__main__":
         teammate_policy = physical_xpass_metadata.get("teammate_policy")
         if teammate_policy is not None:
             args.physical_xpass_teammate_policy = str(teammate_policy)
+        args.physical_xpass_speed_aggregation = normalize_physical_xpass_speed_aggregation(
+            physical_xpass_metadata.get("speed_aggregation")
+        )
 
     # Load model
     args_dict = vars(args)
@@ -619,6 +623,7 @@ if __name__ == "__main__":
             "model_variant": args.model_variant,
             "source": getattr(args, "physical_xpass_source", PHYSICAL_XPASS_SOURCE),
             "teammate_policy": getattr(args, "physical_xpass_teammate_policy", None),
+            "speed_aggregation": getattr(args, "physical_xpass_speed_aggregation", None),
             "physical_cache_dir": args.physical_cache_dir,
             "physical_eps": float(args.physical_eps),
             "learn_physical_scale": bool(args.learn_physical_scale),
