@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import warnings
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,13 +20,27 @@ from dataset import ActionDataset, pass_success_observed_target_invalid_reason
 from models.gnn import Decoder
 from models.utils import run_epoch
 from physical_pass_model import (
+    AS_DEFAULT_N_ANGLES,
+    AS_DEFAULT_N_V0,
+    AS_DEFAULT_NORMALIZE,
+    AS_DEFAULT_RESPECT_OFFSIDE,
+    AS_DEFAULT_V0_MAX,
+    AS_DEFAULT_V0_MIN,
+    PHYSICAL_XPASS_LEGACY_SOURCE,
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
+    PHYSICAL_XPASS_SOURCE,
+    PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+    PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
     _validate_simulation_contract,
     attach_physical_xpass_to_graph,
+    compute_graph_max_player_cum_prob_as_defaults,
     compute_graph_player_cum_prob,
     load_physical_xpass_match,
     load_physical_xpass_component,
+    physical_state_hash,
+    physical_xpass_as_default_metadata,
+    validate_physical_xpass_cache_metadata,
 )
 from scripts import generate_physical_xpass
 from scripts import train_relevant_models as train_wrapper
@@ -58,11 +74,22 @@ def make_label(*, action_index: int = 7, intent_index: int = 1) -> torch.Tensor:
 
 
 class FakeSimulationResult:
-    def __init__(self, shape: tuple[int, int, int, int], updates: list[tuple[int, int, int, int, float]]) -> None:
+    def __init__(
+        self,
+        shape: tuple[int, int, int, int],
+        updates: list[tuple[int, int, int, int, float]],
+        *,
+        x_grid: np.ndarray | None = None,
+        y_grid: np.ndarray | None = None,
+    ) -> None:
         self.player_cum_prob = np.zeros(shape, dtype=float)
         for frame_index, player_index, angle_index, distance_index, value in updates:
             self.player_cum_prob[frame_index, player_index, angle_index, distance_index] = value
         self.r_grid = np.array([0.0, 10.0, 20.0], dtype=float)
+        if x_grid is not None:
+            self.x_grid = x_grid
+        if y_grid is not None:
+            self.y_grid = y_grid
 
 
 class FixedDelta(nn.Module):
@@ -108,77 +135,158 @@ def decoder_args(**overrides: object) -> dict[str, object]:
 
 
 class PhysicalXPassTests(unittest.TestCase):
-    def test_mocked_player_cum_prob_ignores_other_teammates_by_default(self) -> None:
-        captured = {}
+    def test_max_player_cum_prob_default_ignores_other_teammates_and_uses_speed_max(self) -> None:
+        calls = []
 
         def fake_simulate_passes(**kwargs):
-            captured.update(kwargs)
-            self.assertIn("home_1", kwargs["players"].tolist())
-            self.assertIn("home_1", kwargs["passers"].tolist())
-            return FakeSimulationResult((1, 3, 1, 3), [(0, 1, 0, 2, 0.73)])
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            speed = float(kwargs["v0_grid"][0, 0])
+            value = 0.73 if speed == AS_DEFAULT_V0_MAX else 0.41
+            return FakeSimulationResult((1, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 4, 2, value)])
 
         graph = make_graph()
-        probs = compute_graph_player_cum_prob(graph, simulate_passes_fn=fake_simulate_passes)
+        probs = compute_graph_max_player_cum_prob_as_defaults(graph, simulate_passes_fn=fake_simulate_passes)
 
         self.assertAlmostEqual(float(probs["home_2"]), 0.73)
         self.assertTrue(np.isnan(probs["home_1"]))
-        self.assertEqual(captured["PLAYER_POS"].shape, (1, 3, 4))
-        self.assertEqual(captured["players"].tolist(), ["home_1", "target_player", "away_3"])
-        self.assertEqual(captured["player_teams"].tolist(), ["attack", "attack", "defense"])
-        self.assertEqual(captured["passers"].tolist(), ["home_1"])
-        self.assertTrue(captured["normalize"])
-        self.assertEqual(captured["fields_to_return"], ("player_cum_prob",))
+        self.assertTrue(np.isnan(probs["away_3"]))
+        self.assertEqual(len(calls), AS_DEFAULT_N_V0)
+        self.assertEqual(calls[0]["PLAYER_POS"].shape, (1, 3, 4))
+        self.assertEqual(calls[0]["players"].tolist(), ["home_1", "target_player", "away_3"])
+        self.assertEqual(calls[0]["player_teams"].tolist(), ["attack", "attack", "defense"])
+        self.assertEqual(calls[0]["passers"].tolist(), ["home_1"])
+        self.assertTrue(calls[0]["exclude_passer"])
+        self.assertEqual(calls[0]["respect_offside"], AS_DEFAULT_RESPECT_OFFSIDE)
+        self.assertEqual(calls[0]["normalize"], AS_DEFAULT_NORMALIZE)
+        self.assertEqual(calls[0]["fields_to_return"], ("player_cum_prob",))
+        self.assertEqual(calls[0]["phi_grid"].shape, (1, AS_DEFAULT_N_ANGLES))
+        self.assertAlmostEqual(float(calls[0]["v0_grid"][0, 0]), AS_DEFAULT_V0_MIN)
+        self.assertAlmostEqual(float(calls[-1]["v0_grid"][0, 0]), AS_DEFAULT_V0_MAX)
+        np.testing.assert_allclose(calls[0]["BALL_POS"][0], np.array([-52.5, 0.0]), atol=1e-6)
 
-    def test_mocked_player_cum_prob_consider_teammates_preserves_previous_behavior(self) -> None:
+    def test_max_player_cum_prob_consider_teammates_uses_all_players(self) -> None:
         captured = {}
 
         def fake_simulate_passes(**kwargs):
             captured.update(kwargs)
-            return FakeSimulationResult((1, 3, 1, 3), [(0, 1, 0, 2, 0.61)])
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("home_2")
+            return FakeSimulationResult((1, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 0, 2, 0.61)])
 
         graph = make_graph()
-        probs = compute_graph_player_cum_prob(graph, consider_teammates=True, simulate_passes_fn=fake_simulate_passes)
+        probs = compute_graph_max_player_cum_prob_as_defaults(
+            graph,
+            consider_teammates=True,
+            simulate_passes_fn=fake_simulate_passes,
+        )
 
         self.assertAlmostEqual(float(probs["home_2"]), 0.61)
         self.assertEqual(captured["PLAYER_POS"].shape, (1, 3, 4))
         self.assertEqual(captured["players"].tolist(), ["home_1", "home_2", "away_3"])
-        self.assertEqual(captured["player_teams"].tolist(), ["attack", "attack", "defense"])
+        self.assertFalse(captured["exclude_passer"])
 
-    def test_mocked_player_cum_prob_uses_target_specific_slot_with_multiple_attackers(self) -> None:
+    def test_max_player_cum_prob_ignores_off_pitch_distance_samples(self) -> None:
+        x_grid = np.zeros((1, AS_DEFAULT_N_ANGLES, 3), dtype=float)
+        y_grid = np.zeros((1, AS_DEFAULT_N_ANGLES, 3), dtype=float)
+        x_grid[:, :, 2] = 80.0
+
+        def fake_simulate_passes(**kwargs):
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            return FakeSimulationResult(
+                (1, len(players), AS_DEFAULT_N_ANGLES, 3),
+                [(0, target_player_index, 0, 1, 0.4), (0, target_player_index, 0, 2, 0.99)],
+                x_grid=x_grid,
+                y_grid=y_grid,
+            )
+
+        graph = make_graph()
+        probs = compute_graph_max_player_cum_prob_as_defaults(graph, simulate_passes_fn=fake_simulate_passes)
+
+        self.assertAlmostEqual(float(probs["home_2"]), 0.4)
+
+    def test_compute_graph_player_cum_prob_wrapper_keeps_no_normalize_warning(self) -> None:
+        captured = {}
+
+        def fake_simulate_passes(**kwargs):
+            captured.update(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("home_2")
+            return FakeSimulationResult((1, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 0, 2, 0.61)])
+
+        graph = make_graph()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            probs = compute_graph_player_cum_prob(
+                graph,
+                normalize=False,
+                consider_teammates=True,
+                simulate_passes_fn=fake_simulate_passes,
+            )
+
+        self.assertAlmostEqual(float(probs["home_2"]), 0.61)
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(captured["players"].tolist(), ["home_1", "home_2", "away_3"])
+        self.assertTrue(captured["normalize"])
+        self.assertTrue(captured["respect_offside"])
+
+    def test_teammate_policy_switch_can_change_values(self) -> None:
+        def fake_simulate_passes(**kwargs):
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player") if "target_player" in players else players.index("home_2")
+            value = 0.8 if kwargs["exclude_passer"] else 0.3
+            return FakeSimulationResult((kwargs["PLAYER_POS"].shape[0], len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 0, 2, value)])
+
+        graph = make_graph()
+        ignore = compute_graph_max_player_cum_prob_as_defaults(graph, simulate_passes_fn=fake_simulate_passes)
+        consider = compute_graph_max_player_cum_prob_as_defaults(
+            graph,
+            consider_teammates=True,
+            simulate_passes_fn=fake_simulate_passes,
+        )
+
+        self.assertAlmostEqual(float(ignore["home_2"]), 0.8)
+        self.assertAlmostEqual(float(consider["home_2"]), 0.3)
+
+    def test_max_player_cum_prob_uses_player_id_mapping_with_multiple_attackers(self) -> None:
         captured = {}
 
         def fake_simulate_passes(**kwargs):
             captured.update(kwargs)
             return FakeSimulationResult(
-                (2, 3, 1, 3),
-                [(0, 1, 0, 2, 0.2), (1, 1, 0, 2, 0.8)],
+                (2, 3, AS_DEFAULT_N_ANGLES, 3),
+                [
+                    (0, 1, 0, 2, 0.2),
+                    (1, 1, 1, 2, 0.8),
+                ],
             )
 
         graph = make_graph(["home_1", "home_2", "home_4", "away_3"])
         graph.x[2, 0] = 1.0
-        probs = compute_graph_player_cum_prob(graph, simulate_passes_fn=fake_simulate_passes)
+        probs = compute_graph_max_player_cum_prob_as_defaults(graph, simulate_passes_fn=fake_simulate_passes)
 
         self.assertEqual(captured["PLAYER_POS"].shape, (2, 3, 4))
-        np.testing.assert_allclose(captured["PLAYER_POS"][:, 0, 0], np.array([0.0, 0.0]))
-        np.testing.assert_allclose(captured["PLAYER_POS"][:, 1, 0], np.array([20.0, 40.0]))
-        np.testing.assert_allclose(captured["PLAYER_POS"][:, 2, 0], np.array([60.0, 60.0]))
         self.assertEqual(captured["players"].tolist(), ["home_1", "target_player", "away_3"])
         self.assertAlmostEqual(float(probs["home_2"]), 0.2)
         self.assertAlmostEqual(float(probs["home_4"]), 0.8)
         self.assertTrue(np.isnan(probs["away_3"]))
 
-    def test_mocked_player_cum_prob_handles_no_opponents(self) -> None:
+    def test_max_player_cum_prob_handles_no_opponents(self) -> None:
         captured = {}
 
         def fake_simulate_passes(**kwargs):
             captured.update(kwargs)
-            return FakeSimulationResult((1, 2, 1, 3), [(0, 1, 0, 2, 0.5)])
+            return FakeSimulationResult((1, 2, AS_DEFAULT_N_ANGLES, 3), [(0, 1, 0, 2, 0.5)])
 
         graph = make_graph(["home_1", "home_2"])
-        probs = compute_graph_player_cum_prob(graph, simulate_passes_fn=fake_simulate_passes)
+        probs = compute_graph_max_player_cum_prob_as_defaults(graph, simulate_passes_fn=fake_simulate_passes)
 
         self.assertEqual(captured["PLAYER_POS"].shape, (1, 2, 4))
         self.assertEqual(captured["players"].tolist(), ["home_1", "target_player"])
+        self.assertTrue(captured["exclude_passer"])
+        np.testing.assert_allclose(captured["playing_direction"], np.array([1.0]))
         self.assertAlmostEqual(float(probs["home_2"]), 0.5)
 
     def test_validate_simulation_contract_rejects_missing_passer(self) -> None:
@@ -189,40 +297,18 @@ class PhysicalXPassTests(unittest.TestCase):
                 exclude_passer=True,
             )
 
-    def test_accessible_space_smoke_reduced_mode_exclude_passer_contract(self) -> None:
+    def test_accessible_space_smoke_as_default_max_path(self) -> None:
         try:
-            from accessible_space.core import simulate_passes_chunked
+            import accessible_space  # noqa: F401
         except ImportError:
             self.skipTest("accessible_space is not installed")
 
-        PLAYER_POS = np.array([[[0.0, 34.0, 0.0, 0.0], [20.0, 34.0, 0.0, 0.0], [60.0, 34.0, 0.0, 0.0]]], dtype=float)
-        BALL_POS = np.array([[0.0, 34.0]], dtype=float)
-        phi_grid = np.array([[0.0]], dtype=float)
-        v0_grid = np.array([[10.0]], dtype=float)
-        passer_teams = np.array(["attack"], dtype=object)
-        player_teams = np.array(["attack", "attack", "defense"], dtype=object)
-        players = np.array(["home_1", "target_player", "away_3"], dtype=object)
-        passers = np.array(["home_1"], dtype=object)
+        graph = make_graph()
+        result = compute_graph_max_player_cum_prob_as_defaults(graph, use_progress_bar=False, chunk_size=999)
 
-        result = simulate_passes_chunked(
-            PLAYER_POS,
-            BALL_POS,
-            phi_grid,
-            v0_grid,
-            passer_teams,
-            player_teams,
-            players=players,
-            passers=passers,
-            exclude_passer=True,
-            fields_to_return=("player_cum_prob",),
-            x_pitch_min=0.0,
-            x_pitch_max=105.0,
-            y_pitch_min=0.0,
-            y_pitch_max=68.0,
-            use_progress_bar=False,
-        )
-
-        self.assertEqual(np.asarray(result.player_cum_prob).shape[1], 3)
+        self.assertTrue(np.isfinite(float(result["home_2"])))
+        self.assertTrue(np.isnan(result["home_1"]))
+        self.assertTrue(np.isnan(result["away_3"]))
 
     def test_sidecar_attach_aligns_by_action_index_and_player_id_columns(self) -> None:
         graph = make_graph(["home_1", "home_2"])
@@ -340,6 +426,182 @@ class PhysicalXPassTests(unittest.TestCase):
             with self.assertRaisesRegex(FileNotFoundError, "generate_physical_xpass.py"):
                 load_physical_xpass_match(tmpdir, "missing_match")
 
+    def test_physical_xpass_metadata_accepts_new_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = Path(tmpdir) / "metadata.json"
+            metadata_path.write_text(f'{{"source": "{PHYSICAL_XPASS_SOURCE}"}}', encoding="utf-8")
+
+            metadata = validate_physical_xpass_cache_metadata(tmpdir)
+
+        self.assertEqual(metadata["source"], PHYSICAL_XPASS_SOURCE)
+
+    def test_physical_xpass_metadata_rejects_old_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = Path(tmpdir) / "metadata.json"
+            metadata_path.write_text(f'{{"source": "{PHYSICAL_XPASS_LEGACY_SOURCE}"}}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "regenerate compatible physical xPass sidecars"):
+                validate_physical_xpass_cache_metadata(tmpdir)
+
+    def test_physical_xpass_metadata_missing_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(FileNotFoundError, "metadata"):
+                validate_physical_xpass_cache_metadata(tmpdir)
+
+    def test_generate_physical_xpass_reuse_cache_validation_rejects_old_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            (cache_dir / "metadata.json").write_text(
+                json.dumps({"source": PHYSICAL_XPASS_LEGACY_SOURCE}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "incompatible source"):
+                generate_physical_xpass.validate_reuse_cache_dir(
+                    cache_dir,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+                    physical_eps=1e-4,
+                )
+
+    def test_generate_physical_xpass_reuse_cache_validation_rejects_policy_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "teammate_policy"):
+                generate_physical_xpass.validate_reuse_cache_dir(
+                    cache_dir,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+                    physical_eps=1e-4,
+                )
+
+    def test_generate_physical_xpass_reuses_row_without_hash_and_skips_compute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            graph_path = root / "graphs.pt"
+            label_path = root / "labels.pt"
+            torch.save([make_graph(["home_1", "home_2", "away_3"])], graph_path)
+            torch.save(torch.stack([make_label(action_index=7)]), label_path)
+            reuse_rows = pd.DataFrame([{"match_id": "m1", "action_index": 7, "home_2": 0.88}]).set_index(
+                "action_index",
+                drop=False,
+            )
+
+            def fail_compute(*_args, **_kwargs):
+                raise AssertionError("compute should not be called for reusable rows")
+
+            stats: dict[str, int] = {}
+            frame, computed = generate_physical_xpass.compute_match_rows(
+                "m1",
+                graph_path,
+                label_path,
+                eps=1e-4,
+                normalize=True,
+                consider_teammates=False,
+                limit=None,
+                reuse_rows=reuse_rows,
+                reuse_stats=stats,
+                compute_fn=fail_compute,
+            )
+
+        self.assertEqual(computed, 0)
+        self.assertEqual(stats["reused_actions"], 1)
+        self.assertEqual(stats["reused_without_state_hash"], 1)
+        self.assertAlmostEqual(float(frame.loc[0, "home_2"]), 0.88)
+        self.assertIn("physical_state_hash", frame.columns)
+
+    def test_generate_physical_xpass_hash_match_reuses_and_hash_mismatch_recomputes(self) -> None:
+        graph = make_graph(["home_1", "home_2", "away_3"])
+        matching_hash = physical_state_hash(graph)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            graph_path = root / "graphs.pt"
+            label_path = root / "labels.pt"
+            torch.save([graph, graph], graph_path)
+            torch.save(
+                torch.stack([make_label(action_index=7), make_label(action_index=8)]),
+                label_path,
+            )
+            reuse_rows = pd.DataFrame(
+                [
+                    {"match_id": "m1", "action_index": 7, "home_2": 0.77, "physical_state_hash": matching_hash},
+                    {"match_id": "m1", "action_index": 8, "home_2": 0.12, "physical_state_hash": "mismatch"},
+                ]
+            ).set_index("action_index", drop=False)
+
+            def fake_compute(graph_arg, **_kwargs):
+                return pd.Series({"home_1": np.nan, "home_2": 0.66, "away_3": np.nan})
+
+            stats: dict[str, int] = {}
+            frame, computed = generate_physical_xpass.compute_match_rows(
+                "m1",
+                graph_path,
+                label_path,
+                eps=1e-4,
+                normalize=True,
+                consider_teammates=False,
+                limit=None,
+                reuse_rows=reuse_rows,
+                reuse_stats=stats,
+                compute_fn=fake_compute,
+            )
+
+        by_action = frame.set_index("action_index")
+        self.assertEqual(computed, 1)
+        self.assertEqual(stats["reused_actions"], 1)
+        self.assertEqual(stats["hash_verified"], 1)
+        self.assertEqual(stats["hash_mismatch_recomputed"], 1)
+        self.assertAlmostEqual(float(by_action.loc[7, "home_2"]), 0.77)
+        self.assertAlmostEqual(float(by_action.loc[8, "home_2"]), 0.66)
+
+    def test_generate_physical_xpass_limit_counts_computed_rows_only(self) -> None:
+        graph = make_graph(["home_1", "home_2", "away_3"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            graph_path = root / "graphs.pt"
+            label_path = root / "labels.pt"
+            torch.save([graph, graph, graph], graph_path)
+            torch.save(
+                torch.stack(
+                    [
+                        make_label(action_index=7),
+                        make_label(action_index=8),
+                        make_label(action_index=9),
+                    ]
+                ),
+                label_path,
+            )
+            reuse_rows = pd.DataFrame([{"match_id": "m1", "action_index": 7, "home_2": 0.7}]).set_index(
+                "action_index",
+                drop=False,
+            )
+
+            def fake_compute(graph_arg, **_kwargs):
+                return pd.Series({"home_1": np.nan, "home_2": 0.5, "away_3": np.nan})
+
+            stats: dict[str, int] = {}
+            frame, computed = generate_physical_xpass.compute_match_rows(
+                "m1",
+                graph_path,
+                label_path,
+                eps=1e-4,
+                normalize=True,
+                consider_teammates=False,
+                limit=1,
+                reuse_rows=reuse_rows,
+                reuse_stats=stats,
+                compute_fn=fake_compute,
+            )
+
+        self.assertEqual(computed, 1)
+        self.assertEqual(stats["reused_actions"], 1)
+        self.assertEqual(stats["compute_limit_skipped"], 1)
+        self.assertEqual(sorted(frame["action_index"].astype(int).tolist()), [7, 8])
+
     def test_decoder_offset_formula_and_beta_initialization(self) -> None:
         decoder = Decoder(decoder_args())
         decoder.nodewise_mlp = FixedDelta([0.1, -0.2])
@@ -442,28 +704,39 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertNotIn("--use_physical_xpass", outcome_command)
         self.assertNotIn("--physical-cache-dir", outcome_command)
 
-    def test_visualization_sidecar_loader_reads_player_cum_prob_row(self) -> None:
+    def test_visualization_sidecar_loader_reads_max_player_cum_prob_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             match_dir = cache_dir / "matches"
             match_dir.mkdir(parents=True)
             pd.DataFrame(
-                [{"match_id": "m1", "action_index": 3, "home_1": 0.2, "home_2": np.nan}]
+                [{"match_id": "m1", "action_index": 3, "physical_state_hash": "abc", "home_1": 0.2, "home_2": np.nan}]
             ).to_parquet(match_dir / "m1.parquet", index=False)
 
             row = load_physical_xpass_component(cache_dir, "m1", 3)
 
-        self.assertEqual(row.name, "player_cum_prob")
+        self.assertEqual(row.name, "max_player_cum_prob")
         self.assertAlmostEqual(float(row["home_1"]), 0.2)
         self.assertTrue(np.isnan(row["home_2"]))
+        self.assertNotIn("physical_state_hash", row.index)
 
-    def test_generate_physical_xpass_cli_defaults_to_ignore_teammates(self) -> None:
+    def test_generate_physical_xpass_cli_defaults_to_consider_teammates(self) -> None:
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run"])
+        self.assertTrue(args.consider_teammates)
+
+    def test_generate_physical_xpass_cli_accepts_ignore_teammates(self) -> None:
+        args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--ignore-teammates"])
         self.assertFalse(args.consider_teammates)
 
     def test_generate_physical_xpass_cli_accepts_consider_teammates(self) -> None:
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--consider-teammates"])
         self.assertTrue(args.consider_teammates)
+
+    def test_generate_physical_xpass_cli_accepts_reuse_cache_dir(self) -> None:
+        args = generate_physical_xpass.parse_args(
+            ["--feature-run-id", "feature_run", "--reuse-cache-dir", "old_cache"]
+        )
+        self.assertEqual(args.reuse_cache_dir, "old_cache")
 
 
 if __name__ == "__main__":

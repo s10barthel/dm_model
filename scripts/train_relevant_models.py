@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from physical_pass_model import PHYSICAL_XPASS_SOURCE
 from models.utils import (
     infer_feature_graph_schema,
     infer_training_edge_schema,
@@ -213,6 +214,7 @@ def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
     return {
         "use_physical_xpass": bool(getattr(args, "use_physical_xpass", False)),
         "model_variant": str(getattr(args, "model_variant", "gat_phys_logit_offset")),
+        "source": PHYSICAL_XPASS_SOURCE,
         "physical_cache_dir": getattr(args, "physical_cache_dir", None),
         "physical_eps": float(getattr(args, "physical_eps", 1e-4)),
         "learn_physical_scale": bool(getattr(args, "learn_physical_scale", True)),
@@ -800,7 +802,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dest="use_physical_xpass",
         action="store_true",
         default=False,
-        help="Use precomputed accessible-space player_cum_prob for pass_success only.",
+        help="Use precomputed AS-default max player_cum_prob physical xPass for pass_success only.",
     )
     parser.add_argument(
         "--model-variant",

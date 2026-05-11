@@ -21,7 +21,11 @@ from datatools.utils import (
     player_sort_key,
 )
 from models.gnn import GNN
-from physical_pass_model import attach_physical_xpass_to_graphs, model_uses_physical_xpass
+from physical_pass_model import (
+    attach_physical_xpass_to_graphs,
+    model_uses_physical_xpass,
+    validate_physical_xpass_cache_metadata,
+)
 from project_config import get_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
@@ -218,6 +222,7 @@ def inference_gnn(
             if feature_root is None:
                 feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
             physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+        validate_physical_xpass_cache_metadata(physical_cache_dir)
         graphs = attach_physical_xpass_to_graphs(
             graphs,
             labels,

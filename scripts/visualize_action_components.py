@@ -84,7 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES, help="Runtime resolved-action mode.")
     parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--show-trajectories", action="store_true")
-    parser.add_argument("--show-physical-xpass", action="store_true", help="Render player_cum_prob.png from physical xPass sidecars.")
+    parser.add_argument(
+        "--show-physical-xpass",
+        action="store_true",
+        help="Render max_player_cum_prob.png from physical xPass sidecars.",
+    )
     parser.add_argument("--physical-cache-dir", help="Physical xPass sidecar directory override.")
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -519,7 +523,7 @@ def render_action_components(
 
     if show_physical_xpass:
         cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_physical_xpass_dir(feature_root)
-        component_prob_rows["player_cum_prob"] = load_physical_xpass_component(
+        component_prob_rows["max_player_cum_prob"] = load_physical_xpass_component(
             cache_dir,
             resolve_match_id(match),
             action_index,
@@ -536,7 +540,7 @@ def render_action_components(
 
     component_order = list(rendered_components)
     if show_physical_xpass:
-        component_order.append("player_cum_prob")
+        component_order.append("max_player_cum_prob")
     for component_name in component_order:
         if component_name not in component_prob_rows:
             continue

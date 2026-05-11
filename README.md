@@ -875,7 +875,15 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 
 ## physical_xpass_workflow
 
-Physical xPass adds a precompute-first pass-success signal from Jonas Bischofberger's `accessible-space` package. The stored signal is `simulation_result.player_cum_prob`: for each pass action and each candidate teammate, it estimates the physical probability that that specific player intercepts/receives the simulated pass trajectory. It is stored as a sidecar under the feature run, not appended to the graph tensors:
+Physical xPass adds a precompute-first pass-success signal from Jonas Bischofberger's `accessible-space` package. The stored signal is the maximum AS/DAS-default `simulation_result.player_cum_prob` for each candidate teammate:
+
+```text
+physical_xpass_p =
+    max over AS/DAS-default pass angles, speeds, and on-pitch ray distances
+    of player_cum_prob_p
+```
+
+This is no longer tied to the teammate's current location. It represents the best physically achievable player-level interception/reception opportunity from the current ball state, using the AS/DAS-style angle grid, speed grid, and on-pitch pass rays. It is stored as a sidecar under the feature run, not appended to the graph tensors:
 
 - `data/features/runs/<feature_run_id>/physical_xpass/metadata.json`
 - `data/features/runs/<feature_run_id>/physical_xpass/matches/<match_id>.parquet`
@@ -886,16 +894,20 @@ Generate sidecars once for a feature run:
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id>
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --reuse-cache-dir data/features/runs/<old_feature_run_id>/physical_xpass --overwrite
 ```
 
-The generator uses existing preprocessed graph data: `graph.node_ids`, player positions and velocities, teammate flags, and the possessor flag. No additional raw Sportec processing is needed. Each match parquet is wide: one row per pass action, with player-id columns holding `player_cum_prob`; non-candidate players can be missing/NaN.
+The generator uses existing preprocessed graph data: `graph.node_ids`, player positions and velocities, teammate flags, and the possessor flag. No additional raw Sportec processing is needed. Each match parquet is wide: one row per pass action, with player-id columns holding max `player_cum_prob`; non-candidate players can be missing/NaN.
 
-By default the physical simulation uses only the target player plus all opponents:
+The current source is `accessible_space_max_player_cum_prob_as_defaults`. Old sidecars from the previous target-location source (`accessible_space_player_cum_prob`) are incompatible and must be regenerated:
 
-- `--ignore-teammates` is the default and excludes all non-target attacking teammates from the accessible-space simulation
-- `--consider-teammates` restores the previous behavior and includes other attacking teammates too
+```powershell
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite
+```
 
-Training and visualization simply consume whatever sidecars exist. If you want to switch teammate policy, rerun `scripts/generate_physical_xpass.py --overwrite`.
+By default, `--consider-teammates` includes all finite non-goal players in the AS-default max simulation. Use `--ignore-teammates` to compute each candidate with only the passer, the target teammate, and all defenders; in that reduced mode, the passer is present only so `accessible-space` can exclude it from interception competition. These two policies produce different sidecar semantics and are not interchangeable.
+
+`--reuse-cache-dir` can copy compatible rows from an existing physical xPass cache and compute only missing or hash-mismatched actions. Reuse requires the same source, teammate policy, AS-default parameters, and `physical_eps`. New rows include `physical_state_hash`; rows from compatible caches without a hash are reused under a trust-metadata policy and counted in metadata. Old target-location caches cannot be reused.
 
 Train pass success with the recommended default:
 
@@ -908,7 +920,7 @@ Only the `pass_success` low-level command receives physical xPass flags. Other m
 The main model variant is a prior-like logit offset:
 
 ```text
-logit_final = beta0 + beta1 * logit(player_cum_prob) + delta_gat
+logit_final = beta0 + beta1 * logit(physical_xpass) + delta_gat
 ```
 
 `beta0` starts at `0.0`, `beta1` starts at `1.0`, and `delta_gat` is the residual correction learned by the GAT. This is not fully Bayesian updating, but it gives the physical model privileged baseline status: the GAT learns when observed data systematically correct that physical baseline.
@@ -916,14 +928,14 @@ logit_final = beta0 + beta1 * logit(player_cum_prob) + delta_gat
 Physical flags:
 
 - `--use_physical_xpass`: enable sidecar loading and physical pass-success integration.
-- `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the architecture. `gat_baseline` is unchanged; `gat_plus_phys_feature` concatenates `logit(player_cum_prob)` as an ablation; `gat_phys_logit_offset` is the recommended offset model; `gat_phys_logit_offset_regularized` is the offset model with optional residual safeguards.
+- `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the architecture. `gat_baseline` is unchanged; `gat_plus_phys_feature` concatenates `logit(physical_xpass)` as an ablation; `gat_phys_logit_offset` is the recommended offset model; `gat_phys_logit_offset_regularized` is the offset model with optional residual safeguards.
 - `--physical-cache-dir`: override the physical sidecar directory. By default it uses `<feature_run_root>/physical_xpass`.
 - `--physical-eps 1e-4`: clamp probabilities to `[eps, 1-eps]` before taking logits.
 - `--learn-physical-scale` / `--fixed-physical-scale`: learn `beta1` or freeze it at `1.0`; default is learned.
 - `--residual-regularization-lambda`: optional L2 penalty on the observed-target residual `delta_gat`.
 - `--residual-clip-value`: optional tanh bound, `delta_gat = c * tanh(raw_delta / c)`.
 
-The physical simulation uses `normalize=True` by default, then the loader clamps before `logit`. `accessible-space` notes that probabilities/possibilities are not always perfectly normalized because normalization is numerically difficult across players and the ball trajectory. Requesting normalization reduces that issue; clipping then prevents infinite logits from exact 0 or 1 values.
+The physical simulation uses AS/DAS-default normalization (`normalize=True` here), then the loader clamps before `logit`. `accessible-space` notes that probabilities/possibilities are not always perfectly normalized because normalization is numerically difficult across players and the ball trajectory. Requesting normalization reduces that issue; clipping then prevents infinite logits from exact 0 or 1 values.
 
 Compare these runs:
 
@@ -954,7 +966,7 @@ For visualization:
 python scripts/visualize_action_components.py --bundle-id <bundle_id> --match-id <match_id> --action-id <action_id> --show-physical-xpass
 ```
 
-This renders `player_cum_prob.png` next to the other component plots. Use `--physical-cache-dir <path>` if the physical sidecars live outside the selected feature run.
+This renders `max_player_cum_prob.png` next to the other component plots. Use `--physical-cache-dir <path>` if the physical sidecars live outside the selected feature run.
 
 ## EPV Workflow
 
@@ -1037,10 +1049,11 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--split {train,test,all}`: match split to precompute when `--match-id` is omitted. Default: `all`.
 - `--limit <N>`: process only the first `N` pass actions across selected matches. Default: no limit.
 - `--overwrite`: overwrite existing physical xPass match sidecars. Default: off.
+- `--reuse-cache-dir <path>`: reuse compatible rows from another `physical_xpass` directory and compute only misses. Reuse requires matching source, teammate policy, AS-default parameters, and `physical_eps`.
 - `--return-type <return_type>` and `--intended-receiver-mode <mode>`: optional reference label directory selectors. Defaults are inferred from the feature run.
-- `--physical-eps <eps>`: clamp stored `player_cum_prob`. Default: `1e-4`.
-- `--ignore-teammates` / `--consider-teammates`: choose whether other attacking teammates are excluded from the physical simulation. Default: `--ignore-teammates`.
-- `--no-normalize`: disable accessible-space normalization. Default: normalization on.
+- `--physical-eps <eps>`: clamp stored max `player_cum_prob`. Default: `1e-4`.
+- `--ignore-teammates` / `--consider-teammates`: choose reduced target-plus-defenders simulation or all-player simulation. Default: `--consider-teammates`.
+- `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 
 ### `scripts/generate_relevant_features.py`
 
@@ -1163,7 +1176,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--show-physical-xpass`: render `player_cum_prob.png` from physical xPass sidecars. Default: off.
+- `--show-physical-xpass`: render `max_player_cum_prob.png` from physical xPass sidecars. Default: off.
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override for visualization.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.

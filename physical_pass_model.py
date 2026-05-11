@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import json
+import warnings
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -14,7 +17,8 @@ from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from project_config import get_physical_xpass_match_path
 
-PHYSICAL_XPASS_SOURCE = "accessible_space_player_cum_prob"
+PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
+PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
@@ -31,10 +35,95 @@ PHYSICAL_XPASS_VARIANTS = {
     "gat_phys_logit_offset",
     "gat_phys_logit_offset_regularized",
 }
-PHYSICAL_XPASS_ID_COLUMNS = {"match_id", "action_index", "action_id"}
+PHYSICAL_XPASS_ID_COLUMNS = {"match_id", "action_index", "action_id", "physical_state_hash"}
 DEFAULT_V0_MIN = 8.886015553615485
 DEFAULT_V0_MAX = 42.18118275402132
 DEFAULT_N_V0 = 14
+AS_DEFAULT_N_ANGLES = 30
+AS_DEFAULT_PHI_OFFSET = 0.0
+AS_DEFAULT_N_V0 = 15
+AS_DEFAULT_V0_MIN = 3.0
+AS_DEFAULT_V0_MAX = 30.0
+AS_DEFAULT_PASS_START_LOCATION_OFFSET = 0.0
+AS_DEFAULT_TIME_OFFSET_BALL = 0.0
+AS_DEFAULT_RADIAL_GRIDSIZE = 3.0
+AS_DEFAULT_B0 = -4.565680899844368
+AS_DEFAULT_B1 = -2000.0
+AS_DEFAULT_PLAYER_VELOCITY = 9.0
+AS_DEFAULT_KEEP_INERTIAL_VELOCITY = True
+AS_DEFAULT_USE_MAX = False
+AS_DEFAULT_V_MAX = 19.85563874348074
+AS_DEFAULT_A_MAX = 10.659091365334193
+AS_DEFAULT_INERTIAL_SECONDS = 0.17
+AS_DEFAULT_TOL_DISTANCE = 5.0
+AS_DEFAULT_USE_APPROX_TWO_POINT = True
+AS_DEFAULT_V0_PROB_AGGREGATION_MODE = "mean"
+AS_DEFAULT_NORMALIZE = True
+AS_DEFAULT_USE_EFFICIENT_SIGMOID = True
+AS_DEFAULT_FACTOR = 5.077423030272923
+AS_DEFAULT_FACTOR2 = 1.0063028450754512
+AS_DEFAULT_RESPECT_OFFSIDE = True
+AS_DEFAULT_EXCLUDE_PASSER = False
+
+
+def physical_xpass_as_default_metadata(
+    teammate_policy: str = PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+) -> dict[str, Any]:
+    if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
+        raise ValueError(
+            f"Unsupported teammate_policy={teammate_policy!r}. "
+            f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
+        )
+    return {
+        "metric": "max_player_cum_prob",
+        "source": PHYSICAL_XPASS_SOURCE,
+        "teammate_policy": teammate_policy,
+        "coordinate_system": "centered_pitch",
+        "n_angles": AS_DEFAULT_N_ANGLES,
+        "phi_offset": AS_DEFAULT_PHI_OFFSET,
+        "n_v0": AS_DEFAULT_N_V0,
+        "v0_min": AS_DEFAULT_V0_MIN,
+        "v0_max": AS_DEFAULT_V0_MAX,
+        "pass_start_location_offset": AS_DEFAULT_PASS_START_LOCATION_OFFSET,
+        "time_offset_ball": AS_DEFAULT_TIME_OFFSET_BALL,
+        "radial_gridsize": AS_DEFAULT_RADIAL_GRIDSIZE,
+        "b0": AS_DEFAULT_B0,
+        "b1": AS_DEFAULT_B1,
+        "player_velocity": AS_DEFAULT_PLAYER_VELOCITY,
+        "keep_inertial_velocity": AS_DEFAULT_KEEP_INERTIAL_VELOCITY,
+        "use_max": AS_DEFAULT_USE_MAX,
+        "v_max": AS_DEFAULT_V_MAX,
+        "a_max": AS_DEFAULT_A_MAX,
+        "inertial_seconds": AS_DEFAULT_INERTIAL_SECONDS,
+        "tol_distance": AS_DEFAULT_TOL_DISTANCE,
+        "use_approx_two_point": AS_DEFAULT_USE_APPROX_TWO_POINT,
+        "v0_prob_aggregation_mode": AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
+        "normalize": AS_DEFAULT_NORMALIZE,
+        "use_efficient_sigmoid": AS_DEFAULT_USE_EFFICIENT_SIGMOID,
+        "factor": AS_DEFAULT_FACTOR,
+        "factor2": AS_DEFAULT_FACTOR2,
+        "respect_offside": AS_DEFAULT_RESPECT_OFFSIDE,
+        "exclude_passer": teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+    }
+
+
+def validate_physical_xpass_cache_metadata(cache_dir: str | Path) -> dict[str, Any]:
+    metadata_path = Path(cache_dir) / "metadata.json"
+    rerun_message = (
+        "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite "
+        "to regenerate compatible physical xPass sidecars."
+    )
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Physical xPass metadata not found at {metadata_path}. {rerun_message}")
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    source = metadata.get("source")
+    if source != PHYSICAL_XPASS_SOURCE:
+        raise ValueError(
+            f"Physical xPass sidecars at {cache_dir} use incompatible source {source!r}; "
+            f"expected {PHYSICAL_XPASS_SOURCE!r}. {rerun_message}"
+        )
+    return metadata
 
 
 def _get_arg(args: Any, name: str, default: Any = None) -> Any:
@@ -114,6 +203,32 @@ def _candidate_target_indices(graph: Data) -> list[int]:
     finite_xy = torch.isfinite(graph.x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]).all(dim=1)
     mask = teammate & (~possessor) & (~goal) & finite_xy
     return torch.nonzero(mask, as_tuple=False).flatten().tolist()
+
+
+def physical_state_hash(graph: Data) -> str:
+    node_ids = _node_ids(graph)
+    x = graph.x.detach().cpu().to(torch.float32)
+    feature_indices = [
+        config.NODE_FEATURE_IS_TEAMMATE,
+        config.NODE_FEATURE_X,
+        config.NODE_FEATURE_Y,
+        config.NODE_FEATURE_VX,
+        config.NODE_FEATURE_VY,
+        config.NODE_FEATURE_IS_GOAL,
+        config.NODE_FEATURE_IS_POSSESSOR,
+    ]
+    rows: list[dict[str, Any]] = []
+    for node_index, node_id in enumerate(node_ids):
+        values: dict[str, Any] = {"node_id": node_id}
+        for feature_index in feature_indices:
+            if feature_index >= x.shape[1]:
+                values[str(feature_index)] = None
+                continue
+            value = float(x[node_index, feature_index].item())
+            values[str(feature_index)] = None if not math.isfinite(value) else round(value, 6)
+        rows.append(values)
+    payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _extract_simulation_probability(
@@ -266,7 +381,334 @@ def _build_simulation_inputs(
     )
 
 
+def _infer_playing_direction_from_centered_players(player_pos: np.ndarray, player_teams: np.ndarray) -> float:
+    finite_x = np.isfinite(player_pos[:, 0])
+    attack_x = player_pos[(player_teams == "attack") & finite_x, 0]
+    defense_x = player_pos[(player_teams == "defense") & finite_x, 0]
+    if attack_x.size == 0 or defense_x.size == 0:
+        return 1.0
+    return 1.0 if float(np.nanmean(attack_x)) <= float(np.nanmean(defense_x)) else -1.0
+
+
+def _full_as_default_simulation_inputs(
+    graph: Data,
+    *,
+    candidate_indices: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[int, int], int]:
+    x = graph.x.detach().cpu().to(torch.float32)
+    node_ids = _node_ids(graph)
+    player_mask = (
+        (x[:, config.NODE_FEATURE_IS_GOAL] == 0)
+        if x.shape[1] > config.NODE_FEATURE_IS_GOAL
+        else torch.ones(x.shape[0], dtype=torch.bool)
+    )
+    player_mask &= torch.isfinite(x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1]).all(dim=1)
+    player_indices = torch.nonzero(player_mask, as_tuple=False).flatten().tolist()
+    if not player_indices:
+        raise ValueError("No finite non-goal players found for physical xPass simulation.")
+
+    possessor_indices = torch.nonzero(x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1, as_tuple=False).flatten().tolist()
+    if len(possessor_indices) != 1:
+        raise ValueError(f"Expected exactly one possessor node, found {len(possessor_indices)}.")
+    possessor_index = int(possessor_indices[0])
+    if possessor_index not in player_indices:
+        raise ValueError("Possessor node is not part of the simulated player set.")
+
+    player_index_to_sim_index = {node_index: sim_index for sim_index, node_index in enumerate(player_indices)}
+    missing_targets = [node_index for node_index in candidate_indices if node_index not in player_index_to_sim_index]
+    if missing_targets:
+        missing_ids = [node_ids[node_index] for node_index in missing_targets]
+        raise ValueError(f"Candidate target nodes are missing from the physical player mapping: {missing_ids}.")
+
+    player_pos = x[player_indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy()
+    player_pos = np.asarray(player_pos, dtype=float)
+    player_pos[:, 0] -= FIELD_SIZE[0] / 2.0
+    player_pos[:, 1] -= FIELD_SIZE[1] / 2.0
+    player_teams = np.where((x[player_indices, config.NODE_FEATURE_IS_TEAMMATE].numpy() == 1), "attack", "defense").astype(object)
+    players = np.array([node_ids[node_index] for node_index in player_indices], dtype=object)
+    ball_pos = x[possessor_index, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1].numpy().astype(float)
+    ball_pos = np.array([ball_pos[0] - FIELD_SIZE[0] / 2.0, ball_pos[1] - FIELD_SIZE[1] / 2.0], dtype=float)
+    target_index_lookup = {node_index: player_index_to_sim_index[node_index] for node_index in candidate_indices}
+    return player_pos, player_teams, players, ball_pos, target_index_lookup, possessor_index
+
+
+def _reduced_as_default_simulation_inputs(
+    graph: Data,
+    *,
+    candidate_indices: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[int, tuple[int, int]], int, float]:
+    x = graph.x.detach().cpu().to(torch.float32)
+    node_ids = _node_ids(graph)
+    player_mask = (
+        (x[:, config.NODE_FEATURE_IS_GOAL] == 0)
+        if x.shape[1] > config.NODE_FEATURE_IS_GOAL
+        else torch.ones(x.shape[0], dtype=torch.bool)
+    )
+    player_mask &= torch.isfinite(x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1]).all(dim=1)
+    player_indices = torch.nonzero(player_mask, as_tuple=False).flatten().tolist()
+    if not player_indices:
+        raise ValueError("No finite non-goal players found for physical xPass simulation.")
+
+    possessor_indices = torch.nonzero(x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1, as_tuple=False).flatten().tolist()
+    if len(possessor_indices) != 1:
+        raise ValueError(f"Expected exactly one possessor node, found {len(possessor_indices)}.")
+    possessor_index = int(possessor_indices[0])
+    if possessor_index not in player_indices:
+        raise ValueError("Possessor node is not part of the simulated player set.")
+
+    missing_targets = [node_index for node_index in candidate_indices if node_index not in player_indices]
+    if missing_targets:
+        missing_ids = [node_ids[node_index] for node_index in missing_targets]
+        raise ValueError(f"Candidate target nodes are missing from the physical player mapping: {missing_ids}.")
+
+    full_player_pos = x[player_indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy().astype(float)
+    full_player_pos[:, 0] -= FIELD_SIZE[0] / 2.0
+    full_player_pos[:, 1] -= FIELD_SIZE[1] / 2.0
+    full_player_teams = np.where(
+        (x[player_indices, config.NODE_FEATURE_IS_TEAMMATE].numpy() == 1),
+        "attack",
+        "defense",
+    ).astype(object)
+    playing_direction = _infer_playing_direction_from_centered_players(full_player_pos, full_player_teams)
+
+    defender_indices = [
+        node_index
+        for node_index in player_indices
+        if node_index != possessor_index and int(x[node_index, config.NODE_FEATURE_IS_TEAMMATE].item()) == 0
+    ]
+    frame_player_indices = [[possessor_index, graph_target_index] + defender_indices for graph_target_index in candidate_indices]
+    player_counts = {len(indices) for indices in frame_player_indices}
+    if len(player_counts) != 1:
+        raise ValueError(
+            f"Physical xPass reduced simulation player count must be constant across candidates, got {sorted(player_counts)}."
+        )
+
+    player_pos = np.stack(
+        [x[indices, config.NODE_FEATURE_X : config.NODE_FEATURE_VY + 1].numpy() for indices in frame_player_indices],
+        axis=0,
+    ).astype(float)
+    player_pos[:, :, 0] -= FIELD_SIZE[0] / 2.0
+    player_pos[:, :, 1] -= FIELD_SIZE[1] / 2.0
+    player_teams = np.array(["attack", "attack"] + ["defense"] * len(defender_indices), dtype=object)
+    players = np.array(
+        [node_ids[possessor_index], "target_player"] + [node_ids[node_index] for node_index in defender_indices],
+        dtype=object,
+    )
+    ball_pos = x[possessor_index, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1].numpy().astype(float)
+    ball_pos = np.array([ball_pos[0] - FIELD_SIZE[0] / 2.0, ball_pos[1] - FIELD_SIZE[1] / 2.0], dtype=float)
+    target_index_lookup = {node_index: (frame_index, 1) for frame_index, node_index in enumerate(candidate_indices)}
+    return player_pos, player_teams, players, ball_pos, target_index_lookup, possessor_index, playing_direction
+
+
+def _on_pitch_mask(simulation_result: Any, frame_index: int = 0) -> np.ndarray:
+    x_grid = getattr(simulation_result, "x_grid", None)
+    y_grid = getattr(simulation_result, "y_grid", None)
+    player_cum_prob = np.asarray(getattr(simulation_result, "player_cum_prob", None), dtype=float)
+    if x_grid is None or y_grid is None:
+        return np.ones(player_cum_prob.shape[2:], dtype=bool)
+    x_grid = np.asarray(x_grid, dtype=float)
+    y_grid = np.asarray(y_grid, dtype=float)
+    if x_grid.ndim != 3 or y_grid.ndim != 3:
+        raise ValueError(f"simulation_result x_grid/y_grid must be 3D [frame, angle, distance], got {x_grid.shape}/{y_grid.shape}.")
+    return (
+        np.isfinite(x_grid[frame_index])
+        & np.isfinite(y_grid[frame_index])
+        & (x_grid[frame_index] >= -FIELD_SIZE[0] / 2.0)
+        & (x_grid[frame_index] <= FIELD_SIZE[0] / 2.0)
+        & (y_grid[frame_index] >= -FIELD_SIZE[1] / 2.0)
+        & (y_grid[frame_index] <= FIELD_SIZE[1] / 2.0)
+    )
+
+
+def _compute_as_default_max_from_simulation_inputs(
+    *,
+    node_ids: list[str],
+    candidate_indices: list[int],
+    player_pos: np.ndarray,
+    player_teams: np.ndarray,
+    players: np.ndarray,
+    ball_pos: np.ndarray,
+    target_index_lookup: dict[int, tuple[int, int]],
+    possessor_index: int,
+    playing_direction: float,
+    exclude_passer: bool,
+    eps: float,
+    simulate_passes_fn: Callable[..., Any] | None,
+    use_progress_bar: bool,
+    chunk_size: int,
+) -> pd.Series:
+    result = pd.Series(np.nan, index=node_ids, dtype=float)
+    frame_count = int(player_pos.shape[0])
+    PLAYER_POS = np.asarray(player_pos, dtype=float)
+    BALL_POS = np.repeat(np.asarray(ball_pos, dtype=float)[np.newaxis, :], frame_count, axis=0)
+    phi_grid = np.repeat(
+        np.linspace(
+            AS_DEFAULT_PHI_OFFSET,
+            2.0 * np.pi + AS_DEFAULT_PHI_OFFSET,
+            AS_DEFAULT_N_ANGLES,
+            endpoint=False,
+            dtype=float,
+        )[np.newaxis, :],
+        frame_count,
+        axis=0,
+    )
+    v0_values = np.linspace(AS_DEFAULT_V0_MIN, AS_DEFAULT_V0_MAX, AS_DEFAULT_N_V0, dtype=float)
+    passer_teams = np.repeat("attack", frame_count).astype(object)
+    passers = np.repeat(node_ids[possessor_index], frame_count).astype(object)
+    _validate_simulation_contract(players=players, passers=passers, exclude_passer=exclude_passer)
+
+    simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
+    maxima = {node_index: -np.inf for node_index in candidate_indices}
+    for speed in v0_values:
+        simulation_result = simulate_passes_fn(
+            PLAYER_POS=PLAYER_POS,
+            BALL_POS=BALL_POS,
+            phi_grid=phi_grid,
+            v0_grid=np.full((frame_count, 1), float(speed), dtype=float),
+            passer_teams=passer_teams,
+            player_teams=player_teams,
+            players=players,
+            passers=passers,
+            exclude_passer=bool(exclude_passer),
+            respect_offside=AS_DEFAULT_RESPECT_OFFSIDE,
+            playing_direction=np.repeat(float(playing_direction), frame_count),
+            x_pitch_min=-FIELD_SIZE[0] / 2.0,
+            x_pitch_max=FIELD_SIZE[0] / 2.0,
+            y_pitch_min=-FIELD_SIZE[1] / 2.0,
+            y_pitch_max=FIELD_SIZE[1] / 2.0,
+            use_progress_bar=use_progress_bar,
+            chunk_size=chunk_size,
+            fields_to_return=("player_cum_prob",),
+            normalize=AS_DEFAULT_NORMALIZE,
+            pass_start_location_offset=AS_DEFAULT_PASS_START_LOCATION_OFFSET,
+            time_offset_ball=AS_DEFAULT_TIME_OFFSET_BALL,
+            radial_gridsize=AS_DEFAULT_RADIAL_GRIDSIZE,
+            b0=AS_DEFAULT_B0,
+            b1=AS_DEFAULT_B1,
+            player_velocity=AS_DEFAULT_PLAYER_VELOCITY,
+            keep_inertial_velocity=AS_DEFAULT_KEEP_INERTIAL_VELOCITY,
+            use_max=AS_DEFAULT_USE_MAX,
+            v_max=AS_DEFAULT_V_MAX,
+            a_max=AS_DEFAULT_A_MAX,
+            inertial_seconds=AS_DEFAULT_INERTIAL_SECONDS,
+            tol_distance=AS_DEFAULT_TOL_DISTANCE,
+            use_approx_two_point=AS_DEFAULT_USE_APPROX_TWO_POINT,
+            v0_prob_aggregation_mode=AS_DEFAULT_V0_PROB_AGGREGATION_MODE,
+            use_efficient_sigmoid=AS_DEFAULT_USE_EFFICIENT_SIGMOID,
+            factor=AS_DEFAULT_FACTOR,
+            factor2=AS_DEFAULT_FACTOR2,
+        )
+        player_cum_prob = np.asarray(getattr(simulation_result, "player_cum_prob", None), dtype=float)
+        if player_cum_prob.ndim != 4:
+            raise ValueError(
+                "accessible-space simulation_result.player_cum_prob must be 4D "
+                f"[frame, player, angle, distance], got shape={player_cum_prob.shape}."
+            )
+        if (
+            player_cum_prob.shape[0] != frame_count
+            or player_cum_prob.shape[1] != len(players)
+            or player_cum_prob.shape[2] != AS_DEFAULT_N_ANGLES
+        ):
+            raise ValueError(
+                "Unexpected player_cum_prob shape for AS-default physical xPass: "
+                f"{player_cum_prob.shape}, frames={frame_count}, players={len(players)}, "
+                f"n_angles={AS_DEFAULT_N_ANGLES}."
+            )
+        for graph_target_index in candidate_indices:
+            frame_index, target_sim_index = target_index_lookup[graph_target_index]
+            on_pitch = _on_pitch_mask(simulation_result, frame_index=frame_index)
+            if on_pitch.shape != player_cum_prob.shape[2:]:
+                raise ValueError(
+                    f"On-pitch mask shape {on_pitch.shape} does not match "
+                    f"player_cum_prob grid {player_cum_prob.shape[2:]}."
+                )
+            values = np.where(on_pitch, player_cum_prob[frame_index, target_sim_index, :, :], np.nan)
+            if np.isfinite(values).any():
+                maxima[graph_target_index] = max(maxima[graph_target_index], float(np.nanmax(values)))
+
+    for graph_target_index, value in maxima.items():
+        if math.isfinite(value):
+            result.loc[node_ids[graph_target_index]] = float(np.clip(value, float(eps), 1.0 - float(eps)))
+    return result
+
+
+def compute_graph_max_player_cum_prob_as_defaults(
+    graph: Data,
+    *,
+    eps: float = 1e-4,
+    consider_teammates: bool = False,
+    simulate_passes_fn: Callable[..., Any] | None = None,
+    use_progress_bar: bool = False,
+    chunk_size: int = 150,
+) -> pd.Series:
+    node_ids = _node_ids(graph)
+    candidate_indices = _candidate_target_indices(graph)
+    result = pd.Series(np.nan, index=node_ids, dtype=float)
+    if not candidate_indices:
+        return result
+
+    if consider_teammates:
+        player_pos, player_teams, players, ball_pos, raw_target_lookup, possessor_index = _full_as_default_simulation_inputs(
+            graph,
+            candidate_indices=candidate_indices,
+        )
+        player_pos = player_pos[np.newaxis, :, :]
+        target_index_lookup = {node_index: (0, sim_index) for node_index, sim_index in raw_target_lookup.items()}
+        playing_direction = _infer_playing_direction_from_centered_players(player_pos[0], player_teams)
+        exclude_passer = False
+    else:
+        (
+            player_pos,
+            player_teams,
+            players,
+            ball_pos,
+            target_index_lookup,
+            possessor_index,
+            playing_direction,
+        ) = _reduced_as_default_simulation_inputs(graph, candidate_indices=candidate_indices)
+        exclude_passer = True
+
+    return _compute_as_default_max_from_simulation_inputs(
+        node_ids=node_ids,
+        candidate_indices=candidate_indices,
+        player_pos=player_pos,
+        player_teams=player_teams,
+        players=players,
+        ball_pos=ball_pos,
+        target_index_lookup=target_index_lookup,
+        possessor_index=possessor_index,
+        playing_direction=playing_direction,
+        exclude_passer=exclude_passer,
+        eps=eps,
+        simulate_passes_fn=simulate_passes_fn,
+        use_progress_bar=use_progress_bar,
+        chunk_size=chunk_size,
+    )
+
+
 def compute_graph_player_cum_prob(
+    graph: Data,
+    *,
+    eps: float = 1e-4,
+    normalize: bool = True,
+    consider_teammates: bool = False,
+    simulate_passes_fn: Callable[..., Any] | None = None,
+    use_progress_bar: bool = False,
+    chunk_size: int = 150,
+) -> pd.Series:
+    if not normalize:
+        warnings.warn("--no-normalize is ignored for AS-default max physical xPass; normalize=True is required.")
+    return compute_graph_max_player_cum_prob_as_defaults(
+        graph,
+        eps=eps,
+        consider_teammates=consider_teammates,
+        simulate_passes_fn=simulate_passes_fn,
+        use_progress_bar=use_progress_bar,
+        chunk_size=chunk_size,
+    )
+
+
+def compute_graph_player_cum_prob_at_target_location(
     graph: Data,
     *,
     eps: float = 1e-4,
@@ -378,7 +820,7 @@ def load_physical_xpass_component(
     row = frame.loc[int(action_index)]
     player_columns = [column for column in row.index if column not in PHYSICAL_XPASS_ID_COLUMNS]
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
-    series.name = "player_cum_prob"
+    series.name = "max_player_cum_prob"
     return series
 
 

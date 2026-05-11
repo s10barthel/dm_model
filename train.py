@@ -37,7 +37,12 @@ from models.utils import (
     unwrap_model,
     validate_target_flags,
 )
-from physical_pass_model import model_uses_physical_xpass, validate_physical_xpass_args
+from physical_pass_model import (
+    PHYSICAL_XPASS_SOURCE,
+    model_uses_physical_xpass,
+    validate_physical_xpass_args,
+    validate_physical_xpass_cache_metadata,
+)
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     generate_model_run_id,
@@ -137,7 +142,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--include_out", action="store_true", default=False, help="attach a component for ball out of play")
-parser.add_argument("--use_physical_xpass", action="store_true", default=False, help="Use precomputed accessible-space player_cum_prob for pass_success.")
+parser.add_argument(
+    "--use_physical_xpass",
+    action="store_true",
+    default=False,
+    help="Use precomputed AS-default max player_cum_prob physical xPass for pass_success.",
+)
 parser.add_argument(
     "--model-variant",
     dest="model_variant",
@@ -152,7 +162,7 @@ physical_scale_group.add_argument(
     "--learn-physical-scale",
     dest="learn_physical_scale",
     action="store_true",
-    help="Learn beta1 in beta0 + beta1 * logit(player_cum_prob) + delta_gat.",
+    help="Learn beta1 in beta0 + beta1 * logit(physical_xpass) + delta_gat.",
 )
 physical_scale_group.add_argument(
     "--fixed-physical-scale",
@@ -545,6 +555,7 @@ if __name__ == "__main__":
                 f"Physical xPass sidecars not found at {physical_cache_dir}. "
                 "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> before training with --use_physical_xpass."
             )
+        validate_physical_xpass_cache_metadata(physical_cache_dir)
 
     # Load model
     args_dict = vars(args)
@@ -598,7 +609,7 @@ if __name__ == "__main__":
         "physical_xpass": {
             "enabled": bool(model_uses_physical_xpass(args)),
             "model_variant": args.model_variant,
-            "source": "accessible_space_player_cum_prob",
+            "source": PHYSICAL_XPASS_SOURCE,
             "physical_cache_dir": args.physical_cache_dir,
             "physical_eps": float(args.physical_eps),
             "learn_physical_scale": bool(args.learn_physical_scale),

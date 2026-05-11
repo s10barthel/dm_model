@@ -22,7 +22,7 @@ from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
-from physical_pass_model import _candidate_target_indices, compute_graph_player_cum_prob
+from physical_pass_model import AS_DEFAULT_N_ANGLES, AS_DEFAULT_N_V0, _candidate_target_indices, compute_graph_player_cum_prob
 from scripts import run_benchmark
 from scripts import train_relevant_models as train_wrapper
 from validation.benchmark import benchmark_postprocessing as benchmark_post
@@ -2008,11 +2008,9 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         def fake_simulate_passes(**kwargs):
             calls.append(kwargs)
             target_player_index = list(kwargs["players"]).index("target_player")
-            target_xy = kwargs["PLAYER_POS"][0, target_player_index, :2]
-            distance = float(np.linalg.norm(target_xy - kwargs["BALL_POS"][0]))
-            probabilities = np.full((1, kwargs["PLAYER_POS"].shape[1], 1, 1), 0.1, dtype=float)
+            probabilities = np.full((1, kwargs["PLAYER_POS"].shape[1], AS_DEFAULT_N_ANGLES, 1), 0.1, dtype=float)
             probabilities[0, target_player_index, 0, 0] = 0.73
-            return SimpleNamespace(player_cum_prob=probabilities, r_grid=np.array([distance], dtype=float))
+            return SimpleNamespace(player_cum_prob=probabilities, r_grid=np.array([10.0], dtype=float))
 
         result = compute_graph_player_cum_prob(
             graph,
@@ -2022,10 +2020,12 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertEqual(result["target"], 0.73)
         self.assertTrue(result.drop(index="target").isna().all())
-        self.assertEqual(len(calls), 1)
-        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 0], [70.0, 34.0, 2.0, 0.5])
-        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 1], [55.0, 45.0, -1.0, 0.0])
-        np.testing.assert_allclose(calls[0]["BALL_POS"][0], [40.0, 34.0])
+        self.assertEqual(len(calls), AS_DEFAULT_N_V0)
+        self.assertEqual(calls[0]["players"].tolist(), ["possessor", "target_player", "defender"])
+        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 0], [-12.5, 0.0, 1.0, 0.0])
+        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 1], [17.5, 0.0, 2.0, 0.5])
+        np.testing.assert_allclose(calls[0]["PLAYER_POS"][0, 2], [2.5, 11.0, -1.0, 0.0])
+        np.testing.assert_allclose(calls[0]["BALL_POS"][0], [-12.5, 0.0])
 
     def test_action_dataset_splits_possessor_and_relative_velocity_masks(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
