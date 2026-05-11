@@ -22,8 +22,11 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 from physical_pass_model import (
+    attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graphs,
     model_uses_physical_xpass,
+    physical_xpass_source,
+    physical_xpass_teammate_policy,
     validate_physical_xpass_cache_metadata,
 )
 from project_config import get_physical_xpass_dir, get_success_intent_label_dir
@@ -95,6 +98,75 @@ def _runtime_feature_root(match: Match) -> Path | None:
     if feature_root is None:
         feature_root = getattr(match, "feature_root", None)
     return Path(feature_root) if feature_root is not None else None
+
+
+def _allows_online_physical_xpass(match: Match) -> bool:
+    if _runtime_feature_root(match) is not None:
+        return False
+    match_type = type(match)
+    return (
+        match_type.__module__ in {"datatools.benchmark", "datatools.hawkeye", "datatools.skillcorner"}
+        and match_type.__name__ in {"BenchmarkState", "HawkeyeSituation", "SkillcornerPossession"}
+    )
+
+
+def _record_online_physical_xpass(match: Match, model: GNN, *, source: str, graph_count: int) -> None:
+    stats = getattr(match, "physical_xpass_runtime_stats", None)
+    if stats is None:
+        stats = {}
+        setattr(match, "physical_xpass_runtime_stats", stats)
+    task = str(model.args.get("task", "unknown"))
+    task_stats = stats.setdefault(
+        task,
+        {
+            "source": source,
+            "model_id": model.args.get("model_id"),
+            "online_graphs": 0,
+        },
+    )
+    task_stats["online_graphs"] = int(task_stats.get("online_graphs", 0)) + int(graph_count)
+
+
+def attach_physical_xpass_for_inference(
+    match: Match,
+    graphs: list[Data],
+    labels: torch.Tensor,
+    model: GNN,
+) -> list[Data]:
+    source = physical_xpass_source(model.args)
+    eps = float(model.args.get("physical_eps", 1e-4))
+    teammate_policy = physical_xpass_teammate_policy(model.args, source=source)
+    feature_root = _runtime_feature_root(match)
+    physical_cache_dir = model.args.get("physical_cache_dir")
+    if not physical_cache_dir:
+        if feature_root is None:
+            feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
+        physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+
+    try:
+        validate_physical_xpass_cache_metadata(physical_cache_dir, expected_source=source)
+        return attach_physical_xpass_to_graphs(
+            graphs,
+            labels,
+            cache_dir=physical_cache_dir,
+            match_id=resolve_match_id(match),
+            eps=eps,
+            require_observed_target=False,
+        )
+    except FileNotFoundError:
+        if not _allows_online_physical_xpass(match):
+            raise
+
+    attached = attach_physical_xpass_online_to_graphs(
+        graphs,
+        labels,
+        source=source,
+        eps=eps,
+        teammate_policy=teammate_policy,
+        require_observed_target=False,
+    )
+    _record_online_physical_xpass(match, model, source=source, graph_count=len(attached))
+    return attached
 
 
 def resolve_runtime_graph_feature_dir(match: Match, model: GNN, post_action: bool = False) -> Path:
@@ -216,21 +288,7 @@ def inference_gnn(
         feature_action_indices=feature_action_indices,
     )
     if model_uses_physical_xpass(model.args):
-        feature_root = _runtime_feature_root(match)
-        physical_cache_dir = model.args.get("physical_cache_dir")
-        if not physical_cache_dir:
-            if feature_root is None:
-                feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
-            physical_cache_dir = str(get_physical_xpass_dir(feature_root))
-        validate_physical_xpass_cache_metadata(physical_cache_dir)
-        graphs = attach_physical_xpass_to_graphs(
-            graphs,
-            labels,
-            cache_dir=physical_cache_dir,
-            match_id=resolve_match_id(match),
-            eps=float(model.args.get("physical_eps", 1e-4)),
-            require_observed_target=False,
-        )
+        graphs = attach_physical_xpass_for_inference(match, graphs, labels, model)
 
     graphs = Batch.from_data_list(graphs).to(device)
     graphs.x = graphs.x[:, : model.args["node_in_dim"]]

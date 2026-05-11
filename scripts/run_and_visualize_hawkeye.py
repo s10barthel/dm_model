@@ -150,7 +150,7 @@ def render_situation(
     device: str,
     output_root: Path,
     rendered_components: list[str],
-) -> Path:
+) -> tuple[Path, dict[str, object]]:
     output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
@@ -247,7 +247,7 @@ def render_situation(
         output_path = output_dir / f"{component_name}.{suffix}"
         save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
 
-    return output_dir
+    return output_dir, getattr(situation, "physical_xpass_runtime_stats", {})
 
 
 def main() -> None:
@@ -302,8 +302,9 @@ def main() -> None:
 
     output_dirs: list[Path] = []
     rendered_situations: list[dict[str, object]] = []
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     for situation_id in situation_ids:
-        output_dir = render_situation(
+        output_dir, runtime_physical_stats = render_situation(
             situation_id=situation_id,
             tracking=tracking,
             ball=ball,
@@ -314,6 +315,8 @@ def main() -> None:
             output_root=output_root,
             rendered_components=component_selection.rendered_components,
         )
+        if runtime_physical_stats:
+            physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
         output_dirs.append(output_dir)
         rendered_situations.append(
             {
@@ -350,6 +353,7 @@ def main() -> None:
         "requested_action_ids": [str(value) for value in (args.action_id or [])],
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
         "rendered_situations": rendered_situations,
+        "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
         "ball_csv": str(Path(args.ball_csv).resolve()),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),

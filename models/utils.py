@@ -191,6 +191,18 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
+    physical_metadata = (metadata or {}).get("physical_xpass")
+    if isinstance(physical_metadata, dict):
+        source = physical_metadata.get("source")
+        teammate_policy = physical_metadata.get("teammate_policy")
+        if source:
+            args["physical_xpass_source"] = str(source)
+        if teammate_policy:
+            args["physical_xpass_teammate_policy"] = str(teammate_policy)
+    return args
+
+
 def _iso_or_mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
 
@@ -210,6 +222,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
+    enrich_model_args_from_metadata(args, metadata)
     normalize_v_edge_feature_args(args)
 
     legacy_context = infer_legacy_model_context(model_id)
@@ -439,11 +452,13 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         model_path = get_model_path(model_id)
         with open(model_path / "args.json", "r", encoding="utf-8") as f:
             args = json.load(f)
+        metadata = _read_json_if_exists(model_path / "metadata.json") or {}
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
+        enrich_model_args_from_metadata(args, metadata)
         normalize_v_edge_feature_args(args)
 
         if args["model"] in ["gcn", "gin", "gat"]:  # GNN models

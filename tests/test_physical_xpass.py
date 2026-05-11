@@ -6,6 +6,7 @@ import warnings
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,9 @@ from torch_geometric.loader import DataLoader
 from datatools import config
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from dataset import ActionDataset, pass_success_observed_target_invalid_reason
+import inference
 from models.gnn import Decoder
+from models import utils as model_utils
 from models.utils import run_epoch
 from physical_pass_model import (
     AS_DEFAULT_N_ANGLES,
@@ -33,7 +36,9 @@ from physical_pass_model import (
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
     PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
     _validate_simulation_contract,
+    attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graph,
+    compute_graph_physical_xpass_for_source,
     compute_graph_max_player_cum_prob_as_defaults,
     compute_graph_player_cum_prob,
     load_physical_xpass_match,
@@ -231,6 +236,50 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(captured["players"].tolist(), ["home_1", "home_2", "away_3"])
         self.assertTrue(captured["normalize"])
         self.assertTrue(captured["respect_offside"])
+
+    def test_physical_xpass_source_dispatches_legacy_to_target_location(self) -> None:
+        graph = make_graph()
+        expected = pd.Series({"home_1": np.nan, "home_2": 0.42, "away_3": np.nan})
+        with patch("physical_pass_model.compute_graph_player_cum_prob_at_target_location", return_value=expected) as legacy_fn:
+            with patch("physical_pass_model.compute_graph_max_player_cum_prob_as_defaults") as max_fn:
+                result = compute_graph_physical_xpass_for_source(
+                    graph,
+                    source=PHYSICAL_XPASS_LEGACY_SOURCE,
+                    eps=1e-4,
+                )
+
+        legacy_fn.assert_called_once()
+        max_fn.assert_not_called()
+        self.assertAlmostEqual(float(result["home_2"]), 0.42)
+
+    def test_physical_xpass_source_dispatches_new_source_to_as_default_max(self) -> None:
+        graph = make_graph()
+        expected = pd.Series({"home_1": np.nan, "home_2": 0.73, "away_3": np.nan})
+        with patch("physical_pass_model.compute_graph_max_player_cum_prob_as_defaults", return_value=expected) as max_fn:
+            with patch("physical_pass_model.compute_graph_player_cum_prob_at_target_location") as legacy_fn:
+                result = compute_graph_physical_xpass_for_source(
+                    graph,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    eps=1e-4,
+                )
+
+        max_fn.assert_called_once()
+        legacy_fn.assert_not_called()
+        self.assertAlmostEqual(float(result["home_2"]), 0.73)
+
+    def test_online_physical_xpass_attachment_uses_source_dispatch(self) -> None:
+        graph = make_graph()
+        label = make_label(action_index=7)
+        expected = pd.Series({"home_1": np.nan, "home_2": 0.64, "away_3": np.nan})
+        with patch("physical_pass_model.compute_graph_player_cum_prob_at_target_location", return_value=expected):
+            attached = attach_physical_xpass_online_to_graphs(
+                [graph],
+                torch.stack([label]),
+                source=PHYSICAL_XPASS_LEGACY_SOURCE,
+                eps=1e-4,
+            )
+
+        self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.64)
 
     def test_teammate_policy_switch_can_change_values(self) -> None:
         def fake_simulate_passes(**kwargs):
@@ -443,10 +492,127 @@ class PhysicalXPassTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "regenerate compatible physical xPass sidecars"):
                 validate_physical_xpass_cache_metadata(tmpdir)
 
+    def test_physical_xpass_metadata_accepts_expected_legacy_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = Path(tmpdir) / "metadata.json"
+            metadata_path.write_text(f'{{"source": "{PHYSICAL_XPASS_LEGACY_SOURCE}"}}', encoding="utf-8")
+
+            metadata = validate_physical_xpass_cache_metadata(
+                tmpdir,
+                expected_source=PHYSICAL_XPASS_LEGACY_SOURCE,
+            )
+
+        self.assertEqual(metadata["source"], PHYSICAL_XPASS_LEGACY_SOURCE)
+
+    def test_physical_xpass_metadata_rejects_new_source_for_legacy_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            metadata_path = Path(tmpdir) / "metadata.json"
+            metadata_path.write_text(f'{{"source": "{PHYSICAL_XPASS_SOURCE}"}}', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, PHYSICAL_XPASS_LEGACY_SOURCE):
+                validate_physical_xpass_cache_metadata(
+                    tmpdir,
+                    expected_source=PHYSICAL_XPASS_LEGACY_SOURCE,
+                )
+
     def test_physical_xpass_metadata_missing_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaisesRegex(FileNotFoundError, "metadata"):
                 validate_physical_xpass_cache_metadata(tmpdir)
+
+    def test_load_model_copies_physical_xpass_source_from_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_dir = Path(tmpdir)
+            (model_dir / "args.json").write_text(
+                json.dumps(
+                    {
+                        "model": "gat",
+                        "task": "pass_success",
+                        "edge_in_dim": 2,
+                        "node_in_dim": 25,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (model_dir / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "physical_xpass": {
+                            "source": PHYSICAL_XPASS_LEGACY_SOURCE,
+                            "teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeModel:
+                def __init__(self, args):
+                    self.args = args
+
+                def to(self, device):
+                    del device
+                    return self
+
+                def load_state_dict(self, state_dict):
+                    del state_dict
+
+            with patch.object(model_utils, "get_model_path", return_value=model_dir):
+                with patch.object(model_utils, "GNN", FakeModel):
+                    with patch.object(torch, "load", return_value={}):
+                        model = model_utils.load_model("pass_success/fake_run", device="cpu")
+
+        self.assertEqual(model.args["physical_xpass_source"], PHYSICAL_XPASS_LEGACY_SOURCE)
+        self.assertEqual(model.args["physical_xpass_teammate_policy"], PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE)
+
+    def test_inference_missing_synthetic_sidecar_computes_physical_xpass_online(self) -> None:
+        RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
+        match = RuntimeState()
+        match.match_id = "modification_50_game_state_2"
+        graphs = [make_graph()]
+        labels = torch.stack([make_label(action_index=0)])
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "model_id": "pass_success/fake",
+                "use_physical_xpass": True,
+                "model_variant": "gat_phys_logit_offset",
+                "physical_xpass_source": PHYSICAL_XPASS_LEGACY_SOURCE,
+                "physical_cache_dir": "missing_cache",
+                "physical_eps": 1e-4,
+            }
+        )
+
+        with patch.object(inference, "validate_physical_xpass_cache_metadata", side_effect=FileNotFoundError("missing")):
+            with patch.object(inference, "attach_physical_xpass_online_to_graphs", return_value=graphs) as online_attach:
+                result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+
+        self.assertIs(result, graphs)
+        online_attach.assert_called_once()
+        self.assertEqual(online_attach.call_args.kwargs["source"], PHYSICAL_XPASS_LEGACY_SOURCE)
+        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["online_graphs"], 1)
+
+    def test_inference_missing_real_sidecar_stays_strict(self) -> None:
+        match = SimpleNamespace(match_id="DFL-MAT-REAL", runtime_feature_root=Path("feature_run"))
+        graphs = [make_graph()]
+        labels = torch.stack([make_label(action_index=0)])
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "use_physical_xpass": True,
+                "model_variant": "gat_phys_logit_offset",
+                "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                "physical_cache_dir": "missing_cache",
+                "physical_eps": 1e-4,
+            }
+        )
+
+        with patch.object(inference, "validate_physical_xpass_cache_metadata", side_effect=FileNotFoundError("missing")):
+            with patch.object(inference, "attach_physical_xpass_online_to_graphs") as online_attach:
+                with self.assertRaises(FileNotFoundError):
+                    inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+
+        online_attach.assert_not_called()
 
     def test_generate_physical_xpass_reuse_cache_validation_rejects_old_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -111,6 +111,7 @@ def main() -> None:
     processed_matches: list[str] = []
     skipped_match_errors: list[dict[str, str]] = []
     skipped_possessions: dict[str, list[dict[str, str]]] = {}
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
 
     for index, match_id in enumerate(selected_match_ids, start=1):
         print(f"[{index}/{len(selected_match_ids)}] {match_id}")
@@ -161,6 +162,9 @@ def main() -> None:
                         continue
 
                     components = infer_skillcorner_components(possession, model_specs, device=device)
+                    runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
+                    if runtime_physical_stats:
+                        physical_xpass_runtime_stats.setdefault(str(match_id), {})[str(event_index)] = runtime_physical_stats
                     player_meta = context["player_meta"]
                     for component_name in COMPONENT_COLUMNS:
                         table = build_skillcorner_component_table(
@@ -215,6 +219,7 @@ def main() -> None:
         "processed_matches": processed_matches,
         "skipped_match_errors": skipped_match_errors,
         "skipped_possessions": skipped_possessions,
+        "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "models": resolved_model_ids,
         "model_records": model_records,
         "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},

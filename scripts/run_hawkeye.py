@@ -113,6 +113,7 @@ def main() -> None:
     export_tables: list[pd.DataFrame] = []
     stats_by_situation: dict[str, dict[str, int]] = {}
     processed_situation_ids: list[str] = []
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     skipped_situations: list[dict[str, str]] = []
 
     for index, situation_id in enumerate(situation_ids, start=1):
@@ -128,6 +129,9 @@ def main() -> None:
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
             stats_by_situation[situation_id] = stats
+            runtime_physical_stats = getattr(situation, "physical_xpass_runtime_stats", None)
+            if runtime_physical_stats:
+                physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
             processed_situation_ids.append(str(situation_id))
         except Exception as exc:
             error_summary = summarize_exception(exc)
@@ -152,6 +156,7 @@ def main() -> None:
         "requested_situation_ids": args.situation_id or [],
         "limit": args.limit,
         "processed_situation_ids": processed_situation_ids,
+        "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "skipped_situations": skipped_situations,
         "totals": totals,
         "models": resolved_model_ids,

@@ -548,6 +548,7 @@ if __name__ == "__main__":
     args.add_v_edge_features = bool(training_schema["add_v_edge_features"])
     args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)
     validate_physical_xpass_args(args)
+    physical_xpass_metadata = None
     if model_uses_physical_xpass(args):
         physical_cache_dir = Path(args.physical_cache_dir)
         if not physical_cache_dir.exists():
@@ -555,7 +556,14 @@ if __name__ == "__main__":
                 f"Physical xPass sidecars not found at {physical_cache_dir}. "
                 "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> before training with --use_physical_xpass."
             )
-        validate_physical_xpass_cache_metadata(physical_cache_dir)
+        physical_xpass_metadata = validate_physical_xpass_cache_metadata(
+            physical_cache_dir,
+            expected_source=PHYSICAL_XPASS_SOURCE,
+        )
+        args.physical_xpass_source = str(physical_xpass_metadata.get("source", PHYSICAL_XPASS_SOURCE))
+        teammate_policy = physical_xpass_metadata.get("teammate_policy")
+        if teammate_policy is not None:
+            args.physical_xpass_teammate_policy = str(teammate_policy)
 
     # Load model
     args_dict = vars(args)
@@ -609,7 +617,8 @@ if __name__ == "__main__":
         "physical_xpass": {
             "enabled": bool(model_uses_physical_xpass(args)),
             "model_variant": args.model_variant,
-            "source": PHYSICAL_XPASS_SOURCE,
+            "source": getattr(args, "physical_xpass_source", PHYSICAL_XPASS_SOURCE),
+            "teammate_policy": getattr(args, "physical_xpass_teammate_policy", None),
             "physical_cache_dir": args.physical_cache_dir,
             "physical_eps": float(args.physical_eps),
             "learn_physical_scale": bool(args.learn_physical_scale),

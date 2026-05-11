@@ -915,7 +915,9 @@ Train pass success with the recommended default:
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass
 ```
 
-Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing, training fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
+Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing during training or normal Sportec feature-run inference, the run fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
+
+Benchmark, HawkEye, and SkillCorner runtime states do not have reusable Sportec match sidecars. When a physical pass-success checkpoint is used there and no sidecar exists for the synthetic state id, inference computes physical xPass online from the in-memory graph. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new checkpoints use the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the checkpoint's expected source.
 
 The main model variant is a prior-like logit offset:
 

@@ -158,7 +158,8 @@ def main() -> None:
     export_tables: list[pd.DataFrame] = []
     stats_by_state: dict[str, dict[str, int]] = {}
     processed_modifications: list[int] = []
-    processed_states: list[dict[str, int]] = []
+    processed_states: list[dict[str, object]] = []
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     skipped_state_errors: list[dict[str, str | int]] = []
     skipped_modification_errors: list[dict[str, str | int]] = []
 
@@ -187,7 +188,12 @@ def main() -> None:
                 export_tables.append(build_benchmark_export(state_rows, state, components))
                 state_key = f"{modification_id}:{game_state_id}"
                 stats_by_state[state_key] = stats
-                processed_states.append({"modification": int(modification_id), "game_state": int(game_state_id)})
+                state_record = {"modification": int(modification_id), "game_state": int(game_state_id)}
+                runtime_physical_stats = getattr(state, "physical_xpass_runtime_stats", None)
+                if runtime_physical_stats:
+                    physical_xpass_runtime_stats[state_key] = runtime_physical_stats
+                    state_record["physical_xpass_runtime_stats"] = runtime_physical_stats
+                processed_states.append(state_record)
                 processed_state_count += 1
             except Exception as exc:
                 error_summary = summarize_exception(exc)
@@ -236,6 +242,7 @@ def main() -> None:
         "selected_modifications": [int(value) for value in selected_modifications],
         "processed_modifications": processed_modifications,
         "processed_states": processed_states,
+        "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "skipped_modifications": _compact_skips(skipped_modifications),
         "skipped_modification_errors": skipped_modification_errors,
         "skipped_states": skipped_state_errors,

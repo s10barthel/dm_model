@@ -19,6 +19,7 @@ from project_config import get_physical_xpass_match_path
 
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
 PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
+PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE}
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
@@ -107,8 +108,14 @@ def physical_xpass_as_default_metadata(
     }
 
 
-def validate_physical_xpass_cache_metadata(cache_dir: str | Path) -> dict[str, Any]:
+def validate_physical_xpass_cache_metadata(cache_dir: str | Path, *, expected_source: str | None = None) -> dict[str, Any]:
     metadata_path = Path(cache_dir) / "metadata.json"
+    expected_source = expected_source or PHYSICAL_XPASS_SOURCE
+    if expected_source not in PHYSICAL_XPASS_SOURCES:
+        raise ValueError(
+            f"Unsupported physical_xpass_source={expected_source!r}. "
+            f"Expected one of {sorted(PHYSICAL_XPASS_SOURCES)}."
+        )
     rerun_message = (
         "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite "
         "to regenerate compatible physical xPass sidecars."
@@ -118,10 +125,10 @@ def validate_physical_xpass_cache_metadata(cache_dir: str | Path) -> dict[str, A
     with metadata_path.open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
     source = metadata.get("source")
-    if source != PHYSICAL_XPASS_SOURCE:
+    if source != expected_source:
         raise ValueError(
             f"Physical xPass sidecars at {cache_dir} use incompatible source {source!r}; "
-            f"expected {PHYSICAL_XPASS_SOURCE!r}. {rerun_message}"
+            f"expected {expected_source!r}. {rerun_message}"
         )
     return metadata
 
@@ -141,6 +148,35 @@ def physical_xpass_model_variant(args: Any) -> str:
     if variant not in PHYSICAL_MODEL_VARIANTS:
         raise ValueError(f"Unsupported model_variant={variant!r}. Expected one of {sorted(PHYSICAL_MODEL_VARIANTS)}.")
     return variant
+
+
+def physical_xpass_source(args: Any) -> str:
+    source = _get_arg(args, "physical_xpass_source", None) or PHYSICAL_XPASS_SOURCE
+    source = str(source)
+    if source not in PHYSICAL_XPASS_SOURCES:
+        raise ValueError(
+            f"Unsupported physical_xpass_source={source!r}. "
+            f"Expected one of {sorted(PHYSICAL_XPASS_SOURCES)}."
+        )
+    return source
+
+
+def physical_xpass_teammate_policy(args: Any, *, source: str | None = None) -> str:
+    policy = _get_arg(args, "physical_xpass_teammate_policy", None)
+    if policy is None:
+        resolved_source = source or physical_xpass_source(args)
+        return (
+            PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+            if resolved_source == PHYSICAL_XPASS_LEGACY_SOURCE
+            else PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+        )
+    policy = str(policy)
+    if policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
+        raise ValueError(
+            f"Unsupported physical_xpass_teammate_policy={policy!r}. "
+            f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
+        )
+    return policy
 
 
 def model_uses_physical_xpass(args: Any) -> bool:
@@ -789,6 +825,48 @@ def compute_graph_player_cum_prob_at_target_location(
     return result
 
 
+def compute_graph_physical_xpass_for_source(
+    graph: Data,
+    *,
+    source: str,
+    eps: float = 1e-4,
+    teammate_policy: str | None = None,
+    simulate_passes_fn: Callable[..., Any] | None = None,
+    use_progress_bar: bool = False,
+    chunk_size: int = 150,
+) -> pd.Series:
+    source = str(source)
+    if source not in PHYSICAL_XPASS_SOURCES:
+        raise ValueError(
+            f"Unsupported physical_xpass_source={source!r}. "
+            f"Expected one of {sorted(PHYSICAL_XPASS_SOURCES)}."
+        )
+    policy = teammate_policy or (
+        PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+        if source == PHYSICAL_XPASS_LEGACY_SOURCE
+        else PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    )
+    consider_teammates = policy == PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    if source == PHYSICAL_XPASS_LEGACY_SOURCE:
+        return compute_graph_player_cum_prob_at_target_location(
+            graph,
+            eps=eps,
+            normalize=True,
+            consider_teammates=consider_teammates,
+            simulate_passes_fn=simulate_passes_fn,
+            use_progress_bar=use_progress_bar,
+            chunk_size=chunk_size,
+        )
+    return compute_graph_max_player_cum_prob_as_defaults(
+        graph,
+        eps=eps,
+        consider_teammates=consider_teammates,
+        simulate_passes_fn=simulate_passes_fn,
+        use_progress_bar=use_progress_bar,
+        chunk_size=chunk_size,
+    )
+
+
 def load_physical_xpass_match(cache_dir: str | Path, match_id: str) -> pd.DataFrame:
     cache_root = Path(cache_dir)
     direct_path = cache_root / "matches" / f"{match_id}.parquet"
@@ -901,6 +979,46 @@ def attach_physical_xpass_to_graphs(
                 label,
                 rows,
                 match_id=match_id,
+                eps=eps,
+                require_observed_target=require_observed_target,
+            )
+        )
+    return attached
+
+
+def attach_physical_xpass_online_to_graphs(
+    graphs: list[Data],
+    labels: torch.Tensor,
+    *,
+    source: str,
+    eps: float = 1e-4,
+    teammate_policy: str | None = None,
+    require_observed_target: bool = False,
+    simulate_passes_fn: Callable[..., Any] | None = None,
+    use_progress_bar: bool = False,
+    chunk_size: int = 150,
+) -> list[Data]:
+    attached: list[Data] = []
+    for graph, label in zip(graphs, labels):
+        action_index = int(label[LABEL_INDEX["action_index"]].item())
+        probs = compute_graph_physical_xpass_for_source(
+            graph,
+            source=source,
+            eps=eps,
+            teammate_policy=teammate_policy,
+            simulate_passes_fn=simulate_passes_fn,
+            use_progress_bar=use_progress_bar,
+            chunk_size=chunk_size,
+        )
+        row = {"action_index": action_index}
+        row.update({str(player_id): float(value) for player_id, value in probs.items()})
+        physical_rows = pd.DataFrame([row]).set_index("action_index", drop=False)
+        attached.append(
+            attach_physical_xpass_to_graph(
+                graph,
+                label,
+                physical_rows,
+                match_id="<runtime>",
                 eps=eps,
                 require_observed_target=require_observed_target,
             )
