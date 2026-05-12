@@ -3,10 +3,16 @@ from __future__ import annotations
 import math
 from unittest.mock import patch
 
+import pytest
 import pandas as pd
+import torch
+from torch_geometric.data import Data
 
+import scripts.run_skillcorner as run_skillcorner
+from datatools import config
 from datatools.graph_feature import load_frame_snapshot
-from datatools.skillcorner import load_skillcorner_events
+from datatools import skillcorner
+from datatools.skillcorner import SkillcornerPossession, load_skillcorner_events
 from validation.skillcorner.code import skillcorner_postprocessing as post
 
 
@@ -22,6 +28,158 @@ def test_load_frame_snapshot_keeps_current_phase_only() -> None:
 
     assert snapshot.index.tolist() == [10]
     assert snapshot["phase_id"].tolist() == [2]
+
+
+def make_skillcorner_possession(
+    frame_ids: list[int],
+    *,
+    has_ball: dict[int, bool] | None = None,
+    missing_possessor_frames: set[int] | None = None,
+) -> SkillcornerPossession:
+    has_ball = has_ball or {}
+    missing_possessor_frames = missing_possessor_frames or set()
+    tracking_rows = []
+    frame_meta_rows = []
+    for frame_id in frame_ids:
+        possessor_x = pd.NA if frame_id in missing_possessor_frames else 30.0 + frame_id
+        possessor_y = pd.NA if frame_id in missing_possessor_frames else 20.0
+        ball_present = has_ball.get(frame_id, True)
+        tracking_rows.append(
+            {
+                "frame_id": frame_id,
+                "period_id": 1,
+                "ball_x": 40.0 if ball_present else pd.NA,
+                "ball_y": 30.0 if ball_present else pd.NA,
+                "ball_owning_home_away": "home",
+                "home_1_x": possessor_x,
+                "home_1_y": possessor_y,
+                "away_2_x": 60.0,
+                "away_2_y": 30.0,
+                "home_goal_x": 105.0,
+                "home_goal_y": 34.0,
+                "away_goal_x": 0.0,
+                "away_goal_y": 34.0,
+            }
+        )
+        frame_meta_rows.append(
+            {
+                "frame_id": frame_id,
+                "match_id": "match-1",
+                "index": 7,
+                "period": 1,
+                "player_id": 1,
+                "attacking_side": "left_to_right",
+                "possessor_object_id": "home_1",
+                "has_ball": ball_present,
+            }
+        )
+
+    tracking = pd.DataFrame(tracking_rows).set_index("frame_id", drop=False)
+    frame_meta = pd.DataFrame(frame_meta_rows).set_index("frame_id", drop=True)
+    return SkillcornerPossession(
+        match_id="match-1",
+        event_index=7,
+        fps=25.0,
+        tracking=tracking,
+        phases=pd.DataFrame(),
+        frame_meta=frame_meta,
+        actions=pd.DataFrame(),
+        labels=torch.empty((0, len(config.LABEL_COLUMNS))),
+        graph_features_0=[],
+    )
+
+
+def patch_skillcorner_graph_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    missing_graph_frames: set[int] | None = None,
+) -> list[int]:
+    missing_graph_frames = missing_graph_frames or set()
+    calls: list[int] = []
+
+    def fake_construct_graph_for_frame(possession, frame_id, *args, **kwargs):
+        calls.append(int(frame_id))
+        if int(frame_id) in missing_graph_frames:
+            return None
+        return Data()
+
+    monkeypatch.setattr(skillcorner, "construct_graph_for_frame", fake_construct_graph_for_frame)
+    return calls
+
+
+def test_skillcorner_default_frame_mode_selects_only_boundary_valid_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = patch_skillcorner_graph_builder(monkeypatch)
+    possession = make_skillcorner_possession([10, 11, 12, 13, 14])
+
+    actions, labels, graphs, stats = skillcorner._build_actions_and_labels(possession)
+
+    assert actions.index.tolist() == [10, 14]
+    assert labels[:, 0].tolist() == [10, 14]
+    assert len(graphs) == 2
+    assert calls == [10, 14]
+    assert stats["total_frames"] == 5
+    assert stats["evaluated_frames"] == 2
+    assert stats["selected_frames"] == 2
+    assert stats["valid_frames"] == 2
+
+
+def test_skillcorner_all_frame_mode_preserves_all_valid_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_skillcorner_graph_builder(monkeypatch)
+    possession = make_skillcorner_possession([10, 11, 12, 13, 14])
+
+    actions, labels, graphs, stats = skillcorner._build_actions_and_labels(possession, frames_mode="all")
+
+    assert actions.index.tolist() == [10, 11, 12, 13, 14]
+    assert labels[:, 0].tolist() == [10, 11, 12, 13, 14]
+    assert len(graphs) == 5
+    assert stats["evaluated_frames"] == 5
+    assert stats["selected_frames"] == 5
+    assert stats["valid_frames"] == 5
+
+
+def test_skillcorner_first_last_frame_mode_dedupes_single_valid_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_skillcorner_graph_builder(monkeypatch)
+    possession = make_skillcorner_possession([10, 11, 12], has_ball={10: False, 12: False})
+
+    actions, _labels, graphs, stats = skillcorner._build_actions_and_labels(possession, frames_mode="first_and_last")
+
+    assert actions.index.tolist() == [11]
+    assert len(graphs) == 1
+    assert stats["evaluated_frames"] == 3
+    assert stats["selected_frames"] == 1
+    assert stats["valid_frames"] == 1
+    assert stats["skipped_missing_ball"] == 2
+
+
+def test_skillcorner_first_last_frame_mode_falls_back_from_invalid_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_skillcorner_graph_builder(monkeypatch, missing_graph_frames={11})
+    possession = make_skillcorner_possession(
+        [10, 11, 12, 13, 14, 15],
+        has_ball={10: False},
+        missing_possessor_frames={15},
+    )
+
+    actions, _labels, _graphs, stats = skillcorner._build_actions_and_labels(
+        possession,
+        frames_mode="first_and_last",
+    )
+
+    assert actions.index.tolist() == [12, 14]
+    assert stats["evaluated_frames"] == 5
+    assert stats["selected_frames"] == 2
+    assert stats["valid_frames"] == 2
+    assert stats["skipped_missing_ball"] == 1
+    assert stats["skipped_missing_graph"] == 1
+    assert stats["skipped_missing_possessor"] == 1
+
+
+def test_run_skillcorner_frame_mode_cli_defaults_and_flags() -> None:
+    assert run_skillcorner.parse_args([]).frames_mode == "first_and_last"
+    assert run_skillcorner.parse_args(["--frames-first-and-last"]).frames_mode == "first_and_last"
+    assert run_skillcorner.parse_args(["--frames-all"]).frames_mode == "all"
+
+    with pytest.raises(SystemExit):
+        run_skillcorner.parse_args(["--frames-first-and-last", "--frames-all"])
 
 
 def test_filter_event_rows_and_drop_empty_columns() -> None:

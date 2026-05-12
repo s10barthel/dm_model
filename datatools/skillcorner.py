@@ -39,6 +39,7 @@ COMPONENT_COLUMNS = [
     "outcome_conceding_failure",
 ]
 METADATA_COLUMNS = ["match_id", "frame", "index", "period", "player_id", "attacking_side"]
+SKILLCORNER_FRAME_MODES = {"all", "first_and_last"}
 
 
 @dataclass
@@ -407,9 +408,144 @@ def _valid_possessor_snapshot(tracking: pd.DataFrame, frame_id: int, possessor_o
     return not pd.isna(tracking.at[frame_id, x_col]) and not pd.isna(tracking.at[frame_id, y_col])
 
 
+def _initial_skillcorner_frame_stats(total_frames: int) -> dict[str, int]:
+    return {
+        "total_frames": int(total_frames),
+        "valid_frames": 0,
+        "evaluated_frames": 0,
+        "selected_frames": 0,
+        "skipped_missing_ball": 0,
+        "skipped_missing_possessor": 0,
+        "skipped_missing_graph": 0,
+    }
+
+
+def _build_frame_action_label_graph(
+    possession: SkillcornerPossession,
+    frame_id: int,
+    frame_row: pd.Series,
+    period_tracking: pd.DataFrame,
+    feature_dim: int,
+    add_v_edge_features: bool,
+) -> tuple[dict[str, Any], list[float], Data, None] | tuple[None, None, None, str]:
+    possessor_object_id = str(frame_row["possessor_object_id"])
+
+    if not bool(frame_row["has_ball"]):
+        return None, None, None, "skipped_missing_ball"
+    if not _valid_possessor_snapshot(possession.tracking, frame_id, possessor_object_id):
+        return None, None, None, "skipped_missing_possessor"
+
+    graph = construct_graph_for_frame(
+        possession,
+        frame_id,
+        possessor_object_id,
+        period_tracking,
+        feature_dim,
+        extend=True,
+        rotate_to_ltr=False,
+        add_v_edge_features=add_v_edge_features,
+    )
+    if graph is None:
+        return None, None, None, "skipped_missing_graph"
+
+    attacking_players, defending_players = utils.find_active_players(
+        possession.tracking,
+        frame_id,
+        team="home",
+        include_goals=True,
+    )
+    if possessor_object_id not in attacking_players:
+        return None, None, None, "skipped_missing_possessor"
+
+    intent_index = attacking_players.index(possessor_object_id)
+    receiver_index = intent_index
+    start_x = float(possession.tracking.at[frame_id, f"{possessor_object_id}_x"])
+    start_y = float(possession.tracking.at[frame_id, f"{possessor_object_id}_y"])
+
+    action = {
+        "frame_id": frame_id,
+        "object_id": possessor_object_id,
+        "player_id": int(frame_row["player_id"]),
+        "period_id": int(frame_row["period"]),
+        "spadl_type": "synthetic_frame",
+        "action_type": "pass",
+        "receiver_id": possessor_object_id,
+        "next_player_id": possessor_object_id,
+        "receive_frame_id": frame_id,
+        "next_type": "synthetic_frame",
+        "start_x": start_x,
+        "start_y": start_y,
+        "end_x": start_x,
+        "end_y": start_y,
+        "success": True,
+        "blocked": False,
+    }
+    label = [
+        frame_id,
+        1,
+        0,
+        0,
+        len(attacking_players) + len(defending_players),
+        intent_index,
+        receiver_index,
+        0.0,
+        start_x,
+        start_y,
+        start_x,
+        start_y,
+        start_x,
+        start_y,
+        1,
+        0,
+        1,
+        *([0.0] * (len(config.LABEL_COLUMNS) - 17)),
+    ]
+    return action, label, graph, None
+
+
+def _append_skillcorner_frame_result(
+    result: tuple[dict[str, Any], list[float], Data],
+    actions: list[dict[str, Any]],
+    labels: list[list[float]],
+    graphs: list[Data],
+    stats: dict[str, int],
+) -> None:
+    action, label, graph = result
+    actions.append(action)
+    labels.append(label)
+    graphs.append(graph)
+    stats["valid_frames"] += 1
+    stats["selected_frames"] += 1
+
+
+def _evaluate_skillcorner_frame(
+    possession: SkillcornerPossession,
+    frame_id: int,
+    frame_row: pd.Series,
+    period_tracking: pd.DataFrame,
+    feature_dim: int,
+    add_v_edge_features: bool,
+    stats: dict[str, int],
+) -> tuple[dict[str, Any], list[float], Data] | None:
+    stats["evaluated_frames"] += 1
+    action, label, graph, skip_key = _build_frame_action_label_graph(
+        possession,
+        frame_id,
+        frame_row,
+        period_tracking,
+        feature_dim,
+        add_v_edge_features,
+    )
+    if skip_key is not None:
+        stats[skip_key] += 1
+        return None
+    return action, label, graph
+
+
 def _build_actions_and_labels(
     possession: SkillcornerPossession,
     add_v_edge_features: bool = False,
+    frames_mode: str = "first_and_last",
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
@@ -417,99 +553,59 @@ def _build_actions_and_labels(
     feature_dim = infer_node_feature_dim(extend=True)
     period_id = int(possession.frame_meta["period"].iloc[0])
     period_tracking = possession.tracking[possession.tracking["period_id"] == period_id]
+    stats = _initial_skillcorner_frame_stats(len(possession.frame_meta))
 
-    stats = {
-        "total_frames": int(len(possession.frame_meta)),
-        "valid_frames": 0,
-        "skipped_missing_ball": 0,
-        "skipped_missing_possessor": 0,
-        "skipped_missing_graph": 0,
-    }
+    if frames_mode not in SKILLCORNER_FRAME_MODES:
+        raise ValueError(f"Unsupported SkillCorner frames_mode: {frames_mode}")
 
-    for frame_id, frame_row in possession.frame_meta.iterrows():
-        frame_id = int(frame_id)
-        possessor_object_id = str(frame_row["possessor_object_id"])
-
-        if not bool(frame_row["has_ball"]):
-            stats["skipped_missing_ball"] += 1
-            continue
-        if not _valid_possessor_snapshot(possession.tracking, frame_id, possessor_object_id):
-            stats["skipped_missing_possessor"] += 1
-            continue
-
-        graph = construct_graph_for_frame(
-            possession,
-            frame_id,
-            possessor_object_id,
-            period_tracking,
-            feature_dim,
-            extend=True,
-            rotate_to_ltr=False,
-            add_v_edge_features=add_v_edge_features,
-        )
-        if graph is None:
-            stats["skipped_missing_graph"] += 1
-            continue
-
-        attacking_players, defending_players = utils.find_active_players(
-            possession.tracking,
-            frame_id,
-            team="home",
-            include_goals=True,
-        )
-        if possessor_object_id not in attacking_players:
-            stats["skipped_missing_possessor"] += 1
-            continue
-
-        intent_index = attacking_players.index(possessor_object_id)
-        receiver_index = intent_index
-        start_x = float(possession.tracking.at[frame_id, f"{possessor_object_id}_x"])
-        start_y = float(possession.tracking.at[frame_id, f"{possessor_object_id}_y"])
-
-        actions.append(
-            {
-                "frame_id": frame_id,
-                "object_id": possessor_object_id,
-                "player_id": int(frame_row["player_id"]),
-                "period_id": int(frame_row["period"]),
-                "spadl_type": "synthetic_frame",
-                "action_type": "pass",
-                "receiver_id": possessor_object_id,
-                "next_player_id": possessor_object_id,
-                "receive_frame_id": frame_id,
-                "next_type": "synthetic_frame",
-                "start_x": start_x,
-                "start_y": start_y,
-                "end_x": start_x,
-                "end_y": start_y,
-                "success": True,
-                "blocked": False,
-            }
-        )
-        labels.append(
-            [
+    frame_items = [(int(frame_id), frame_row) for frame_id, frame_row in possession.frame_meta.iterrows()]
+    if frames_mode == "all":
+        for frame_id, frame_row in frame_items:
+            result = _evaluate_skillcorner_frame(
+                possession,
                 frame_id,
-                1,
-                0,
-                0,
-                len(attacking_players) + len(defending_players),
-                intent_index,
-                receiver_index,
-                0.0,
-                start_x,
-                start_y,
-                start_x,
-                start_y,
-                start_x,
-                start_y,
-                1,
-                0,
-                1,
-                *([0.0] * (len(config.LABEL_COLUMNS) - 17)),
-            ]
-        )
-        graphs.append(graph)
-        stats["valid_frames"] += 1
+                frame_row,
+                period_tracking,
+                feature_dim,
+                add_v_edge_features,
+                stats,
+            )
+            if result is not None:
+                _append_skillcorner_frame_result(result, actions, labels, graphs, stats)
+    else:
+        first_frame_id: int | None = None
+        first_result: tuple[dict[str, Any], list[float], Data] | None = None
+        for frame_id, frame_row in frame_items:
+            first_result = _evaluate_skillcorner_frame(
+                possession,
+                frame_id,
+                frame_row,
+                period_tracking,
+                feature_dim,
+                add_v_edge_features,
+                stats,
+            )
+            if first_result is not None:
+                first_frame_id = frame_id
+                _append_skillcorner_frame_result(first_result, actions, labels, graphs, stats)
+                break
+
+        if first_frame_id is not None and first_result is not None:
+            for frame_id, frame_row in reversed(frame_items):
+                if frame_id == first_frame_id:
+                    break
+                result = _evaluate_skillcorner_frame(
+                    possession,
+                    frame_id,
+                    frame_row,
+                    period_tracking,
+                    feature_dim,
+                    add_v_edge_features,
+                    stats,
+                )
+                if result is not None:
+                    _append_skillcorner_frame_result(result, actions, labels, graphs, stats)
+                    break
 
     actions_df = (
         pd.DataFrame(actions).set_index("frame_id", drop=False)
@@ -524,6 +620,7 @@ def build_skillcorner_possession(
     context: dict[str, Any],
     event_index: int,
     add_v_edge_features: bool = False,
+    frames_mode: str = "first_and_last",
 ) -> tuple[SkillcornerPossession, dict[str, int]]:
     events = context["events"]
     event_rows = events.loc[events["index"] == int(event_index)]
@@ -556,18 +653,13 @@ def build_skillcorner_possession(
         graph_features_0=[],
     )
     if frame_meta.empty:
-        empty_stats = {
-            "total_frames": 0,
-            "valid_frames": 0,
-            "skipped_missing_ball": 0,
-            "skipped_missing_possessor": 0,
-            "skipped_missing_graph": 0,
-        }
+        empty_stats = _initial_skillcorner_frame_stats(0)
         return possession, empty_stats
 
     actions, labels, graphs, stats = _build_actions_and_labels(
         possession,
         add_v_edge_features=add_v_edge_features,
+        frames_mode=frames_mode,
     )
     possession.actions = actions
     possession.labels = labels
@@ -673,13 +765,23 @@ def summarize_skillcorner_stats(
         "possessions": 0,
         "total_frames": 0,
         "valid_frames": 0,
+        "evaluated_frames": 0,
+        "selected_frames": 0,
         "skipped_missing_ball": 0,
         "skipped_missing_possessor": 0,
         "skipped_missing_graph": 0,
     }
     for match_stats in stats_by_match.values():
         totals["possessions"] += int(match_stats.get("possessions", 0))
-        for key in ["total_frames", "valid_frames", "skipped_missing_ball", "skipped_missing_possessor", "skipped_missing_graph"]:
+        for key in [
+            "total_frames",
+            "valid_frames",
+            "evaluated_frames",
+            "selected_frames",
+            "skipped_missing_ball",
+            "skipped_missing_possessor",
+            "skipped_missing_graph",
+        ]:
             totals[key] += int(match_stats.get(key, 0))
 
     return {

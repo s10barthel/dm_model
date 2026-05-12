@@ -32,7 +32,7 @@ from project_config import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more SkillCorner match ids.")
@@ -46,7 +46,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
-    return parser.parse_args()
+    frame_group = parser.add_mutually_exclusive_group()
+    frame_group.add_argument(
+        "--frames-first-and-last",
+        dest="frames_mode",
+        action="store_const",
+        const="first_and_last",
+        default="first_and_last",
+        help="Process only the first and last valid frame per possession.",
+    )
+    frame_group.add_argument(
+        "--frames-all",
+        dest="frames_mode",
+        action="store_const",
+        const="all",
+        help="Process every valid frame per possession.",
+    )
+    return parser.parse_args(argv)
 
 
 def _save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
@@ -128,6 +144,8 @@ def main() -> None:
                 "skipped_possessions": 0,
                 "total_frames": 0,
                 "valid_frames": 0,
+                "evaluated_frames": 0,
+                "selected_frames": 0,
                 "skipped_missing_ball": 0,
                 "skipped_missing_possessor": 0,
                 "skipped_missing_graph": 0,
@@ -139,6 +157,7 @@ def main() -> None:
                         context,
                         int(event_index),
                         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                        frames_mode=args.frames_mode,
                     )
                     match_stats["possessions"] += 1
                     for key in [
@@ -147,6 +166,8 @@ def main() -> None:
                         "skipped_missing_ball",
                         "skipped_missing_possessor",
                         "skipped_missing_graph",
+                        "evaluated_frames",
+                        "selected_frames",
                     ]:
                         match_stats[key] += int(possession_stats.get(key, 0))
 
@@ -216,6 +237,7 @@ def main() -> None:
         "source_target_families": shared_context.get("source_target_families", {}),
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
+        "frames_mode": args.frames_mode,
         "processed_matches": processed_matches,
         "skipped_match_errors": skipped_match_errors,
         "skipped_possessions": skipped_possessions,
@@ -243,6 +265,7 @@ def main() -> None:
         )
     print(
         "Processed {matches} matches, {possessions} possessions, {valid_frames}/{total_frames} valid frames, "
+        "{selected_frames} selected frames, {evaluated_frames} evaluated frames, "
         "skipped {skipped_missing_ball} missing-ball frames, "
         "{skipped_missing_possessor} missing-possessor frames, "
         "{skipped_missing_graph} missing-graph frames.".format(**totals)
