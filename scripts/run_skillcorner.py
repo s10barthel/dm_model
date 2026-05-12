@@ -74,6 +74,44 @@ def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def format_remaining_games(count: int) -> str:
+    unit = "game" if int(count) == 1 else "games"
+    return f"{int(count)} {unit} left"
+
+
+def format_match_progress(index: int, total: int, match_id: str) -> str:
+    remaining = max(int(total) - int(index), 0)
+    return f"[{index}/{total}] match_id={match_id} | {format_remaining_games(remaining)}"
+
+
+def format_possession_progress(match_id: str, possession_number: int, total_possessions: int) -> str:
+    return f"  match {match_id} possession {possession_number}/{total_possessions}"
+
+
+def format_possession_skip(
+    match_id: str,
+    possession_number: int,
+    total_possessions: int,
+    event_index: int | str,
+    error: str,
+) -> str:
+    return (
+        f"  SKIP match {match_id} possession {possession_number}/{total_possessions} "
+        f"event_index={event_index}: {error}"
+    )
+
+
+def format_match_completion(match_id: str, match_stats: dict[str, int]) -> str:
+    return (
+        f"  DONE match {match_id}: "
+        f"{int(match_stats.get('processed_possessions', 0))}/{int(match_stats.get('possessions', 0))} possessions, "
+        f"{int(match_stats.get('skipped_possessions', 0))} skipped, "
+        f"{int(match_stats.get('selected_frames', 0))} selected frames, "
+        f"{int(match_stats.get('evaluated_frames', 0))} evaluated frames, "
+        f"{int(match_stats.get('valid_frames', 0))}/{int(match_stats.get('total_frames', 0))} valid frames"
+    )
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -130,13 +168,17 @@ def main() -> None:
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
 
     for index, match_id in enumerate(selected_match_ids, start=1):
-        print(f"[{index}/{len(selected_match_ids)}] {match_id}")
+        print(format_match_progress(index, len(selected_match_ids), str(match_id)))
         try:
             context = build_skillcorner_match_context(match_id, args.input_dir)
             if context["events"].empty:
                 skipped_matches["no_player_possession"].append(str(match_id))
+                print(f"  SKIP match {match_id}: no eligible possessions")
                 continue
 
+            event_indices = context["events"]["index"].tolist()
+            total_possessions = len(event_indices)
+            print(f"  match {match_id}: {total_possessions} eligible possessions")
             tables_by_component: dict[str, list[pd.DataFrame]] = {component: [] for component in COMPONENT_COLUMNS}
             match_stats = {
                 "possessions": 0,
@@ -151,7 +193,8 @@ def main() -> None:
                 "skipped_missing_graph": 0,
             }
 
-            for event_index in context["events"]["index"].tolist():
+            for possession_number, event_index in enumerate(event_indices, start=1):
+                print(format_possession_progress(str(match_id), possession_number, total_possessions))
                 try:
                     possession, possession_stats = build_skillcorner_possession(
                         context,
@@ -172,14 +215,23 @@ def main() -> None:
                         match_stats[key] += int(possession_stats.get(key, 0))
 
                     if int(possession_stats.get("valid_frames", 0)) == 0:
+                        error_summary = "ValueError: no valid frames were available after SkillCorner graph construction."
                         skipped_possessions.setdefault(str(match_id), []).append(
                             {
                                 "event_index": str(event_index),
-                                "error": "ValueError: no valid frames were available after SkillCorner graph construction.",
+                                "error": error_summary,
                             }
                         )
                         match_stats["skipped_possessions"] += 1
-                        print(f"  SKIP possession {event_index}: no valid frames were available after graph construction.")
+                        print(
+                            format_possession_skip(
+                                str(match_id),
+                                possession_number,
+                                total_possessions,
+                                event_index,
+                                error_summary,
+                            )
+                        )
                         continue
 
                     components = infer_skillcorner_components(possession, model_specs, device=device)
@@ -197,15 +249,25 @@ def main() -> None:
                         tables_by_component[component_name].append(table)
                     match_stats["processed_possessions"] += 1
                 except Exception as exc:
+                    error_summary = summarize_exception(exc)
                     skipped_possessions.setdefault(str(match_id), []).append(
-                        {"event_index": str(event_index), "error": summarize_exception(exc)}
+                        {"event_index": str(event_index), "error": error_summary}
                     )
                     match_stats["skipped_possessions"] += 1
-                    print(f"  SKIP possession {event_index}: {summarize_exception(exc)}")
+                    print(
+                        format_possession_skip(
+                            str(match_id),
+                            possession_number,
+                            total_possessions,
+                            event_index,
+                            error_summary,
+                        )
+                    )
 
             if match_stats["processed_possessions"] == 0:
                 skipped_matches["processing_error"].append(str(match_id))
                 skipped_match_errors.append({"match_id": str(match_id), "error": "no_usable_possessions"})
+                print(f"  SKIP match {match_id}: no usable possessions")
                 continue
 
             match_output_dir = output_dir / str(match_id)
@@ -215,10 +277,11 @@ def main() -> None:
 
             stats_by_match[str(match_id)] = match_stats
             processed_matches.append(str(match_id))
+            print(format_match_completion(str(match_id), match_stats))
         except Exception as exc:
             skipped_matches["processing_error"].append(str(match_id))
             skipped_match_errors.append({"match_id": str(match_id), "error": summarize_exception(exc)})
-            print(f"  SKIP {match_id}: {summarize_exception(exc)}")
+            print(f"  SKIP match {match_id}: {summarize_exception(exc)}")
 
     summary = summarize_skillcorner_stats(stats_by_match, skipped_matches)
     metadata = {

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import math
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -180,6 +182,144 @@ def test_run_skillcorner_frame_mode_cli_defaults_and_flags() -> None:
 
     with pytest.raises(SystemExit):
         run_skillcorner.parse_args(["--frames-first-and-last", "--frames-all"])
+
+
+def test_run_skillcorner_progress_formatting_helpers() -> None:
+    assert run_skillcorner.format_match_progress(3, 20, "117670") == "[3/20] match_id=117670 | 17 games left"
+    assert run_skillcorner.format_match_progress(19, 20, "117670") == "[19/20] match_id=117670 | 1 game left"
+    assert run_skillcorner.format_possession_progress("117670", 12, 48) == "  match 117670 possession 12/48"
+    assert (
+        run_skillcorner.format_possession_skip("117670", 12, 48, 345, "ValueError: example")
+        == "  SKIP match 117670 possession 12/48 event_index=345: ValueError: example"
+    )
+    assert (
+        run_skillcorner.format_match_completion(
+            "117670",
+            {
+                "processed_possessions": 45,
+                "possessions": 48,
+                "skipped_possessions": 3,
+                "selected_frames": 90,
+                "evaluated_frames": 94,
+                "valid_frames": 90,
+                "total_frames": 250,
+            },
+        )
+        == "  DONE match 117670: 45/48 possessions, 3 skipped, 90 selected frames, "
+        "94 evaluated frames, 90/250 valid frames"
+    )
+
+
+def test_run_skillcorner_main_prints_match_centered_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    args = argparse.Namespace(
+        input_dir="skillcorner_data",
+        match_id=None,
+        limit=None,
+        device="cpu",
+        bundle_id=None,
+        action_intent_model_id=None,
+        pass_intent_model_id=None,
+        pass_success_model_id=None,
+        outcome_scoring_model_id=None,
+        outcome_conceding_model_id=None,
+        run_id="test_run",
+        output_dir=str(tmp_path),
+        frames_mode="first_and_last",
+    )
+    shared_context = {
+        "intended_receiver_mode": "mode",
+        "return_type": "return",
+        "target_family": "target",
+    }
+    model_ids = {
+        "action_intent": "action_intent/model",
+        "pass_intent": "pass_intent/model",
+        "pass_success": "pass_success/model",
+        "outcome_scoring": "outcome_scoring/model",
+        "outcome_conceding": "outcome_conceding/model",
+    }
+    contexts = {
+        "m1": {
+            "events": pd.DataFrame({"index": [10, 20]}),
+            "player_meta": pd.DataFrame({"player_id": [1]}),
+        },
+        "m2": {
+            "events": pd.DataFrame({"index": [30]}),
+            "player_meta": pd.DataFrame({"player_id": [1]}),
+        },
+    }
+    possession_stats = {
+        ("m1", 10): {
+            "total_frames": 2,
+            "valid_frames": 0,
+            "evaluated_frames": 2,
+            "selected_frames": 0,
+            "skipped_missing_ball": 2,
+            "skipped_missing_possessor": 0,
+            "skipped_missing_graph": 0,
+        },
+        ("m1", 20): {
+            "total_frames": 4,
+            "valid_frames": 2,
+            "evaluated_frames": 2,
+            "selected_frames": 2,
+            "skipped_missing_ball": 0,
+            "skipped_missing_possessor": 0,
+            "skipped_missing_graph": 0,
+        },
+        ("m2", 30): {
+            "total_frames": 4,
+            "valid_frames": 2,
+            "evaluated_frames": 2,
+            "selected_frames": 2,
+            "skipped_missing_ball": 0,
+            "skipped_missing_possessor": 0,
+            "skipped_missing_graph": 0,
+        },
+    }
+
+    monkeypatch.setattr(run_skillcorner, "parse_args", lambda: args)
+    monkeypatch.setattr(run_skillcorner.torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(run_skillcorner, "resolve_model_selection", lambda **kwargs: (model_ids, shared_context, None))
+    monkeypatch.setattr(run_skillcorner, "discover_skillcorner_matches", lambda *args, **kwargs: (["m1", "m2"], {}))
+    monkeypatch.setattr(run_skillcorner, "load_skillcorner_models", lambda **kwargs: {"models": object()})
+    monkeypatch.setattr(run_skillcorner, "validate_model_graph_schemas", lambda model_specs: {"add_v_edge_features": False})
+    monkeypatch.setattr(
+        run_skillcorner,
+        "get_model_provenance",
+        lambda model_id: {"feature_signature": {"model_id": model_id}},
+    )
+    monkeypatch.setattr(run_skillcorner, "build_skillcorner_match_context", lambda match_id, input_dir: contexts[match_id])
+
+    def fake_build_skillcorner_possession(context, event_index, **kwargs):
+        match_id = "m1" if event_index in {10, 20} else "m2"
+        possession = SimpleNamespace(physical_xpass_runtime_stats=None)
+        return possession, possession_stats[(match_id, int(event_index))]
+
+    monkeypatch.setattr(run_skillcorner, "build_skillcorner_possession", fake_build_skillcorner_possession)
+    monkeypatch.setattr(run_skillcorner, "infer_skillcorner_components", lambda possession, model_specs, device: {})
+    monkeypatch.setattr(run_skillcorner, "build_skillcorner_component_table", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(run_skillcorner, "_save_component_table", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run_skillcorner, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(run_skillcorner, "write_latest_run", lambda *args, **kwargs: None)
+
+    run_skillcorner.main()
+
+    output = capsys.readouterr().out
+    assert "[1/2] match_id=m1 | 1 game left" in output
+    assert "[2/2] match_id=m2 | 0 games left" in output
+    assert "  match m1: 2 eligible possessions" in output
+    assert "  match m1 possession 1/2" in output
+    assert (
+        "  SKIP match m1 possession 1/2 event_index=10: "
+        "ValueError: no valid frames were available after SkillCorner graph construction."
+    ) in output
+    assert "  DONE match m1: 1/2 possessions, 1 skipped, 2 selected frames, 4 evaluated frames, 2/6 valid frames" in output
+    assert "  DONE match m2: 1/1 possessions, 0 skipped, 2 selected frames, 2 evaluated frames, 2/4 valid frames" in output
 
 
 def test_filter_event_rows_and_drop_empty_columns() -> None:
