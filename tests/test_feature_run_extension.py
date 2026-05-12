@@ -41,6 +41,8 @@ def make_args(
     replace_model: bool = False,
     refresh_target_families: list[str] | None = None,
     next_action_conditions_enabled: bool = True,
+    num_workers: str = "1",
+    worker_thread_limit: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         extend_feature_run_id="base",
@@ -52,6 +54,8 @@ def make_args(
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
         next_action_conditions_enabled=next_action_conditions_enabled,
+        num_workers=num_workers,
+        worker_thread_limit=worker_thread_limit,
     )
 
 
@@ -197,6 +201,23 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
 
         self.assertFalse(args.next_action_conditions_enabled)
 
+    def test_parse_accepts_worker_flags(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "generate_relevant_features.py",
+                "--num-workers",
+                "auto",
+                "--worker-thread-limit",
+                "2",
+            ],
+        ):
+            args = generator.parse_args()
+
+        self.assertEqual(args.num_workers, "auto")
+        self.assertEqual(args.worker_thread_limit, 2)
+
     def test_next_action_conditions_off_propagates_to_full_generation_commands(self) -> None:
         command = generator.with_mode_flags(
             ["python", "datatools/graph_feature.py"],
@@ -205,11 +226,31 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
                 intended_receiver_model_id=None,
                 run_id=None,
                 next_action_conditions_enabled=False,
+                num_workers="1",
+                worker_thread_limit=1,
             ),
         )
 
         self.assertIn("--next-action-conditions-off", command)
         self.assertNotIn("--next-action-conditions-on", command)
+
+    def test_worker_flags_propagate_to_full_generation_commands(self) -> None:
+        command = generator.with_mode_flags(
+            ["python", "datatools/graph_feature.py"],
+            SimpleNamespace(
+                return_types=[],
+                intended_receiver_model_id=None,
+                run_id=None,
+                next_action_conditions_enabled=True,
+                num_workers="auto",
+                worker_thread_limit=3,
+            ),
+        )
+
+        self.assertIn("--num-workers", command)
+        self.assertIn("auto", command)
+        self.assertIn("--worker-thread-limit", command)
+        self.assertIn("3", command)
 
     def test_output_run_must_not_already_exist(self) -> None:
         with self.assertRaises(FileExistsError):
@@ -359,6 +400,14 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             )
         )
 
+    def test_extension_commands_propagate_worker_flags(self) -> None:
+        plan = self.build_plan(make_args(["next_5"], num_workers="auto", worker_thread_limit=2))
+
+        self.assertTrue(all("--num-workers" in command for command in plan.commands))
+        self.assertTrue(all("--worker-thread-limit" in command for command in plan.commands))
+        self.assertTrue(all("auto" in command for command in plan.commands))
+        self.assertTrue(all("2" in command for command in plan.commands))
+
     def test_full_generation_commands_have_documented_step_descriptions(self) -> None:
         steps = generator.full_generation_commands("python")
 
@@ -442,6 +491,32 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(run_command.call_count, 3)
             self.assertTrue(all("--overwrite-labels" in call.args[0] for call in run_command.call_args_list))
             write_latest_run.assert_called_once_with("feature", "derived")
+
+    def test_full_generation_metadata_records_worker_settings(self) -> None:
+        args = SimpleNamespace(
+            extend_feature_run_id=None,
+            run_id="feature_demo",
+            return_types=["disc_0.9"],
+            intended_receiver_modes=["original", "angle_only"],
+            intended_receiver_model_id=None,
+            next_action_conditions_enabled=True,
+            num_workers="auto",
+            worker_thread_limit=2,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "run_generation_steps"),
+                patch.object(generator, "write_latest_run"),
+            ):
+                generator.run_full_generation(args)
+
+            metadata = json.loads((root / "feature_demo" / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(metadata["num_workers"], "auto")
+        self.assertEqual(metadata["worker_thread_limit"], 2)
 
     def test_replacement_removes_only_copied_model_mode_artifacts(self) -> None:
         args = make_args(model_id="success_intent/new", run_id="derived", replace_model=True)

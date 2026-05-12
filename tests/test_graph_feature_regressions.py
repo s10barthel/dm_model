@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import unittest
 import tempfile
 from pathlib import Path
@@ -14,7 +15,7 @@ from torch_geometric.data import Batch, Data
 from datatools.benchmark import build_benchmark_export
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import graph_feature
-from datatools.match import Match
+from datatools.match import Match, clear_intended_receiver_model_cache
 from datatools.utils import filter_features_and_labels
 from inference import inference_gnn, resolve_match_graphs
 from models import utils as model_utils
@@ -272,6 +273,31 @@ class GraphFeatureMatchConstructionTests(unittest.TestCase):
 
 
 class GraphFeatureRegressionTests(unittest.TestCase):
+    def test_resolve_num_workers_auto_caps_at_six(self) -> None:
+        with patch("datatools.graph_feature.os.cpu_count", return_value=16):
+            self.assertEqual(graph_feature.resolve_num_workers("auto"), 6)
+
+    def test_resolve_num_workers_rejects_non_positive_values(self) -> None:
+        with self.assertRaises(ValueError):
+            graph_feature.resolve_num_workers("0")
+
+    def test_parse_accepts_worker_flags(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "graph_feature.py",
+                "--num-workers",
+                "auto",
+                "--worker-thread-limit",
+                "2",
+            ],
+        ):
+            args = graph_feature.parse_args()
+
+        self.assertEqual(args.num_workers, "auto")
+        self.assertEqual(args.worker_thread_limit, 2)
+
     def test_node_feature_dimensions_include_offside_tail(self) -> None:
         self.assertEqual(graph_feature.infer_node_feature_dim(extend=False), 20)
         self.assertEqual(graph_feature.infer_node_feature_dim(extend=True), 26)
@@ -664,6 +690,65 @@ class GraphFeatureRegressionTests(unittest.TestCase):
         self.assertEqual(labels.shape[1], len(LABEL_COLUMNS))
         self.assertEqual(float(labels[0, LABEL_INDEX["scores_goal_next10"]]), 0.0)
         self.assertEqual(float(labels[0, LABEL_INDEX["concedes_goal_next10"]]), 0.0)
+
+    def test_intended_receiver_model_cache_reuses_loaded_checkpoint_within_process(self) -> None:
+        clear_intended_receiver_model_cache()
+        match = object.__new__(Match)
+        dummy_model = torch.nn.Linear(1, 1)
+
+        with (
+            patch("models.utils.load_model", return_value=dummy_model) as load_model,
+            patch(
+                "models.utils.get_model_graph_schema",
+                return_value={"edge_in_dim": 4, "add_v_edge_features": True},
+            ) as get_schema,
+        ):
+            cached_first = match._get_cached_intended_receiver_model("success_intent/demo")
+            cached_second = match._get_cached_intended_receiver_model("success_intent/demo")
+
+        self.assertIs(cached_first[0], dummy_model)
+        self.assertIs(cached_second[0], dummy_model)
+        self.assertEqual(load_model.call_count, 1)
+        self.assertEqual(get_schema.call_count, 1)
+        clear_intended_receiver_model_cache()
+
+    def test_return_annotation_cache_reuses_per_return_type_annotations(self) -> None:
+        match = object.__new__(Match)
+        match._base_events = pd.DataFrame({"value": [1.0]})
+        match._cached_events_by_return_type = {}
+        match._cached_diagnostic_events = None
+
+        def add_columns(events: pd.DataFrame, *_args: object, **_kwargs: object) -> pd.DataFrame:
+            events = events.copy()
+            for column in [
+                "scores",
+                "concedes",
+                "scores_xg",
+                "concedes_xg",
+                "scores_xT",
+                "concedes_xT",
+                "scores_goal_distance",
+                "concedes_goal_distance",
+                "scores_epv",
+                "concedes_epv",
+            ]:
+                events[column] = 0.0
+            return events
+
+        with (
+            patch("datatools.match.utils.label_returns", side_effect=add_columns) as label_returns,
+            patch("datatools.match.utils.label_xt_returns", side_effect=add_columns) as label_xt_returns,
+            patch("datatools.match.utils.label_goal_distance_returns", side_effect=add_columns) as label_goal_distance_returns,
+            patch("datatools.match.utils.label_epv_returns", side_effect=add_columns) as label_epv_returns,
+        ):
+            first = match._get_events_for_return_type("next_1", "next", 1, False)
+            second = match._get_events_for_return_type("next_1", "next", 1, False)
+
+        self.assertIs(first, second)
+        self.assertEqual(label_returns.call_count, 1)
+        self.assertEqual(label_xt_returns.call_count, 1)
+        self.assertEqual(label_goal_distance_returns.call_count, 1)
+        self.assertEqual(label_epv_returns.call_count, 1)
 
 
 class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):

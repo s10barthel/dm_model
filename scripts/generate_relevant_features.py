@@ -127,6 +127,17 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable pass/cross next-action inclusion conditions while keeping frame requirements.",
     )
+    parser.add_argument(
+        "--num-workers",
+        default="1",
+        help="Number of match worker processes to use inside each graph_feature step, or 'auto'.",
+    )
+    parser.add_argument(
+        "--worker-thread-limit",
+        type=int,
+        default=1,
+        help="Thread limit passed to each graph_feature worker process.",
+    )
     args = parser.parse_args()
     args.requested_return_types = resolve_requested_return_types(args.return_type) if args.return_type else []
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
@@ -134,6 +145,8 @@ def parse_args() -> argparse.Namespace:
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
+    if args.worker_thread_limit < 1:
+        parser.error("--worker-thread-limit must be a positive integer.")
     return args
 
 
@@ -157,6 +170,8 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
     if args.run_id:
         command.extend(["--run-id", args.run_id])
+    command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
+    command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
     command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
     return command
 
@@ -337,6 +352,8 @@ def extension_graph_feature_command(
     augment_blocks_from_existing_graphs: bool = False,
     overwrite_labels: bool = False,
     next_action_conditions_enabled: bool = True,
+    num_workers: str | int = "1",
+    worker_thread_limit: int = 1,
 ) -> list[str]:
     command = [
         python,
@@ -348,6 +365,10 @@ def extension_graph_feature_command(
         "--labels-only",
         "--run-id",
         output_run_id,
+        "--num-workers",
+        str(num_workers),
+        "--worker-thread-limit",
+        str(worker_thread_limit),
         next_action_conditions_flag(next_action_conditions_enabled),
     ]
     if feature_variant:
@@ -383,6 +404,8 @@ def extension_commands_for_plan(
     refresh_existing_labels: bool = False,
     final_modes: list[str] | None = None,
     next_action_conditions_enabled: bool = True,
+    num_workers: str | int = "1",
+    worker_thread_limit: int = 1,
 ) -> list[FeatureGenerationStep]:
     steps: list[FeatureGenerationStep] = []
     final_modes = final_modes if final_modes is not None else [*base_modes, *added_modes]
@@ -410,6 +433,8 @@ def extension_commands_for_plan(
                             intended_receiver_model_id=intended_receiver_model_id,
                             overwrite_labels=True,
                             next_action_conditions_enabled=next_action_conditions_enabled,
+                            num_workers=num_workers,
+                            worker_thread_limit=worker_thread_limit,
                         ),
                     )
                 )
@@ -428,6 +453,8 @@ def extension_commands_for_plan(
                         intent_train_label_source_return_type=source_return_type,
                         overwrite_labels=True,
                         next_action_conditions_enabled=next_action_conditions_enabled,
+                        num_workers=num_workers,
+                        worker_thread_limit=worker_thread_limit,
                     ),
                 )
             )
@@ -449,6 +476,8 @@ def extension_commands_for_plan(
                             augment_blocks_from_existing_graphs=should_generate_model_augmented and split == "train",
                             overwrite_labels=True,
                             next_action_conditions_enabled=next_action_conditions_enabled,
+                            num_workers=num_workers,
+                            worker_thread_limit=worker_thread_limit,
                         ),
                     )
                 )
@@ -467,6 +496,8 @@ def extension_commands_for_plan(
                         intent_train_label_source_return_type=source_return_type,
                         overwrite_labels=True,
                         next_action_conditions_enabled=next_action_conditions_enabled,
+                        num_workers=num_workers,
+                        worker_thread_limit=worker_thread_limit,
                     ),
                 )
             )
@@ -486,6 +517,8 @@ def extension_commands_for_plan(
                         intended_receiver_modes=added_return_modes,
                         intended_receiver_model_id=intended_receiver_model_id,
                         next_action_conditions_enabled=next_action_conditions_enabled,
+                        num_workers=num_workers,
+                        worker_thread_limit=worker_thread_limit,
                     ),
                 )
             )
@@ -503,6 +536,8 @@ def extension_commands_for_plan(
                     intent_train_label_source_mode=source_mode,
                     intent_train_label_source_return_type=source_return_type,
                     next_action_conditions_enabled=next_action_conditions_enabled,
+                    num_workers=num_workers,
+                    worker_thread_limit=worker_thread_limit,
                 ),
             )
         )
@@ -522,6 +557,8 @@ def extension_commands_for_plan(
                         intended_receiver_model_id=intended_receiver_model_id,
                         augment_blocks_from_existing_graphs=(split == "train"),
                         next_action_conditions_enabled=next_action_conditions_enabled,
+                        num_workers=num_workers,
+                        worker_thread_limit=worker_thread_limit,
                     ),
                 )
             )
@@ -539,6 +576,8 @@ def extension_commands_for_plan(
                     intent_train_label_source_mode=source_mode,
                     intent_train_label_source_return_type=source_return_type,
                     next_action_conditions_enabled=next_action_conditions_enabled,
+                    num_workers=num_workers,
+                    worker_thread_limit=worker_thread_limit,
                 ),
             )
         )
@@ -645,6 +684,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         regenerate_model_mode=regenerate_model_mode,
         refresh_existing_labels=bool(refresh_target_families),
         next_action_conditions_enabled=base_next_action_conditions_enabled,
+        num_workers=getattr(args, "num_workers", "1"),
+        worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)),
     )
     commands = [step.command for step in command_steps]
     return FeatureExtensionPlan(
@@ -686,6 +727,8 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
         "extension_replaced_intended_receiver_modes": plan.replaced_intended_receiver_modes,
         "next_action_conditions_enabled": plan.next_action_conditions_enabled,
+        "num_workers": str(getattr(args, "num_workers", "1")),
+        "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "extension_commands": plan.commands,
         "intended_receiver_modes": plan.final_intended_receiver_modes,
         "intended_receiver_model_id": plan.intended_receiver_model_id,
@@ -775,6 +818,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": EXPECTED_GRAPH_SCHEMA.copy(),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
+        "num_workers": str(getattr(args, "num_workers", "1")),
+        "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "splits": ["train", "test"],
         "return_types": args.return_types,
         "return_type": args.return_types[0] if len(args.return_types) == 1 else None,

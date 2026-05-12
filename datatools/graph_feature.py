@@ -2,8 +2,12 @@ import argparse
 import os
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
+from multiprocessing import freeze_support
 from pathlib import Path
+from types import SimpleNamespace
 from typing import List, Tuple
 
 if not os.getcwd() in sys.path:
@@ -54,6 +58,55 @@ BASE_EDGE_FEATURE_DIM = 2
 VELOCITY_EDGE_FEATURE_EXTRA_DIM = 2
 SUCCESS_INTENT_EXTRA_DIM = 4
 SUCCESS_INTENT_WINDOW_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class FeatureGenerationPaths:
+    feature_dir: str
+    label_dir: str | None = None
+    post_feature_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class MatchGenerationTask:
+    match_id: str
+    match_index: int
+    n_matches: int
+    match_lineup: pd.DataFrame
+    args_dict: dict[str, object]
+    feature_root: str
+    paths: FeatureGenerationPaths
+    show_progress: bool
+    worker_thread_limit: int
+
+
+@dataclass(frozen=True)
+class MatchGenerationResult:
+    match_id: str
+    summary: str
+    stats_by_mode: dict[str, dict[str, int]]
+
+
+def resolve_num_workers(value: str | int) -> int:
+    if isinstance(value, int):
+        workers = value
+    else:
+        text = str(value).strip().lower()
+        if text == "auto":
+            cpu_count = os.cpu_count() or 1
+            workers = max(1, min(6, cpu_count - 2))
+        else:
+            workers = int(text)
+    if workers < 1:
+        raise ValueError("--num-workers must be a positive integer or 'auto'.")
+    return workers
+
+
+def configure_worker_thread_limit(limit: int) -> None:
+    value = str(int(limit))
+    os.environ["OMP_NUM_THREADS"] = value
+    os.environ["MKL_NUM_THREADS"] = value
+    os.environ["NUMEXPR_NUM_THREADS"] = value
 
 
 def calculate_offside_flags(
@@ -915,6 +968,7 @@ def save_augmented_blocks_from_existing_graphs(
     match_id: str,
     feature_root: Path,
     overwrite: bool = False,
+    verbose: bool = True,
 ) -> None:
     graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
     if not graph_path.exists():
@@ -934,10 +988,11 @@ def save_augmented_blocks_from_existing_graphs(
         match.actions = resolved_actions.copy()
         match.labels = labels_by_key[(mode, return_type)]
         match.graph_features_0 = list(base_graphs)
-        augmented_graph_features, augmented_labels = augment_blocked_actions(match)
+        augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=verbose)
         torch.save(augmented_graph_features, augmented_feature_path)
         torch.save(augmented_labels, augmented_label_path)
-        print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
+        if verbose:
+            print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
 
 
 def save_labels_only_artifacts(
@@ -953,6 +1008,7 @@ def save_labels_only_artifacts(
     intent_train_label_source_return_type: str | None = None,
     augment_blocks_from_existing_graphs: bool = False,
     overwrite_labels: bool = False,
+    verbose: bool = True,
 ) -> None:
     _validate_labels_only_base_artifacts(
         match_id,
@@ -980,7 +1036,8 @@ def save_labels_only_artifacts(
             intent_train_label_source_return_type,
             overwrite=overwrite_labels,
         )
-        print("Successfully saved labels-only intent-training labels.")
+        if verbose:
+            print("Successfully saved labels-only intent-training labels.")
     else:
         save_action_labels_if_missing(labels_by_key, match_id, feature_root, overwrite=overwrite_labels)
         if augment_blocks_from_existing_graphs:
@@ -991,8 +1048,10 @@ def save_labels_only_artifacts(
                 primary_return_type,
                 match_id,
                 feature_root,
+                verbose=verbose,
             )
-        print("Successfully saved labels-only action labels.")
+        if verbose:
+            print("Successfully saved labels-only action labels.")
 
 
 def construct_intent_training_samples(
@@ -1074,14 +1133,21 @@ def construct_intent_training_samples(
     return augmented_graphs, labels
 
 
-def augment_blocked_actions(match: Match, max_block_dist=5, max_block_angle=15) -> Tuple[List[Data], torch.Tensor]:
+def augment_blocked_actions(
+    match: Match,
+    max_block_dist=5,
+    max_block_angle=15,
+    verbose: bool = True,
+) -> Tuple[List[Data], torch.Tensor]:
     augmented_features = []
     augmented_labels = []
 
     action_indices = match.labels[:, 0].numpy().astype(int)
     tqdm_desc = "Augmenting features and labels"
 
-    for i, action_index in enumerate(tqdm(action_indices, desc=tqdm_desc)):
+    iterator = tqdm(action_indices, desc=tqdm_desc) if verbose else action_indices
+
+    for i, action_index in enumerate(iterator):
         augmented_features.append(match.graph_features_0[i])
         augmented_labels.append(match.labels[i])
 
@@ -1158,7 +1224,373 @@ def augment_blocked_actions(match: Match, max_block_dist=5, max_block_angle=15) 
     return augmented_features, augmented_labels
 
 
-if __name__ == "__main__":
+def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "action_type": args.action_type,
+        "split": args.split,
+        "return_types": list(args.return_types),
+        "post_action": bool(args.post_action),
+        "augment_blocks": bool(args.augment_blocks),
+        "feature_variant": args.feature_variant,
+        "intended_receiver_model_id": args.intended_receiver_model_id,
+        "labels_only": bool(args.labels_only),
+        "intended_receiver_modes": list(args.intended_receiver_modes),
+        "intent_train_label_source_mode": args.intent_train_label_source_mode,
+        "intent_train_label_source_return_type": args.intent_train_label_source_return_type,
+        "augment_blocks_from_existing_graphs": bool(args.augment_blocks_from_existing_graphs),
+        "overwrite_labels": bool(args.overwrite_labels),
+        "next_action_conditions_enabled": bool(args.next_action_conditions_enabled),
+    }
+
+
+def ensure_output_dirs(args: argparse.Namespace, feature_root: Path) -> FeatureGenerationPaths:
+    label_dir: str | None = None
+    post_feature_dir: str | None = None
+
+    if args.action_type.startswith("shot"):
+        feature_dir = feature_root / "augmented_shot_graphs"
+        label_dir = str(feature_root / "augmented_shot_labels")
+        os.makedirs(feature_dir, exist_ok=True)
+        os.makedirs(label_dir, exist_ok=True)
+    else:
+        if args.feature_variant == "intent_train_augmented":
+            feature_dir = get_action_graph_intent_train_dir(feature_root)
+            label_dir_builder = get_intent_train_label_dir
+        elif args.feature_variant == "success_intent":
+            feature_dir = get_success_intent_graph_dir(feature_root)
+            label_dir_builder = None
+        else:
+            feature_dir = get_action_graph_dir(feature_root)
+            label_dir_builder = get_action_label_dir
+        Path(feature_dir).mkdir(parents=True, exist_ok=True)
+        if args.feature_variant == "success_intent":
+            Path(get_success_intent_label_dir(root=feature_root)).mkdir(parents=True, exist_ok=True)
+        else:
+            for intended_receiver_mode in args.intended_receiver_modes:
+                for return_type in args.return_types:
+                    Path(
+                        label_dir_builder(
+                            return_type,
+                            intended_receiver_mode=intended_receiver_mode,
+                            root=feature_root,
+                        )
+                    ).mkdir(parents=True, exist_ok=True)
+
+        if args.post_action:
+            if args.feature_variant != "base":
+                raise ValueError("Post-action features are only supported for base graphs.")
+            post_feature_dir = str(get_post_action_graph_dir(feature_root))
+            os.makedirs(post_feature_dir, exist_ok=True)
+
+    if args.augment_blocks or args.augment_blocks_from_existing_graphs:
+        for intended_receiver_mode in args.intended_receiver_modes:
+            augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode, root=feature_root))
+            augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode, root=feature_root))
+            os.makedirs(augmented_feature_dir, exist_ok=True)
+            os.makedirs(augmented_label_dir, exist_ok=True)
+
+    return FeatureGenerationPaths(
+        feature_dir=str(feature_dir),
+        label_dir=label_dir,
+        post_feature_dir=post_feature_dir,
+    )
+
+
+def _match_heading(task: MatchGenerationTask, match_lineup: pd.DataFrame) -> str:
+    if match_lineup.empty:
+        return f"\n[{task.match_index + 1}/{task.n_matches}] {task.match_id}"
+    game_date = pd.to_datetime(match_lineup["game_date"].iloc[0]).date()
+    match_name = " vs ".join(match_lineup["contestant_name"].dropna().unique())
+    return f"\n[{task.match_index + 1}/{task.n_matches}] {task.match_id}: {match_name} on {game_date}"
+
+
+def _save_success_intent_match(
+    match: Match,
+    match_id: str,
+    feature_root: Path,
+    feature_dir: str,
+    return_types: list[str],
+    show_progress: bool,
+) -> MatchGenerationResult:
+    resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, return_types)
+    for labels in success_intent_labels.values():
+        extract_sorted_action_indices(labels, context="Action labels")
+
+    primary_return_type = return_types[0]
+    match.actions = resolved_actions.copy()
+    match.labels = success_intent_labels[primary_return_type]
+    if show_progress:
+        print("Constructing success-intent graph features for actions...")
+    success_graphs = construct_graph_features(
+        match,
+        extend=False,
+        post_action=False,
+        feature_variant="success_intent",
+        add_v_edge_features=True,
+        verbose=show_progress,
+    )
+    invalid_graphs = count_invalid_graphs(success_graphs)
+    valid_graphs = len(success_graphs) - invalid_graphs
+    if valid_graphs == 0:
+        raise ValueError("No usable success-intent graphs were constructed for this match.")
+    torch.save(success_graphs, f"{feature_dir}/{match_id}.pt")
+    label_dir = get_success_intent_label_dir(root=feature_root)
+    torch.save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
+    if invalid_graphs and show_progress:
+        print(f"  Skipped {invalid_graphs} corrupted action frames while building success-intent graphs.")
+    if show_progress:
+        print(f"Successfully saved success-intent graphs for {len(success_graphs)} events.")
+    summary = f"saved {len(success_graphs)} success-intent graphs"
+    if invalid_graphs:
+        summary += f" ({invalid_graphs} invalid skipped)"
+    return MatchGenerationResult(match_id=match_id, summary=summary, stats_by_mode={})
+
+
+def _save_action_type_all_match(
+    match: Match,
+    match_id: str,
+    feature_root: Path,
+    paths: FeatureGenerationPaths,
+    args: argparse.Namespace,
+    show_progress: bool,
+) -> MatchGenerationResult:
+    if args.labels_only:
+        _validate_labels_only_base_artifacts(
+            match_id,
+            feature_root,
+            feature_variant=args.feature_variant,
+            intent_train_label_source_mode=args.intent_train_label_source_mode,
+            intent_train_label_source_return_type=args.intent_train_label_source_return_type,
+        )
+    resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
+        match,
+        intended_receiver_modes=args.intended_receiver_modes,
+        return_types=args.return_types,
+        intended_receiver_model_id=args.intended_receiver_model_id,
+        feature_root=feature_root,
+        match_id=match_id,
+        prefer_existing_resolved_actions=args.labels_only,
+    )
+
+    if args.labels_only:
+        save_labels_only_artifacts(
+            match,
+            resolved_actions_by_mode,
+            labels_by_key,
+            args.intended_receiver_modes,
+            args.return_types,
+            match_id,
+            feature_root,
+            feature_variant=args.feature_variant,
+            intent_train_label_source_mode=args.intent_train_label_source_mode,
+            intent_train_label_source_return_type=args.intent_train_label_source_return_type,
+            augment_blocks_from_existing_graphs=args.augment_blocks_from_existing_graphs,
+            overwrite_labels=args.overwrite_labels,
+            verbose=show_progress,
+        )
+        primary_mode = args.intended_receiver_modes[0]
+        primary_return_type = args.return_types[0]
+        label_count = int(labels_by_key[(primary_mode, primary_return_type)].shape[0])
+        return MatchGenerationResult(
+            match_id=match_id,
+            summary=f"saved labels-only artifacts for {label_count} actions",
+            stats_by_mode=stats_by_mode,
+        )
+
+    for mode, resolved_actions in resolved_actions_by_mode.items():
+        resolved_action_path = get_resolved_action_path(
+            match_id,
+            intended_receiver_mode=mode,
+            root=feature_root,
+        )
+        resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_actions.to_parquet(resolved_action_path)
+
+    primary_mode = args.intended_receiver_modes[0]
+    primary_return_type = args.return_types[0]
+    base_action_indices = bind_canonical_graph_context(
+        match,
+        resolved_actions_by_mode,
+        labels_by_key,
+        primary_mode,
+        primary_return_type,
+    )
+
+    if args.feature_variant == "intent_train_augmented":
+        if show_progress:
+            print("Constructing intent-training augmentation graphs...")
+        augmented_graphs, _, augmented_action_indices = construct_intent_training_samples(
+            match,
+            extend=True,
+            add_v_edge_features=True,
+            return_action_indices=True,
+            verbose=show_progress,
+        )
+        if not augmented_graphs:
+            raise ValueError("No usable intent-training samples were constructed for this match.")
+        torch.save(augmented_graphs, f"{paths.feature_dir}/{match_id}.pt")
+        for mode in args.intended_receiver_modes:
+            for return_type in args.return_types:
+                label_lookup = {
+                    int(label[0].item()): label.clone()
+                    for label in labels_by_key[(mode, return_type)]
+                }
+                augmented_labels = torch.stack(
+                    [label_lookup[action_index] for action_index in augmented_action_indices],
+                    dim=0,
+                )
+                label_dir = get_intent_train_label_dir(
+                    return_type,
+                    intended_receiver_mode=mode,
+                    root=feature_root,
+                )
+                torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
+        if show_progress:
+            print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
+        return MatchGenerationResult(
+            match_id=match_id,
+            summary=f"saved {len(augmented_graphs)} augmented intent samples",
+            stats_by_mode=stats_by_mode,
+        )
+
+    if show_progress:
+        print("Constructing base graph features for actions...")
+    match.graph_features_0 = construct_graph_features(
+        match,
+        extend=True,
+        post_action=False,
+        feature_variant="base",
+        action_indices=base_action_indices,
+        add_v_edge_features=True,
+        verbose=show_progress,
+    )
+    invalid_graphs = count_invalid_graphs(match.graph_features_0)
+    valid_graphs = len(match.graph_features_0) - invalid_graphs
+    if valid_graphs == 0:
+        raise ValueError("No usable action graphs were constructed for this match.")
+    torch.save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    if invalid_graphs and show_progress:
+        print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
+
+    if args.post_action:
+        if show_progress:
+            print("Constructing base graph features for post-actions...")
+        match.graph_features_1 = construct_graph_features(
+            match,
+            extend=True,
+            post_action=True,
+            feature_variant="base",
+            action_indices=base_action_indices,
+            add_v_edge_features=True,
+            verbose=show_progress,
+        )
+        torch.save(match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt")
+
+    for mode in args.intended_receiver_modes:
+        for return_type in args.return_types:
+            label_dir = get_action_label_dir(
+                return_type,
+                intended_receiver_mode=mode,
+                root=feature_root,
+            )
+            torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
+
+    if args.augment_blocks:
+        for mode in args.intended_receiver_modes:
+            match.actions = resolved_actions_by_mode[mode].copy()
+            match.labels = labels_by_key[(mode, args.return_types[0])]
+            augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=show_progress)
+            augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
+            augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
+            torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
+            torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
+            if show_progress:
+                print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
+
+    if show_progress:
+        print(f"Successfully saved for {len(match.graph_features_0)} events.")
+    summary = f"saved {len(match.graph_features_0)} base graphs"
+    if invalid_graphs:
+        summary += f" ({invalid_graphs} invalid skipped)"
+    return MatchGenerationResult(match_id=match_id, summary=summary, stats_by_mode=stats_by_mode)
+
+
+def _save_non_all_match(
+    match: Match,
+    match_id: str,
+    paths: FeatureGenerationPaths,
+    return_types: list[str],
+    show_progress: bool,
+) -> MatchGenerationResult:
+    primary_return_type = return_types[0]
+    match.labels = match.construct_labels(return_type=primary_return_type)
+    if match.labels.numel() == 0:
+        raise ValueError("No usable labels were constructed for this match.")
+
+    action_indices = extract_sorted_action_indices(match.labels, context="Action labels")
+
+    if show_progress:
+        print("Constructing base graph features for actions...")
+    match.graph_features_0 = construct_graph_features(
+        match,
+        extend=True,
+        post_action=False,
+        feature_variant="base",
+        action_indices=action_indices,
+        add_v_edge_features=True,
+        verbose=show_progress,
+    )
+    valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
+    if valid_graphs == 0:
+        raise ValueError("No usable action graphs were constructed for this match.")
+    torch.save(match.labels, f"{paths.label_dir}/{match_id}.pt")
+    torch.save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    return MatchGenerationResult(
+        match_id=match_id,
+        summary=f"saved {len(match.graph_features_0)} action graphs",
+        stats_by_mode={},
+    )
+
+
+def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationResult:
+    configure_worker_thread_limit(int(task.worker_thread_limit))
+    args = SimpleNamespace(**task.args_dict)
+    feature_root = Path(task.feature_root)
+    events = pd.read_csv(f"data/event_synced/{task.match_id}.csv", header=0, parse_dates=["utc_timestamp"])
+    tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
+    match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    if task.show_progress:
+        print(_match_heading(task, task.match_lineup))
+
+    if args.action_type == "all":
+        if args.feature_variant == "success_intent":
+            return _save_success_intent_match(
+                match,
+                task.match_id,
+                feature_root,
+                task.paths.feature_dir,
+                args.return_types,
+                task.show_progress,
+            )
+        return _save_action_type_all_match(
+            match,
+            task.match_id,
+            feature_root,
+            task.paths,
+            args,
+            task.show_progress,
+        )
+
+    return _save_non_all_match(
+        match,
+        task.match_id,
+        task.paths,
+        args.return_types,
+        task.show_progress,
+    )
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
@@ -1234,6 +1666,17 @@ if __name__ == "__main__":
         action="store_false",
         help="Disable pass/cross next-action inclusion conditions while keeping frame requirements.",
     )
+    parser.add_argument(
+        "--num-workers",
+        default="1",
+        help="Number of match worker processes to use, or 'auto' to resolve automatically.",
+    )
+    parser.add_argument(
+        "--worker-thread-limit",
+        type=int,
+        default=1,
+        help="Thread limit propagated to each worker process for BLAS/OpenMP-backed libraries.",
+    )
     args, _ = parser.parse_known_args()
     args.return_types = resolve_requested_return_types(args.return_type)
     if args.only_intended_receiver_mode:
@@ -1246,8 +1689,10 @@ if __name__ == "__main__":
                 args.intended_receiver_modes.append(mode)
     else:
         args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
-    feature_root = get_feature_run_root(args.run_id) if args.run_id else FEATURE_DIR
+    return args
 
+
+def validate_args(args: argparse.Namespace) -> None:
     if args.labels_only and args.post_action:
         raise ValueError("--labels-only cannot be combined with --post_action.")
     if args.labels_only and args.feature_variant == "success_intent":
@@ -1258,6 +1703,8 @@ if __name__ == "__main__":
         raise ValueError("--overwrite-labels requires --labels-only.")
     if args.augment_blocks_from_existing_graphs and args.feature_variant != "base":
         raise ValueError("--augment-blocks-from-existing-graphs is only supported for base labels.")
+    if args.worker_thread_limit < 1:
+        raise ValueError("--worker-thread-limit must be a positive integer.")
     if args.labels_only and args.feature_variant == "intent_train_augmented":
         if not args.intent_train_label_source_mode or not args.intent_train_label_source_return_type:
             raise ValueError(
@@ -1269,67 +1716,9 @@ if __name__ == "__main__":
             [args.intent_train_label_source_return_type]
         )[0]
 
-    if args.action_type.startswith("shot"):
-        if args.feature_variant != "base":
-            raise ValueError("Intent-training augmentation is only supported for action_type=all.")
-        args.action_type = "shot_augment"
-        feature_dir = feature_root / "augmented_shot_graphs"
-        label_dir = feature_root / "augmented_shot_labels"
-        os.makedirs(feature_dir, exist_ok=True)
-        os.makedirs(label_dir, exist_ok=True)
 
-    else:  # args.actions_type == "all"
-        if args.feature_variant == "intent_train_augmented":
-            feature_dir = get_action_graph_intent_train_dir(feature_root)
-            label_dir_builder = get_intent_train_label_dir
-        elif args.feature_variant == "success_intent":
-            feature_dir = get_success_intent_graph_dir(feature_root)
-            label_dir_builder = None
-        else:
-            feature_dir = get_action_graph_dir(feature_root)
-            label_dir_builder = get_action_label_dir
-        Path(feature_dir).mkdir(parents=True, exist_ok=True)
-        if args.feature_variant == "success_intent":
-            Path(get_success_intent_label_dir(root=feature_root)).mkdir(parents=True, exist_ok=True)
-        else:
-            for intended_receiver_mode in args.intended_receiver_modes:
-                for return_type in args.return_types:
-                    Path(
-                        label_dir_builder(
-                            return_type,
-                            intended_receiver_mode=intended_receiver_mode,
-                            root=feature_root,
-                        )
-                    ).mkdir(parents=True, exist_ok=True)
-
-        if args.post_action:
-            if args.feature_variant != "base":
-                raise ValueError("Post-action features are only supported for base graphs.")
-            post_feature_dir = str(get_post_action_graph_dir(feature_root))
-            os.makedirs(post_feature_dir, exist_ok=True)
-
-    if args.augment_blocks or args.augment_blocks_from_existing_graphs:
-        for intended_receiver_mode in args.intended_receiver_modes:
-            augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode, root=feature_root))
-            augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode, root=feature_root))
-            os.makedirs(augmented_feature_dir, exist_ok=True)
-            os.makedirs(augmented_label_dir, exist_ok=True)
-
-    lineups = pd.read_parquet("data/lineup/line_up.parquet")
-    lineups["game_id"] = lineups["stats_perform_match_id"]
-    lineups["game_date"] = pd.to_datetime(lineups["game_date"])
-    match_dates = lineups[["game_id", "game_date"]].drop_duplicates().set_index("game_id")["game_date"]
-
-    if args.split == "train":
-        match_ids, _ = load_base_splits()
-    else:  # split == "test"
-        _, match_ids = load_base_splits()
-
-    n_matches = len(match_ids)
-
-    successful_matches = 0
-    skipped_matches: list[dict[str, str]] = []
-    aggregate_stats = {
+def aggregate_mode_stats(intended_receiver_modes: list[str]) -> dict[str, dict[str, int]]:
+    return {
         mode: {
             "failed_passes_total": 0,
             "failed_passes_labeled": 0,
@@ -1338,219 +1727,152 @@ if __name__ == "__main__":
             "model_failed_passes_scored": 0,
             "model_angle_only_fallbacks": 0,
         }
-        for mode in args.intended_receiver_modes
+        for mode in intended_receiver_modes
     }
 
+
+def accumulate_mode_stats(
+    aggregate_stats: dict[str, dict[str, int]],
+    stats_by_mode: dict[str, dict[str, int]],
+) -> None:
+    for mode, mode_stats in stats_by_mode.items():
+        if mode not in aggregate_stats:
+            continue
+        for key in aggregate_stats[mode]:
+            aggregate_stats[mode][key] += int(mode_stats.get(key, 0) or 0)
+
+
+def emit_model_fallback_message(
+    stats_by_mode: dict[str, dict[str, int]],
+    *,
+    writer=print,
+) -> None:
+    mode_stats = stats_by_mode.get(INTENDED_RECEIVER_MODE_MODEL)
+    if not mode_stats or not mode_stats.get("model_failed_passes_total", 0):
+        return
+    writer(
+        "  Intended-receiver model fallback: "
+        f"{int(mode_stats.get('model_angle_only_fallbacks', 0))} / "
+        f"{int(mode_stats.get('model_failed_passes_total', 0))} failed passes used angle_only."
+    )
+
+
+def build_match_tasks(
+    match_ids: list[str],
+    lineups: pd.DataFrame,
+    args: argparse.Namespace,
+    feature_root: Path,
+    paths: FeatureGenerationPaths,
+    *,
+    num_workers: int,
+) -> list[MatchGenerationTask]:
+    args_dict = args_to_worker_dict(args)
+    tasks: list[MatchGenerationTask] = []
     for i, match_id in enumerate(match_ids):
-        try:
-            events = pd.read_csv(f"data/event_synced/{match_id}.csv", header=0, parse_dates=["utc_timestamp"])
-            tracking = pd.read_parquet(f"data/tracking_processed/{match_id}.parquet")
-            match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id]
+        match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
+        tasks.append(
+            MatchGenerationTask(
+                match_id=str(match_id),
+                match_index=i,
+                n_matches=len(match_ids),
+                match_lineup=match_lineup,
+                args_dict=args_dict,
+                feature_root=str(feature_root),
+                paths=paths,
+                show_progress=num_workers == 1,
+                worker_thread_limit=int(args.worker_thread_limit),
+            )
+        )
+    return tasks
 
-            match = build_match_for_feature_generation(events, tracking, match_lineup, args)
-            match_date = match_dates[match_id].date()
-            match_name = " vs ".join(match_lineup["contestant_name"].unique())
-            print(f"\n[{i+1}/{n_matches}] {match_id}: {match_name} on {match_date}")
 
-            if args.action_type == "all":
-                if args.feature_variant == "success_intent":
-                    resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, args.return_types)
-                    for labels in success_intent_labels.values():
-                        extract_sorted_action_indices(labels, context="Action labels")
+def run_match_generation(
+    tasks: list[MatchGenerationTask],
+    *,
+    num_workers: int,
+    intended_receiver_modes: list[str],
+) -> tuple[int, list[dict[str, str]], dict[str, dict[str, int]]]:
+    successful_matches = 0
+    skipped_matches: list[dict[str, str]] = []
+    aggregate_stats = aggregate_mode_stats(intended_receiver_modes)
 
-                    primary_return_type = args.return_types[0]
-                    match.actions = resolved_actions.copy()
-                    match.labels = success_intent_labels[primary_return_type]
-                    print("Constructing success-intent graph features for actions...")
-                    success_graphs = construct_graph_features(
-                        match,
-                        extend=False,
-                        post_action=False,
-                        feature_variant="success_intent",
-                        add_v_edge_features=True,
-                    )
-                    valid_graphs = len(success_graphs) - count_invalid_graphs(success_graphs)
-                    if valid_graphs == 0:
-                        raise ValueError("No usable success-intent graphs were constructed for this match.")
-                    torch.save(success_graphs, f"{feature_dir}/{match_id}.pt")
-                    invalid_graphs = count_invalid_graphs(success_graphs)
-                    if invalid_graphs:
-                        print(f"  Skipped {invalid_graphs} corrupted action frames while building success-intent graphs.")
-                    label_dir = get_success_intent_label_dir(root=feature_root)
-                    torch.save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
-                    print(f"Successfully saved success-intent graphs for {len(success_graphs)} events.")
-                else:
-                    if args.labels_only:
-                        _validate_labels_only_base_artifacts(
-                            match_id,
-                            feature_root,
-                            feature_variant=args.feature_variant,
-                            intent_train_label_source_mode=args.intent_train_label_source_mode,
-                            intent_train_label_source_return_type=args.intent_train_label_source_return_type,
-                        )
-                    resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
-                        match,
-                        intended_receiver_modes=args.intended_receiver_modes,
-                        return_types=args.return_types,
-                        intended_receiver_model_id=args.intended_receiver_model_id,
-                        feature_root=feature_root,
-                        match_id=match_id,
-                        prefer_existing_resolved_actions=args.labels_only,
-                    )
-                    for mode, mode_stats in stats_by_mode.items():
-                        for key in aggregate_stats[mode]:
-                            aggregate_stats[mode][key] += int(mode_stats.get(key, 0) or 0)
-                        if mode == INTENDED_RECEIVER_MODE_MODEL and mode_stats.get("model_failed_passes_total", 0):
-                            print(
-                                "  Intended-receiver model fallback: "
-                                f"{int(mode_stats.get('model_angle_only_fallbacks', 0))} / "
-                                f"{int(mode_stats.get('model_failed_passes_total', 0))} failed passes used angle_only."
-                            )
+    if num_workers == 1:
+        for task in tasks:
+            try:
+                result = process_match_generation_task(task)
+                successful_matches += 1
+                accumulate_mode_stats(aggregate_stats, result.stats_by_mode)
+                emit_model_fallback_message(result.stats_by_mode)
+            except Exception as exc:
+                error_summary = summarize_exception(exc)
+                skipped_matches.append({"match_id": task.match_id, "error": error_summary})
+                print(f"  SKIP {task.match_id}: {error_summary}")
+        return successful_matches, skipped_matches, aggregate_stats
 
-                    if args.labels_only:
-                        save_labels_only_artifacts(
-                            match,
-                            resolved_actions_by_mode,
-                            labels_by_key,
-                            args.intended_receiver_modes,
-                            args.return_types,
-                            match_id,
-                            feature_root,
-                            feature_variant=args.feature_variant,
-                            intent_train_label_source_mode=args.intent_train_label_source_mode,
-                            intent_train_label_source_return_type=args.intent_train_label_source_return_type,
-                            augment_blocks_from_existing_graphs=args.augment_blocks_from_existing_graphs,
-                            overwrite_labels=args.overwrite_labels,
-                        )
-                    else:
-                        for mode, resolved_actions in resolved_actions_by_mode.items():
-                            resolved_action_path = get_resolved_action_path(
-                                match_id,
-                                intended_receiver_mode=mode,
-                                root=feature_root,
-                            )
-                            resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
-                            resolved_actions.to_parquet(resolved_action_path)
+    progress = tqdm(total=len(tasks), desc="compute matches")
+    try:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=configure_worker_thread_limit,
+            initargs=(int(tasks[0].worker_thread_limit) if tasks else 1,),
+        ) as executor:
+            future_to_task = {executor.submit(process_match_generation_task, task): task for task in tasks}
+            for future in as_completed(future_to_task):
+                task = future_to_task[future]
+                try:
+                    result = future.result()
+                    successful_matches += 1
+                    accumulate_mode_stats(aggregate_stats, result.stats_by_mode)
+                    progress.write(f"  DONE {result.match_id}: {result.summary}")
+                    emit_model_fallback_message(result.stats_by_mode, writer=progress.write)
+                except Exception as exc:
+                    error_summary = summarize_exception(exc)
+                    skipped_matches.append({"match_id": task.match_id, "error": error_summary})
+                    progress.write(f"  SKIP {task.match_id}: {error_summary}")
+                finally:
+                    progress.update(1)
+    finally:
+        progress.close()
 
-                        primary_mode = args.intended_receiver_modes[0]
-                        primary_return_type = args.return_types[0]
-                        base_action_indices = bind_canonical_graph_context(
-                            match,
-                            resolved_actions_by_mode,
-                            labels_by_key,
-                            primary_mode,
-                            primary_return_type,
-                        )
+    return successful_matches, skipped_matches, aggregate_stats
 
-                        if args.feature_variant == "intent_train_augmented":
-                            print("Constructing intent-training augmentation graphs...")
-                            augmented_graphs, _, augmented_action_indices = construct_intent_training_samples(
-                                match,
-                                extend=True,
-                                add_v_edge_features=True,
-                                return_action_indices=True,
-                            )
-                            if not augmented_graphs:
-                                raise ValueError("No usable intent-training samples were constructed for this match.")
-                            torch.save(augmented_graphs, f"{feature_dir}/{match_id}.pt")
-                            for mode in args.intended_receiver_modes:
-                                for return_type in args.return_types:
-                                    label_lookup = {
-                                        int(label[0].item()): label.clone()
-                                        for label in labels_by_key[(mode, return_type)]
-                                    }
-                                    augmented_labels = torch.stack(
-                                        [label_lookup[action_index] for action_index in augmented_action_indices],
-                                        dim=0,
-                                    )
-                                    label_dir = get_intent_train_label_dir(
-                                        return_type,
-                                        intended_receiver_mode=mode,
-                                        root=feature_root,
-                                    )
-                                    torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
-                            print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
-                        else:
-                            print("Constructing base graph features for actions...")
-                            match.graph_features_0 = construct_graph_features(
-                                match,
-                                extend=True,
-                                post_action=False,
-                                feature_variant="base",
-                                action_indices=base_action_indices,
-                                add_v_edge_features=True,
-                            )
-                            valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
-                            if valid_graphs == 0:
-                                raise ValueError("No usable action graphs were constructed for this match.")
-                            torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
-                            invalid_graphs = count_invalid_graphs(match.graph_features_0)
-                            if invalid_graphs:
-                                print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
 
-                            if args.post_action:
-                                print("Constructing base graph features for post-actions...")
-                                match.graph_features_1 = construct_graph_features(
-                                    match,
-                                    extend=True,
-                                    post_action=True,
-                                    feature_variant="base",
-                                    action_indices=base_action_indices,
-                                    add_v_edge_features=True,
-                                )
-                                torch.save(match.graph_features_1, f"{post_feature_dir}/{match_id}.pt")
+def main() -> None:
+    args = parse_args()
+    validate_args(args)
+    num_workers = resolve_num_workers(args.num_workers)
+    configure_worker_thread_limit(int(args.worker_thread_limit))
+    feature_root = get_feature_run_root(args.run_id) if args.run_id else FEATURE_DIR
 
-                            for mode in args.intended_receiver_modes:
-                                for return_type in args.return_types:
-                                    label_dir = get_action_label_dir(
-                                        return_type,
-                                        intended_receiver_mode=mode,
-                                        root=feature_root,
-                                    )
-                                    torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
+    if args.action_type.startswith("shot"):
+        if args.feature_variant != "base":
+            raise ValueError("Intent-training augmentation is only supported for action_type=all.")
+        args.action_type = "shot_augment"
 
-                            if args.augment_blocks:
-                                for mode in args.intended_receiver_modes:
-                                    match.actions = resolved_actions_by_mode[mode].copy()
-                                    match.labels = labels_by_key[(mode, args.return_types[0])]
-                                    augmented_graph_features, augmented_labels = augment_blocked_actions(match)
-                                    augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
-                                    augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
-                                    torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
-                                    torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
-                                    print(
-                                        f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}."
-                                    )
+    paths = ensure_output_dirs(args, feature_root)
 
-                            print(f"Successfully saved for {len(match.graph_features_0)} events.")
-            else:
-                primary_return_type = args.return_types[0]
-                match.labels = match.construct_labels(return_type=primary_return_type)
-                if match.labels.numel() == 0:
-                    raise ValueError("No usable labels were constructed for this match.")
+    lineups = pd.read_parquet("data/lineup/line_up.parquet")
+    lineups["game_id"] = lineups["stats_perform_match_id"]
+    lineups["game_date"] = pd.to_datetime(lineups["game_date"])
 
-                action_indices = extract_sorted_action_indices(match.labels, context="Action labels")
+    if args.split == "train":
+        match_ids, _ = load_base_splits()
+    else:
+        _, match_ids = load_base_splits()
 
-                print("Constructing base graph features for actions...")
-                match.graph_features_0 = construct_graph_features(
-                    match,
-                    extend=True,
-                    post_action=False,
-                    feature_variant="base",
-                    action_indices=action_indices,
-                    add_v_edge_features=True,
-                )
-                valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
-                if valid_graphs == 0:
-                    raise ValueError("No usable action graphs were constructed for this match.")
-                torch.save(match.labels, f"{label_dir}/{match_id}.pt")
-                torch.save(match.graph_features_0, f"{feature_dir}/{match_id}.pt")
-
-            successful_matches += 1
-        except Exception as exc:
-            error_summary = summarize_exception(exc)
-            skipped_matches.append({"match_id": match_id, "error": error_summary})
-            print(f"  SKIP {match_id}: {error_summary}")
+    tasks = build_match_tasks(
+        [str(match_id) for match_id in match_ids],
+        lineups,
+        args,
+        feature_root,
+        paths,
+        num_workers=num_workers,
+    )
+    successful_matches, skipped_matches, aggregate_stats = run_match_generation(
+        tasks,
+        num_workers=num_workers,
+        intended_receiver_modes=args.intended_receiver_modes,
+    )
 
     if successful_matches == 0:
         raise RuntimeError(f"No usable matches were processed for split={args.split}, feature_variant={args.feature_variant}.")
@@ -1567,3 +1889,8 @@ if __name__ == "__main__":
             f"{aggregate_stats[INTENDED_RECEIVER_MODE_MODEL]['model_failed_passes_total']} "
             "failed passes used angle_only."
         )
+
+
+if __name__ == "__main__":
+    freeze_support()
+    main()

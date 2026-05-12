@@ -385,6 +385,7 @@ python scripts/generate_relevant_features.py --return_type disc_0.9 --return_typ
 python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
 python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --return_type disc_0.9 --next-action-conditions-off
+python scripts/generate_relevant_features.py --return_type disc_0.9 --num-workers auto --worker-thread-limit 1
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
@@ -417,17 +418,30 @@ Useful options:
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
+- `--num-workers <N|auto>` to parallelize matches inside each `datatools/graph_feature.py` subprocess; default: `1`
+- `--worker-thread-limit <N>` to cap BLAS/OpenMP-style thread pools per worker; default: `1`
 - `--replace-intended-receiver-model` with `--extend-feature-run-id` and `--intended-receiver-model-id` to regenerate copied model-mode artifacts with a different `success_intent` checkpoint in the derived run
 
 Terminal output progression:
 
-A normal (full) feature run executes 5 sequential steps. Before each subprocess starts, it prints a top-level progress line such as `Feature generation step 1/5: train split with post_action + augment_blocks`, then prints these messages for each match (e.g., `[1/306] ... [306/306]`):
+A normal (full) feature run executes 5 sequential steps. Before each subprocess starts, it prints a top-level progress line such as `Feature generation step 1/5: train split with post_action + augment_blocks`.
+
+With `--num-workers 1`, each subprocess keeps the old sequential per-match flow and prints match headers such as `[1/306] ... [306/306]`, followed by these messages:
 
 1. **train split with post_action + augment_blocks:** prints `"Successfully saved {N} augmented events for mode={mode}."` then `"Successfully saved for {N} events."`
 2. **test split with post_action:** prints `"Successfully saved for {N} events."`
 3. **train split with intent_train_augmented:** prints `"Successfully saved {N} augmented intent samples."`
 4. **train split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
 5. **test split with success_intent:** prints `"Successfully saved success-intent graphs for {N} events."`
+
+With `--num-workers > 1`, each subprocess still runs the same 5 top-level steps sequentially, but it parallelizes matches inside that step. In that mode:
+
+- the inner per-match progress bars are disabled
+- the subprocess shows one outer progress bar: `compute matches`
+- completed matches are reported as concise lines such as `DONE <match_id>: ...`
+- skipped matches are reported as `SKIP <match_id>: ...`
+
+`--num-workers auto` resolves to `max(1, min(6, cpu_count - 2))`, which is `6` on a 16-logical-core machine. `--worker-thread-limit 1` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` per worker to avoid oversubscription.
 
 An `--extend-feature-run-id` run with new `--return_type` values only executes 3 steps, printing `Feature generation step X/3: ...` before each step:
 
@@ -1079,6 +1093,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
+- `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
+- `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.
 - `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
 - `--next-action-conditions-on` / `--next-action-conditions-off`: keep or disable the pass/cross next-action consistency filter. Default: on. Derived runs must match the base run's setting.

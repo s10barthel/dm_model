@@ -25,6 +25,12 @@ from project_config import (
     parse_return_type,
 )
 
+_INTENDED_RECEIVER_MODEL_CACHE: Dict[str, tuple[object, dict[str, object]]] = {}
+
+
+def clear_intended_receiver_model_cache() -> None:
+    _INTENDED_RECEIVER_MODEL_CACHE.clear()
+
 
 class Match(ABC):
     def __init__(
@@ -154,6 +160,112 @@ class Match(ABC):
         self.tabular_features_1 = None
         self.labels = None
         self.intended_receiver_stats: Dict[str, object] = {}
+        self._base_events = self.events.copy()
+        self._cached_events_by_return_type: Dict[str, pd.DataFrame] = {}
+        self._cached_diagnostic_events: pd.DataFrame | None = None
+
+    def _get_cached_intended_receiver_model(
+        self,
+        intended_receiver_model_id: str,
+    ) -> tuple[object, dict[str, object]]:
+        cached = _INTENDED_RECEIVER_MODEL_CACHE.get(intended_receiver_model_id)
+        if cached is not None:
+            return cached
+
+        from models.utils import get_model_graph_schema, load_model
+
+        model = load_model(intended_receiver_model_id, device="cpu")
+        if model is None:
+            raise FileNotFoundError(f"Could not load intended receiver model checkpoint {intended_receiver_model_id}.")
+        model.eval()
+        graph_schema = get_model_graph_schema(model) or {"edge_in_dim": 2, "add_v_edge_features": False}
+        cached = (model, graph_schema)
+        _INTENDED_RECEIVER_MODEL_CACHE[intended_receiver_model_id] = cached
+        return cached
+
+    def _get_diagnostic_events(self) -> pd.DataFrame:
+        if not hasattr(self, "_cached_diagnostic_events"):
+            self._cached_diagnostic_events = None
+        if not hasattr(self, "_base_events"):
+            self._base_events = self.events.copy()
+        if self._cached_diagnostic_events is None:
+            self._cached_diagnostic_events = utils.label_returns(self._base_events.copy(), lookahead_len=10, skip_first=False)
+        return self._cached_diagnostic_events
+
+    def _get_events_for_return_type(self, return_type: str, return_kind: str, return_value: int | float, skip_first: bool) -> pd.DataFrame:
+        if not hasattr(self, "_cached_events_by_return_type"):
+            self._cached_events_by_return_type = {}
+        if not hasattr(self, "_base_events"):
+            self._base_events = self.events.copy()
+        cached = self._cached_events_by_return_type.get(return_type)
+        if cached is not None:
+            return cached
+
+        events = self._base_events.copy()
+        if return_kind == "next":
+            lookahead_len = int(return_value)
+            events = utils.label_returns(events, lookahead_len, skip_first=skip_first)
+            events = utils.label_xt_returns(
+                events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+            events = utils.label_goal_distance_returns(
+                events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+            events = utils.label_epv_returns(
+                events,
+                lookahead_len=lookahead_len,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+        elif return_kind == "in":
+            action_offset = int(return_value)
+            events = utils.label_returns(events, action_offset)
+            events = utils.label_xt_in_state_returns(
+                events,
+                action_offset=action_offset,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            events = utils.label_goal_distance_in_state_returns(
+                events,
+                action_offset=action_offset,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            events = utils.label_epv_in_state_returns(
+                events,
+                action_offset=action_offset,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+        else:
+            gamma = float(return_value)
+            events = utils.label_discounted_goal_returns(events, gamma, skip_first=skip_first)
+            events = utils.label_discounted_returns(events, gamma, skip_first=skip_first)
+            events = utils.label_discounted_xt_returns(
+                events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+            events = utils.label_discounted_goal_distance_returns(
+                events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+            events = utils.label_discounted_epv_returns(
+                events,
+                gamma=gamma,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+                skip_first=skip_first,
+            )
+
+        self._cached_events_by_return_type[return_type] = events
+        return events
 
     def _apply_intended_receiver_model(
         self,
@@ -163,7 +275,6 @@ class Match(ABC):
         from torch_geometric.data import Batch
 
         from datatools.graph_feature import construct_graph_for_action
-        from models.utils import get_model_graph_schema, load_model
 
         failed_pass_indices = actions.index[
             (actions["action_type"] == "pass")
@@ -181,11 +292,7 @@ class Match(ABC):
             actions.attrs["intended_receiver_stats"] = stats
             return actions
 
-        model = load_model(intended_receiver_model_id, device="cpu")
-        if model is None:
-            raise FileNotFoundError(f"Could not load intended receiver model checkpoint {intended_receiver_model_id}.")
-        model.eval()
-        graph_schema = get_model_graph_schema(model) or {"edge_in_dim": 2, "add_v_edge_features": False}
+        model, graph_schema = self._get_cached_intended_receiver_model(intended_receiver_model_id)
         expected_edge_dim = int(graph_schema["edge_in_dim"])
         add_v_edge_features = bool(graph_schema["add_v_edge_features"])
 
@@ -497,70 +604,8 @@ class Match(ABC):
                 self.actions = self._apply_intended_receiver_model(self.actions, intended_receiver_model_id)
 
         self.intended_receiver_stats = dict(self.actions.attrs.get("intended_receiver_stats", {}))
-
-        diagnostic_events = utils.label_returns(self.events, lookahead_len=10, skip_first=False)
-
-        if return_kind == "next":
-            lookahead_len = int(return_value)
-            self.events = utils.label_returns(self.events, lookahead_len, skip_first=skip_first)
-            self.events = utils.label_xt_returns(
-                self.events,
-                lookahead_len=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
-            self.events = utils.label_goal_distance_returns(
-                self.events,
-                lookahead_len=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
-            self.events = utils.label_epv_returns(
-                self.events,
-                lookahead_len=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
-        elif return_kind == "in":
-            lookahead_len = int(return_value)
-            self.events = utils.label_returns(self.events, lookahead_len)
-            self.events = utils.label_xt_in_state_returns(
-                self.events,
-                action_offset=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-            )
-            self.events = utils.label_goal_distance_in_state_returns(
-                self.events,
-                action_offset=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-            )
-            self.events = utils.label_epv_in_state_returns(
-                self.events,
-                action_offset=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-            )
-        else:
-            gamma = float(return_value)
-            self.events = utils.label_discounted_goal_returns(self.events, gamma, skip_first=skip_first)
-            self.events = utils.label_discounted_returns(self.events, gamma, skip_first=skip_first)
-            self.events = utils.label_discounted_xt_returns(
-                self.events,
-                gamma=gamma,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
-            self.events = utils.label_discounted_goal_distance_returns(
-                self.events,
-                gamma=gamma,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
-            self.events = utils.label_discounted_epv_returns(
-                self.events,
-                gamma=gamma,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
+        diagnostic_events = self._get_diagnostic_events()
+        self.events = self._get_events_for_return_type(return_type, return_kind, return_value, skip_first)
 
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
