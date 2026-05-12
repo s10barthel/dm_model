@@ -36,11 +36,15 @@ OUTPUT_COLUMNS = [
     "modification",
     "game_state_value_1",
     "game_state_value_2",
+    "avg_pass_score_1",
+    "avg_pass_score_2",
     "higher_state_id",
     "model_rating",
     "agreement",
+    "pass_score_rating",
+    "pass_score_agreement",
 ]
-TEXT_SUMMARY_KEYS = [
+GAME_STATE_VALUE_SUMMARY_KEYS = [
     "modifications_total",
     "modifications_with_game_state_value_1",
     "modifications_with_game_state_value_2",
@@ -48,6 +52,16 @@ TEXT_SUMMARY_KEYS = [
     "draws",
     "agreements",
     "disagreements",
+    "output_rows",
+]
+AVG_PASS_SCORE_SUMMARY_KEYS = [
+    "modifications_total",
+    "modifications_with_avg_pass_score_1",
+    "modifications_with_avg_pass_score_2",
+    "modifications_with_both_avg_pass_scores",
+    "pass_score_draws",
+    "pass_score_agreements",
+    "pass_score_disagreements",
     "output_rows",
 ]
 
@@ -159,10 +173,7 @@ def filter_pass_intent_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna(subset=["pass_intent"]).copy()
 
 
-def compute_game_state_values(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=["modification", "game_state", "game_state_value"])
-
+def add_pass_scores(df: pd.DataFrame) -> pd.DataFrame:
     scored_df = df.copy()
     scored_df["pass_score"] = (
         scored_df["pass_success"]
@@ -176,6 +187,13 @@ def compute_game_state_values(df: pd.DataFrame) -> pd.DataFrame:
             - scored_df["outcome_conceding_failure"]
         )
     )
+    return scored_df
+
+
+def compute_game_state_values(scored_df: pd.DataFrame) -> pd.DataFrame:
+    if scored_df.empty:
+        return pd.DataFrame(columns=["modification", "game_state", "game_state_value"])
+
     scored_df["weighted_pass_score"] = scored_df["pass_intent"] * scored_df["pass_score"]
 
     return (
@@ -186,54 +204,74 @@ def compute_game_state_values(df: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def pivot_game_state_values(
+def compute_avg_pass_scores(scored_df: pd.DataFrame) -> pd.DataFrame:
+    if scored_df.empty:
+        return pd.DataFrame(columns=["modification", "game_state", "avg_pass_score"])
+
+    return (
+        scored_df.groupby(["modification", "game_state"])["pass_score"]
+        .mean()
+        .rename("avg_pass_score")
+        .reset_index()
+    )
+
+
+def pivot_metric_values(
     modification_labels: pd.DataFrame,
-    game_state_values: pd.DataFrame,
+    metric_values: pd.DataFrame,
+    value_column: str,
+    output_columns: tuple[str, str],
 ) -> pd.DataFrame:
-    if game_state_values.empty:
+    if metric_values.empty:
         summary_df = modification_labels.copy()
-        summary_df["game_state_value_1"] = pd.NA
-        summary_df["game_state_value_2"] = pd.NA
+        summary_df[output_columns[0]] = pd.NA
+        summary_df[output_columns[1]] = pd.NA
         return summary_df
 
-    pivoted_values = game_state_values.pivot(
+    pivoted_values = metric_values.pivot(
         index="modification",
         columns="game_state",
-        values="game_state_value",
+        values=value_column,
     ).rename(
         columns={
-            1: "game_state_value_1",
-            2: "game_state_value_2",
+            1: output_columns[0],
+            2: output_columns[1],
         }
     )
     pivoted_values.columns.name = None
     pivoted_values = pivoted_values.reset_index()
 
     summary_df = modification_labels.merge(pivoted_values, on="modification", how="left")
-    for column in ["game_state_value_1", "game_state_value_2"]:
+    for column in output_columns:
         if column not in summary_df.columns:
             summary_df[column] = pd.NA
     return summary_df
 
 
-def add_ratings(summary_df: pd.DataFrame) -> pd.DataFrame:
+def add_pairwise_rating(
+    summary_df: pd.DataFrame,
+    value_1_column: str,
+    value_2_column: str,
+    rating_column: str,
+    agreement_column: str,
+) -> pd.DataFrame:
     rated_df = summary_df.copy()
 
-    game_state_value_1 = rated_df["game_state_value_1"]
-    game_state_value_2 = rated_df["game_state_value_2"]
-    both_present = game_state_value_1.notna() & game_state_value_2.notna()
+    value_1 = rated_df[value_1_column]
+    value_2 = rated_df[value_2_column]
+    both_present = value_1.notna() & value_2.notna()
 
-    model_rating = pd.Series(pd.NA, index=rated_df.index, dtype="Int64")
-    model_rating.loc[both_present & (game_state_value_1 > game_state_value_2)] = 1
-    model_rating.loc[both_present & (game_state_value_1 < game_state_value_2)] = 2
-    model_rating.loc[both_present & (game_state_value_1 == game_state_value_2)] = 0
-    rated_df["model_rating"] = model_rating
+    rating = pd.Series(pd.NA, index=rated_df.index, dtype="Int64")
+    rating.loc[both_present & (value_1 > value_2)] = 1
+    rating.loc[both_present & (value_1 < value_2)] = 2
+    rating.loc[both_present & (value_1 == value_2)] = 0
+    rated_df[rating_column] = rating
 
     agreement = pd.Series(pd.NA, index=rated_df.index, dtype="Int64")
-    comparable = rated_df["model_rating"].notna() & rated_df["model_rating"].ne(0)
-    agreement.loc[comparable & rated_df["higher_state_id"].eq(rated_df["model_rating"])] = 1
-    agreement.loc[comparable & rated_df["higher_state_id"].ne(rated_df["model_rating"])] = 0
-    rated_df["agreement"] = agreement
+    comparable = rated_df[rating_column].notna() & rated_df[rating_column].ne(0)
+    agreement.loc[comparable & rated_df["higher_state_id"].eq(rated_df[rating_column])] = 1
+    agreement.loc[comparable & rated_df["higher_state_id"].ne(rated_df[rating_column])] = 0
+    rated_df[agreement_column] = agreement
 
     return rated_df
 
@@ -243,9 +281,40 @@ def build_benchmark_summary(benchmark_df: pd.DataFrame) -> tuple[pd.DataFrame, d
     modification_labels = collect_modification_labels(benchmark_df)
 
     filtered_df = filter_pass_intent_rows(benchmark_df)
-    game_state_values = compute_game_state_values(filtered_df)
-    summary_df = pivot_game_state_values(modification_labels, game_state_values)
-    summary_df = add_ratings(summary_df)
+    scored_df = add_pass_scores(filtered_df)
+    game_state_values = compute_game_state_values(scored_df)
+    avg_pass_scores = compute_avg_pass_scores(scored_df)
+    summary_df = pivot_metric_values(
+        modification_labels,
+        game_state_values,
+        "game_state_value",
+        ("game_state_value_1", "game_state_value_2"),
+    )
+    avg_pass_score_summary = pivot_metric_values(
+        modification_labels,
+        avg_pass_scores,
+        "avg_pass_score",
+        ("avg_pass_score_1", "avg_pass_score_2"),
+    )
+    summary_df = summary_df.merge(
+        avg_pass_score_summary[["modification", "avg_pass_score_1", "avg_pass_score_2"]],
+        on="modification",
+        how="left",
+    )
+    summary_df = add_pairwise_rating(
+        summary_df,
+        "game_state_value_1",
+        "game_state_value_2",
+        "model_rating",
+        "agreement",
+    )
+    summary_df = add_pairwise_rating(
+        summary_df,
+        "avg_pass_score_1",
+        "avg_pass_score_2",
+        "pass_score_rating",
+        "pass_score_agreement",
+    )
     summary_df = summary_df.sort_values("modification").reset_index(drop=True)
 
     for column in OUTPUT_COLUMNS:
@@ -263,9 +332,17 @@ def build_benchmark_summary(benchmark_df: pd.DataFrame) -> tuple[pd.DataFrame, d
         "modifications_with_both_game_states": int(
             (summary_df["game_state_value_1"].notna() & summary_df["game_state_value_2"].notna()).sum()
         ),
+        "modifications_with_avg_pass_score_1": int(summary_df["avg_pass_score_1"].notna().sum()),
+        "modifications_with_avg_pass_score_2": int(summary_df["avg_pass_score_2"].notna().sum()),
+        "modifications_with_both_avg_pass_scores": int(
+            (summary_df["avg_pass_score_1"].notna() & summary_df["avg_pass_score_2"].notna()).sum()
+        ),
         "draws": int(summary_df["model_rating"].eq(0).sum()),
         "agreements": int(summary_df["agreement"].eq(1).sum()),
         "disagreements": int(summary_df["agreement"].eq(0).sum()),
+        "pass_score_draws": int(summary_df["pass_score_rating"].eq(0).sum()),
+        "pass_score_agreements": int(summary_df["pass_score_agreement"].eq(1).sum()),
+        "pass_score_disagreements": int(summary_df["pass_score_agreement"].eq(0).sum()),
         "output_rows": len(summary_df),
     }
     return summary_df, stats
@@ -273,12 +350,27 @@ def build_benchmark_summary(benchmark_df: pd.DataFrame) -> tuple[pd.DataFrame, d
 
 def print_summary(stats: dict[str, int]) -> None:
     print("\nSummary")
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
+    for key in [
+        "benchmark_rows_total",
+        "benchmark_rows_with_pass_intent",
+        "benchmark_rows_filtered_missing_pass_intent",
+    ]:
+        print(f"  {key}: {stats[key]}")
+    print()
+    print(format_text_summary(stats), end="")
 
 
 def format_text_summary(stats: dict[str, int]) -> str:
-    lines = [f"{key}: {stats[key]}" for key in TEXT_SUMMARY_KEYS]
+    blocks = [
+        ("game_state_value", GAME_STATE_VALUE_SUMMARY_KEYS),
+        ("avg_pass_score", AVG_PASS_SCORE_SUMMARY_KEYS),
+    ]
+    lines: list[str] = []
+    for heading, keys in blocks:
+        if lines:
+            lines.append("")
+        lines.append(heading)
+        lines.extend(f"{key}: {stats[key]}" for key in keys)
     return "\n".join(lines) + "\n"
 
 

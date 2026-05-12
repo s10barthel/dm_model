@@ -286,6 +286,17 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                     "outcome_conceding_failure": 0.0,
                 },
                 {
+                    "modification": 1,
+                    "game_state": 2,
+                    "higher_state_id": 1,
+                    "pass_intent": 0.1,
+                    "pass_success": 1.0,
+                    "outcome_scoring_success": 1.0,
+                    "outcome_conceding_success": 0.0,
+                    "outcome_scoring_failure": 0.0,
+                    "outcome_conceding_failure": 0.0,
+                },
+                {
                     "modification": 2,
                     "game_state": 1,
                     "higher_state_id": 1,
@@ -394,16 +405,43 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_benchmark_postprocessing_counts_agreements_disagreements_and_draws(self) -> None:
         summary_df, stats = benchmark_post.build_benchmark_summary(self._make_benchmark_postprocessing_df())
 
+        self.assertEqual(
+            summary_df.columns.tolist(),
+            [
+                "modification",
+                "game_state_value_1",
+                "game_state_value_2",
+                "avg_pass_score_1",
+                "avg_pass_score_2",
+                "higher_state_id",
+                "model_rating",
+                "agreement",
+                "pass_score_rating",
+                "pass_score_agreement",
+            ],
+        )
+        self.assertTrue(math.isclose(summary_df.loc[0, "game_state_value_2"], 0.3))
+        self.assertTrue(math.isclose(summary_df.loc[0, "avg_pass_score_2"], 0.6))
         self.assertEqual(summary_df["model_rating"].tolist(), [1, 2, 0])
         self.assertEqual(summary_df["agreement"].tolist()[:2], [1, 0])
         self.assertTrue(pd.isna(summary_df.loc[2, "agreement"]))
+        self.assertEqual(summary_df["pass_score_rating"].tolist(), [0, 2, 0])
+        self.assertTrue(pd.isna(summary_df.loc[0, "pass_score_agreement"]))
+        self.assertEqual(summary_df.loc[1, "pass_score_agreement"], 0)
+        self.assertTrue(pd.isna(summary_df.loc[2, "pass_score_agreement"]))
         self.assertEqual(stats["modifications_total"], 3)
         self.assertEqual(stats["modifications_with_game_state_value_1"], 3)
         self.assertEqual(stats["modifications_with_game_state_value_2"], 3)
         self.assertEqual(stats["modifications_with_both_game_states"], 3)
+        self.assertEqual(stats["modifications_with_avg_pass_score_1"], 3)
+        self.assertEqual(stats["modifications_with_avg_pass_score_2"], 3)
+        self.assertEqual(stats["modifications_with_both_avg_pass_scores"], 3)
         self.assertEqual(stats["draws"], 1)
         self.assertEqual(stats["agreements"], 1)
         self.assertEqual(stats["disagreements"], 1)
+        self.assertEqual(stats["pass_score_draws"], 2)
+        self.assertEqual(stats["pass_score_agreements"], 0)
+        self.assertEqual(stats["pass_score_disagreements"], 1)
         self.assertEqual(stats["output_rows"], 3)
 
     def test_benchmark_postprocessing_writes_run_summary_files(self) -> None:
@@ -421,12 +459,20 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             self.assertEqual(text_summary_path, run_root / "benchmark_summary.txt")
             self.assertTrue(summary_path.exists())
             self.assertTrue(text_summary_path.exists())
-            self.assertEqual(pd.read_csv(summary_path).shape[0], len(summary_df))
+            written_summary = pd.read_csv(summary_path)
+            self.assertEqual(written_summary.shape[0], len(summary_df))
+            self.assertIn("avg_pass_score_1", written_summary.columns)
+            self.assertIn("avg_pass_score_2", written_summary.columns)
+            self.assertIn("pass_score_rating", written_summary.columns)
+            self.assertIn("pass_score_agreement", written_summary.columns)
             self.assertEqual(stats["agreements"], 1)
             self.assertEqual(stats["disagreements"], 1)
+            self.assertEqual(stats["pass_score_agreements"], 0)
+            self.assertEqual(stats["pass_score_disagreements"], 1)
             self.assertEqual(
                 text_summary_path.read_text(encoding="utf-8").splitlines(),
                 [
+                    "game_state_value",
                     "modifications_total: 3",
                     "modifications_with_game_state_value_1: 3",
                     "modifications_with_game_state_value_2: 3",
@@ -434,6 +480,16 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                     "draws: 1",
                     "agreements: 1",
                     "disagreements: 1",
+                    "output_rows: 3",
+                    "",
+                    "avg_pass_score",
+                    "modifications_total: 3",
+                    "modifications_with_avg_pass_score_1: 3",
+                    "modifications_with_avg_pass_score_2: 3",
+                    "modifications_with_both_avg_pass_scores: 3",
+                    "pass_score_draws: 2",
+                    "pass_score_agreements: 0",
+                    "pass_score_disagreements: 1",
                     "output_rows: 3",
                 ],
             )
@@ -444,12 +500,12 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
             run_benchmark.update_benchmark_runs_ledger(
                 "run_a",
-                {"agreements": 3, "disagreements": 1},
+                {"agreements": 3, "disagreements": 1, "pass_score_agreements": 2, "pass_score_disagreements": 2},
                 ledger_path=ledger_path,
             )
             run_benchmark.update_benchmark_runs_ledger(
                 "run_a",
-                {"agreements": 1, "disagreements": 1},
+                {"agreements": 1, "disagreements": 1, "pass_score_agreements": 1, "pass_score_disagreements": 3},
                 ledger_path=ledger_path,
             )
             run_benchmark.update_benchmark_runs_ledger(
@@ -460,12 +516,27 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
             ledger = pd.read_csv(ledger_path)
 
-        self.assertEqual(ledger.columns.tolist(), ["run_id", "agreements", "disagreements", "performance"])
+        self.assertEqual(
+            ledger.columns.tolist(),
+            [
+                "run_id",
+                "agreements",
+                "disagreements",
+                "performance",
+                "pass_score_agreements",
+                "pass_score_disagreements",
+                "pass_score_performance",
+            ],
+        )
         self.assertEqual(ledger["run_id"].tolist(), ["run_a", "run_b"])
         self.assertEqual(ledger.loc[0, "agreements"], 1)
         self.assertEqual(ledger.loc[0, "disagreements"], 1)
         self.assertTrue(math.isclose(ledger.loc[0, "performance"], 0.5))
+        self.assertEqual(ledger.loc[0, "pass_score_agreements"], 1)
+        self.assertEqual(ledger.loc[0, "pass_score_disagreements"], 3)
+        self.assertTrue(math.isclose(ledger.loc[0, "pass_score_performance"], 0.25))
         self.assertTrue(pd.isna(ledger.loc[1, "performance"]))
+        self.assertTrue(pd.isna(ledger.loc[1, "pass_score_performance"]))
 
     def test_figure_to_rgb_image_tight_false_keeps_canvas_size_stable_when_text_extents_change(self) -> None:
         fig_short, ax_short = plt.subplots(figsize=(4, 3))

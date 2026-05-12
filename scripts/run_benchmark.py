@@ -34,7 +34,15 @@ from validation.benchmark.benchmark_postprocessing import run_benchmark_postproc
 
 
 BENCHMARK_RUNS_LEDGER_FILENAME = "benchmark_runs.csv"
-BENCHMARK_RUNS_LEDGER_COLUMNS = ["run_id", "agreements", "disagreements", "performance"]
+BENCHMARK_RUNS_LEDGER_COLUMNS = [
+    "run_id",
+    "agreements",
+    "disagreements",
+    "performance",
+    "pass_score_agreements",
+    "pass_score_disagreements",
+    "pass_score_performance",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +90,14 @@ def update_benchmark_runs_ledger(
     disagreements = int(stats["disagreements"])
     comparable_total = agreements + disagreements
     performance = math.nan if comparable_total == 0 else agreements / comparable_total
+    pass_score_agreements = int(stats.get("pass_score_agreements", 0))
+    pass_score_disagreements = int(stats.get("pass_score_disagreements", 0))
+    pass_score_comparable_total = pass_score_agreements + pass_score_disagreements
+    pass_score_performance = (
+        math.nan
+        if pass_score_comparable_total == 0
+        else pass_score_agreements / pass_score_comparable_total
+    )
     row = pd.DataFrame(
         [
             {
@@ -89,6 +105,9 @@ def update_benchmark_runs_ledger(
                 "agreements": agreements,
                 "disagreements": disagreements,
                 "performance": performance,
+                "pass_score_agreements": pass_score_agreements,
+                "pass_score_disagreements": pass_score_disagreements,
+                "pass_score_performance": pass_score_performance,
             }
         ],
         columns=BENCHMARK_RUNS_LEDGER_COLUMNS,
