@@ -143,6 +143,7 @@ class ActionDataset(Dataset):
         use_physical_xpass=False,
         physical_cache_dir=None,
         physical_eps=1e-4,
+        physical_xpass_floor=None,
     ):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
@@ -155,6 +156,7 @@ class ActionDataset(Dataset):
         self.use_physical_xpass = bool(use_physical_xpass)
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
         self.physical_eps = float(physical_eps)
+        self.physical_xpass_floor = None if physical_xpass_floor is None else float(physical_xpass_floor)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
         self.v_edge_feature_mode = str(v_edge_feature_mode).strip().replace("-", "_")
         self.mask_possessor_v_edge_features = bool(mask_possessor_v_edge_features) or self.v_edge_feature_mode == "no_poss"
@@ -400,6 +402,7 @@ class ActionDataset(Dataset):
                     physical_rows_by_match[match_id],
                     match_id=match_id,
                     eps=self.physical_eps,
+                    floor=self.physical_xpass_floor,
                     require_observed_target=True,
                 )
 

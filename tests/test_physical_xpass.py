@@ -462,6 +462,18 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(logits[0]), 0.0, places=6)
         self.assertAlmostEqual(float(logits[1]), float(torch.logit(torch.tensor(0.8))), places=6)
 
+    def test_sidecar_attach_applies_physical_xpass_floor_before_logit(self) -> None:
+        graph = make_graph(["home_1", "home_2"])
+        label = make_label()
+        sidecar = pd.DataFrame([{"match_id": "m1", "action_index": 7, "home_2": 0.01}]).set_index("action_index", drop=False)
+
+        attached = attach_physical_xpass_to_graph(graph, label, sidecar, match_id="m1", floor=0.2)
+
+        probs = getattr(attached, PHYSICAL_XPASS_PROB_ATTR)
+        logits = getattr(attached, PHYSICAL_XPASS_LOGIT_ATTR)
+        self.assertTrue(torch.allclose(probs, torch.tensor([0.5, 0.2])))
+        self.assertAlmostEqual(float(logits[1]), float(torch.logit(torch.tensor(0.2))), places=6)
+
     def test_sidecar_attach_fails_when_observed_target_is_missing(self) -> None:
         graph = make_graph(["home_1", "home_2"])
         label = make_label()
@@ -535,7 +547,7 @@ class PhysicalXPassTests(unittest.TestCase):
             torch.save(labels, label_dir / "match_1.pt")
             pd.DataFrame(
                 [
-                    {"match_id": "match_1", "action_index": 7, "home_2": 0.8},
+                    {"match_id": "match_1", "action_index": 7, "home_2": 0.05},
                     {"match_id": "match_1", "action_index": 8, "home_1": np.nan},
                 ]
             ).to_parquet(match_dir / "match_1.parquet", index=False)
@@ -548,6 +560,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 task="pass_success",
                 use_physical_xpass=True,
                 physical_cache_dir=physical_cache,
+                physical_xpass_floor=0.2,
             )
 
         expected_skips = {"invalid_pass_success_target:target_is_possessor": 1}
@@ -558,7 +571,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(int(baseline.labels[0, LABEL_INDEX["action_index"]].item()), 7)
         self.assertEqual(int(physical.labels[0, LABEL_INDEX["action_index"]].item()), 7)
         self.assertTrue(hasattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR))
-        self.assertAlmostEqual(float(getattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.8)
+        self.assertAlmostEqual(float(getattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.2)
 
     def test_missing_sidecar_failure_mentions_precompute_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -662,6 +675,7 @@ class PhysicalXPassTests(unittest.TestCase):
                             "source": PHYSICAL_XPASS_LEGACY_SOURCE,
                             "teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
                             "speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                            "physical_xpass_floor": 0.2,
                         }
                     }
                 ),
@@ -690,6 +704,7 @@ class PhysicalXPassTests(unittest.TestCase):
             model.args["physical_xpass_speed_aggregation"],
             PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
         )
+        self.assertEqual(model.args["physical_xpass_floor"], 0.2)
 
     def test_inference_missing_synthetic_sidecar_computes_physical_xpass_online(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
@@ -706,6 +721,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 "physical_xpass_source": PHYSICAL_XPASS_LEGACY_SOURCE,
                 "physical_cache_dir": "missing_cache",
                 "physical_eps": 1e-4,
+                "physical_xpass_floor": 0.2,
             }
         )
 
@@ -720,7 +736,32 @@ class PhysicalXPassTests(unittest.TestCase):
             online_attach.call_args.kwargs["speed_aggregation"],
             PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
         )
+        self.assertEqual(online_attach.call_args.kwargs["floor"], 0.2)
         self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["online_graphs"], 1)
+
+    def test_inference_cached_sidecar_uses_physical_xpass_floor(self) -> None:
+        match = SimpleNamespace(match_id="DFL-MAT-REAL", runtime_feature_root=Path("feature_run"))
+        graphs = [make_graph()]
+        labels = torch.stack([make_label(action_index=0)])
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "use_physical_xpass": True,
+                "model_variant": "gat_phys_logit_offset",
+                "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                "physical_cache_dir": "cache_dir",
+                "physical_eps": 1e-4,
+                "physical_xpass_floor": 0.2,
+            }
+        )
+
+        with patch.object(inference, "validate_physical_xpass_cache_metadata", return_value={}):
+            with patch.object(inference, "attach_physical_xpass_to_graphs", return_value=graphs) as cached_attach:
+                result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+
+        self.assertIs(result, graphs)
+        cached_attach.assert_called_once()
+        self.assertEqual(cached_attach.call_args.kwargs["floor"], 0.2)
 
     def test_inference_missing_real_sidecar_stays_strict(self) -> None:
         match = SimpleNamespace(match_id="DFL-MAT-REAL", runtime_feature_root=Path("feature_run"))
@@ -1054,6 +1095,7 @@ class PhysicalXPassTests(unittest.TestCase):
             model_variant="gat_phys_logit_offset_regularized",
             physical_cache_dir="cache_dir",
             physical_eps=1e-3,
+            physical_xpass_floor=0.2,
             learn_physical_scale=False,
             residual_regularization_lambda=0.25,
             residual_clip_value=2.0,
@@ -1094,6 +1136,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn("--use_physical_xpass", pass_command)
         self.assertIn("--model-variant", pass_command)
         self.assertIn("--fixed-physical-scale", pass_command)
+        self.assertIn("--physical-xpass-floor", pass_command)
         self.assertIn("--residual-regularization-lambda", pass_command)
         self.assertIn("--residual-distance-threshold", pass_command)
         self.assertIn("--short-residual-regularization-lambda", pass_command)
@@ -1102,7 +1145,37 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn("--long-residual-clip-value", pass_command)
         self.assertNotIn("--use_physical_xpass", outcome_command)
         self.assertNotIn("--physical-cache-dir", outcome_command)
+        self.assertNotIn("--physical-xpass-floor", outcome_command)
         self.assertNotIn("--short-residual-clip-value", outcome_command)
+
+    def test_wrapper_physical_xpass_floor_validation(self) -> None:
+        base_args = [
+            "--feature-run-id",
+            "feature_run",
+            "--target-family",
+            "goal_distance",
+            "--return_type",
+            "disc_0.9",
+            "--intended-receiver-mode",
+            "angle_only",
+        ]
+
+        with patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"):
+            with patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["angle_only"]):
+                with patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]):
+                    self.assertIsNone(train_wrapper.parse_args(base_args).physical_xpass_floor)
+                    self.assertEqual(
+                        train_wrapper.parse_args([*base_args, "--physical-xpass-floor", "0.0"]).physical_xpass_floor,
+                        0.0,
+                    )
+                    self.assertEqual(
+                        train_wrapper.parse_args([*base_args, "--physical_xpass_floor", "0.2"]).physical_xpass_floor,
+                        0.2,
+                    )
+        with self.assertRaises(SystemExit):
+            train_wrapper.parse_args([*base_args, "--physical-xpass-floor", "-0.1"])
+        with self.assertRaises(SystemExit):
+            train_wrapper.parse_args([*base_args, "--physical-xpass-floor", "1.0"])
 
     def test_visualization_sidecar_loader_reads_max_player_cum_prob_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -25,6 +25,7 @@ from physical_pass_model import (
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graphs,
     model_uses_physical_xpass,
+    physical_xpass_floor,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
@@ -160,6 +161,7 @@ def attach_physical_xpass_for_inference(
     source = physical_xpass_source(model.args)
     speed_aggregation = physical_xpass_speed_aggregation(model.args)
     eps = float(model.args.get("physical_eps", 1e-4))
+    floor = physical_xpass_floor(model.args)
     teammate_policy = physical_xpass_teammate_policy(model.args, source=source)
     feature_root = _runtime_feature_root(match)
     physical_cache_dir = model.args.get("physical_cache_dir")
@@ -180,6 +182,7 @@ def attach_physical_xpass_for_inference(
             cache_dir=physical_cache_dir,
             match_id=resolve_match_id(match),
             eps=eps,
+            floor=floor,
             require_observed_target=False,
         )
     except FileNotFoundError:
@@ -191,6 +194,7 @@ def attach_physical_xpass_for_inference(
         labels,
         source=source,
         eps=eps,
+        floor=floor,
         teammate_policy=teammate_policy,
         speed_aggregation=speed_aggregation,
         require_observed_target=False,

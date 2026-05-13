@@ -198,12 +198,15 @@ def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, An
         source = physical_metadata.get("source")
         teammate_policy = physical_metadata.get("teammate_policy")
         speed_aggregation = physical_metadata.get("speed_aggregation")
+        floor = physical_metadata.get("physical_xpass_floor")
         if source:
             args["physical_xpass_source"] = str(source)
         if teammate_policy:
             args["physical_xpass_teammate_policy"] = str(teammate_policy)
         if speed_aggregation:
             args["physical_xpass_speed_aggregation"] = str(speed_aggregation)
+        if floor is not None:
+            args["physical_xpass_floor"] = float(floor)
     return args
 
 

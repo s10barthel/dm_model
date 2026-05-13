@@ -963,6 +963,7 @@ Physical flags:
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the architecture. `gat_baseline` is unchanged; `gat_plus_phys_feature` concatenates `logit(physical_xpass)` as an ablation; `gat_phys_logit_offset` is the recommended offset model; `gat_phys_logit_offset_regularized` is the offset model with optional residual safeguards.
 - `--physical-cache-dir`: override the physical sidecar directory. By default it uses `<feature_run_root>/physical_xpass`.
 - `--physical-eps 1e-4`: clamp probabilities to `[eps, 1-eps]` before taking logits.
+- `--physical-xpass-floor <prob>`: optional lower floor applied before taking logits, e.g. `0.01 -> 0.2` when set to `0.2`. Default: unset.
 - `--learn-physical-scale` / `--fixed-physical-scale`: learn `beta1` or freeze it at `1.0`; default is learned.
 - `--residual-regularization-lambda`: optional L2 penalty on the observed-target residual `delta_gat`.
 - `--residual-clip-value`: optional tanh bound, `delta_gat = c * tanh(raw_delta / c)`.
@@ -995,6 +996,9 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 # Offset + tighter short-pass clipping than long-pass clipping
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --short-residual-clip-value 1.0 --long-residual-clip-value 3.0
+
+# Offset + physical xPass floor for very low physical probabilities
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --physical-xpass-floor 0.2 --short-residual-clip-value 0.25 --long-residual-clip-value 1.0
 ```
 
 Tuning L2/clipping as ablations means training otherwise comparable runs where only the residual constraint changes. Start with no L2 and no clipping (`residual_regularization_lambda=0.0`, `residual_clip_value=None`) to see the clean offset effect, then test whether constraining the residual improves calibration or hypothetical-pass maps. Distance-specific settings are useful when you want the model to stay close to physical xPass on short passes but allow larger GAT corrections on long passes.
@@ -1128,6 +1132,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the pass-success physical xPass architecture. Default: `gat_phys_logit_offset`.
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.
 - `--physical-eps <eps>`: physical probability clamp epsilon. Default: `1e-4`.
+- `--physical-xpass-floor <prob>`: optional lower physical xPass floor before logit conversion. Default: unset.
 - `--learn-physical-scale` / `--fixed-physical-scale`: learn or freeze `beta1`. Default: learned.
 - `--residual-regularization-lambda <value>`: optional observed-target residual L2. Default: `0.0`.
 - `--residual-clip-value <value>`: optional residual clipping bound. Default: unset.

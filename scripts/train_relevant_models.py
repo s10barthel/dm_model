@@ -200,6 +200,9 @@ def append_physical_xpass_flags(command: list[str], args: argparse.Namespace) ->
     if getattr(args, "physical_cache_dir", None):
         command.extend(["--physical-cache-dir", str(args.physical_cache_dir)])
     command.extend(["--physical-eps", str(getattr(args, "physical_eps", 1e-4))])
+    physical_xpass_floor = getattr(args, "physical_xpass_floor", None)
+    if physical_xpass_floor is not None:
+        command.extend(["--physical-xpass-floor", str(physical_xpass_floor)])
     command.append("--learn-physical-scale" if bool(getattr(args, "learn_physical_scale", True)) else "--fixed-physical-scale")
     command.extend(["--residual-distance-threshold", str(getattr(args, "residual_distance_threshold", 30.0))])
     residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
@@ -230,6 +233,7 @@ def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
         "source": PHYSICAL_XPASS_SOURCE,
         "physical_cache_dir": getattr(args, "physical_cache_dir", None),
         "physical_eps": float(getattr(args, "physical_eps", 1e-4)),
+        "physical_xpass_floor": getattr(args, "physical_xpass_floor", None),
         "learn_physical_scale": bool(getattr(args, "learn_physical_scale", True)),
         "residual_regularization_lambda": float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0),
         "residual_clip_value": getattr(args, "residual_clip_value", None),
@@ -830,6 +834,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--physical-cache-dir", default=None, help="Override physical xPass sidecar directory.")
     parser.add_argument("--physical-eps", type=float, default=1e-4, help="Physical probability clamp epsilon.")
+    parser.add_argument(
+        "--physical-xpass-floor",
+        "--physical_xpass_floor",
+        dest="physical_xpass_floor",
+        type=float,
+        default=None,
+        help="Optional lower probability floor applied before physical xPass logit conversion.",
+    )
     physical_scale_group = parser.add_mutually_exclusive_group()
     physical_scale_group.add_argument(
         "--learn-physical-scale",
@@ -898,6 +910,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--early-stopping-min-delta must be non-negative.")
     if not (0.0 < args.physical_eps < 0.5):
         parser.error("--physical-eps must be between 0 and 0.5.")
+    if args.physical_xpass_floor is not None and not (0.0 <= args.physical_xpass_floor < 1.0):
+        parser.error("--physical-xpass-floor must be in [0.0, 1.0) when provided.")
     if args.residual_distance_threshold <= 0:
         parser.error("--residual-distance-threshold must be positive.")
     if args.residual_regularization_lambda < 0:

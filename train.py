@@ -158,6 +158,14 @@ parser.add_argument(
 )
 parser.add_argument("--physical-cache-dir", default=None, help="Physical xPass sidecar directory containing metadata.json and matches/*.parquet.")
 parser.add_argument("--physical-eps", type=float, default=1e-4, help="Clamping epsilon for physical probabilities before logit conversion.")
+parser.add_argument(
+    "--physical-xpass-floor",
+    "--physical_xpass_floor",
+    dest="physical_xpass_floor",
+    type=float,
+    default=None,
+    help="Optional lower probability floor applied before physical xPass logit conversion.",
+)
 physical_scale_group = parser.add_mutually_exclusive_group()
 physical_scale_group.add_argument(
     "--learn-physical-scale",
@@ -656,6 +664,7 @@ if __name__ == "__main__":
             "speed_aggregation": getattr(args, "physical_xpass_speed_aggregation", None),
             "physical_cache_dir": args.physical_cache_dir,
             "physical_eps": float(args.physical_eps),
+            "physical_xpass_floor": args.physical_xpass_floor,
             "learn_physical_scale": bool(args.learn_physical_scale),
             "residual_regularization_lambda": float(args.residual_regularization_lambda or 0.0),
             "residual_clip_value": args.residual_clip_value,
@@ -725,6 +734,7 @@ if __name__ == "__main__":
         "use_physical_xpass": model_uses_physical_xpass(args),
         "physical_cache_dir": args.physical_cache_dir,
         "physical_eps": args.physical_eps,
+        "physical_xpass_floor": args.physical_xpass_floor,
     }
     train_dataset = ActionDataset(
         train_match_ids,

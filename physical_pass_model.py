@@ -236,6 +236,11 @@ def residual_distance_threshold(args: Any) -> float:
     return float(_get_arg(args, "residual_distance_threshold", DEFAULT_RESIDUAL_DISTANCE_THRESHOLD))
 
 
+def physical_xpass_floor(args: Any) -> float | None:
+    value = _get_arg(args, "physical_xpass_floor", None)
+    return None if value is None else float(value)
+
+
 def resolved_residual_regularization_lambdas(args: Any) -> tuple[float, float]:
     base = float(_get_arg(args, "residual_regularization_lambda", 0.0) or 0.0)
     short_value = _get_arg(args, "short_residual_regularization_lambda", None)
@@ -260,12 +265,15 @@ def resolved_residual_clip_values(args: Any) -> tuple[float | None, float | None
 def validate_physical_xpass_args(args: Any) -> None:
     variant = physical_xpass_model_variant(args)
     eps = float(_get_arg(args, "physical_eps", 1e-4))
+    floor = physical_xpass_floor(args)
     residual_clip_value = _get_arg(args, "residual_clip_value", None)
     residual_regularization_lambda = float(_get_arg(args, "residual_regularization_lambda", 0.0) or 0.0)
     distance_threshold = residual_distance_threshold(args)
 
     if not (0.0 < eps < 0.5):
         raise ValueError(f"--physical-eps must be between 0 and 0.5, got {eps}.")
+    if floor is not None and not (0.0 <= floor < 1.0):
+        raise ValueError("--physical-xpass-floor must be in [0.0, 1.0) when provided.")
     if distance_threshold <= 0:
         raise ValueError("--residual-distance-threshold must be positive.")
     if residual_regularization_lambda < 0:
@@ -300,6 +308,13 @@ def probability_to_logit_numpy(prob: np.ndarray | pd.Series | list[float], eps: 
     values = np.asarray(prob, dtype=float)
     values = np.clip(values, float(eps), 1.0 - float(eps))
     return np.log(values / (1.0 - values))
+
+
+def _physical_xpass_lower_bound(eps: float, floor: float | None = None) -> float:
+    if floor is not None and not (0.0 <= float(floor) < 1.0):
+        raise ValueError("--physical-xpass-floor must be in [0.0, 1.0) when provided.")
+    lower_bound = max(float(eps), float(floor)) if floor is not None else float(eps)
+    return min(lower_bound, 1.0 - float(eps))
 
 
 def _node_ids(graph: Data) -> list[str]:
@@ -1242,6 +1257,7 @@ def attach_physical_xpass_to_graph(
     *,
     match_id: str,
     eps: float = 1e-4,
+    floor: float | None = None,
     require_observed_target: bool = True,
 ) -> Data:
     if physical_rows is None:
@@ -1274,7 +1290,8 @@ def attach_physical_xpass_to_graph(
                 f"observed target player column {node_ids[target_index]!r}."
             )
 
-    probs = torch.clamp(probs, float(eps), 1.0 - float(eps))
+    lower_bound = _physical_xpass_lower_bound(eps, floor)
+    probs = torch.clamp(probs, lower_bound, 1.0 - float(eps))
     logits = probability_to_logit(probs, eps=eps)
     if not torch.isfinite(probs).all() or not torch.isfinite(logits).all():
         raise ValueError(f"Physical xPass values are non-finite after clipping for match {match_id}, action_index={action_index}.")
@@ -1301,6 +1318,7 @@ def attach_physical_xpass_to_graphs(
     cache_dir: str | Path,
     match_id: str,
     eps: float = 1e-4,
+    floor: float | None = None,
     require_observed_target: bool = True,
 ) -> list[Data]:
     rows = load_physical_xpass_match(cache_dir, match_id)
@@ -1313,6 +1331,7 @@ def attach_physical_xpass_to_graphs(
                 rows,
                 match_id=match_id,
                 eps=eps,
+                floor=floor,
                 require_observed_target=require_observed_target,
             )
         )
@@ -1325,6 +1344,7 @@ def attach_physical_xpass_online_to_graphs(
     *,
     source: str,
     eps: float = 1e-4,
+    floor: float | None = None,
     teammate_policy: str | None = None,
     speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     require_observed_target: bool = False,
@@ -1355,6 +1375,7 @@ def attach_physical_xpass_online_to_graphs(
                 physical_rows,
                 match_id="<runtime>",
                 eps=eps,
+                floor=floor,
                 require_observed_target=require_observed_target,
             )
         )
