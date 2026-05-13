@@ -23,8 +23,11 @@ SKILLCORNER_DATA_REQUIRED_COLUMNS = [
     "pass_score",
     "risk",
     "reward",
-    "game_state_value",
+    "game_state_value_start",
+    "game_state_value_end",
+    "game_state_value_next",
     "dm_score",
+    "end_type",
     "match_id",
 ]
 SKILLCORNER_IDS_REQUIRED_COLUMNS = ["player_id", "participant"]
@@ -36,8 +39,11 @@ ACTIONS_COLUMNS = [
     "pass_score",
     "risk",
     "reward",
-    "game_state_value",
+    "game_state_value_start",
+    "game_state_value_end",
+    "game_state_value_next",
     "dm_score",
+    "end_type",
     "match_id",
 ]
 PLAYER_SUMMARY_COLUMNS = [
@@ -52,9 +58,9 @@ PLAYER_SUMMARY_COLUMNS = [
     "reward_sum",
     "reward_avg",
     "reward_median",
-    "game_state_value_sum",
-    "game_state_value_avg",
-    "game_state_value_median",
+    "game_state_value_start_sum",
+    "game_state_value_start_avg",
+    "game_state_value_start_median",
     "dm_score_sum",
     "dm_score_avg",
     "dm_score_median",
@@ -164,9 +170,9 @@ def aggregate_skillcorner_players(skillcorner_actions: pd.DataFrame) -> pd.DataF
             reward_sum=("reward", "sum"),
             reward_avg=("reward", "mean"),
             reward_median=("reward", "median"),
-            game_state_value_sum=("game_state_value", "sum"),
-            game_state_value_avg=("game_state_value", "mean"),
-            game_state_value_median=("game_state_value", "median"),
+            game_state_value_start_sum=("game_state_value_start", "sum"),
+            game_state_value_start_avg=("game_state_value_start", "mean"),
+            game_state_value_start_median=("game_state_value_start", "median"),
             dm_score_sum=("dm_score", "sum"),
             dm_score_avg=("dm_score", "mean"),
             dm_score_median=("dm_score", "median"),
@@ -183,20 +189,25 @@ def print_summary(summary: dict[str, object]) -> None:
         print(f"  {key}: {value}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    skillcorner_data = read_skillcorner_data(args.skillcorner_data_path)
-    skillcorner_ids = read_skillcorner_ids(args.skillcorner_ids_path)
+def run_skillcorner_filter(
+    *,
+    skillcorner_data_path: Path = DEFAULT_SKILLCORNER_DATA_PATH,
+    skillcorner_ids_path: Path = DEFAULT_SKILLCORNER_IDS_PATH,
+    output_dir: Path = OUTPUT_DIR,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object], dict[str, Path]]:
+    skillcorner_data = read_skillcorner_data(skillcorner_data_path)
+    skillcorner_ids = read_skillcorner_ids(skillcorner_ids_path)
     filtered_skillcorner_ids = filter_skillcorner_ids(skillcorner_ids)
 
     skillcorner_actions_raw = filter_skillcorner_actions_raw(skillcorner_data, filtered_skillcorner_ids)
     skillcorner_actions = build_skillcorner_actions(skillcorner_actions_raw, filtered_skillcorner_ids)
     skillcorner_players = aggregate_skillcorner_players(skillcorner_actions)
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    actions_raw_path = args.output_dir / RAW_ACTIONS_FILENAME
-    actions_path = args.output_dir / ACTIONS_FILENAME
-    players_path = args.output_dir / PLAYERS_FILENAME
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    actions_raw_path = output_dir / RAW_ACTIONS_FILENAME
+    actions_path = output_dir / ACTIONS_FILENAME
+    players_path = output_dir / PLAYERS_FILENAME
 
     skillcorner_actions_raw.to_csv(actions_raw_path, index=False)
     skillcorner_actions.to_csv(actions_path, index=False)
@@ -212,6 +223,21 @@ def main(argv: list[str] | None = None) -> int:
         "actions_path": actions_path,
         "players_path": players_path,
     }
+    paths = {
+        "actions_raw_path": actions_raw_path,
+        "actions_path": actions_path,
+        "players_path": players_path,
+    }
+    return skillcorner_actions_raw, skillcorner_actions, skillcorner_players, summary, paths
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    _, _, _, summary, _ = run_skillcorner_filter(
+        skillcorner_data_path=args.skillcorner_data_path,
+        skillcorner_ids_path=args.skillcorner_ids_path,
+        output_dir=args.output_dir,
+    )
     print_summary(summary)
     return 0
 

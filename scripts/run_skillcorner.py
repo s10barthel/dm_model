@@ -30,6 +30,8 @@ from project_config import (
     write_latest_run,
     write_run_metadata,
 )
+from validation.skillcorner.code.skillcorner_filter import run_skillcorner_filter
+from validation.skillcorner.code.skillcorner_postprocessing import run_skillcorner_postprocessing
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -317,10 +319,32 @@ def main() -> None:
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == SKILLCORNER_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("skillcorner_component", component_run_id)
+    _, postprocessing_summary, summary_path = run_skillcorner_postprocessing(
+        component_run_root=output_dir,
+        event_data_dir=Path(args.input_dir),
+        output_file=output_dir / "skillcorner_summary.csv",
+    )
+    _, _, _, filter_summary, filter_paths = run_skillcorner_filter(
+        skillcorner_data_path=summary_path,
+        output_dir=output_dir,
+    )
     print(f"SkillCorner component run id: {component_run_id}")
 
     totals = summary["totals"]
     print(f"Saved SkillCorner components to {output_dir}")
+    print(f"Saved SkillCorner summary to {summary_path}")
+    print(
+        "Saved SkillCorner filtered outputs to {actions_raw_path}, {actions_path}, and {players_path}".format(
+            **filter_paths
+        )
+    )
+    print(
+        "SkillCorner postprocessing scored {events_with_dm_score}/{event_rows} events; "
+        "filtered actions rows: {skillcorner_actions_rows}.".format(
+            **postprocessing_summary,
+            **filter_summary,
+        )
+    )
     if skipped_match_errors or skipped_possessions:
         print(
             f"Skipped {len(skipped_match_errors)} matches and "

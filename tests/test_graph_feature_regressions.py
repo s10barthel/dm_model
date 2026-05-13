@@ -87,11 +87,11 @@ def make_offside_match_and_snapshot(
 
 
 class DummyNodeModel(torch.nn.Module):
-    def __init__(self, task: str, logits: list[float]) -> None:
+    def __init__(self, task: str, logits: list[float] | list[list[float]], node_in_dim: int = 25) -> None:
         super().__init__()
         self.args = {
             "task": task,
-            "node_in_dim": 25,
+            "node_in_dim": node_in_dim,
             "include_out": False,
             "xy_only": False,
             "possessor_aware": True,
@@ -99,6 +99,7 @@ class DummyNodeModel(torch.nn.Module):
             "ball_z_aware": True,
             "poss_vel_aware": True,
             "accel_aware": True,
+            "offside_aware": True,
             "extend_features": False,
             "sparsify": "none",
             "max_edge_dist": 10,
@@ -124,6 +125,14 @@ def make_inference_graph() -> Data:
     )
     edge_attr = torch.ones((edge_index.shape[1], 2), dtype=torch.float32)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def make_offside_inference_graph() -> Data:
+    base = make_inference_graph()
+    x = torch.zeros((base.x.shape[0], 26), dtype=torch.float32)
+    x[:, : base.x.shape[1]] = base.x
+    x[1, -1] = 1.0
+    return Data(x=x, edge_index=base.edge_index, edge_attr=base.edge_attr)
 
 
 def make_marked_inference_graph(marker: float) -> Data:
@@ -186,6 +195,12 @@ def make_inference_match(labels: torch.Tensor) -> SimpleNamespace:
         graph_features_1=None,
         graph_features_by_dir={},
     )
+
+
+def make_offside_inference_match(labels: torch.Tensor) -> SimpleNamespace:
+    match = make_inference_match(labels)
+    match.graph_features_0 = [make_offside_inference_graph()]
+    return match
 
 
 def make_pass_filter_events() -> pd.DataFrame:
@@ -783,6 +798,50 @@ class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
 
         self.assertEqual(probs.columns.tolist(), ["home_10", "home_11", "home_12"])
         torch.testing.assert_close(torch.tensor(probs.loc[0].tolist()), expected, atol=1e-6, rtol=0.0)
+
+    def test_pass_intent_masks_offside_options_and_renormalizes(self) -> None:
+        model = DummyNodeModel("pass_intent", logits=[0.0, 5.0, 0.0, 0.0], node_in_dim=26)
+        match = make_offside_inference_match(make_inference_labels())
+
+        probs, _ = inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.columns.tolist(), ["home_11", "home_12"])
+        self.assertEqual(float(probs.loc[0, "home_11"]), 0.0)
+        self.assertEqual(float(probs.loc[0, "home_12"]), 1.0)
+
+    def test_action_intent_masks_offside_options_and_renormalizes(self) -> None:
+        model = DummyNodeModel("action_intent", logits=[0.0, 5.0, 0.0, 0.0], node_in_dim=26)
+        match = make_offside_inference_match(make_inference_labels())
+
+        probs, _ = inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.columns.tolist(), ["home_10", "home_11", "home_12"])
+        self.assertEqual(float(probs.loc[0, "home_11"]), 0.0)
+        self.assertAlmostEqual(float(probs.loc[0, "home_10"]), 0.5, places=6)
+        self.assertAlmostEqual(float(probs.loc[0, "home_12"]), 0.5, places=6)
+
+    def test_pass_success_forces_offside_options_to_zero(self) -> None:
+        model = DummyNodeModel("pass_success", logits=[0.0, 5.0, 0.0, 0.0], node_in_dim=26)
+        match = make_offside_inference_match(make_inference_labels())
+
+        probs, _ = inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(float(probs.loc[0, "home_11"]), 0.0)
+        self.assertAlmostEqual(float(probs.loc[0, "home_12"]), 0.5, places=6)
+
+    def test_outcome_success_branch_uses_failure_branch_for_offside_options(self) -> None:
+        model = DummyNodeModel(
+            "outcome_scoring",
+            logits=[[0.0, 0.0], [-2.0, 5.0], [0.0, 0.0], [0.0, 0.0]],
+            node_in_dim=26,
+        )
+        match = make_offside_inference_match(make_inference_labels())
+
+        failure_probs, success_probs = inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertAlmostEqual(float(failure_probs.loc[0, "home_11"]), float(torch.sigmoid(torch.tensor(-2.0))), places=6)
+        self.assertAlmostEqual(float(success_probs.loc[0, "home_11"]), float(failure_probs.loc[0, "home_11"]), places=6)
+        self.assertAlmostEqual(float(success_probs.loc[0, "home_12"]), 0.5, places=6)
 
     def test_benchmark_export_leaves_passer_pass_intent_empty_and_renormalized(self) -> None:
         pass_intent = self._run_inference("pass_intent")

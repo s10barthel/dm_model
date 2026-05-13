@@ -38,6 +38,7 @@ REQUIRED_COMPONENT_IDENTIFIER_COLUMNS = ["match_id", "frame", "index", "player_i
 IGNORED_COMPONENT_COLUMNS = {"period", "attacking_side", "shot"}
 MODEL_KEY_COLUMNS = ["match_id", "frame", "index", "player_id", "receiver_id"]
 GAME_STATE_KEY_COLUMNS = ["match_id", "index"]
+GAME_STATE_FRAME_KEY_COLUMNS = ["match_id", "index", "frame"]
 PASS_SCORE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "receiver_id", "pass_score", "risk", "reward"]
 GAME_STATE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "game_state_value"]
 REQUIRED_EVENT_COLUMNS = [
@@ -100,6 +101,8 @@ def normalize_event_identifiers(df: pd.DataFrame) -> pd.DataFrame:
     for column in ["index", "frame_start", "frame_end", "player_id", "player_targeted_id", "event_type_id", "start_type_id"]:
         if column in normalized.columns:
             normalized[column] = coerce_nullable_integer(normalized[column])
+    if "team_id" in normalized.columns:
+        normalized["team_id"] = coerce_nullable_integer(normalized["team_id"])
     return normalized
 
 
@@ -110,6 +113,10 @@ def ensure_event_matching_columns(df: pd.DataFrame) -> pd.DataFrame:
     for column in ["index", "frame_start", "frame_end", "player_targeted_id"]:
         if column not in normalized.columns:
             normalized[column] = pd.Series(pd.NA, index=normalized.index, dtype="Int64")
+    if "team_id" not in normalized.columns:
+        normalized["team_id"] = pd.Series(pd.NA, index=normalized.index, dtype="Int64")
+    if "end_type" not in normalized.columns:
+        normalized["end_type"] = pd.Series(pd.NA, index=normalized.index, dtype="string")
     return normalize_event_identifiers(normalized)
 
 
@@ -200,12 +207,12 @@ def compute_model_scores(model_data: pd.DataFrame) -> pd.DataFrame:
     )
     game_state_values = (
         (scored["pass_intent"] * scored["pass_score"])
-        .groupby([scored["match_id"], scored["index"]], dropna=False)
+        .groupby([scored["match_id"], scored["index"], scored["frame"]], dropna=False)
         .sum(min_count=1)
         .rename("game_state_value")
         .reset_index()
     )
-    return scored.merge(game_state_values, on=GAME_STATE_KEY_COLUMNS, how="left")
+    return scored.merge(game_state_values, on=GAME_STATE_FRAME_KEY_COLUMNS, how="left")
 
 
 def build_match_model_data(match_dir: Path) -> pd.DataFrame:
@@ -251,12 +258,18 @@ def build_pass_score_candidates(model_data: pd.DataFrame) -> pd.DataFrame:
     return candidates
 
 
-def build_game_state_candidates(model_data: pd.DataFrame) -> pd.DataFrame:
+def build_game_state_candidates(model_data: pd.DataFrame, frame_position: str) -> pd.DataFrame:
     if model_data.empty:
         return pd.DataFrame(columns=["match_id", "index", "frame", "game_state_value"])
 
-    min_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("min")
-    candidates = model_data.loc[model_data["frame"].eq(min_frames), GAME_STATE_LOOKUP_COLUMNS].copy()
+    if frame_position == "start":
+        selected_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("min")
+    elif frame_position == "end":
+        selected_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("max")
+    else:
+        raise ValueError(f"Unsupported game state frame position: {frame_position!r}")
+
+    candidates = model_data.loc[model_data["frame"].eq(selected_frames), GAME_STATE_LOOKUP_COLUMNS].copy()
     candidates = candidates.dropna(subset=["game_state_value"]).reset_index(drop=True)
 
     value_counts = (
@@ -270,6 +283,15 @@ def build_game_state_candidates(model_data: pd.DataFrame) -> pd.DataFrame:
 
     candidates = candidates.drop_duplicates(subset=["match_id", "index", "frame"], keep="first")
     return candidates.reset_index(drop=True)
+
+
+def rename_value_column(df: pd.DataFrame, source: str, target: str) -> pd.DataFrame:
+    renamed = df.copy()
+    if source in renamed.columns:
+        renamed = renamed.rename(columns={source: target})
+    elif target not in renamed.columns:
+        renamed[target] = pd.Series(dtype=float)
+    return renamed
 
 
 def read_event_data(event_path: Path) -> pd.DataFrame:
@@ -332,10 +354,17 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
     original_columns = base.columns.tolist()
     base["__event_row_id"] = pd.RangeIndex(len(base))
     working = ensure_event_matching_columns(base.copy())
+    for column in ["team_id", "end_type", "player_targeted_id"]:
+        if column not in base.columns:
+            base[column] = working[column]
 
-    game_state_candidates = build_game_state_candidates(model_data)
+    game_state_start_candidates = rename_value_column(
+        build_game_state_candidates(model_data, "start"),
+        "game_state_value",
+        "game_state_value_start",
+    )
     game_state_matches = working[["__event_row_id", "match_id", "index", "frame_start"]].merge(
-        game_state_candidates,
+        game_state_start_candidates,
         on=["match_id", "index"],
         how="left",
     )
@@ -345,7 +374,26 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         event_frame_column="frame_start",
         candidate_frame_column="frame",
         tie_break="earlier",
-        value_columns=["game_state_value"],
+        value_columns=["game_state_value_start"],
+    )
+
+    game_state_end_candidates = rename_value_column(
+        build_game_state_candidates(model_data, "end"),
+        "game_state_value",
+        "game_state_value_end",
+    )
+    game_state_end_matches = working[["__event_row_id", "match_id", "index", "frame_end"]].merge(
+        game_state_end_candidates,
+        on=["match_id", "index"],
+        how="left",
+    )
+    selected_game_state_end = select_nearest_frame_match(
+        game_state_end_matches,
+        event_id_column="__event_row_id",
+        event_frame_column="frame_end",
+        candidate_frame_column="frame",
+        tie_break="later",
+        value_columns=["game_state_value_end"],
     )
 
     pass_score_candidates = build_pass_score_candidates(model_data)
@@ -365,9 +413,52 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
     )
 
     scored = base.merge(selected_game_state, on="__event_row_id", how="left")
+    scored = scored.merge(selected_game_state_end, on="__event_row_id", how="left")
     scored = scored.merge(selected_pass_score, on="__event_row_id", how="left")
-    scored["dm_score"] = scored["pass_score"] - scored["game_state_value"]
-    return scored[original_columns + ["pass_score", "risk", "reward", "game_state_value", "dm_score"]]
+
+    scored["game_state_value_next"] = (
+        scored.groupby("match_id", dropna=False)["game_state_value_start"].shift(-1)
+    )
+    scored["__team_id_next"] = scored.groupby("match_id", dropna=False)["team_id"].shift(-1)
+    scored["dm_score"] = scored["pass_score"] - scored["game_state_value_start"]
+
+    empty_target = scored["player_targeted_id"].isna() & scored["pass_score"].isna()
+    has_start_end = scored["game_state_value_start"].notna() & scored["game_state_value_end"].notna()
+    foul_mask = empty_target & scored["end_type"].eq("foul_suffered") & has_start_end
+    scored.loc[foul_mask, "dm_score"] = (
+        scored.loc[foul_mask, "game_state_value_end"] - scored.loc[foul_mask, "game_state_value_start"]
+    )
+
+    has_next_inputs = (
+        scored["game_state_value_start"].notna()
+        & scored["game_state_value_next"].notna()
+        & scored["team_id"].notna()
+        & scored["__team_id_next"].notna()
+    )
+    possession_loss_mask = empty_target & scored["end_type"].eq("possession_loss") & has_next_inputs
+    same_team_mask = possession_loss_mask & scored["team_id"].eq(scored["__team_id_next"])
+    different_team_mask = possession_loss_mask & scored["team_id"].ne(scored["__team_id_next"])
+    scored.loc[same_team_mask, "dm_score"] = (
+        scored.loc[same_team_mask, "game_state_value_next"]
+        - scored.loc[same_team_mask, "game_state_value_start"]
+    )
+    scored.loc[different_team_mask, "dm_score"] = (
+        -scored.loc[different_team_mask, "game_state_value_next"]
+        - scored.loc[different_team_mask, "game_state_value_start"]
+    )
+
+    return scored[
+        original_columns
+        + [
+            "pass_score",
+            "risk",
+            "reward",
+            "game_state_value_start",
+            "game_state_value_end",
+            "game_state_value_next",
+            "dm_score",
+        ]
+    ]
 
 
 def resolve_component_run_root(args: argparse.Namespace) -> tuple[Path, str | None]:
@@ -418,18 +509,16 @@ def print_summary(summary: dict[str, object]) -> None:
         print(f"  {key}: {value}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
-    component_run_root, resolved_run_id = resolve_component_run_root(args)
-    match_dirs = discover_match_dirs(component_run_root)
-    model_data = build_model_data(match_dirs)
-    event_data = load_event_data(args.event_data_dir)
-    event_data = add_scores_to_event_data(model_data, event_data)
-
-    args.output_file.parent.mkdir(parents=True, exist_ok=True)
-    event_data.to_csv(args.output_file, index=False)
-
-    summary = {
+def summarize_scored_events(
+    event_data: pd.DataFrame,
+    *,
+    resolved_run_id: str | None,
+    component_run_root: Path,
+    match_dirs: list[Path],
+    model_data: pd.DataFrame,
+    output_file: Path,
+) -> dict[str, object]:
+    return {
         "component_run_id": resolved_run_id,
         "component_run_root": component_run_root,
         "match_dirs": len(match_dirs),
@@ -438,10 +527,59 @@ def main(argv: list[str] | None = None) -> int:
         "events_with_pass_score": int(event_data["pass_score"].notna().sum()),
         "events_with_risk": int(event_data["risk"].notna().sum()),
         "events_with_reward": int(event_data["reward"].notna().sum()),
-        "events_with_game_state_value": int(event_data["game_state_value"].notna().sum()),
+        "events_with_game_state_value_start": int(event_data["game_state_value_start"].notna().sum()),
+        "events_with_game_state_value_end": int(event_data["game_state_value_end"].notna().sum()),
+        "events_with_game_state_value_next": int(event_data["game_state_value_next"].notna().sum()),
         "events_with_dm_score": int(event_data["dm_score"].notna().sum()),
-        "output_file": args.output_file,
+        "output_file": output_file,
     }
+
+
+def run_skillcorner_postprocessing(
+    *,
+    component_run_root: Path | None = None,
+    component_run_id: str | None = None,
+    component_runs_dir: Path = SKILLCORNER_COMPONENT_RUNS_DIR,
+    event_data_dir: Path = DEFAULT_EVENT_DATA_DIR,
+    output_file: Path = DEFAULT_OUTPUT_FILE,
+) -> tuple[pd.DataFrame, dict[str, object], Path]:
+    args = argparse.Namespace(
+        component_run_root=component_run_root,
+        component_run_id=component_run_id,
+        component_runs_dir=component_runs_dir,
+        event_data_dir=event_data_dir,
+        output_file=output_file,
+    )
+    resolved_component_run_root, resolved_run_id = resolve_component_run_root(args)
+    match_dirs = discover_match_dirs(resolved_component_run_root)
+    model_data = build_model_data(match_dirs)
+    event_data = load_event_data(args.event_data_dir)
+    event_data = add_scores_to_event_data(model_data, event_data)
+
+    output_path = Path(args.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    event_data.to_csv(output_path, index=False)
+
+    summary = summarize_scored_events(
+        event_data,
+        resolved_run_id=resolved_run_id,
+        component_run_root=resolved_component_run_root,
+        match_dirs=match_dirs,
+        model_data=model_data,
+        output_file=output_path,
+    )
+    return event_data, summary, output_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    event_data, summary, _ = run_skillcorner_postprocessing(
+        component_run_root=args.component_run_root,
+        component_run_id=args.component_run_id,
+        component_runs_dir=args.component_runs_dir,
+        event_data_dir=args.event_data_dir,
+        output_file=args.output_file,
+    )
     print_summary(summary)
     return 0
 

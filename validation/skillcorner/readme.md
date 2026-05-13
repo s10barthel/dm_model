@@ -24,7 +24,7 @@ validation/skillcorner/
 
 ### `code/skillcorner_postprocessing.py`
 
-Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates `pass_score`, `risk`, `reward`, and `game_state_value`, joins those scores back onto filtered SkillCorner event rows, and writes:
+Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates `pass_score`, `risk`, `reward`, and start/end/next `game_state_value` fields, joins those scores back onto filtered SkillCorner event rows, and writes:
 
 - `output/skillcorner_summary.csv`
 
@@ -42,6 +42,8 @@ If neither option is provided, the script uses the latest SkillCorner run regist
 ```powershell
 python scripts\run_skillcorner.py --run-id <component_run_id>
 ```
+
+`scripts/run_skillcorner.py` also runs SkillCorner postprocessing and filtering automatically after a successful component run, saving the derived CSVs next to that run's `metadata.json`.
 
 ### `code/skillcorner_filter.py`
 
@@ -73,7 +75,9 @@ Row-level SkillCorner event export produced by `skillcorner_postprocessing.py`. 
 - `pass_score`
 - `risk`
 - `reward`
-- `game_state_value`
+- `game_state_value_start`
+- `game_state_value_end`
+- `game_state_value_next`
 - `dm_score`
 
 ### `output/skillcorner_actions_raw.csv`
@@ -88,8 +92,11 @@ A reduced row-level action table with only:
 - `pass_score`
 - `risk`
 - `reward`
-- `game_state_value`
+- `game_state_value_start`
+- `game_state_value_end`
+- `game_state_value_next`
 - `dm_score`
+- `end_type`
 - `match_id`
 
 Rows with empty `dm_score` are removed.
@@ -102,5 +109,5 @@ Participant-level aggregates derived from `skillcorner_actions.csv`, including:
 - `pass_score_sum`, `pass_score_avg`, `pass_score_median`
 - `risk_sum`, `risk_avg`, `risk_median`
 - `reward_sum`, `reward_avg`, `reward_median`
-- `game_state_value_sum`, `game_state_value_avg`, `game_state_value_median`
+- `game_state_value_start_sum`, `game_state_value_start_avg`, `game_state_value_start_median`
 - `dm_score_sum`, `dm_score_avg`, `dm_score_median`
