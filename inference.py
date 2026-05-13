@@ -33,8 +33,6 @@ from physical_pass_model import (
 from project_config import get_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
-OFFSIDE_RULE_SELECTION_TASKS = {"action_intent", "pass_intent", "pass_intent_oppo_agn", "success_intent"}
-OFFSIDE_RULE_SUCCESS_TASKS = {"pass_success", "outcome_scoring", "outcome_conceding"}
 
 
 def _exclude_possessor_from_pass_only_intent(
@@ -63,15 +61,6 @@ def _renormalize_probabilities(probs: np.ndarray) -> np.ndarray:
     if total > 0:
         return np.asarray(probs, dtype=float) / total
     return np.asarray(probs, dtype=float)
-
-
-def _apply_offside_selection_mask(probs: np.ndarray, offside_mask: np.ndarray) -> np.ndarray:
-    probs = np.asarray(probs, dtype=float).copy()
-    offside_mask = np.asarray(offside_mask, dtype=bool)
-    if probs.shape[0] != offside_mask.shape[0] or not offside_mask.any() or bool(offside_mask.all()):
-        return probs
-    probs[offside_mask] = 0.0
-    return _renormalize_probabilities(probs)
 
 
 def _uses_offside_rule_mask(model: GNN, node_dim: int) -> bool:
@@ -339,10 +328,10 @@ def inference_gnn(
 
     graphs = Batch.from_data_list(graphs).to(device)
     graphs.x = graphs.x[:, : model.args["node_in_dim"]]
-    use_offside_rule_mask = _uses_offside_rule_mask(model, int(graphs.x.shape[1]))
+    use_offside_rule_mask = model.args["task"] == "pass_success" and _uses_offside_rule_mask(model, int(graphs.x.shape[1]))
     offside_node_mask = (
         graphs.x[:, -1].bool()
-        if use_offside_rule_mask and model.args["task"] in OFFSIDE_RULE_SELECTION_TASKS | OFFSIDE_RULE_SUCCESS_TASKS
+        if use_offside_rule_mask
         else torch.zeros(graphs.x.shape[0], dtype=torch.bool, device=graphs.x.device)
     )
 
@@ -412,8 +401,6 @@ def inference_gnn(
                     player_indices_i = [player_id for player_id in player_indices_i if player_id != str(possessor_object_id)]
                     probs_i = _renormalize_probabilities(probs_i[keep_mask])
                     offside_i = offside_i[keep_mask]
-                if model.args["task"] in OFFSIDE_RULE_SELECTION_TASKS:
-                    probs_i = _apply_offside_selection_mask(probs_i, offside_i)
         elif out_filter == "all":  # "receiver" in model.args["task"]
             player_indices_i = active_players[0] + active_players[1]
             if model.args["include_out"]:
@@ -425,10 +412,6 @@ def inference_gnn(
             probs_i = np.asarray(probs_i, dtype=float).copy()
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
-        elif model.args["task"] in {"outcome_scoring", "outcome_conceding"}:
-            probs_i = np.asarray(probs_i, dtype=float).copy()
-            if probs_i.ndim == 2 and probs_i.shape[0] == offside_i.shape[0] and probs_i.shape[1] >= 2:
-                probs_i[offside_i, 1] = probs_i[offside_i, 0]
 
         if model.args["task"] in two_case_tasks:
             probs_i0 = dict(zip(player_indices_i, probs_i[:, 0].tolist()))
