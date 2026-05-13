@@ -62,6 +62,7 @@ def make_graph(node_ids: list[str] | None = None) -> Data:
     x[:, 3] = torch.arange(len(node_ids), dtype=torch.float32) * 20.0
     x[:, 4] = 34.0
     x[:, 5:7] = 0.0
+    x[:, config.NODE_FEATURE_POSS_DIST] = torch.abs(x[:, config.NODE_FEATURE_X] - x[0, config.NODE_FEATURE_X])
     x[0, 0] = 1.0
     x[1, 0] = 1.0
     x[0, 13] = 1.0
@@ -112,16 +113,19 @@ class FixedDelta(nn.Module):
 
 
 class DummyOffsetModel(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, delta_values: list[float] | None = None, output_values: list[float] | None = None) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.zeros(1))
         self.decoder = SimpleNamespace(latest_delta_gat=None)
+        self.delta_values = delta_values or [0.0, 2.0]
+        self.output_values = output_values or [-10.0, 0.0]
 
     def forward(self, batch_graphs, batch_dests=None):
         del batch_dests
-        delta = torch.tensor([0.0, 2.0], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
+        node_count = batch_graphs.x.shape[0]
+        delta = torch.tensor(self.delta_values[:node_count], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
         self.decoder.latest_delta_gat = delta
-        return torch.tensor([-10.0, 0.0], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
+        return torch.tensor(self.output_values[:node_count], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
 
 
 def decoder_args(**overrides: object) -> dict[str, object]:
@@ -139,6 +143,9 @@ def decoder_args(**overrides: object) -> dict[str, object]:
         "learn_physical_scale": True,
         "physical_eps": 1e-4,
         "residual_clip_value": None,
+        "residual_distance_threshold": 30.0,
+        "short_residual_clip_value": None,
+        "long_residual_clip_value": None,
     }
     args.update(overrides)
     return args
@@ -943,6 +950,34 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(out[0]), float(torch.tanh(torch.tensor(10.0))), places=6)
         self.assertAlmostEqual(float(decoder.latest_delta_gat[0]), float(torch.tanh(torch.tensor(10.0))), places=6)
 
+    def test_decoder_applies_distance_specific_residual_clipping(self) -> None:
+        decoder = Decoder(
+            decoder_args(
+                residual_distance_threshold=30.0,
+                short_residual_clip_value=1.0,
+                long_residual_clip_value=3.0,
+            )
+        )
+        decoder.nodewise_mlp = FixedDelta([10.0, 10.0])
+        node_features = torch.zeros((2, 25), dtype=torch.float32)
+        node_features[:, config.NODE_FEATURE_POSS_DIST] = torch.tensor([20.0, 40.0])
+
+        out = decoder(
+            node_features=node_features,
+            node_embeddings=torch.zeros((2, 4), dtype=torch.float32),
+            physical_xpass_logit=torch.zeros(2, dtype=torch.float32),
+        )
+
+        expected = torch.tensor(
+            [
+                torch.tanh(torch.tensor(10.0)).item(),
+                (3.0 * torch.tanh(torch.tensor(10.0 / 3.0))).item(),
+            ],
+            dtype=torch.float32,
+        )
+        self.assertTrue(torch.allclose(out, expected))
+        self.assertTrue(torch.allclose(decoder.latest_delta_gat, expected))
+
     def test_run_epoch_adds_observed_residual_l2_to_pass_success_loss(self) -> None:
         graph = make_graph(["home_1", "home_2"])
         label = make_label()
@@ -969,6 +1004,50 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["residual_l2"], 4.0, places=6)
         self.assertAlmostEqual(metrics["ce_loss"], expected_bce + 0.5 * 4.0, places=6)
 
+    def test_run_epoch_uses_distance_specific_residual_l2_weights(self) -> None:
+        short_graph = make_graph(["home_1", "home_2"])
+        long_graph = make_graph(["home_1", "home_2"])
+        long_graph.x[1, config.NODE_FEATURE_POSS_DIST] = 40.0
+        label = make_label()
+        loader = DataLoader(
+            [
+                (short_graph, label, torch.tensor(1.0, dtype=torch.float32)),
+                (long_graph, label, torch.tensor(1.0, dtype=torch.float32)),
+            ],
+            batch_size=2,
+        )
+        args = SimpleNamespace(
+            gnn_task="node_binary",
+            task="pass_success",
+            include_out=False,
+            lambda_l1=0.0,
+            residual_regularization_lambda=0.0,
+            residual_distance_threshold=30.0,
+            short_residual_regularization_lambda=0.25,
+            long_residual_regularization_lambda=0.5,
+            use_physical_xpass=True,
+            model_variant="gat_phys_logit_offset",
+            use_xg=False,
+            use_xt=False,
+            use_goal_distance=False,
+            use_epv=False,
+            print_freq=99,
+            clip=10,
+        )
+
+        metrics = run_epoch(
+            args,
+            DummyOffsetModel(delta_values=[0.0, 2.0, 0.0, 3.0], output_values=[-10.0, 0.0, -10.0, 0.0]),
+            loader,
+            device="cpu",
+            train=False,
+        )
+
+        expected_bce = float(nn.BCEWithLogitsLoss()(torch.tensor([0.0, 0.0]), torch.tensor([1.0, 1.0])))
+        expected_penalty = (0.25 * 2.0**2 + 0.5 * 3.0**2) / 2.0
+        self.assertAlmostEqual(metrics["residual_l2"], (2.0**2 + 3.0**2) / 2.0, places=6)
+        self.assertAlmostEqual(metrics["ce_loss"], expected_bce + expected_penalty, places=6)
+
     def test_wrapper_physical_flags_reach_only_pass_success(self) -> None:
         args = SimpleNamespace(
             use_physical_xpass=True,
@@ -978,6 +1057,11 @@ class PhysicalXPassTests(unittest.TestCase):
             learn_physical_scale=False,
             residual_regularization_lambda=0.25,
             residual_clip_value=2.0,
+            residual_distance_threshold=35.0,
+            short_residual_regularization_lambda=0.5,
+            long_residual_regularization_lambda=0.1,
+            short_residual_clip_value=1.0,
+            long_residual_clip_value=3.0,
         )
         feature_flags = train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy()
 
@@ -1011,8 +1095,14 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn("--model-variant", pass_command)
         self.assertIn("--fixed-physical-scale", pass_command)
         self.assertIn("--residual-regularization-lambda", pass_command)
+        self.assertIn("--residual-distance-threshold", pass_command)
+        self.assertIn("--short-residual-regularization-lambda", pass_command)
+        self.assertIn("--long-residual-regularization-lambda", pass_command)
+        self.assertIn("--short-residual-clip-value", pass_command)
+        self.assertIn("--long-residual-clip-value", pass_command)
         self.assertNotIn("--use_physical_xpass", outcome_command)
         self.assertNotIn("--physical-cache-dir", outcome_command)
+        self.assertNotIn("--short-residual-clip-value", outcome_command)
 
     def test_visualization_sidecar_loader_reads_max_player_cum_prob_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

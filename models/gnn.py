@@ -5,7 +5,14 @@ import torch.nn as nn
 from torch_geometric.data import Batch
 from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
 
-from physical_pass_model import PHYSICAL_XPASS_LOGIT_ATTR, PHYSICAL_XPASS_VARIANTS, physical_xpass_model_variant
+from datatools import config
+from physical_pass_model import (
+    PHYSICAL_XPASS_LOGIT_ATTR,
+    PHYSICAL_XPASS_VARIANTS,
+    physical_xpass_model_variant,
+    residual_distance_threshold,
+    resolved_residual_clip_values,
+)
 
 
 class Encoder(nn.Module):
@@ -97,6 +104,8 @@ class Decoder(nn.Module):
         )
         self.physical_eps = float(args.get("physical_eps", 1e-4))
         self.residual_clip_value = args.get("residual_clip_value", None)
+        self.residual_distance_threshold = residual_distance_threshold(args)
+        self.short_residual_clip_value, self.long_residual_clip_value = resolved_residual_clip_values(args)
         self.latest_delta_gat = None
         node_in_dim = args["node_emb_dim"]
         graph_in_dim = args["graph_emb_dim"]
@@ -187,6 +196,32 @@ class Decoder(nn.Module):
                     nn.Linear(mlp_dims[1], out_dim),
                 )
 
+    def _clip_delta_gat(self, delta_gat: torch.Tensor, node_features: torch.Tensor | None) -> torch.Tensor:
+        short_clip = self.short_residual_clip_value
+        long_clip = self.long_residual_clip_value
+        if short_clip is None and long_clip is None:
+            return delta_gat
+        if short_clip == long_clip:
+            clip_value = float(short_clip)
+            return clip_value * torch.tanh(delta_gat / clip_value)
+        if node_features is None:
+            raise ValueError("node_features are required for distance-specific residual clipping.")
+        if node_features.shape[0] != delta_gat.shape[0] or node_features.shape[1] <= config.NODE_FEATURE_POSS_DIST:
+            raise ValueError("node_features must include NODE_FEATURE_POSS_DIST for distance-specific residual clipping.")
+
+        distances = node_features[:, config.NODE_FEATURE_POSS_DIST].to(device=delta_gat.device, dtype=delta_gat.dtype)
+        short_mask = distances <= float(self.residual_distance_threshold)
+        clipped = delta_gat
+        if short_clip is not None:
+            clip_value = float(short_clip)
+            short_delta = clip_value * torch.tanh(delta_gat / clip_value)
+            clipped = torch.where(short_mask, short_delta, clipped)
+        if long_clip is not None:
+            clip_value = float(long_clip)
+            long_delta = clip_value * torch.tanh(delta_gat / clip_value)
+            clipped = torch.where(~short_mask, long_delta, clipped)
+        return clipped
+
     def forward(
         self,
         node_features: torch.Tensor = None,
@@ -248,9 +283,7 @@ class Decoder(nn.Module):
                 "gat_phys_logit_offset_regularized",
             }:
                 delta_gat = node_outputs
-                if self.residual_clip_value is not None:
-                    clip_value = float(self.residual_clip_value)
-                    delta_gat = clip_value * torch.tanh(delta_gat / clip_value)
+                delta_gat = self._clip_delta_gat(delta_gat, node_features)
                 self.latest_delta_gat = delta_gat
                 node_outputs = self.physical_beta0 + self.physical_beta1 * physical_xpass_logit + delta_gat
             else:

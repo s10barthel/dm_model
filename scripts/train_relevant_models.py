@@ -201,12 +201,25 @@ def append_physical_xpass_flags(command: list[str], args: argparse.Namespace) ->
         command.extend(["--physical-cache-dir", str(args.physical_cache_dir)])
     command.extend(["--physical-eps", str(getattr(args, "physical_eps", 1e-4))])
     command.append("--learn-physical-scale" if bool(getattr(args, "learn_physical_scale", True)) else "--fixed-physical-scale")
+    command.extend(["--residual-distance-threshold", str(getattr(args, "residual_distance_threshold", 30.0))])
     residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
     if residual_lambda:
         command.extend(["--residual-regularization-lambda", str(residual_lambda)])
     residual_clip_value = getattr(args, "residual_clip_value", None)
     if residual_clip_value is not None:
         command.extend(["--residual-clip-value", str(residual_clip_value)])
+    short_residual_lambda = getattr(args, "short_residual_regularization_lambda", None)
+    if short_residual_lambda is not None:
+        command.extend(["--short-residual-regularization-lambda", str(short_residual_lambda)])
+    long_residual_lambda = getattr(args, "long_residual_regularization_lambda", None)
+    if long_residual_lambda is not None:
+        command.extend(["--long-residual-regularization-lambda", str(long_residual_lambda)])
+    short_residual_clip_value = getattr(args, "short_residual_clip_value", None)
+    if short_residual_clip_value is not None:
+        command.extend(["--short-residual-clip-value", str(short_residual_clip_value)])
+    long_residual_clip_value = getattr(args, "long_residual_clip_value", None)
+    if long_residual_clip_value is not None:
+        command.extend(["--long-residual-clip-value", str(long_residual_clip_value)])
     return command
 
 
@@ -220,6 +233,11 @@ def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
         "learn_physical_scale": bool(getattr(args, "learn_physical_scale", True)),
         "residual_regularization_lambda": float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0),
         "residual_clip_value": getattr(args, "residual_clip_value", None),
+        "residual_distance_threshold": float(getattr(args, "residual_distance_threshold", 30.0)),
+        "short_residual_regularization_lambda": getattr(args, "short_residual_regularization_lambda", None),
+        "long_residual_regularization_lambda": getattr(args, "long_residual_regularization_lambda", None),
+        "short_residual_clip_value": getattr(args, "short_residual_clip_value", None),
+        "long_residual_clip_value": getattr(args, "long_residual_clip_value", None),
     }
 
 
@@ -838,6 +856,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional tanh bound for the pass_success residual.",
     )
+    parser.add_argument(
+        "--residual-distance-threshold",
+        type=float,
+        default=30.0,
+        help="Passer-target distance threshold separating short and long residual controls.",
+    )
+    parser.add_argument(
+        "--short-residual-regularization-lambda",
+        type=float,
+        default=None,
+        help="Optional short-pass override for pass_success residual L2.",
+    )
+    parser.add_argument(
+        "--long-residual-regularization-lambda",
+        type=float,
+        default=None,
+        help="Optional long-pass override for pass_success residual L2.",
+    )
+    parser.add_argument(
+        "--short-residual-clip-value",
+        type=float,
+        default=None,
+        help="Optional short-pass override for pass_success residual clipping.",
+    )
+    parser.add_argument(
+        "--long-residual-clip-value",
+        type=float,
+        default=None,
+        help="Optional long-pass override for pass_success residual clipping.",
+    )
     args = parser.parse_args(argv)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
@@ -850,10 +898,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--early-stopping-min-delta must be non-negative.")
     if not (0.0 < args.physical_eps < 0.5):
         parser.error("--physical-eps must be between 0 and 0.5.")
+    if args.residual_distance_threshold <= 0:
+        parser.error("--residual-distance-threshold must be positive.")
     if args.residual_regularization_lambda < 0:
         parser.error("--residual-regularization-lambda must be non-negative.")
+    for name in ("short_residual_regularization_lambda", "long_residual_regularization_lambda"):
+        value = getattr(args, name)
+        if value is not None and value < 0:
+            parser.error(f"--{name.replace('_', '-')} must be non-negative.")
     if args.residual_clip_value is not None and args.residual_clip_value <= 0:
         parser.error("--residual-clip-value must be positive when provided.")
+    for name in ("short_residual_clip_value", "long_residual_clip_value"):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be positive when provided.")
     validate_batch_size_args(args, parser)
     try:
         resolve_wrapper_feature_flags(args)

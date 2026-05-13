@@ -28,6 +28,7 @@ from xgboost import XGBClassifier
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
+from physical_pass_model import residual_distance_threshold, resolved_residual_regularization_lambdas
 from project_config import (
     FEATURE_RUNS_DIR,
     SAVED_DIR,
@@ -1425,10 +1426,10 @@ def run_epoch(
 
                 target = get_label_slice(batch_labels, "success")
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
-                residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
+                short_residual_lambda, long_residual_lambda = resolved_residual_regularization_lambdas(args)
                 if (
                     args.task == "pass_success"
-                    and residual_lambda > 0
+                    and (short_residual_lambda > 0 or long_residual_lambda > 0)
                     and getattr(args, "use_physical_xpass", False)
                     and getattr(args, "model_variant", None)
                     in {"gat_phys_logit_offset", "gat_phys_logit_offset_regularized"}
@@ -1437,10 +1438,22 @@ def run_epoch(
                     if delta_gat is None:
                         raise ValueError("Residual regularization requested, but decoder did not expose latest_delta_gat.")
                     delta_observed = []
+                    distance_observed = []
                     for graph_index in index_range:
-                        delta_observed.append(delta_gat[batch == graph_index][intent[graph_index]])
-                    residual_l2 = torch.stack(delta_observed).pow(2).mean()
-                    pred_loss = pred_loss + residual_lambda * residual_l2
+                        graph_mask = batch == graph_index
+                        target_index = intent[graph_index]
+                        delta_observed.append(delta_gat[graph_mask][target_index])
+                        distance_observed.append(batch_graphs.x[graph_mask][target_index, config.NODE_FEATURE_POSS_DIST])
+                    delta_observed = torch.stack(delta_observed)
+                    distance_observed = torch.stack(distance_observed).to(device=delta_observed.device, dtype=delta_observed.dtype)
+                    residual_l2 = delta_observed.pow(2).mean()
+                    threshold = float(residual_distance_threshold(args))
+                    residual_lambdas = torch.where(
+                        distance_observed <= threshold,
+                        torch.full_like(distance_observed, float(short_residual_lambda)),
+                        torch.full_like(distance_observed, float(long_residual_lambda)),
+                    )
+                    pred_loss = pred_loss + (residual_lambdas * delta_observed.pow(2)).mean()
                     metrics.setdefault("residual_l2", 0)
                     metrics["residual_l2"] += residual_l2.item() * batch_graphs.num_graphs
 

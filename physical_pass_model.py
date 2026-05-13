@@ -23,6 +23,7 @@ PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE}
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
+DEFAULT_RESIDUAL_DISTANCE_THRESHOLD = 30.0
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
 PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX = "package_max"
@@ -231,18 +232,54 @@ def model_uses_physical_xpass(args: Any) -> bool:
     return task == "pass_success" and physical_xpass_enabled(args) and physical_xpass_model_variant(args) in PHYSICAL_XPASS_VARIANTS
 
 
+def residual_distance_threshold(args: Any) -> float:
+    return float(_get_arg(args, "residual_distance_threshold", DEFAULT_RESIDUAL_DISTANCE_THRESHOLD))
+
+
+def resolved_residual_regularization_lambdas(args: Any) -> tuple[float, float]:
+    base = float(_get_arg(args, "residual_regularization_lambda", 0.0) or 0.0)
+    short_value = _get_arg(args, "short_residual_regularization_lambda", None)
+    long_value = _get_arg(args, "long_residual_regularization_lambda", None)
+    short_lambda = base if short_value is None else float(short_value)
+    long_lambda = base if long_value is None else float(long_value)
+    return short_lambda, long_lambda
+
+
+def resolved_residual_clip_values(args: Any) -> tuple[float | None, float | None]:
+    base = _get_arg(args, "residual_clip_value", None)
+    short_value = _get_arg(args, "short_residual_clip_value", None)
+    long_value = _get_arg(args, "long_residual_clip_value", None)
+    short_clip = base if short_value is None else short_value
+    long_clip = base if long_value is None else long_value
+    return (
+        None if short_clip is None else float(short_clip),
+        None if long_clip is None else float(long_clip),
+    )
+
+
 def validate_physical_xpass_args(args: Any) -> None:
     variant = physical_xpass_model_variant(args)
     eps = float(_get_arg(args, "physical_eps", 1e-4))
     residual_clip_value = _get_arg(args, "residual_clip_value", None)
     residual_regularization_lambda = float(_get_arg(args, "residual_regularization_lambda", 0.0) or 0.0)
+    distance_threshold = residual_distance_threshold(args)
 
     if not (0.0 < eps < 0.5):
         raise ValueError(f"--physical-eps must be between 0 and 0.5, got {eps}.")
+    if distance_threshold <= 0:
+        raise ValueError("--residual-distance-threshold must be positive.")
     if residual_regularization_lambda < 0:
         raise ValueError("--residual-regularization-lambda must be non-negative.")
+    for name in ("short_residual_regularization_lambda", "long_residual_regularization_lambda"):
+        value = _get_arg(args, name, None)
+        if value is not None and float(value) < 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be non-negative.")
     if residual_clip_value is not None and float(residual_clip_value) <= 0:
         raise ValueError("--residual-clip-value must be positive when provided.")
+    for name in ("short_residual_clip_value", "long_residual_clip_value"):
+        value = _get_arg(args, name, None)
+        if value is not None and float(value) <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive when provided.")
     if _get_arg(args, "physical_xpass_speed_aggregation", None) is not None or _get_arg(args, "speed_aggregation", None) is not None:
         physical_xpass_speed_aggregation(args)
     if physical_xpass_enabled(args) and _get_arg(args, "task", None) != "pass_success":

@@ -184,6 +184,36 @@ parser.add_argument(
     default=None,
     help="Optional tanh bound c for delta_gat = c * tanh(raw_delta / c).",
 )
+parser.add_argument(
+    "--residual-distance-threshold",
+    type=float,
+    default=30.0,
+    help="Passer-target distance threshold separating short and long residual controls.",
+)
+parser.add_argument(
+    "--short-residual-regularization-lambda",
+    type=float,
+    default=None,
+    help="Optional short-pass override for residual L2 regularization.",
+)
+parser.add_argument(
+    "--long-residual-regularization-lambda",
+    type=float,
+    default=None,
+    help="Optional long-pass override for residual L2 regularization.",
+)
+parser.add_argument(
+    "--short-residual-clip-value",
+    type=float,
+    default=None,
+    help="Optional short-pass override for residual tanh clipping.",
+)
+parser.add_argument(
+    "--long-residual-clip-value",
+    type=float,
+    default=None,
+    help="Optional long-pass override for residual tanh clipping.",
+)
 parser.add_argument("--filter_blockers", action="store_true", default=False, help="only include potential blockers")
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
@@ -629,6 +659,11 @@ if __name__ == "__main__":
             "learn_physical_scale": bool(args.learn_physical_scale),
             "residual_regularization_lambda": float(args.residual_regularization_lambda or 0.0),
             "residual_clip_value": args.residual_clip_value,
+            "residual_distance_threshold": float(args.residual_distance_threshold),
+            "short_residual_regularization_lambda": args.short_residual_regularization_lambda,
+            "long_residual_regularization_lambda": args.long_residual_regularization_lambda,
+            "short_residual_clip_value": args.short_residual_clip_value,
+            "long_residual_clip_value": args.long_residual_clip_value,
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,

@@ -966,6 +966,9 @@ Physical flags:
 - `--learn-physical-scale` / `--fixed-physical-scale`: learn `beta1` or freeze it at `1.0`; default is learned.
 - `--residual-regularization-lambda`: optional L2 penalty on the observed-target residual `delta_gat`.
 - `--residual-clip-value`: optional tanh bound, `delta_gat = c * tanh(raw_delta / c)`.
+- `--residual-distance-threshold 30.0`: distance cutoff for distance-specific residual controls; short passes are `NODE_FEATURE_POSS_DIST <= threshold`, long passes are `> threshold`.
+- `--short-residual-regularization-lambda` / `--long-residual-regularization-lambda`: optional short/long overrides for residual L2. Unset values fall back to `--residual-regularization-lambda`.
+- `--short-residual-clip-value` / `--long-residual-clip-value`: optional short/long overrides for residual clipping. Unset values fall back to `--residual-clip-value`.
 
 The physical simulation uses AS/DAS-default normalization (`normalize=True` here), then the loader clamps before `logit`. `accessible-space` notes that probabilities/possibilities are not always perfectly normalized because normalization is numerically difficult across players and the ball trajectory. Requesting normalization reduces that issue; clipping then prevents infinite logits from exact 0 or 1 values.
 
@@ -986,9 +989,15 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 # Offset + residual clipping
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --residual-clip-value 2.0
+
+# Offset + stronger short-pass L2 than long-pass L2
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --short-residual-regularization-lambda 0.02 --long-residual-regularization-lambda 0.002
+
+# Offset + tighter short-pass clipping than long-pass clipping
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass --model-variant gat_phys_logit_offset_regularized --short-residual-clip-value 1.0 --long-residual-clip-value 3.0
 ```
 
-Tuning L2/clipping as ablations means training otherwise comparable runs where only the residual constraint changes. Start with no L2 and no clipping (`residual_regularization_lambda=0.0`, `residual_clip_value=None`) to see the clean offset effect, then test whether constraining the residual improves calibration or hypothetical-pass maps.
+Tuning L2/clipping as ablations means training otherwise comparable runs where only the residual constraint changes. Start with no L2 and no clipping (`residual_regularization_lambda=0.0`, `residual_clip_value=None`) to see the clean offset effect, then test whether constraining the residual improves calibration or hypothetical-pass maps. Distance-specific settings are useful when you want the model to stay close to physical xPass on short passes but allow larger GAT corrections on long passes.
 
 `include_out=True` is not supported initially because `player_cum_prob` is player-indexed and has no natural out-of-play node. IPW remains active when configured: the final observed-target BCE is still weighted by `batch_ipw`.
 
@@ -1122,6 +1131,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--learn-physical-scale` / `--fixed-physical-scale`: learn or freeze `beta1`. Default: learned.
 - `--residual-regularization-lambda <value>`: optional observed-target residual L2. Default: `0.0`.
 - `--residual-clip-value <value>`: optional residual clipping bound. Default: unset.
+- `--residual-distance-threshold <meters>`: short/long residual cutoff. Default: `30.0`; short is `<= threshold`, long is `> threshold`.
+- `--short-residual-regularization-lambda <value>` / `--long-residual-regularization-lambda <value>`: optional short/long L2 overrides.
+- `--short-residual-clip-value <value>` / `--long-residual-clip-value <value>`: optional short/long clipping overrides.
 - `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
 
 ### `scripts/evaluate_relevant_models.py`
