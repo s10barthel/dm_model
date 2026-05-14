@@ -1233,6 +1233,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 - `--input-dir <path>`: SkillCorner data root. Default: `skillcorner_data`.
 - `--match-id <id>`: restrict inference to one or more specific SkillCorner match ids. Default: all discoverable valid matches.
+- `--frames-first-and-last`: restrict inference to first and last frame of a ball possession
 - `--limit <N>`: process only the first `N` selected matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
