@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import math
 import json
+import os
 import warnings
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +81,7 @@ def physical_xpass_as_default_metadata(
     teammate_policy: str = PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
     *,
     speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    max_speed: int | None = None,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -86,17 +89,19 @@ def physical_xpass_as_default_metadata(
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
         )
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
+    v0_values = as_default_v0_values(max_speed=max_speed)
     return {
         "metric": "max_player_cum_prob",
         "source": PHYSICAL_XPASS_SOURCE,
         "teammate_policy": teammate_policy,
         "speed_aggregation": speed_aggregation,
+        "max_speed": None if max_speed is None else int(max_speed),
         "coordinate_system": "centered_pitch",
         "n_angles": AS_DEFAULT_N_ANGLES,
         "phi_offset": AS_DEFAULT_PHI_OFFSET,
-        "n_v0": AS_DEFAULT_N_V0,
+        "n_v0": int(v0_values.shape[0]),
         "v0_min": AS_DEFAULT_V0_MIN,
-        "v0_max": AS_DEFAULT_V0_MAX,
+        "v0_max": float(v0_values[-1]),
         "pass_start_location_offset": AS_DEFAULT_PASS_START_LOCATION_OFFSET,
         "time_offset_ball": AS_DEFAULT_TIME_OFFSET_BALL,
         "radial_gridsize": AS_DEFAULT_RADIAL_GRIDSIZE,
@@ -122,6 +127,17 @@ def physical_xpass_as_default_metadata(
         "respect_offside": AS_DEFAULT_RESPECT_OFFSIDE,
         "exclude_passer": teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
     }
+
+
+def as_default_v0_values(max_speed: int | None = None) -> np.ndarray:
+    values = np.linspace(AS_DEFAULT_V0_MIN, AS_DEFAULT_V0_MAX, AS_DEFAULT_N_V0, dtype=float)
+    if max_speed is None:
+        return values
+    max_speed = int(max_speed)
+    values = values[values <= float(max_speed)]
+    if values.size == 0:
+        raise ValueError(f"--max-speed must be at least {AS_DEFAULT_V0_MIN:g} m/s.")
+    return values
 
 
 def normalize_physical_xpass_speed_aggregation(value: str | None) -> str:
@@ -768,6 +784,7 @@ def _compute_as_default_max_from_simulation_inputs(
     use_progress_bar: bool,
     chunk_size: int,
     speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    max_speed: int | None = None,
 ) -> pd.Series:
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     result = pd.Series(np.nan, index=node_ids, dtype=float)
@@ -785,7 +802,7 @@ def _compute_as_default_max_from_simulation_inputs(
         frame_count,
         axis=0,
     )
-    v0_values = np.linspace(AS_DEFAULT_V0_MIN, AS_DEFAULT_V0_MAX, AS_DEFAULT_N_V0, dtype=float)
+    v0_values = as_default_v0_values(max_speed=max_speed)
     passer_teams = np.repeat("attack", frame_count).astype(object)
     passers = np.repeat(node_ids[possessor_index], frame_count).astype(object)
     _validate_simulation_contract(players=players, passers=passers, exclude_passer=exclude_passer)
@@ -858,6 +875,7 @@ def compute_graph_max_player_cum_prob_as_defaults(
     eps: float = 1e-4,
     consider_teammates: bool = False,
     speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    max_speed: int | None = None,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -905,6 +923,7 @@ def compute_graph_max_player_cum_prob_as_defaults(
         use_progress_bar=use_progress_bar,
         chunk_size=chunk_size,
         speed_aggregation=speed_aggregation,
+        max_speed=max_speed,
     )
 
 
@@ -914,6 +933,7 @@ def compute_graphs_max_player_cum_prob_as_defaults(
     eps: float = 1e-4,
     consider_teammates: bool = False,
     speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    max_speed: int | None = None,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -927,6 +947,7 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                 eps=eps,
                 consider_teammates=False,
                 speed_aggregation=speed_aggregation,
+                max_speed=max_speed,
                 simulate_passes_fn=simulate_passes_fn,
                 use_progress_bar=use_progress_bar,
                 chunk_size=chunk_size,
@@ -1000,7 +1021,7 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                     target_index_lookup[target_key] = (frame_index, int(sim_index))
                     target_keys[target_key] = (int(item["graph_index"]), int(graph_target_index))
 
-            v0_values = np.linspace(AS_DEFAULT_V0_MIN, AS_DEFAULT_V0_MAX, AS_DEFAULT_N_V0, dtype=float)
+            v0_values = as_default_v0_values(max_speed=max_speed)
             if speed_aggregation == PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX:
                 simulation_results = [
                     simulate_passes_fn(
@@ -1248,6 +1269,407 @@ def load_physical_xpass_component(
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
     series.name = "max_player_cum_prob"
     return series
+
+
+def resolve_physical_num_workers(value: str | int) -> int:
+    if isinstance(value, int):
+        workers = value
+    else:
+        text = str(value).strip().lower()
+        if text == "auto":
+            cpu_count = os.cpu_count() or 1
+            workers = max(1, min(6, cpu_count - 2))
+        else:
+            workers = int(text)
+    if workers < 1:
+        raise ValueError("--physical-num-workers must be a positive integer or 'auto'.")
+    return workers
+
+
+def configure_physical_worker_thread_limit(limit: int) -> None:
+    value = str(int(limit))
+    os.environ["OMP_NUM_THREADS"] = value
+    os.environ["MKL_NUM_THREADS"] = value
+    os.environ["NUMEXPR_NUM_THREADS"] = value
+
+
+def _runtime_cache_metadata(
+    *,
+    source: str,
+    teammate_policy: str,
+    speed_aggregation: str,
+) -> dict[str, Any]:
+    if source == PHYSICAL_XPASS_SOURCE:
+        return physical_xpass_as_default_metadata(
+            teammate_policy,
+            speed_aggregation=speed_aggregation,
+        )
+    if source == PHYSICAL_XPASS_LEGACY_SOURCE:
+        return {
+            "metric": "player_cum_prob",
+            "source": PHYSICAL_XPASS_LEGACY_SOURCE,
+            "teammate_policy": teammate_policy,
+            "speed_aggregation": normalize_physical_xpass_speed_aggregation(speed_aggregation),
+            "storage": "wide_parquet_one_row_per_action_player_id_columns",
+        }
+    raise ValueError(f"Unsupported physical_xpass_source={source!r}.")
+
+
+def _ensure_runtime_physical_xpass_cache(
+    cache_dir: str | Path,
+    *,
+    source: str,
+    teammate_policy: str,
+    speed_aggregation: str,
+) -> dict[str, Any]:
+    cache_root = Path(cache_dir)
+    metadata_path = cache_root / "metadata.json"
+    expected_metadata = _runtime_cache_metadata(
+        source=source,
+        teammate_policy=teammate_policy,
+        speed_aggregation=speed_aggregation,
+    )
+    if metadata_path.exists():
+        metadata = validate_physical_xpass_cache_metadata(
+            cache_root,
+            expected_source=source,
+            expected_speed_aggregation=speed_aggregation,
+        )
+        actual_policy = metadata.get("teammate_policy")
+        if actual_policy is not None and actual_policy != teammate_policy:
+            raise ValueError(
+                f"Physical xPass sidecars at {cache_root} use incompatible teammate_policy "
+                f"{actual_policy!r}; expected {teammate_policy!r}."
+            )
+        return metadata
+
+    (cache_root / "matches").mkdir(parents=True, exist_ok=True)
+    metadata = {
+        **expected_metadata,
+        "created_for": "runtime_physical_xpass_cache",
+        "storage": "wide_parquet_one_row_per_action_player_id_columns",
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    return metadata
+
+
+def _write_runtime_physical_xpass_rows(
+    cache_dir: str | Path,
+    match_id: str,
+    rows: pd.DataFrame,
+) -> Path:
+    cache_root = Path(cache_dir)
+    output_path = cache_root / "matches" / f"{match_id}.parquet"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.exists():
+        existing = pd.read_parquet(output_path)
+        if "action_index" in existing.columns:
+            rows = pd.concat(
+                [
+                    existing.loc[~existing["action_index"].astype(int).isin(rows["action_index"].astype(int))],
+                    rows,
+                ],
+                ignore_index=True,
+                sort=False,
+            )
+    rows = rows.sort_values("action_index").reset_index(drop=True)
+    tmp_path = output_path.with_name(f".{output_path.stem}.tmp.parquet")
+    rows.to_parquet(tmp_path, index=False)
+    tmp_path.replace(output_path)
+    return output_path
+
+
+def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
+    return {
+        "cache_dir": str(Path(cache_dir)),
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_written": 0,
+        "hash_mismatch_recomputed": 0,
+        "online_graphs": 0,
+        "cache_disabled": False,
+        "num_workers": 1,
+        "worker_thread_limit": None,
+        "physical_batch_size": 16,
+        "matches": {},
+    }
+
+
+def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[str, object]) -> dict[str, object]:
+    for key in ["cache_hits", "cache_misses", "cache_written", "hash_mismatch_recomputed", "online_graphs"]:
+        target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+    target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
+    target["cache_disabled"] = bool(target.get("cache_disabled", False)) or bool(source.get("cache_disabled", False))
+    target["num_workers"] = source.get("num_workers", target.get("num_workers"))
+    target["worker_thread_limit"] = source.get("worker_thread_limit", target.get("worker_thread_limit"))
+    target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
+    target_matches = target.setdefault("matches", {})
+    source_matches = source.get("matches", {})
+    if isinstance(target_matches, dict) and isinstance(source_matches, dict):
+        for match_id, match_stats in source_matches.items():
+            current = target_matches.setdefault(str(match_id), {})
+            if isinstance(current, dict) and isinstance(match_stats, dict):
+                for key in ["cache_hits", "cache_misses", "cache_written", "hash_mismatch_recomputed", "online_graphs"]:
+                    current[key] = int(current.get(key, 0)) + int(match_stats.get(key, 0))
+    return target
+
+
+def _chunk_items(items: list[dict[str, Any]], chunks: int) -> list[list[dict[str, Any]]]:
+    if not items:
+        return []
+    chunks = max(1, min(int(chunks), len(items)))
+    chunk_size = int(math.ceil(len(items) / chunks))
+    return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, object]:
+    misses = list(task["misses"])
+    source = str(task["source"])
+    eps = float(task["eps"])
+    teammate_policy = str(task["teammate_policy"])
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(task.get("speed_aggregation"))
+    physical_batch_size = int(task.get("physical_batch_size", 16))
+    consider_teammates = teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+
+    if source == PHYSICAL_XPASS_SOURCE:
+        computed_probs = compute_graphs_max_player_cum_prob_as_defaults(
+            [item["graph"] for item in misses],
+            eps=eps,
+            consider_teammates=consider_teammates,
+            speed_aggregation=speed_aggregation,
+            batch_size=physical_batch_size,
+        )
+    else:
+        computed_probs = [
+            compute_graph_physical_xpass_for_source(
+                item["graph"],
+                source=source,
+                eps=eps,
+                teammate_policy=teammate_policy,
+                speed_aggregation=speed_aggregation,
+            )
+            for item in misses
+        ]
+
+    if len(computed_probs) != len(misses):
+        raise ValueError(f"Physical xPass runtime worker returned {len(computed_probs)} rows for {len(misses)} misses.")
+
+    rows = []
+    for item, probs in zip(misses, computed_probs):
+        row = {
+            "match_id": str(item["match_id"]),
+            "action_index": int(item["action_index"]),
+            "physical_state_hash": str(item["physical_state_hash"]),
+        }
+        row.update({str(player_id): float(value) for player_id, value in probs.items()})
+        rows.append(row)
+    return {"rows": rows, "computed": len(rows)}
+
+
+def prewarm_physical_xpass_runtime_cache(
+    items: list[dict[str, Any]],
+    *,
+    cache_dir: str | Path,
+    source: str,
+    eps: float = 1e-4,
+    teammate_policy: str | None = None,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    refresh: bool = False,
+    num_workers: str | int = "auto",
+    worker_thread_limit: int = 1,
+    physical_batch_size: int = 16,
+) -> dict[str, object]:
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
+    teammate_policy = teammate_policy or (
+        PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+        if source == PHYSICAL_XPASS_LEGACY_SOURCE
+        else PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    )
+    if int(worker_thread_limit) < 1:
+        raise ValueError("--physical-worker-thread-limit must be positive.")
+    if int(physical_batch_size) < 1:
+        raise ValueError("--physical-batch-size must be positive.")
+
+    resolved_workers = resolve_physical_num_workers(num_workers)
+    _ensure_runtime_physical_xpass_cache(
+        cache_dir,
+        source=source,
+        teammate_policy=teammate_policy,
+        speed_aggregation=speed_aggregation,
+    )
+
+    stats = _runtime_physical_xpass_stats(cache_dir)
+    stats["num_workers"] = int(resolved_workers)
+    stats["worker_thread_limit"] = int(worker_thread_limit)
+    stats["physical_batch_size"] = int(physical_batch_size)
+    match_stats_by_id: dict[str, dict[str, int]] = {}
+    misses: list[dict[str, Any]] = []
+    seen_miss_keys: set[tuple[str, int]] = set()
+    cache_by_match: dict[str, pd.DataFrame | None] = {}
+
+    for item in items:
+        match_id = str(item["match_id"])
+        graphs = list(item.get("graphs") or [])
+        labels = item.get("labels")
+        if labels is None or len(graphs) == 0:
+            continue
+        if not isinstance(labels, torch.Tensor):
+            labels = torch.as_tensor(labels, dtype=torch.float32)
+        if len(graphs) != int(labels.shape[0]):
+            raise ValueError(f"Runtime physical xPass item for {match_id} has {len(graphs)} graphs and {int(labels.shape[0])} labels.")
+
+        if match_id not in cache_by_match:
+            try:
+                cache_by_match[match_id] = load_physical_xpass_match(cache_dir, match_id)
+            except FileNotFoundError:
+                cache_by_match[match_id] = None
+        cached_rows = cache_by_match[match_id]
+        match_stats = match_stats_by_id.setdefault(
+            match_id,
+            {
+                "cache_hits": 0,
+                "cache_misses": 0,
+                "cache_written": 0,
+                "hash_mismatch_recomputed": 0,
+                "online_graphs": 0,
+            },
+        )
+
+        for graph, label in zip(graphs, labels):
+            action_index = int(label[LABEL_INDEX["action_index"]].item())
+            state_hash = physical_state_hash(graph)
+            if not refresh and cached_rows is not None and action_index in cached_rows.index:
+                cached_row = cached_rows.loc[action_index]
+                cached_hash = cached_row.get("physical_state_hash", None)
+                if pd.notna(cached_hash) and str(cached_hash) == state_hash:
+                    stats["cache_hits"] = int(stats["cache_hits"]) + 1
+                    match_stats["cache_hits"] += 1
+                    continue
+                if pd.notna(cached_hash):
+                    stats["hash_mismatch_recomputed"] = int(stats["hash_mismatch_recomputed"]) + 1
+                    match_stats["hash_mismatch_recomputed"] += 1
+
+            stats["cache_misses"] = int(stats["cache_misses"]) + 1
+            match_stats["cache_misses"] += 1
+            miss_key = (match_id, action_index)
+            if miss_key in seen_miss_keys:
+                continue
+            seen_miss_keys.add(miss_key)
+            misses.append(
+                {
+                    "match_id": match_id,
+                    "action_index": action_index,
+                    "physical_state_hash": state_hash,
+                    "graph": graph,
+                }
+            )
+
+    if misses:
+        worker_count = min(int(resolved_workers), len(misses))
+        task_template = {
+            "source": source,
+            "eps": float(eps),
+            "teammate_policy": teammate_policy,
+            "speed_aggregation": speed_aggregation,
+            "physical_batch_size": int(physical_batch_size),
+        }
+        rows: list[dict[str, Any]] = []
+        if worker_count == 1:
+            for chunk in _chunk_items(misses, 1):
+                result = _compute_runtime_physical_xpass_chunk({**task_template, "misses": chunk})
+                rows.extend(result["rows"])
+        else:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                initializer=configure_physical_worker_thread_limit,
+                initargs=(int(worker_thread_limit),),
+            ) as executor:
+                futures = [
+                    executor.submit(_compute_runtime_physical_xpass_chunk, {**task_template, "misses": chunk})
+                    for chunk in _chunk_items(misses, worker_count)
+                ]
+                for future in as_completed(futures):
+                    result = future.result()
+                    rows.extend(result["rows"])
+
+        rows_by_match: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            rows_by_match.setdefault(str(row["match_id"]), []).append(row)
+        for match_id, match_rows in rows_by_match.items():
+            frame = pd.DataFrame(match_rows)
+            frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+            _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
+            written = int(len(frame))
+            stats["cache_written"] = int(stats["cache_written"]) + written
+            stats["online_graphs"] = int(stats["online_graphs"]) + written
+            match_stats = match_stats_by_id.setdefault(
+                match_id,
+                {
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "cache_written": 0,
+                    "hash_mismatch_recomputed": 0,
+                    "online_graphs": 0,
+                },
+            )
+            match_stats["cache_written"] += written
+            match_stats["online_graphs"] += written
+
+    stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
+    return stats
+
+
+def attach_physical_xpass_cached_online_to_graphs(
+    graphs: list[Data],
+    labels: torch.Tensor,
+    *,
+    cache_dir: str | Path,
+    match_id: str,
+    source: str,
+    eps: float = 1e-4,
+    floor: float | None = None,
+    teammate_policy: str | None = None,
+    speed_aggregation: str | None = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    refresh: bool = False,
+    num_workers: str | int = 1,
+    worker_thread_limit: int = 1,
+    physical_batch_size: int = 16,
+    require_observed_target: bool = False,
+) -> tuple[list[Data], dict[str, object]]:
+    speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
+    teammate_policy = teammate_policy or (
+        PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+        if source == PHYSICAL_XPASS_LEGACY_SOURCE
+        else PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    )
+    stats = prewarm_physical_xpass_runtime_cache(
+        [{"match_id": match_id, "graphs": graphs, "labels": labels}],
+        cache_dir=cache_dir,
+        source=source,
+        eps=eps,
+        teammate_policy=teammate_policy,
+        speed_aggregation=speed_aggregation,
+        refresh=refresh,
+        num_workers=num_workers,
+        worker_thread_limit=worker_thread_limit,
+        physical_batch_size=physical_batch_size,
+    )
+    physical_rows = load_physical_xpass_match(cache_dir, match_id)
+    attached: list[Data] = []
+    for graph, label in zip(graphs, labels):
+        attached.append(
+            attach_physical_xpass_to_graph(
+                graph,
+                label,
+                physical_rows,
+                match_id=match_id,
+                eps=eps,
+                floor=floor,
+                require_observed_target=require_observed_target,
+            )
+        )
+    return attached, stats
 
 
 def attach_physical_xpass_to_graph(

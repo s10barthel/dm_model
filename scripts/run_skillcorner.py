@@ -23,10 +23,19 @@ from datatools.skillcorner import (
     summarize_skillcorner_stats,
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
+from physical_pass_model import (
+    model_uses_physical_xpass,
+    physical_xpass_source,
+    physical_xpass_speed_aggregation,
+    physical_xpass_teammate_policy,
+    prewarm_physical_xpass_runtime_cache,
+    resolve_physical_num_workers,
+)
 from project_config import (
     PROJECT_ROOT,
     SKILLCORNER_COMPONENT_RUNS_DIR,
     generate_run_id,
+    get_runtime_physical_xpass_dir,
     write_latest_run,
     write_run_metadata,
 )
@@ -48,6 +57,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass sidecar directory override.")
+    parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
+    parser.add_argument("--refresh-physical-cache", action="store_true", help="Recompute selected runtime physical xPass rows and overwrite cache entries.")
+    parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
+    parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
+    parser.add_argument("--physical-batch-size", type=int, default=16)
     frame_group = parser.add_mutually_exclusive_group()
     frame_group.add_argument(
         "--frames-first-and-last",
@@ -64,7 +79,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         const="all",
         help="Process every valid frame per possession.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    try:
+        resolve_physical_num_workers(args.physical_num_workers)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.physical_worker_thread_limit < 1:
+        parser.error("--physical-worker-thread-limit must be positive.")
+    if args.physical_batch_size < 1:
+        parser.error("--physical-batch-size must be positive.")
+    return args
 
 
 def _save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
@@ -74,6 +98,45 @@ def _save_component_table(frame: pd.DataFrame, output_path: Path) -> None:
 
 def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _pass_success_uses_physical_xpass(model_specs: dict[str, object]) -> bool:
+    model = model_specs.get("pass_success")
+    return model is not None and model_uses_physical_xpass(model.args)
+
+
+def _prewarm_skillcorner_physical_xpass(
+    possessions: list[object],
+    model_specs: dict[str, object],
+    *,
+    cache_dir: str,
+    num_workers: str | int,
+    worker_thread_limit: int,
+    physical_batch_size: int,
+) -> dict[str, object] | None:
+    model = model_specs.get("pass_success")
+    if model is None or not model_uses_physical_xpass(model.args):
+        return None
+    items = [
+        {"match_id": str(possession.match_id), "graphs": possession.graph_features_0, "labels": possession.labels}
+        for possession in possessions
+        if possession.labels.numel() > 0 and possession.graph_features_0
+    ]
+    if not items:
+        return None
+    source = physical_xpass_source(model.args)
+    return prewarm_physical_xpass_runtime_cache(
+        items,
+        cache_dir=cache_dir,
+        source=source,
+        eps=float(model.args.get("physical_eps", 1e-4)),
+        teammate_policy=physical_xpass_teammate_policy(model.args, source=source),
+        speed_aggregation=physical_xpass_speed_aggregation(model.args),
+        refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
+        num_workers=num_workers,
+        worker_thread_limit=int(worker_thread_limit),
+        physical_batch_size=int(physical_batch_size),
+    )
 
 
 def format_remaining_games(count: int) -> str:
@@ -160,6 +223,21 @@ def main() -> None:
         outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],
         device=device,
     )
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("skillcorner"))
+    physical_num_workers = getattr(args, "physical_num_workers", "auto")
+    physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
+    physical_batch_size = int(getattr(args, "physical_batch_size", 16))
+    pass_success_model = model_specs.get("pass_success")
+    if pass_success_model is not None and bool(pass_success_model.args.get("use_physical_xpass", False)):
+        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_model.args["physical_runtime_cache_refresh"] = refresh_physical_cache
+        pass_success_model.args["physical_num_workers"] = physical_num_workers
+        pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
+        pass_success_model.args["physical_batch_size"] = physical_batch_size
+        if not no_physical_cache:
+            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
@@ -168,6 +246,7 @@ def main() -> None:
     skipped_match_errors: list[dict[str, str]] = []
     skipped_possessions: dict[str, list[dict[str, str]]] = {}
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
 
     for index, match_id in enumerate(selected_match_ids, start=1):
         print(format_match_progress(index, len(selected_match_ids), str(match_id)))
@@ -195,6 +274,7 @@ def main() -> None:
                 "skipped_missing_graph": 0,
             }
 
+            built_possessions: list[tuple[int, int, object]] = []
             for possession_number, event_index in enumerate(event_indices, start=1):
                 print(format_possession_progress(str(match_id), possession_number, total_possessions))
                 try:
@@ -236,6 +316,58 @@ def main() -> None:
                         )
                         continue
 
+                    built_possessions.append((possession_number, int(event_index), possession))
+                except Exception as exc:
+                    error_summary = summarize_exception(exc)
+                    skipped_possessions.setdefault(str(match_id), []).append(
+                        {"event_index": str(event_index), "error": error_summary}
+                    )
+                    match_stats["skipped_possessions"] += 1
+                    print(
+                        format_possession_skip(
+                            str(match_id),
+                            possession_number,
+                            total_possessions,
+                            event_index,
+                            error_summary,
+                        )
+                    )
+
+            if built_possessions and not no_physical_cache and _pass_success_uses_physical_xpass(model_specs):
+                try:
+                    prewarm_stats = _prewarm_skillcorner_physical_xpass(
+                        [possession for _, _, possession in built_possessions],
+                        model_specs,
+                        cache_dir=physical_cache_dir,
+                        num_workers=physical_num_workers,
+                        worker_thread_limit=physical_worker_thread_limit,
+                        physical_batch_size=physical_batch_size,
+                    )
+                    if prewarm_stats:
+                        physical_xpass_prewarm_stats[str(match_id)] = prewarm_stats
+                    pass_success_model = model_specs.get("pass_success")
+                    if pass_success_model is not None:
+                        pass_success_model.args["physical_runtime_cache_refresh"] = False
+                except Exception as exc:
+                    error_summary = summarize_exception(exc)
+                    for possession_number, event_index, _possession in built_possessions:
+                        skipped_possessions.setdefault(str(match_id), []).append(
+                            {"event_index": str(event_index), "error": error_summary}
+                        )
+                        match_stats["skipped_possessions"] += 1
+                        print(
+                            format_possession_skip(
+                                str(match_id),
+                                possession_number,
+                                total_possessions,
+                                event_index,
+                                error_summary,
+                            )
+                        )
+                    built_possessions = []
+
+            for possession_number, event_index, possession in built_possessions:
+                try:
                     components = infer_skillcorner_components(possession, model_specs, device=device)
                     runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
                     if runtime_physical_stats:
@@ -300,6 +432,12 @@ def main() -> None:
         "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
         "source_return_types": shared_context.get("source_return_types", {}),
         "source_target_families": shared_context.get("source_target_families", {}),
+        "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_cache_disabled": no_physical_cache,
+        "refresh_physical_cache": refresh_physical_cache,
+        "physical_num_workers": physical_num_workers,
+        "physical_worker_thread_limit": physical_worker_thread_limit,
+        "physical_batch_size": physical_batch_size,
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
         "frames_mode": args.frames_mode,
@@ -307,6 +445,7 @@ def main() -> None:
         "skipped_match_errors": skipped_match_errors,
         "skipped_possessions": skipped_possessions,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
         "models": resolved_model_ids,
         "model_records": model_records,
         "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},

@@ -170,10 +170,18 @@ class Decoder(nn.Module):
                 "gat_phys_logit_offset",
                 "gat_phys_logit_offset_regularized",
             }:
-                self.physical_beta0 = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+                freeze_beta0 = bool(args.get("freeze_beta0", False))
+                freeze_beta1 = args.get("freeze_beta1", None)
+                if freeze_beta1 is None:
+                    freeze_beta1 = not bool(args.get("learn_physical_scale", True))
+                freeze_beta1 = bool(freeze_beta1)
+                self.physical_beta0 = nn.Parameter(
+                    torch.tensor(0.0, dtype=torch.float32),
+                    requires_grad=not freeze_beta0,
+                )
                 self.physical_beta1 = nn.Parameter(
                     torch.tensor(1.0, dtype=torch.float32),
-                    requires_grad=bool(args.get("learn_physical_scale", True)),
+                    requires_grad=not freeze_beta1,
                 )
 
         elif args["gnn_task"] in ["graph_binary", "graph_multiclass", "graph_regression"]:

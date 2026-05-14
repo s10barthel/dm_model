@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import warnings
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -39,6 +40,8 @@ from physical_pass_model import (
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
     PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
     _validate_simulation_contract,
+    as_default_v0_values,
+    attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graph,
     compute_graphs_max_player_cum_prob_as_defaults,
@@ -49,10 +52,15 @@ from physical_pass_model import (
     load_physical_xpass_component,
     physical_state_hash,
     physical_xpass_as_default_metadata,
+    prewarm_physical_xpass_runtime_cache,
+    resolve_physical_num_workers,
     validate_physical_xpass_cache_metadata,
 )
 from scripts import compare_physical_xpass_speed_modes
 from scripts import generate_physical_xpass
+from scripts import run_benchmark
+from scripts import run_hawkeye
+from scripts import run_skillcorner
 from scripts import train_relevant_models as train_wrapper
 
 
@@ -141,6 +149,8 @@ def decoder_args(**overrides: object) -> dict[str, object]:
         "use_physical_xpass": True,
         "model_variant": "gat_phys_logit_offset",
         "learn_physical_scale": True,
+        "freeze_beta0": False,
+        "freeze_beta1": False,
         "physical_eps": 1e-4,
         "residual_clip_value": None,
         "residual_distance_threshold": 30.0,
@@ -206,6 +216,30 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(calls[0]["v0_grid"][0, 0]), AS_DEFAULT_V0_MIN)
         self.assertAlmostEqual(float(calls[0]["v0_grid"][0, -1]), AS_DEFAULT_V0_MAX)
 
+    def test_max_player_cum_prob_package_max_filters_speed_grid_by_max_speed(self) -> None:
+        calls = []
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            return FakeSimulationResult((1, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 4, 2, 0.72)])
+
+        graph = make_graph()
+        probs = compute_graph_max_player_cum_prob_as_defaults(
+            graph,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            max_speed=20,
+            simulate_passes_fn=fake_simulate_passes,
+        )
+        expected_speeds = as_default_v0_values(max_speed=20)
+
+        self.assertAlmostEqual(float(probs["home_2"]), 0.72)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["v0_grid"].shape, (1, len(expected_speeds)))
+        self.assertLessEqual(float(calls[0]["v0_grid"][0, -1]), 20.0)
+        np.testing.assert_allclose(calls[0]["v0_grid"][0], expected_speeds)
+
     def test_batched_consider_teammates_uses_one_package_call_for_compatible_graphs(self) -> None:
         calls = []
 
@@ -237,6 +271,30 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(probs[0]["home_2"]), 0.44)
         self.assertAlmostEqual(float(probs[1]["home_2"]), 0.66)
 
+    def test_batched_consider_teammates_filters_speed_grid_by_max_speed(self) -> None:
+        calls = []
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("home_2")
+            return FakeSimulationResult((2, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 0, 2, 0.44)])
+
+        probs = compute_graphs_max_player_cum_prob_as_defaults(
+            [make_graph(), make_graph()],
+            consider_teammates=True,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            max_speed=20,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+        )
+        expected_speeds = as_default_v0_values(max_speed=20)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["v0_grid"].shape, (2, len(expected_speeds)))
+        np.testing.assert_allclose(calls[0]["v0_grid"][0], expected_speeds)
+        self.assertAlmostEqual(float(probs[0]["home_2"]), 0.44)
+
     def test_batched_exact_mode_makes_one_call_per_speed(self) -> None:
         calls = []
 
@@ -260,6 +318,27 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(calls[0]["v0_grid"].shape, (2, 1))
         self.assertEqual(calls[0]["v0_prob_aggregation_mode"], "mean")
         self.assertAlmostEqual(float(probs[0]["home_2"]), 0.9)
+
+    def test_exact_mode_filters_speed_grid_by_max_speed(self) -> None:
+        calls = []
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            return FakeSimulationResult((1, len(players), AS_DEFAULT_N_ANGLES, 3), [(0, target_player_index, 0, 2, 0.5)])
+
+        compute_graph_max_player_cum_prob_as_defaults(
+            make_graph(),
+            max_speed=20,
+            simulate_passes_fn=fake_simulate_passes,
+        )
+        expected_speeds = as_default_v0_values(max_speed=20)
+
+        self.assertEqual(len(calls), len(expected_speeds))
+        self.assertEqual(calls[0]["v0_grid"].shape, (1, 1))
+        self.assertLessEqual(float(calls[-1]["v0_grid"][0, 0]), 20.0)
+        np.testing.assert_allclose([float(call["v0_grid"][0, 0]) for call in calls], expected_speeds)
 
     def test_max_player_cum_prob_consider_teammates_uses_all_players(self) -> None:
         captured = {}
@@ -706,7 +785,185 @@ class PhysicalXPassTests(unittest.TestCase):
         )
         self.assertEqual(model.args["physical_xpass_floor"], 0.2)
 
-    def test_inference_missing_synthetic_sidecar_computes_physical_xpass_online(self) -> None:
+    def test_runtime_physical_xpass_cache_computes_writes_then_reuses(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.73}, dtype=float)],
+            ) as compute:
+                attached, stats = attach_physical_xpass_cached_online_to_graphs(
+                    [make_graph()],
+                    labels,
+                    cache_dir=cache_dir,
+                    match_id="runtime_match",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                )
+
+            compute.assert_called_once()
+            self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.73)
+            self.assertEqual(stats["cache_hits"], 0)
+            self.assertEqual(stats["cache_misses"], 1)
+            self.assertEqual(stats["cache_written"], 1)
+            self.assertTrue((cache_dir / "metadata.json").exists())
+            self.assertTrue((cache_dir / "matches" / "runtime_match.parquet").exists())
+
+            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute_again:
+                attached_again, reuse_stats = attach_physical_xpass_cached_online_to_graphs(
+                    [make_graph()],
+                    labels,
+                    cache_dir=cache_dir,
+                    match_id="runtime_match",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                )
+
+            compute_again.assert_not_called()
+            self.assertAlmostEqual(float(getattr(attached_again[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.73)
+            self.assertEqual(reuse_stats["cache_hits"], 1)
+            self.assertEqual(reuse_stats["cache_misses"], 0)
+
+    def test_runtime_physical_xpass_cache_hash_mismatch_recomputes_and_replaces(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.41}, dtype=float)],
+            ):
+                attach_physical_xpass_cached_online_to_graphs(
+                    [make_graph()],
+                    labels,
+                    cache_dir=cache_dir,
+                    match_id="runtime_match",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                )
+
+            changed_graph = make_graph()
+            changed_graph.x[1, config.NODE_FEATURE_X] += 1.0
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.81}, dtype=float)],
+            ) as compute:
+                attached, stats = attach_physical_xpass_cached_online_to_graphs(
+                    [changed_graph],
+                    labels,
+                    cache_dir=cache_dir,
+                    match_id="runtime_match",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                )
+
+            compute.assert_called_once()
+            self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.81)
+            self.assertEqual(stats["hash_mismatch_recomputed"], 1)
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+            self.assertEqual(len(rows), 1)
+            self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.81)
+            self.assertEqual(str(rows.loc[5, "physical_state_hash"]), physical_state_hash(changed_graph))
+
+    def test_runtime_physical_xpass_cache_rejects_incompatible_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            (cache_dir / "metadata.json").write_text(
+                json.dumps({"source": PHYSICAL_XPASS_LEGACY_SOURCE}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "incompatible source"):
+                attach_physical_xpass_cached_online_to_graphs(
+                    [make_graph()],
+                    torch.stack([make_label(action_index=5)]),
+                    cache_dir=cache_dir,
+                    match_id="runtime_match",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                )
+
+    def test_runtime_physical_xpass_prewarm_detects_hits_and_misses(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.37}, dtype=float)],
+            ):
+                first_stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    physical_batch_size=4,
+                )
+            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute_again:
+                second_stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    physical_batch_size=4,
+                )
+
+        self.assertEqual(first_stats["cache_misses"], 1)
+        self.assertEqual(first_stats["cache_written"], 1)
+        self.assertEqual(first_stats["num_workers"], 1)
+        self.assertEqual(first_stats["physical_batch_size"], 4)
+        compute_again.assert_not_called()
+        self.assertEqual(second_stats["cache_hits"], 1)
+        self.assertEqual(second_stats["cache_misses"], 0)
+
+    def test_runtime_physical_xpass_prewarm_refresh_recomputes_cached_row_once(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.25}, dtype=float)],
+            ):
+                prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            with patch(
+                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                return_value=[pd.Series({"home_2": 0.92}, dtype=float)],
+            ) as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    refresh=True,
+                    num_workers=1,
+                )
+
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        compute.assert_called_once()
+        self.assertEqual(stats["cache_hits"], 0)
+        self.assertEqual(stats["cache_misses"], 1)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.92)
+
+    def test_inference_missing_synthetic_sidecar_uses_runtime_cache_when_enabled(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
         match = RuntimeState()
         match.match_id = "modification_50_game_state_2"
@@ -722,6 +979,49 @@ class PhysicalXPassTests(unittest.TestCase):
                 "physical_cache_dir": "missing_cache",
                 "physical_eps": 1e-4,
                 "physical_xpass_floor": 0.2,
+            }
+        )
+
+        cache_stats = {
+            "cache_dir": "missing_cache",
+            "cache_hits": 0,
+            "cache_misses": 1,
+            "cache_written": 1,
+            "hash_mismatch_recomputed": 0,
+            "online_graphs": 1,
+            "cache_disabled": False,
+        }
+        with patch.object(inference, "validate_physical_xpass_cache_metadata", side_effect=FileNotFoundError("missing")):
+            with patch.object(
+                inference,
+                "attach_physical_xpass_cached_online_to_graphs",
+                return_value=(graphs, cache_stats),
+            ) as cached_attach:
+                result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+
+        self.assertIs(result, graphs)
+        cached_attach.assert_called_once()
+        self.assertEqual(cached_attach.call_args.kwargs["floor"], 0.2)
+        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["cache_misses"], 1)
+        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["cache_written"], 1)
+
+    def test_inference_missing_synthetic_sidecar_computes_physical_xpass_online_when_cache_disabled(self) -> None:
+        RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
+        match = RuntimeState()
+        match.match_id = "modification_50_game_state_2"
+        graphs = [make_graph()]
+        labels = torch.stack([make_label(action_index=0)])
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "model_id": "pass_success/fake",
+                "use_physical_xpass": True,
+                "model_variant": "gat_phys_logit_offset",
+                "physical_xpass_source": PHYSICAL_XPASS_LEGACY_SOURCE,
+                "physical_cache_dir": "missing_cache",
+                "physical_eps": 1e-4,
+                "physical_xpass_floor": 0.2,
+                "physical_runtime_cache_disabled": True,
             }
         )
 
@@ -836,6 +1136,61 @@ class PhysicalXPassTests(unittest.TestCase):
                     speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
                     physical_eps=1e-4,
                 )
+
+    def test_generate_physical_xpass_reuse_cache_validation_rejects_max_speed_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                max_speed=20,
+            )
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "max_speed"):
+                generate_physical_xpass.validate_reuse_cache_dir(
+                    cache_dir,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    max_speed=18,
+                    physical_eps=1e-4,
+                )
+
+    def test_physical_xpass_metadata_records_max_speed_effective_grid(self) -> None:
+        metadata = physical_xpass_as_default_metadata(
+            PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            max_speed=20,
+        )
+        expected_speeds = as_default_v0_values(max_speed=20)
+
+        self.assertEqual(metadata["max_speed"], 20)
+        self.assertEqual(metadata["n_v0"], len(expected_speeds))
+        self.assertAlmostEqual(metadata["v0_max"], float(expected_speeds[-1]))
+        self.assertLessEqual(metadata["v0_max"], 20.0)
+
+    def test_generate_physical_xpass_reuse_cache_validation_allows_old_full_grid_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            )
+            metadata.pop("max_speed")
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            path = generate_physical_xpass.validate_reuse_cache_dir(
+                cache_dir,
+                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                physical_eps=1e-4,
+            )
+
+        self.assertEqual(path, cache_dir)
 
     def test_generate_physical_xpass_reuses_row_without_hash_and_skips_compute(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -977,9 +1332,11 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(torch.allclose(out, expected))
         self.assertAlmostEqual(float(Decoder(decoder_args()).physical_beta0), 0.0)
         self.assertAlmostEqual(float(Decoder(decoder_args()).physical_beta1), 1.0)
+        self.assertTrue(Decoder(decoder_args()).physical_beta0.requires_grad)
+        self.assertTrue(Decoder(decoder_args()).physical_beta1.requires_grad)
 
     def test_decoder_fixed_beta_and_residual_clipping(self) -> None:
-        decoder = Decoder(decoder_args(learn_physical_scale=False, residual_clip_value=1.0))
+        decoder = Decoder(decoder_args(freeze_beta1=True, residual_clip_value=1.0))
         decoder.nodewise_mlp = FixedDelta([10.0])
 
         out = decoder(
@@ -988,8 +1345,26 @@ class PhysicalXPassTests(unittest.TestCase):
         )
 
         self.assertFalse(decoder.physical_beta1.requires_grad)
+        self.assertTrue(decoder.physical_beta0.requires_grad)
         self.assertAlmostEqual(float(out[0]), float(torch.tanh(torch.tensor(10.0))), places=6)
         self.assertAlmostEqual(float(decoder.latest_delta_gat[0]), float(torch.tanh(torch.tensor(10.0))), places=6)
+
+    def test_decoder_can_freeze_beta0_and_beta1_independently(self) -> None:
+        default_decoder = Decoder(decoder_args())
+        freeze_beta0_decoder = Decoder(decoder_args(freeze_beta0=True))
+        freeze_beta1_decoder = Decoder(decoder_args(freeze_beta1=True))
+        freeze_both_decoder = Decoder(decoder_args(freeze_beta0=True, freeze_beta1=True))
+        legacy_freeze_beta1_decoder = Decoder(decoder_args(learn_physical_scale=False, freeze_beta1=None))
+
+        self.assertTrue(default_decoder.physical_beta0.requires_grad)
+        self.assertTrue(default_decoder.physical_beta1.requires_grad)
+        self.assertFalse(freeze_beta0_decoder.physical_beta0.requires_grad)
+        self.assertTrue(freeze_beta0_decoder.physical_beta1.requires_grad)
+        self.assertTrue(freeze_beta1_decoder.physical_beta0.requires_grad)
+        self.assertFalse(freeze_beta1_decoder.physical_beta1.requires_grad)
+        self.assertFalse(freeze_both_decoder.physical_beta0.requires_grad)
+        self.assertFalse(freeze_both_decoder.physical_beta1.requires_grad)
+        self.assertFalse(legacy_freeze_beta1_decoder.physical_beta1.requires_grad)
 
     def test_decoder_applies_distance_specific_residual_clipping(self) -> None:
         decoder = Decoder(
@@ -1096,7 +1471,8 @@ class PhysicalXPassTests(unittest.TestCase):
             physical_cache_dir="cache_dir",
             physical_eps=1e-3,
             physical_xpass_floor=0.2,
-            learn_physical_scale=False,
+            freeze_beta0=True,
+            freeze_beta1=True,
             residual_regularization_lambda=0.25,
             residual_clip_value=2.0,
             residual_distance_threshold=35.0,
@@ -1135,7 +1511,8 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertIn("--use_physical_xpass", pass_command)
         self.assertIn("--model-variant", pass_command)
-        self.assertIn("--fixed-physical-scale", pass_command)
+        self.assertIn("--freeze-beta0", pass_command)
+        self.assertIn("--freeze-beta1", pass_command)
         self.assertIn("--physical-xpass-floor", pass_command)
         self.assertIn("--residual-regularization-lambda", pass_command)
         self.assertIn("--residual-distance-threshold", pass_command)
@@ -1146,7 +1523,30 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertNotIn("--use_physical_xpass", outcome_command)
         self.assertNotIn("--physical-cache-dir", outcome_command)
         self.assertNotIn("--physical-xpass-floor", outcome_command)
+        self.assertNotIn("--freeze-beta0", outcome_command)
+        self.assertNotIn("--freeze-beta1", outcome_command)
         self.assertNotIn("--short-residual-clip-value", outcome_command)
+
+    def test_wrapper_legacy_fixed_physical_scale_maps_to_freeze_beta1(self) -> None:
+        args = SimpleNamespace(
+            use_physical_xpass=True,
+            model_variant="gat_phys_logit_offset_regularized",
+            physical_cache_dir=None,
+            physical_eps=1e-4,
+            physical_xpass_floor=None,
+            learn_physical_scale=False,
+            residual_regularization_lambda=0.0,
+            residual_clip_value=None,
+            residual_distance_threshold=30.0,
+            short_residual_regularization_lambda=None,
+            long_residual_regularization_lambda=None,
+            short_residual_clip_value=None,
+            long_residual_clip_value=None,
+        )
+        command = train_wrapper.append_physical_xpass_flags([], args)
+
+        self.assertIn("--freeze-beta1", command)
+        self.assertNotIn("--fixed-physical-scale", command)
 
     def test_wrapper_physical_xpass_floor_validation(self) -> None:
         base_args = [
@@ -1197,6 +1597,7 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run"])
         self.assertTrue(args.consider_teammates)
         self.assertEqual(args.speed_aggregation, PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION)
+        self.assertIsNone(args.max_speed)
 
     def test_generate_physical_xpass_cli_accepts_ignore_teammates(self) -> None:
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--ignore-teammates"])
@@ -1229,8 +1630,143 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.num_workers, "1")
         self.assertEqual(args.physical_batch_size, 4)
 
+    def test_generate_physical_xpass_cli_accepts_max_speed_aliases(self) -> None:
+        hyphen_args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--max-speed", "20"])
+        underscore_args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--max_speed", "20"])
+
+        self.assertEqual(hyphen_args.max_speed, 20)
+        self.assertEqual(underscore_args.max_speed, 20)
+
+    def test_generate_physical_xpass_cli_rejects_max_speed_below_grid_min(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--max-speed", "2"])
+
+    def test_runtime_physical_xpass_cache_cli_flags(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_hawkeye.py",
+                "--physical-cache-dir",
+                "cache",
+                "--no-physical-cache",
+                "--refresh-physical-cache",
+                "--physical-num-workers",
+                "2",
+                "--physical-worker-thread-limit",
+                "3",
+                "--physical-batch-size",
+                "4",
+            ],
+        ):
+            hawkeye_args = run_hawkeye.parse_args()
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "run_benchmark.py",
+                "--physical-cache-dir",
+                "cache",
+                "--no-physical-cache",
+                "--refresh-physical-cache",
+                "--physical-num-workers",
+                "2",
+                "--physical-worker-thread-limit",
+                "3",
+                "--physical-batch-size",
+                "4",
+            ],
+        ):
+            benchmark_args = run_benchmark.parse_args()
+        skillcorner_args = run_skillcorner.parse_args(
+            [
+                "--physical-cache-dir",
+                "cache",
+                "--no-physical-cache",
+                "--refresh-physical-cache",
+                "--physical-num-workers",
+                "2",
+                "--physical-worker-thread-limit",
+                "3",
+                "--physical-batch-size",
+                "4",
+            ]
+        )
+
+        for args in [hawkeye_args, benchmark_args, skillcorner_args]:
+            self.assertEqual(args.physical_cache_dir, "cache")
+            self.assertTrue(args.no_physical_cache)
+            self.assertTrue(args.refresh_physical_cache)
+            self.assertEqual(args.physical_num_workers, "2")
+            self.assertEqual(args.physical_worker_thread_limit, 3)
+            self.assertEqual(args.physical_batch_size, 4)
+
+    def test_runtime_prewarm_runner_helpers_batch_expected_objects(self) -> None:
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "model_id": "pass_success/fake",
+                "use_physical_xpass": True,
+                "model_variant": "gat_phys_logit_offset",
+                "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                "physical_runtime_cache_refresh": True,
+                "physical_eps": 1e-4,
+            }
+        )
+        model_specs = {"pass_success": model}
+        labels = torch.stack([make_label(action_index=1)])
+        graph = make_graph()
+        hawkeye_situation = SimpleNamespace(match_id="hawkeye_1", labels=labels, graph_features_0=[graph])
+        benchmark_states = [
+            SimpleNamespace(match_id="benchmark_1", labels=labels, graph_features_0=[graph]),
+            SimpleNamespace(match_id="benchmark_2", labels=labels, graph_features_0=[graph]),
+        ]
+        skillcorner_possessions = [
+            SimpleNamespace(match_id="skillcorner_1", labels=labels, graph_features_0=[graph]),
+            SimpleNamespace(match_id="skillcorner_1", labels=labels, graph_features_0=[graph]),
+        ]
+
+        with patch.object(run_hawkeye, "prewarm_physical_xpass_runtime_cache", return_value={"cache_misses": 1}) as hawkeye_prewarm:
+            run_hawkeye._prewarm_hawkeye_physical_xpass(
+                hawkeye_situation,
+                model_specs,
+                cache_dir="cache",
+                num_workers="2",
+                worker_thread_limit=3,
+                physical_batch_size=4,
+            )
+        with patch.object(run_benchmark, "prewarm_physical_xpass_runtime_cache", return_value={"cache_misses": 2}) as benchmark_prewarm:
+            run_benchmark._prewarm_benchmark_physical_xpass(
+                benchmark_states,
+                model_specs,
+                cache_dir="cache",
+                num_workers="2",
+                worker_thread_limit=3,
+                physical_batch_size=4,
+            )
+        with patch.object(run_skillcorner, "prewarm_physical_xpass_runtime_cache", return_value={"cache_misses": 2}) as skillcorner_prewarm:
+            run_skillcorner._prewarm_skillcorner_physical_xpass(
+                skillcorner_possessions,
+                model_specs,
+                cache_dir="cache",
+                num_workers="2",
+                worker_thread_limit=3,
+                physical_batch_size=4,
+            )
+
+        self.assertEqual(hawkeye_prewarm.call_args.args[0][0]["match_id"], "hawkeye_1")
+        self.assertEqual(hawkeye_prewarm.call_args.kwargs["num_workers"], "2")
+        self.assertEqual(hawkeye_prewarm.call_args.kwargs["worker_thread_limit"], 3)
+        self.assertEqual(hawkeye_prewarm.call_args.kwargs["physical_batch_size"], 4)
+        self.assertTrue(hawkeye_prewarm.call_args.kwargs["refresh"])
+        self.assertEqual([item["match_id"] for item in benchmark_prewarm.call_args.args[0]], ["benchmark_1", "benchmark_2"])
+        self.assertEqual([item["match_id"] for item in skillcorner_prewarm.call_args.args[0]], ["skillcorner_1", "skillcorner_1"])
+
     def test_generate_physical_xpass_auto_workers_resolves_to_six_on_sixteen_cores(self) -> None:
-        with patch.object(generate_physical_xpass.os, "cpu_count", return_value=16):
+        with patch("physical_pass_model.os.cpu_count", return_value=16):
+            self.assertEqual(resolve_physical_num_workers("auto"), 6)
             self.assertEqual(generate_physical_xpass.resolve_num_workers("auto"), 6)
 
     def test_compare_speed_modes_long_frame_and_top_option_metrics(self) -> None:

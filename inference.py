@@ -22,6 +22,7 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 from physical_pass_model import (
+    attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graphs,
     model_uses_physical_xpass,
@@ -31,7 +32,7 @@ from physical_pass_model import (
     physical_xpass_teammate_policy,
     validate_physical_xpass_cache_metadata,
 )
-from project_config import get_physical_xpass_dir, get_success_intent_label_dir
+from project_config import get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
 
@@ -134,6 +135,7 @@ def _record_online_physical_xpass(
     source: str,
     speed_aggregation: str,
     graph_count: int,
+    extra_stats: dict[str, object] | None = None,
 ) -> None:
     stats = getattr(match, "physical_xpass_runtime_stats", None)
     if stats is None:
@@ -146,10 +148,40 @@ def _record_online_physical_xpass(
             "source": source,
             "speed_aggregation": speed_aggregation,
             "model_id": model.args.get("model_id"),
+            "cache_dir": None,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "cache_written": 0,
+            "hash_mismatch_recomputed": 0,
             "online_graphs": 0,
+            "cache_disabled": False,
         },
     )
     task_stats["online_graphs"] = int(task_stats.get("online_graphs", 0)) + int(graph_count)
+    if extra_stats:
+        for key in [
+            "cache_hits",
+            "cache_misses",
+            "cache_written",
+            "hash_mismatch_recomputed",
+            "online_graphs",
+        ]:
+            if key in extra_stats and key != "online_graphs":
+                task_stats[key] = int(task_stats.get(key, 0)) + int(extra_stats[key])
+        for key in ["cache_dir", "cache_disabled"]:
+            if key in extra_stats:
+                task_stats[key] = extra_stats[key]
+
+
+def _runtime_physical_xpass_source_name(match: Match) -> str | None:
+    match_type = type(match)
+    if match_type.__module__ == "datatools.hawkeye" and match_type.__name__ == "HawkeyeSituation":
+        return "hawkeye"
+    if match_type.__module__ == "datatools.benchmark" and match_type.__name__ == "BenchmarkState":
+        return "benchmark"
+    if match_type.__module__ == "datatools.skillcorner" and match_type.__name__ == "SkillcornerPossession":
+        return "skillcorner"
+    return None
 
 
 def attach_physical_xpass_for_inference(
@@ -167,8 +199,41 @@ def attach_physical_xpass_for_inference(
     physical_cache_dir = model.args.get("physical_cache_dir")
     if not physical_cache_dir:
         if feature_root is None:
-            feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
-        physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+            runtime_source_name = _runtime_physical_xpass_source_name(match)
+            if runtime_source_name is not None:
+                physical_cache_dir = str(get_runtime_physical_xpass_dir(runtime_source_name))
+            else:
+                feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
+                physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+        else:
+            physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+
+    if _allows_online_physical_xpass(match) and not bool(model.args.get("physical_runtime_cache_disabled", False)):
+        attached, cache_stats = attach_physical_xpass_cached_online_to_graphs(
+            graphs,
+            labels,
+            cache_dir=physical_cache_dir,
+            match_id=resolve_match_id(match),
+            source=source,
+            eps=eps,
+            floor=floor,
+            teammate_policy=teammate_policy,
+            speed_aggregation=speed_aggregation,
+            refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
+            num_workers=model.args.get("physical_num_workers", 1),
+            worker_thread_limit=int(model.args.get("physical_worker_thread_limit", 1)),
+            physical_batch_size=int(model.args.get("physical_batch_size", 16)),
+            require_observed_target=False,
+        )
+        _record_online_physical_xpass(
+            match,
+            model,
+            source=source,
+            speed_aggregation=speed_aggregation,
+            graph_count=int(cache_stats.get("online_graphs", 0)),
+            extra_stats=cache_stats,
+        )
+        return attached
 
     try:
         validate_physical_xpass_cache_metadata(
@@ -205,6 +270,7 @@ def attach_physical_xpass_for_inference(
         source=source,
         speed_aggregation=speed_aggregation,
         graph_count=len(attached),
+        extra_stats={"cache_disabled": bool(model.args.get("physical_runtime_cache_disabled", False))},
     )
     return attached
 

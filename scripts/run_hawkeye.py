@@ -25,10 +25,19 @@ from datatools.hawkeye import (
     summarize_hawkeye_stats,
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
+from physical_pass_model import (
+    model_uses_physical_xpass,
+    physical_xpass_source,
+    physical_xpass_speed_aggregation,
+    physical_xpass_teammate_policy,
+    prewarm_physical_xpass_runtime_cache,
+    resolve_physical_num_workers,
+)
 from project_config import (
     HAWKEYE_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
     generate_run_id,
+    get_runtime_physical_xpass_dir,
     write_latest_run,
     write_run_metadata,
 )
@@ -57,12 +66,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass sidecar directory override.")
+    parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
+    parser.add_argument("--refresh-physical-cache", action="store_true", help="Recompute selected runtime physical xPass rows and overwrite cache entries.")
+    parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
+    parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
+    parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.set_defaults(freeze_ballreceipt=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        resolve_physical_num_workers(args.physical_num_workers)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.physical_worker_thread_limit < 1:
+        parser.error("--physical-worker-thread-limit must be positive.")
+    if args.physical_batch_size < 1:
+        parser.error("--physical-batch-size must be positive.")
+    return args
 
 
 def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def _pass_success_uses_physical_xpass(model_specs: dict[str, object]) -> bool:
+    model = model_specs.get("pass_success")
+    return model is not None and model_uses_physical_xpass(model.args)
+
+
+def _prewarm_hawkeye_physical_xpass(
+    situation,
+    model_specs: dict[str, object],
+    *,
+    cache_dir: str,
+    num_workers: str | int,
+    worker_thread_limit: int,
+    physical_batch_size: int,
+) -> dict[str, object] | None:
+    model = model_specs.get("pass_success")
+    if model is None or not model_uses_physical_xpass(model.args):
+        return None
+    if situation.labels.numel() == 0 or not situation.graph_features_0:
+        return None
+    source = physical_xpass_source(model.args)
+    return prewarm_physical_xpass_runtime_cache(
+        [{"match_id": str(situation.match_id), "graphs": situation.graph_features_0, "labels": situation.labels}],
+        cache_dir=cache_dir,
+        source=source,
+        eps=float(model.args.get("physical_eps", 1e-4)),
+        teammate_policy=physical_xpass_teammate_policy(model.args, source=source),
+        speed_aggregation=physical_xpass_speed_aggregation(model.args),
+        refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
+        num_workers=num_workers,
+        worker_thread_limit=int(worker_thread_limit),
+        physical_batch_size=int(physical_batch_size),
+    )
 
 
 def main() -> None:
@@ -107,6 +165,21 @@ def main() -> None:
         outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],
         device=device,
     )
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("hawkeye"))
+    physical_num_workers = getattr(args, "physical_num_workers", "auto")
+    physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
+    physical_batch_size = int(getattr(args, "physical_batch_size", 16))
+    pass_success_model = model_specs.get("pass_success")
+    if pass_success_model is not None and bool(pass_success_model.args.get("use_physical_xpass", False)):
+        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_model.args["physical_runtime_cache_refresh"] = refresh_physical_cache
+        pass_success_model.args["physical_num_workers"] = physical_num_workers
+        pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
+        pass_success_model.args["physical_batch_size"] = physical_batch_size
+        if not no_physical_cache:
+            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
@@ -114,6 +187,7 @@ def main() -> None:
     stats_by_situation: dict[str, dict[str, int]] = {}
     processed_situation_ids: list[str] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
     skipped_situations: list[dict[str, str]] = []
 
     for index, situation_id in enumerate(situation_ids, start=1):
@@ -126,6 +200,20 @@ def main() -> None:
                 freeze_ballreceipt=args.freeze_ballreceipt,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
             )
+            if not no_physical_cache and _pass_success_uses_physical_xpass(model_specs):
+                prewarm_stats = _prewarm_hawkeye_physical_xpass(
+                    situation,
+                    model_specs,
+                    cache_dir=physical_cache_dir,
+                    num_workers=physical_num_workers,
+                    worker_thread_limit=physical_worker_thread_limit,
+                    physical_batch_size=physical_batch_size,
+                )
+                if prewarm_stats:
+                    physical_xpass_prewarm_stats[str(situation_id)] = prewarm_stats
+                pass_success_model = model_specs.get("pass_success")
+                if pass_success_model is not None:
+                    pass_success_model.args["physical_runtime_cache_refresh"] = False
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
             stats_by_situation[situation_id] = stats
@@ -153,10 +241,17 @@ def main() -> None:
         "source_return_types": shared_context.get("source_return_types", {}),
         "source_target_families": shared_context.get("source_target_families", {}),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
+        "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_cache_disabled": no_physical_cache,
+        "refresh_physical_cache": refresh_physical_cache,
+        "physical_num_workers": physical_num_workers,
+        "physical_worker_thread_limit": physical_worker_thread_limit,
+        "physical_batch_size": physical_batch_size,
         "requested_situation_ids": args.situation_id or [],
         "limit": args.limit,
         "processed_situation_ids": processed_situation_ids,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
         "skipped_situations": skipped_situations,
         "totals": totals,
         "models": resolved_model_ids,

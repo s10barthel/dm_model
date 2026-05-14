@@ -203,7 +203,14 @@ def append_physical_xpass_flags(command: list[str], args: argparse.Namespace) ->
     physical_xpass_floor = getattr(args, "physical_xpass_floor", None)
     if physical_xpass_floor is not None:
         command.extend(["--physical-xpass-floor", str(physical_xpass_floor)])
-    command.append("--learn-physical-scale" if bool(getattr(args, "learn_physical_scale", True)) else "--fixed-physical-scale")
+    freeze_beta0 = bool(getattr(args, "freeze_beta0", False))
+    freeze_beta1 = getattr(args, "freeze_beta1", None)
+    if freeze_beta1 is None:
+        freeze_beta1 = not bool(getattr(args, "learn_physical_scale", True))
+    if freeze_beta0:
+        command.append("--freeze-beta0")
+    if bool(freeze_beta1):
+        command.append("--freeze-beta1")
     command.extend(["--residual-distance-threshold", str(getattr(args, "residual_distance_threshold", 30.0))])
     residual_lambda = float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0)
     if residual_lambda:
@@ -234,7 +241,9 @@ def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
         "physical_cache_dir": getattr(args, "physical_cache_dir", None),
         "physical_eps": float(getattr(args, "physical_eps", 1e-4)),
         "physical_xpass_floor": getattr(args, "physical_xpass_floor", None),
-        "learn_physical_scale": bool(getattr(args, "learn_physical_scale", True)),
+        "freeze_beta0": bool(getattr(args, "freeze_beta0", False)),
+        "freeze_beta1": bool(getattr(args, "freeze_beta1", not bool(getattr(args, "learn_physical_scale", True)))),
+        "learn_physical_scale": not bool(getattr(args, "freeze_beta1", not bool(getattr(args, "learn_physical_scale", True)))),
         "residual_regularization_lambda": float(getattr(args, "residual_regularization_lambda", 0.0) or 0.0),
         "residual_clip_value": getattr(args, "residual_clip_value", None),
         "residual_distance_threshold": float(getattr(args, "residual_distance_threshold", 30.0)),
@@ -842,20 +851,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional lower probability floor applied before physical xPass logit conversion.",
     )
-    physical_scale_group = parser.add_mutually_exclusive_group()
-    physical_scale_group.add_argument(
-        "--learn-physical-scale",
-        dest="learn_physical_scale",
+    physical_beta1_group = parser.add_mutually_exclusive_group()
+    physical_beta1_group.add_argument(
+        "--freeze-beta1",
+        dest="freeze_beta1",
         action="store_true",
-        help="Learn beta1 for the physical logit offset.",
-    )
-    physical_scale_group.add_argument(
-        "--fixed-physical-scale",
-        dest="learn_physical_scale",
-        action="store_false",
         help="Freeze beta1 at 1.0 for the physical logit offset.",
     )
-    parser.set_defaults(learn_physical_scale=True)
+    physical_beta1_group.add_argument(
+        "--learn-physical-scale",
+        dest="freeze_beta1",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    physical_beta1_group.add_argument(
+        "--fixed-physical-scale",
+        dest="freeze_beta1",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(freeze_beta1=False)
+    parser.add_argument(
+        "--freeze-beta0",
+        dest="freeze_beta0",
+        action="store_true",
+        default=False,
+        help="Freeze beta0 at 0.0 for the physical logit offset.",
+    )
     parser.add_argument(
         "--residual-regularization-lambda",
         type=float,
@@ -899,6 +921,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional long-pass override for pass_success residual clipping.",
     )
     args = parser.parse_args(argv)
+    args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
     args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)

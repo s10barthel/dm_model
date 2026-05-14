@@ -43,6 +43,7 @@ COMPONENT_RUNS_DIR = DATA_ROOT / "component_runs"
 HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
 BENCHMARK_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "benchmark"
 SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
+RUNTIME_PHYSICAL_XPASS_DIR = DATA_ROOT / "runtime_physical_xpass"
 VISUALIZATION_DIR = DATA_ROOT / "visualizations"
 HAWKEYE_VISUALIZATION_DIR = VISUALIZATION_DIR / "hawkeye"
 BENCHMARK_VISUALIZATION_DIR = VISUALIZATION_DIR / "benchmark"
@@ -158,6 +159,7 @@ def ensure_project_dirs() -> None:
         HAWKEYE_COMPONENT_RUNS_DIR,
         BENCHMARK_COMPONENT_RUNS_DIR,
         SKILLCORNER_COMPONENT_RUNS_DIR,
+        RUNTIME_PHYSICAL_XPASS_DIR,
         VISUALIZATION_DIR,
         HAWKEYE_VISUALIZATION_DIR,
         BENCHMARK_VISUALIZATION_DIR,
@@ -311,6 +313,11 @@ def get_physical_xpass_match_dir(root: Path | None = None) -> Path:
 
 def get_physical_xpass_match_path(match_id: str, root: Path | None = None) -> Path:
     return get_physical_xpass_match_dir(root=root) / f"{match_id}.parquet"
+
+
+def get_runtime_physical_xpass_dir(source: str, root: Path | None = None) -> Path:
+    cache_root = Path(root) if root is not None else RUNTIME_PHYSICAL_XPASS_DIR
+    return cache_root / str(source) / PHYSICAL_XPASS_DIR_NAME
 
 
 def get_feature_run_root(run_id: str) -> Path:

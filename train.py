@@ -166,20 +166,33 @@ parser.add_argument(
     default=None,
     help="Optional lower probability floor applied before physical xPass logit conversion.",
 )
-physical_scale_group = parser.add_mutually_exclusive_group()
-physical_scale_group.add_argument(
-    "--learn-physical-scale",
-    dest="learn_physical_scale",
+physical_beta1_group = parser.add_mutually_exclusive_group()
+physical_beta1_group.add_argument(
+    "--freeze-beta1",
+    dest="freeze_beta1",
     action="store_true",
-    help="Learn beta1 in beta0 + beta1 * logit(physical_xpass) + delta_gat.",
+    help="Freeze beta1 at 1.0 in beta0 + beta1 * logit(physical_xpass) + delta_gat.",
 )
-physical_scale_group.add_argument(
-    "--fixed-physical-scale",
-    dest="learn_physical_scale",
+physical_beta1_group.add_argument(
+    "--learn-physical-scale",
+    dest="freeze_beta1",
     action="store_false",
-    help="Freeze beta1 at 1.0 in the physical logit offset.",
+    help=argparse.SUPPRESS,
 )
-parser.set_defaults(learn_physical_scale=True)
+physical_beta1_group.add_argument(
+    "--fixed-physical-scale",
+    dest="freeze_beta1",
+    action="store_true",
+    help=argparse.SUPPRESS,
+)
+parser.set_defaults(freeze_beta1=False)
+parser.add_argument(
+    "--freeze-beta0",
+    dest="freeze_beta0",
+    action="store_true",
+    default=False,
+    help="Freeze beta0 at 0.0 in the physical logit offset.",
+)
 parser.add_argument(
     "--residual-regularization-lambda",
     type=float,
@@ -331,6 +344,7 @@ parser.add_argument("--training-step-total", type=int, default=None, help=argpar
 
 args, _ = parser.parse_known_args()
 normalize_v_edge_feature_args(vars(args))
+args.learn_physical_scale = not bool(args.freeze_beta1)
 
 
 def infer_node_in_dim(feature_dir: str, task: str) -> int:
@@ -665,6 +679,8 @@ if __name__ == "__main__":
             "physical_cache_dir": args.physical_cache_dir,
             "physical_eps": float(args.physical_eps),
             "physical_xpass_floor": args.physical_xpass_floor,
+            "freeze_beta0": bool(args.freeze_beta0),
+            "freeze_beta1": bool(args.freeze_beta1),
             "learn_physical_scale": bool(args.learn_physical_scale),
             "residual_regularization_lambda": float(args.residual_regularization_lambda or 0.0),
             "residual_clip_value": args.residual_clip_value,

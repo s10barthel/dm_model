@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import warnings
 from datetime import datetime
@@ -25,12 +24,16 @@ from physical_pass_model import (
     PHYSICAL_XPASS_SPEED_AGGREGATIONS,
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
     PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+    AS_DEFAULT_V0_MIN,
+    as_default_v0_values,
+    configure_physical_worker_thread_limit,
     compute_graphs_max_player_cum_prob_as_defaults,
     compute_graph_max_player_cum_prob_as_defaults,
     load_physical_xpass_match,
     normalize_physical_xpass_speed_aggregation,
     physical_state_hash,
     physical_xpass_as_default_metadata,
+    resolve_physical_num_workers,
     validate_physical_xpass_cache_metadata,
 )
 from project_config import (
@@ -90,6 +93,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--max-speed",
+        "--max_speed",
+        dest="max_speed",
+        type=int,
+        default=None,
+        help="Ignore AS/DAS speed-grid values greater than this integer m/s cap.",
+    )
+    parser.add_argument(
         "--num-workers",
         default="auto",
         help="Number of match-level worker processes, or 'auto' (6 on a 16-logical-core machine).",
@@ -135,6 +146,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--physical-batch-size must be positive.")
     if args.worker_thread_limit < 1:
         parser.error("--worker-thread-limit must be positive.")
+    if args.max_speed is not None and args.max_speed < int(AS_DEFAULT_V0_MIN):
+        parser.error(f"--max-speed must be at least {AS_DEFAULT_V0_MIN:g} m/s.")
     return args
 
 
@@ -182,25 +195,11 @@ def teammate_policy_from_args(args: argparse.Namespace) -> str:
 
 
 def resolve_num_workers(value: str | int) -> int:
-    if isinstance(value, int):
-        workers = value
-    else:
-        text = str(value).strip().lower()
-        if text == "auto":
-            cpu_count = os.cpu_count() or 1
-            workers = max(1, min(6, cpu_count - 2))
-        else:
-            workers = int(text)
-    if workers < 1:
-        raise ValueError("--num-workers must be a positive integer or 'auto'.")
-    return workers
+    return resolve_physical_num_workers(value)
 
 
 def configure_worker_thread_limit(limit: int) -> None:
-    value = str(int(limit))
-    os.environ["OMP_NUM_THREADS"] = value
-    os.environ["MKL_NUM_THREADS"] = value
-    os.environ["NUMEXPR_NUM_THREADS"] = value
+    configure_physical_worker_thread_limit(limit)
 
 
 def validate_reuse_cache_dir(
@@ -209,12 +208,14 @@ def validate_reuse_cache_dir(
     teammate_policy: str,
     speed_aggregation: str,
     physical_eps: float,
+    max_speed: int | None = None,
 ) -> Path:
     cache_path = Path(cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_path)
     expected_metadata = physical_xpass_as_default_metadata(
         teammate_policy,
         speed_aggregation=speed_aggregation,
+        max_speed=max_speed,
     )
     mismatches: list[str] = []
     for key, expected_value in expected_metadata.items():
@@ -222,6 +223,8 @@ def validate_reuse_cache_dir(
         if key == "speed_aggregation":
             actual_value = normalize_physical_xpass_speed_aggregation(actual_value)
             expected_value = normalize_physical_xpass_speed_aggregation(expected_value)
+        if key in {"max_speed", "n_v0", "v0_max"} and actual_value is None and expected_metadata["max_speed"] is None:
+            continue
         if actual_value != expected_value:
             mismatches.append(f"{key}: expected {expected_value!r}, got {actual_value!r}")
     metadata_eps = metadata.get("physical_eps")
@@ -233,6 +236,7 @@ def validate_reuse_cache_dir(
             f"--reuse-cache-dir {cache_path} is not compatible with this physical xPass run. "
             f"{details}. Regenerate that cache with source={PHYSICAL_XPASS_SOURCE!r}, "
             f"teammate_policy={teammate_policy!r}, speed_aggregation={speed_aggregation!r}, "
+            f"max_speed={max_speed!r}, "
             f"and physical_eps={float(physical_eps)!r}."
         )
     return cache_path
@@ -256,6 +260,7 @@ def compute_match_rows(
     normalize: bool,
     consider_teammates: bool,
     speed_aggregation: str = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+    max_speed: int | None = None,
     physical_batch_size: int = 16,
     limit: int | None,
     selected_row_indices: set[int] | None = None,
@@ -334,6 +339,7 @@ def compute_match_rows(
                 eps=eps,
                 consider_teammates=consider_teammates,
                 speed_aggregation=speed_aggregation,
+                max_speed=max_speed,
                 batch_size=physical_batch_size,
             )
         else:
@@ -343,6 +349,7 @@ def compute_match_rows(
                     eps=eps,
                     consider_teammates=consider_teammates,
                     speed_aggregation=speed_aggregation,
+                    max_speed=max_speed,
                 )
                 for item in pending
             ]
@@ -377,6 +384,7 @@ def process_match_task(task: dict[str, object]) -> dict[str, object]:
         normalize=True,
         consider_teammates=bool(task["consider_teammates"]),
         speed_aggregation=str(task["speed_aggregation"]),
+        max_speed=task.get("max_speed"),
         physical_batch_size=int(task["physical_batch_size"]),
         limit=task.get("limit"),
         reuse_rows=reuse_rows,
@@ -426,6 +434,7 @@ def main() -> None:
             args.reuse_cache_dir,
             teammate_policy=teammate_policy,
             speed_aggregation=speed_aggregation,
+            max_speed=args.max_speed,
             physical_eps=float(args.physical_eps),
         )
         if args.reuse_cache_dir
@@ -466,6 +475,7 @@ def main() -> None:
                 "eps": float(args.physical_eps),
                 "consider_teammates": bool(args.consider_teammates),
                 "speed_aggregation": speed_aggregation,
+                "max_speed": args.max_speed,
                 "physical_batch_size": int(args.physical_batch_size),
                 "limit": remaining,
                 "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
@@ -516,7 +526,11 @@ def main() -> None:
                         skipped_match_ids[match_id] = str(result["skip_reason"])
 
     metadata = {
-        **physical_xpass_as_default_metadata(teammate_policy, speed_aggregation=speed_aggregation),
+        **physical_xpass_as_default_metadata(
+            teammate_policy,
+            speed_aggregation=speed_aggregation,
+            max_speed=args.max_speed,
+        ),
         "feature_run_id": feature_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "graph_dir": str(graph_dir),
@@ -533,6 +547,7 @@ def main() -> None:
         "n_hash_mismatch_recomputed": int(reuse_stats.get("hash_mismatch_recomputed", 0)),
         "reuse_stats": {key: int(value) for key, value in sorted(reuse_stats.items())},
         "physical_eps": float(args.physical_eps),
+        "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed).tolist()],
         "num_workers": int(num_workers),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),

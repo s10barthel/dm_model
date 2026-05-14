@@ -907,6 +907,7 @@ Generate sidecars once for a feature run:
 ```powershell
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id>
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite --speed-aggregation package_max --num-workers auto --physical-batch-size 16
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite --max-speed 20
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite --num-workers 1
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100 --num-workers 1
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --reuse-cache-dir data/features/runs/<old_feature_run_id>/physical_xpass --overwrite
@@ -926,6 +927,7 @@ Speed aggregation has two modes:
 
 - `--speed-aggregation package_max` is the default and fastest path. It passes the full AS/DAS speed grid, `3..30 m/s` with 15 speeds, into `accessible-space` in one call per compatible batch using `v0_prob_aggregation_mode="max"`.
 - `--speed-aggregation exact_separate_speed` preserves the older exact semantics by simulating each speed separately, then taking the max over speeds, angles, and on-pitch ray distances.
+- `--max-speed` / `--max_speed` keeps the existing AS/DAS speed grid but ignores grid values greater than the integer cap. For example, `--max-speed 20` uses only the default grid speeds `<= 20 m/s`; it does not create a new grid ending exactly at `20`.
 
 Before a full regeneration, compare the modes on a sample:
 
@@ -947,7 +949,16 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing during training or normal Sportec feature-run inference, the run fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
 
-Benchmark, HawkEye, and SkillCorner runtime states do not have reusable Sportec match sidecars. When a physical pass-success checkpoint is used there and no sidecar exists for the synthetic state id, inference computes physical xPass online from the in-memory graph. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new checkpoints use the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the checkpoint's expected source and speed aggregation.
+Benchmark, HawkEye, and SkillCorner runtime states do not use the Sportec feature-run sidecars above. Instead, when a physical pass-success checkpoint is used and runtime caching is enabled, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, and `scripts/run_skillcorner.py` automatically prewarm synthetic-state physical xPass sidecars under `data/runtime_physical_xpass/<source>/physical_xpass/` before normal component inference. They reuse rows when `physical_state_hash` still matches, compute only missing/refreshed/hash-mismatched rows, write those rows to cache, then run the normal inference path against cache hits. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new checkpoints use the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the checkpoint's expected source and speed aggregation.
+
+Runtime prewarm is bounded by the runner's natural unit: Hawkeye prewarms one situation at a time, Benchmark prewarms both game states for one modification together, and SkillCorner prewarms all valid possessions for one match together. Physical xPass worker controls for these runtime scripts:
+
+- `--physical-cache-dir <path>`: override the runtime physical xPass cache directory.
+- `--no-physical-cache`: disable runtime cache use and compute misses online for the current run.
+- `--refresh-physical-cache`: recompute selected runtime rows and overwrite matching cache entries.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: worker processes for runtime physical xPass cache misses. Default: `auto`.
+- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: OMP/MKL/NUMEXPR thread limit per worker. Default: `1`.
+- `--physical-batch-size <N>`: compatible actions per accessible-space batch inside each worker. Default: `16`.
 
 The main model variant is a prior-like logit offset:
 
@@ -964,7 +975,8 @@ Physical flags:
 - `--physical-cache-dir`: override the physical sidecar directory. By default it uses `<feature_run_root>/physical_xpass`.
 - `--physical-eps 1e-4`: clamp probabilities to `[eps, 1-eps]` before taking logits.
 - `--physical-xpass-floor <prob>`: optional lower floor applied before taking logits, e.g. `0.01 -> 0.2` when set to `0.2`. Default: unset.
-- `--learn-physical-scale` / `--fixed-physical-scale`: learn `beta1` or freeze it at `1.0`; default is learned.
+- `--freeze-beta1`: freeze `beta1` at `1.0`; default is learned.
+- `--freeze-beta0`: freeze `beta0` at `0.0`; default is learned.
 - `--residual-regularization-lambda`: optional L2 penalty on the observed-target residual `delta_gat`.
 - `--residual-clip-value`: optional tanh bound, `delta_gat = c * tanh(raw_delta / c)`.
 - `--residual-distance-threshold 30.0`: distance cutoff for distance-specific residual controls; short passes are `NODE_FEATURE_POSS_DIST <= threshold`, long passes are `> threshold`.
@@ -972,6 +984,8 @@ Physical flags:
 - `--short-residual-clip-value` / `--long-residual-clip-value`: optional short/long overrides for residual clipping. Unset values fall back to `--residual-clip-value`.
 
 The physical simulation uses AS/DAS-default normalization (`normalize=True` here), then the loader clamps before `logit`. `accessible-space` notes that probabilities/possibilities are not always perfectly normalized because normalization is numerically difficult across players and the ball trajectory. Requesting normalization reduces that issue; clipping then prevents infinite logits from exact 0 or 1 values.
+
+Using both `--freeze-beta0` and `--freeze-beta1` gives `logit_final = logit(physical_xpass) + delta_gat`; residual controls still apply. To use physical xPass exactly as-is, both betas must be frozen and the GAT residual must also be removed or forced to zero.
 
 Compare these runs:
 
@@ -1133,7 +1147,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.
 - `--physical-eps <eps>`: physical probability clamp epsilon. Default: `1e-4`.
 - `--physical-xpass-floor <prob>`: optional lower physical xPass floor before logit conversion. Default: unset.
-- `--learn-physical-scale` / `--fixed-physical-scale`: learn or freeze `beta1`. Default: learned.
+- `--freeze-beta1`: freeze `beta1` at `1.0`. Default: learned.
+- `--freeze-beta0`: freeze `beta0` at `0.0`. Default: learned.
 - `--residual-regularization-lambda <value>`: optional observed-target residual L2. Default: `0.0`.
 - `--residual-clip-value <value>`: optional residual clipping bound. Default: unset.
 - `--residual-distance-threshold <meters>`: short/long residual cutoff. Default: `30.0`; short is `<= threshold`, long is `> threshold`.
@@ -1186,6 +1201,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/component_runs/hawkeye`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye/physical_xpass`.
+- `--no-physical-cache`: disable runtime physical xPass cache/prewarm. Default: off.
+- `--refresh-physical-cache`: recompute selected runtime physical xPass rows before inference. Default: off.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: worker processes for runtime physical xPass prewarm. Default: `auto`.
+- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
+- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
 
 ### `scripts/run_benchmark.py`
 
@@ -1201,6 +1222,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/component_runs/benchmark`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark/physical_xpass`.
+- `--no-physical-cache`: disable runtime physical xPass cache/prewarm. Default: off.
+- `--refresh-physical-cache`: recompute selected runtime physical xPass rows before inference. Default: off.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: worker processes for runtime physical xPass prewarm. Default: `auto`.
+- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
+- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
 
 ### `scripts/run_skillcorner.py`
 
@@ -1216,6 +1243,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/component_runs/skillcorner`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner/physical_xpass`.
+- `--no-physical-cache`: disable runtime physical xPass cache/prewarm. Default: off.
+- `--refresh-physical-cache`: recompute selected runtime physical xPass rows before inference. Default: off.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: worker processes for runtime physical xPass prewarm. Default: `auto`.
+- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
+- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
 
 ### `scripts/visualize_action_components.py`
 
