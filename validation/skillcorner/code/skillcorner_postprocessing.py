@@ -416,10 +416,22 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
     scored = scored.merge(selected_game_state_end, on="__event_row_id", how="left")
     scored = scored.merge(selected_pass_score, on="__event_row_id", how="left")
 
-    scored["game_state_value_next"] = (
-        scored.groupby("match_id", dropna=False)["game_state_value_start"].shift(-1)
-    )
+    scored["__game_state_value_next_raw"] = scored.groupby("match_id", dropna=False)[
+        "game_state_value_start"
+    ].shift(-1)
     scored["__team_id_next"] = scored.groupby("match_id", dropna=False)["team_id"].shift(-1)
+    has_signed_next_inputs = (
+        scored["__game_state_value_next_raw"].notna()
+        & scored["team_id"].notna()
+        & scored["__team_id_next"].notna()
+    )
+    different_next_team_mask = has_signed_next_inputs & scored["team_id"].ne(scored["__team_id_next"]).fillna(False)
+    scored["game_state_value_next"] = scored["__game_state_value_next_raw"].where(has_signed_next_inputs)
+    scored.loc[different_next_team_mask, "game_state_value_next"] = -scored.loc[
+        different_next_team_mask,
+        "__game_state_value_next_raw",
+    ]
+    scored["action_epv"] = scored["game_state_value_next"] - scored["game_state_value_start"]
     scored["dm_score"] = scored["pass_score"] - scored["game_state_value_start"]
 
     empty_target = scored["player_targeted_id"].isna() & scored["pass_score"].isna()
@@ -436,16 +448,7 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         & scored["__team_id_next"].notna()
     )
     possession_loss_mask = empty_target & scored["end_type"].eq("possession_loss") & has_next_inputs
-    same_team_mask = possession_loss_mask & scored["team_id"].eq(scored["__team_id_next"])
-    different_team_mask = possession_loss_mask & scored["team_id"].ne(scored["__team_id_next"])
-    scored.loc[same_team_mask, "dm_score"] = (
-        scored.loc[same_team_mask, "game_state_value_next"]
-        - scored.loc[same_team_mask, "game_state_value_start"]
-    )
-    scored.loc[different_team_mask, "dm_score"] = (
-        -scored.loc[different_team_mask, "game_state_value_next"]
-        - scored.loc[different_team_mask, "game_state_value_start"]
-    )
+    scored.loc[possession_loss_mask, "dm_score"] = scored.loc[possession_loss_mask, "action_epv"]
 
     return scored[
         original_columns
@@ -456,6 +459,7 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
             "game_state_value_start",
             "game_state_value_end",
             "game_state_value_next",
+            "action_epv",
             "dm_score",
         ]
     ]
@@ -530,6 +534,7 @@ def summarize_scored_events(
         "events_with_game_state_value_start": int(event_data["game_state_value_start"].notna().sum()),
         "events_with_game_state_value_end": int(event_data["game_state_value_end"].notna().sum()),
         "events_with_game_state_value_next": int(event_data["game_state_value_next"].notna().sum()),
+        "events_with_action_epv": int(event_data["action_epv"].notna().sum()),
         "events_with_dm_score": int(event_data["dm_score"].notna().sum()),
         "output_file": output_file,
     }

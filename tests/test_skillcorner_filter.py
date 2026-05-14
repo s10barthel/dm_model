@@ -50,6 +50,7 @@ def test_filter_skillcorner_actions_raw_keeps_only_known_players() -> None:
                 "game_state_value_start": 0.2,
                 "game_state_value_end": 0.25,
                 "game_state_value_next": 0.3,
+                "action_epv": 0.1,
                 "end_type": "pass",
                 "dm_score": 0.3,
                 "extra": "keep",
@@ -61,6 +62,7 @@ def test_filter_skillcorner_actions_raw_keeps_only_known_players() -> None:
                 "game_state_value_start": 0.5,
                 "game_state_value_end": 0.55,
                 "game_state_value_next": pd.NA,
+                "action_epv": pd.NA,
                 "end_type": "pass",
                 "dm_score": 0.6,
                 "extra": "drop",
@@ -93,6 +95,7 @@ def test_build_skillcorner_actions_keeps_requested_columns_and_drops_empty_dm_sc
                 "game_state_value_start": 0.2,
                 "game_state_value_end": 0.25,
                 "game_state_value_next": 0.4,
+                "action_epv": 0.2,
                 "end_type": "pass",
                 "dm_score": 0.3,
             },
@@ -105,6 +108,7 @@ def test_build_skillcorner_actions_keeps_requested_columns_and_drops_empty_dm_sc
                 "game_state_value_start": 0.5,
                 "game_state_value_end": 0.55,
                 "game_state_value_next": pd.NA,
+                "action_epv": pd.NA,
                 "end_type": "pass",
                 "dm_score": pd.NA,
             },
@@ -129,15 +133,16 @@ def test_build_skillcorner_actions_keeps_requested_columns_and_drops_empty_dm_sc
     assert actions["game_state_value_start"].tolist() == [0.2]
     assert actions["game_state_value_end"].tolist() == [0.25]
     assert actions["game_state_value_next"].tolist() == [0.4]
+    assert actions["action_epv"].tolist() == [0.2]
     assert actions["end_type"].tolist() == ["pass"]
 
 
 def test_aggregate_skillcorner_players_computes_counts_sums_means_and_medians() -> None:
     skillcorner_actions = pd.DataFrame(
         [
-            {"participant": "DM1", "pass_score": 1.0, "risk": 2.0, "reward": 10.0, "game_state_value_start": 4.0, "dm_score": 7.0, "match_id": "m1"},
-            {"participant": "DM1", "pass_score": 3.0, "risk": 4.0, "reward": 20.0, "game_state_value_start": 6.0, "dm_score": 9.0, "match_id": "m2"},
-            {"participant": "DM2", "pass_score": 5.0, "risk": 6.0, "reward": 30.0, "game_state_value_start": 8.0, "dm_score": 11.0, "match_id": "m3"},
+            {"participant": "DM1", "pass_score": 1.0, "risk": 2.0, "reward": 10.0, "game_state_value_start": 4.0, "action_epv": 5.0, "dm_score": 7.0, "match_id": "m1"},
+            {"participant": "DM1", "pass_score": 3.0, "risk": 4.0, "reward": 20.0, "game_state_value_start": 6.0, "action_epv": 7.0, "dm_score": 9.0, "match_id": "m2"},
+            {"participant": "DM2", "pass_score": 5.0, "risk": 6.0, "reward": 30.0, "game_state_value_start": 8.0, "action_epv": 13.0, "dm_score": 11.0, "match_id": "m3"},
         ]
     )
 
@@ -158,6 +163,9 @@ def test_aggregate_skillcorner_players_computes_counts_sums_means_and_medians() 
     assert math.isclose(dm1["game_state_value_start_sum"], 10.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["game_state_value_start_avg"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["game_state_value_start_median"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["action_epv_sum"], 12.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["action_epv_avg"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["action_epv_median"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["dm_score_sum"], 16.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["dm_score_avg"], 8.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(dm1["dm_score_median"], 8.0, rel_tol=1e-9, abs_tol=1e-9)

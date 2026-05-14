@@ -566,13 +566,14 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
 
     scored = post.add_scores_to_event_data(model_data, event_data)
 
-    assert scored.columns.tolist()[-7:] == [
+    assert scored.columns.tolist()[-8:] == [
         "pass_score",
         "risk",
         "reward",
         "game_state_value_start",
         "game_state_value_end",
         "game_state_value_next",
+        "action_epv",
         "dm_score",
     ]
     assert math.isclose(scored.loc[0, "pass_score"], 0.40, rel_tol=1e-9, abs_tol=1e-9)
@@ -581,6 +582,7 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
     assert math.isclose(scored.loc[0, "game_state_value_start"], 0.25, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "game_state_value_end"], 0.35, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "game_state_value_next"], 0.10, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "action_epv"], -0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
 
     assert pd.isna(scored.loc[1, "pass_score"])
@@ -588,14 +590,20 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
     assert pd.isna(scored.loc[1, "reward"])
     assert math.isclose(scored.loc[1, "game_state_value_start"], 0.10, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[1, "game_state_value_end"], 0.18, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[1, "action_epv"], 0.20, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[1, "dm_score"], 0.08, rel_tol=1e-9, abs_tol=1e-9)
 
     assert math.isclose(scored.loc[2, "game_state_value_next"], 0.45, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[2, "action_epv"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[2, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[3, "pass_score"], 0.60, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "action_epv"], -0.25, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[3, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(scored.loc[4, "game_state_value_next"], 0.50, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[4, "game_state_value_next"], -0.50, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[4, "action_epv"], -0.70, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[4, "dm_score"], -0.70, rel_tol=1e-9, abs_tol=1e-9)
     assert pd.isna(scored.loc[5, "game_state_value_next"])
+    assert pd.isna(scored.loc[5, "action_epv"])
     assert pd.isna(scored.loc[6, "game_state_value_next"])
+    assert pd.isna(scored.loc[6, "action_epv"])
     assert pd.isna(scored.loc[6, "dm_score"])
