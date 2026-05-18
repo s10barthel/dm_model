@@ -14,7 +14,7 @@ import torch
 
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
-from inference import inference_gnn, load_success_intent_labels
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn, load_success_intent_labels
 from models.utils import (
     get_model_provenance,
     infer_feature_graph_schema,
@@ -172,6 +172,28 @@ def save_component_table(frame: pd.DataFrame, actions: pd.DataFrame, output_path
     table = pd.concat([identifiers, table], axis=1)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     table.to_parquet(output_path, index=False)
+
+
+def save_match_component_tables(
+    match_output_dir: Path,
+    actions: pd.DataFrame,
+    *,
+    action_intent: pd.DataFrame,
+    pass_intent: pd.DataFrame,
+    pass_success: pd.DataFrame | None,
+    scoring_success: pd.DataFrame,
+    scoring_failure: pd.DataFrame,
+    conceding_success: pd.DataFrame,
+    conceding_failure: pd.DataFrame,
+) -> None:
+    save_component_table(action_intent, actions, match_output_dir / "action_intent.parquet")
+    save_component_table(pass_intent, actions, match_output_dir / "pass_intent.parquet")
+    if pass_success is not None:
+        save_component_table(pass_success, actions, match_output_dir / "pass_success.parquet")
+    save_component_table(scoring_success, actions, match_output_dir / "outcome_scoring_success.parquet")
+    save_component_table(scoring_failure, actions, match_output_dir / "outcome_scoring_failure.parquet")
+    save_component_table(conceding_success, actions, match_output_dir / "outcome_conceding_success.parquet")
+    save_component_table(conceding_failure, actions, match_output_dir / "outcome_conceding_failure.parquet")
 
 
 def resolve_optional_success_intent_model_id(
@@ -372,6 +394,7 @@ def main() -> None:
         "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},
         "processed_match_ids": [],
         "skipped_matches": [],
+        "physical_xpass_skipped_actions": {},
         "status": "completed",
     }
     if success_intent_model_id and success_intent_model_record is not None:
@@ -397,7 +420,11 @@ def main() -> None:
 
             action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
             pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
-            pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
+            pass_success = None
+            try:
+                pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
+            except PhysicalXPassNoUsableRowsError as exc:
+                print(f"  WARN {match_id}: pass_success export skipped: {summarize_exception(exc)}")
             scoring_failure, scoring_success = inference_gnn(
                 match,
                 model_specs["outcome_scoring"],
@@ -413,13 +440,20 @@ def main() -> None:
             if action_intent.empty:
                 raise ValueError("No usable inference rows were produced for this match.")
 
-            save_component_table(action_intent, match.actions, match_output_dir / "action_intent.parquet")
-            save_component_table(pass_intent, match.actions, match_output_dir / "pass_intent.parquet")
-            save_component_table(pass_success, match.actions, match_output_dir / "pass_success.parquet")
-            save_component_table(scoring_success, match.actions, match_output_dir / "outcome_scoring_success.parquet")
-            save_component_table(scoring_failure, match.actions, match_output_dir / "outcome_scoring_failure.parquet")
-            save_component_table(conceding_success, match.actions, match_output_dir / "outcome_conceding_success.parquet")
-            save_component_table(conceding_failure, match.actions, match_output_dir / "outcome_conceding_failure.parquet")
+            save_match_component_tables(
+                match_output_dir,
+                match.actions,
+                action_intent=action_intent,
+                pass_intent=pass_intent,
+                pass_success=pass_success,
+                scoring_success=scoring_success,
+                scoring_failure=scoring_failure,
+                conceding_success=conceding_success,
+                conceding_failure=conceding_failure,
+            )
+            physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
+            if physical_skip_stats:
+                metadata["physical_xpass_skipped_actions"][match_id] = physical_skip_stats
 
             if success_intent_model is not None:
                 try:

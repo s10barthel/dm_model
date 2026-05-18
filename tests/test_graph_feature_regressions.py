@@ -1085,6 +1085,39 @@ class ComponentExportRegressionTests(unittest.TestCase):
         self.assertEqual(exported["original_event_id"].tolist(), ["EVENT-105", "EVENT-211"])
         self.assertNotIn("index", exported.columns)
 
+    def test_match_component_export_keeps_other_outputs_when_pass_success_is_skipped(self) -> None:
+        actions = pd.DataFrame(
+            [
+                {
+                    "stats_perform_match_id": "DFL-MAT-TEST",
+                    "action_id": 105,
+                    "original_event_id": "EVENT-105",
+                }
+            ],
+            index=pd.Index([4], name="index"),
+        )
+        frame = pd.DataFrame({"home_1": [0.25]}, index=pd.Index([4], name="index"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "DFL-MAT-TEST"
+            run_relevant_models.save_match_component_tables(
+                output_dir,
+                actions,
+                action_intent=frame,
+                pass_intent=frame,
+                pass_success=None,
+                scoring_success=frame,
+                scoring_failure=frame,
+                conceding_success=frame,
+                conceding_failure=frame,
+            )
+
+            self.assertTrue((output_dir / "action_intent.parquet").exists())
+            self.assertTrue((output_dir / "pass_intent.parquet").exists())
+            self.assertTrue((output_dir / "outcome_scoring_success.parquet").exists())
+            self.assertTrue((output_dir / "outcome_conceding_failure.parquet").exists())
+            self.assertFalse((output_dir / "pass_success.parquet").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

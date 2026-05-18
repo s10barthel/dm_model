@@ -136,6 +136,38 @@ class DummyOffsetModel(nn.Module):
         return torch.tensor(self.output_values[:node_count], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
 
 
+class DummyPhysicalInferenceModel(nn.Module):
+    def __init__(self, cache_dir: Path) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+        self.args = {
+            "task": "pass_success",
+            "node_in_dim": 25,
+            "include_out": False,
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "offside_aware": True,
+            "extend_features": False,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+            "filter_blockers": False,
+            "use_physical_xpass": True,
+            "model_variant": "gat_phys_logit_offset",
+            "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+            "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+            "physical_cache_dir": str(cache_dir),
+        }
+
+    def forward(self, graphs: Data, _batch_dests: torch.Tensor | None = None) -> torch.Tensor:
+        return torch.zeros(graphs.x.shape[0], dtype=torch.float32, device=graphs.x.device) + self.weight * 0.0
+
+
 def decoder_args(**overrides: object) -> dict[str, object]:
     args: dict[str, object] = {
         "task": "pass_success",
@@ -161,7 +193,115 @@ def decoder_args(**overrides: object) -> dict[str, object]:
     return args
 
 
+def make_physical_inference_match(action_indexes: list[int], is_pass: list[int]) -> SimpleNamespace:
+    labels = torch.zeros((len(action_indexes), len(LABEL_COLUMNS)), dtype=torch.float32)
+    for row_index, (action_index, is_pass_i) in enumerate(zip(action_indexes, is_pass)):
+        labels[row_index, LABEL_INDEX["action_index"]] = int(action_index)
+        labels[row_index, LABEL_INDEX["is_pass"]] = int(is_pass_i)
+        labels[row_index, LABEL_INDEX["intent_index"]] = 1
+        labels[row_index, LABEL_INDEX["success"]] = 1
+
+    tracking_rows = []
+    action_rows = []
+    for action_index in action_indexes:
+        tracking_rows.append(
+            {
+                "home_1_x": 10.0,
+                "home_1_y": 34.0,
+                "home_2_x": 20.0,
+                "home_2_y": 30.0,
+                "away_3_x": 60.0,
+                "away_3_y": 34.0,
+            }
+        )
+        action_rows.append(
+            {
+                "frame_id": int(action_index),
+                "object_id": "home_1",
+                "end_frame_id": int(action_index),
+                "end_player_id": "home_1",
+            }
+        )
+
+    return SimpleNamespace(
+        actions=pd.DataFrame(action_rows, index=pd.Index(action_indexes, name="index")),
+        tracking=pd.DataFrame(tracking_rows, index=pd.Index(action_indexes, name="frame_id")),
+        labels=labels,
+        graph_features_0=[make_graph(["home_1", "home_2", "away_3"]) for _ in action_indexes],
+        graph_features_1=None,
+        graph_features_by_dir={},
+        graph_feature_action_indices_by_dir={},
+        match_id="match_1",
+    )
+
+
+def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -> None:
+    (cache_dir / "matches").mkdir(parents=True)
+    (cache_dir / "metadata.json").write_text(
+        json.dumps(
+            physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            )
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "match_id": "match_1",
+            "action_index": int(action_index),
+            "physical_state_hash": f"hash_{action_index}",
+            "home_1": 0.2,
+            "home_2": 0.8,
+            "away_3": 0.1,
+        }
+        for action_index in action_indexes
+    ]
+    pd.DataFrame(
+        rows,
+        columns=["match_id", "action_index", "physical_state_hash", "home_1", "home_2", "away_3"],
+    ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+
+
 class PhysicalXPassTests(unittest.TestCase):
+    def test_pass_success_inference_skips_non_pass_actions_missing_from_static_physical_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            write_physical_inference_cache(cache_dir, [0, 2])
+            match = make_physical_inference_match([0, 1, 2], [1, 0, 1])
+            model = DummyPhysicalInferenceModel(cache_dir)
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [0, 2])
+        self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["skipped_count"], 1)
+        self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["sample_action_indexes"], [1])
+
+    def test_pass_success_inference_skips_pass_actions_missing_from_static_physical_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            write_physical_inference_cache(cache_dir, [0])
+            match = make_physical_inference_match([0, 1], [1, 1])
+            model = DummyPhysicalInferenceModel(cache_dir)
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [0])
+        self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["skipped_count"], 1)
+        self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["sample_action_indexes"], [1])
+
+    def test_pass_success_inference_raises_specific_error_when_all_physical_rows_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            write_physical_inference_cache(cache_dir, [])
+            match = make_physical_inference_match([0, 1], [1, 0])
+            model = DummyPhysicalInferenceModel(cache_dir)
+
+            with self.assertRaises(inference.PhysicalXPassNoUsableRowsError):
+                inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["skipped_count"], 2)
+
     def test_max_player_cum_prob_default_ignores_other_teammates_and_uses_speed_max(self) -> None:
         calls = []
 

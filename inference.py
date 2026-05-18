@@ -25,6 +25,7 @@ from physical_pass_model import (
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_to_graphs,
+    load_physical_xpass_match,
     model_uses_physical_xpass,
     physical_xpass_floor,
     physical_xpass_speed_aggregation,
@@ -35,6 +36,10 @@ from physical_pass_model import (
 from project_config import get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
+
+
+class PhysicalXPassNoUsableRowsError(ValueError):
+    pass
 
 
 def _exclude_possessor_from_pass_only_intent(
@@ -275,6 +280,95 @@ def attach_physical_xpass_for_inference(
     return attached
 
 
+def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
+    feature_root = _runtime_feature_root(match)
+    physical_cache_dir = model.args.get("physical_cache_dir")
+    if physical_cache_dir:
+        return str(physical_cache_dir)
+
+    if feature_root is None:
+        runtime_source_name = _runtime_physical_xpass_source_name(match)
+        if runtime_source_name is not None:
+            return str(get_runtime_physical_xpass_dir(runtime_source_name))
+        feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
+
+    return str(get_physical_xpass_dir(feature_root))
+
+
+def _record_physical_xpass_skipped_actions(
+    match: Match,
+    model: GNN,
+    *,
+    cache_dir: str,
+    requested_count: int,
+    kept_count: int,
+    skipped_action_indexes: list[int],
+) -> None:
+    if not skipped_action_indexes:
+        return
+
+    stats = getattr(match, "physical_xpass_skipped_actions", None)
+    if stats is None:
+        stats = {}
+        setattr(match, "physical_xpass_skipped_actions", stats)
+
+    task = str(model.args.get("task", "unknown"))
+    stats[task] = {
+        "cache_dir": str(cache_dir),
+        "requested_count": int(requested_count),
+        "kept_count": int(kept_count),
+        "skipped_count": int(len(skipped_action_indexes)),
+        "sample_action_indexes": [int(action_index) for action_index in skipped_action_indexes[:10]],
+    }
+
+
+def filter_missing_physical_xpass_rows_for_inference(
+    match: Match,
+    graphs: list[Data],
+    labels: torch.Tensor,
+    model: GNN,
+) -> tuple[list[Data], torch.Tensor]:
+    if not model_uses_physical_xpass(model.args) or _allows_online_physical_xpass(match):
+        return graphs, labels
+
+    source = physical_xpass_source(model.args)
+    speed_aggregation = physical_xpass_speed_aggregation(model.args)
+    cache_dir = _physical_xpass_cache_dir_for_inference(match, model)
+    validate_physical_xpass_cache_metadata(
+        cache_dir,
+        expected_source=source,
+        expected_speed_aggregation=speed_aggregation,
+    )
+    physical_rows = load_physical_xpass_match(cache_dir, resolve_match_id(match))
+    available_action_indexes = set(physical_rows.index.astype(int).tolist())
+
+    kept_graphs: list[Data] = []
+    kept_labels: list[torch.Tensor] = []
+    skipped_action_indexes: list[int] = []
+    for graph, label in zip(graphs, labels):
+        action_index = int(label[config.LABEL_INDEX["action_index"]].item())
+        if action_index in available_action_indexes:
+            kept_graphs.append(graph)
+            kept_labels.append(label)
+        else:
+            skipped_action_indexes.append(action_index)
+
+    _record_physical_xpass_skipped_actions(
+        match,
+        model,
+        cache_dir=cache_dir,
+        requested_count=len(graphs),
+        kept_count=len(kept_graphs),
+        skipped_action_indexes=skipped_action_indexes,
+    )
+    if not kept_labels:
+        raise PhysicalXPassNoUsableRowsError(
+            "No usable graph/label pairs remain after filtering missing physical xPass sidecar rows."
+        )
+
+    return kept_graphs, torch.stack(kept_labels, axis=0)
+
+
 def resolve_runtime_graph_feature_dir(match: Match, model: GNN, post_action: bool = False) -> Path:
     checkpoint_feature_path = Path(resolve_graph_feature_dir(model, post_action))
     feature_root = _runtime_feature_root(match)
@@ -394,6 +488,7 @@ def inference_gnn(
         feature_action_indices=feature_action_indices,
     )
     if model_uses_physical_xpass(model.args):
+        graphs, labels = filter_missing_physical_xpass_rows_for_inference(match, graphs, labels, model)
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model)
 
     graphs = Batch.from_data_list(graphs).to(device)
