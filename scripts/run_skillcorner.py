@@ -25,12 +25,15 @@ from datatools.skillcorner import (
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    format_physical_xpass_cache_summary,
     model_uses_physical_xpass,
     physical_xpass_source,
     physical_xpass_speed_aggregation,
     physical_xpass_teammate_policy,
+    prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
     resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
 )
 from project_config import (
     PROJECT_ROOT,
@@ -118,11 +121,7 @@ def _prewarm_skillcorner_physical_xpass(
     model = model_specs.get("pass_success")
     if model is None or not model_uses_physical_xpass(model.args):
         return None
-    items = [
-        {"match_id": str(possession.match_id), "graphs": possession.graph_features_0, "labels": possession.labels}
-        for possession in possessions
-        if possession.labels.numel() > 0 and possession.graph_features_0
-    ]
+    items = prepare_runtime_physical_xpass_prewarm_items(possessions, model)
     if not items:
         return None
     source = physical_xpass_source(model.args)
@@ -152,6 +151,15 @@ def format_match_progress(index: int, total: int, match_id: str) -> str:
 
 def format_possession_progress(match_id: str, possession_number: int, total_possessions: int) -> str:
     return f"  match {match_id} possession {possession_number}/{total_possessions}"
+
+
+def format_skillcorner_inference_progress(match_id: str, index: int, total: int, event_index: int | str) -> str:
+    remaining = max(int(total) - int(index), 0)
+    unit = "possession" if remaining == 1 else "possessions"
+    return (
+        f"match {match_id} inference {int(index)}/{int(total)} | "
+        f"event_index={event_index} | {remaining} {unit} left"
+    )
 
 
 def format_possession_skip(
@@ -237,6 +245,7 @@ def main() -> None:
         pass_success_model.args["physical_num_workers"] = physical_num_workers
         pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
         pass_success_model.args["physical_batch_size"] = physical_batch_size
+        pass_success_model.args["physical_runtime_cache_read_only"] = False
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
@@ -349,6 +358,8 @@ def main() -> None:
                     pass_success_model = model_specs.get("pass_success")
                     if pass_success_model is not None:
                         pass_success_model.args["physical_runtime_cache_refresh"] = False
+                        if prewarm_stats:
+                            pass_success_model.args["physical_runtime_cache_read_only"] = True
                 except Exception as exc:
                     error_summary = summarize_exception(exc)
                     for possession_number, event_index, _possession in built_possessions:
@@ -372,9 +383,17 @@ def main() -> None:
                 total=len(built_possessions),
                 desc=f"match {match_id} possessions",
             ) as progress:
-                for possession_number, event_index, possession in progress:
+                for inference_number, (possession_number, event_index, possession) in enumerate(progress, start=1):
                     progress.set_postfix(event_index=int(event_index))
                     try:
+                        progress.write(
+                            format_skillcorner_inference_progress(
+                                str(match_id),
+                                inference_number,
+                                len(built_possessions),
+                                event_index,
+                            )
+                        )
                         components = infer_skillcorner_components(possession, model_specs, device=device)
                         runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
                         if runtime_physical_stats:
@@ -425,6 +444,15 @@ def main() -> None:
             print(f"  SKIP match {match_id}: {summarize_exception(exc)}")
 
     summary = summarize_skillcorner_stats(stats_by_match, skipped_matches)
+    physical_xpass_required = _pass_success_uses_physical_xpass(model_specs)
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        prewarm_stats=physical_xpass_prewarm_stats,
+        runtime_stats=physical_xpass_runtime_stats,
+    )
     metadata = {
         "run_id": component_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -453,6 +481,7 @@ def main() -> None:
         "skipped_possessions": skipped_possessions,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
+        "physical_xpass_cache_summary": physical_xpass_cache_summary,
         "models": resolved_model_ids,
         "model_records": model_records,
         "model_feature_signatures": {task: record["feature_signature"] for task, record in model_records.items()},
@@ -503,6 +532,7 @@ def main() -> None:
         "{skipped_missing_possessor} missing-possessor frames, "
         "{skipped_missing_graph} missing-graph frames.".format(**totals)
     )
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":

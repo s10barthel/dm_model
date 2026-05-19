@@ -26,12 +26,15 @@ from datatools.hawkeye import (
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    format_physical_xpass_cache_summary,
     model_uses_physical_xpass,
     physical_xpass_source,
     physical_xpass_speed_aggregation,
     physical_xpass_teammate_policy,
+    prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
     resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
 )
 from project_config import (
     HAWKEYE_COMPONENT_RUNS_DIR,
@@ -106,11 +109,12 @@ def _prewarm_hawkeye_physical_xpass(
     model = model_specs.get("pass_success")
     if model is None or not model_uses_physical_xpass(model.args):
         return None
-    if situation.labels.numel() == 0 or not situation.graph_features_0:
+    items = prepare_runtime_physical_xpass_prewarm_items([situation], model)
+    if not items:
         return None
     source = physical_xpass_source(model.args)
     return prewarm_physical_xpass_runtime_cache(
-        [{"match_id": str(situation.match_id), "graphs": situation.graph_features_0, "labels": situation.labels}],
+        items,
         cache_dir=cache_dir,
         source=source,
         eps=float(model.args.get("physical_eps", 1e-4)),
@@ -178,6 +182,7 @@ def main() -> None:
         pass_success_model.args["physical_num_workers"] = physical_num_workers
         pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
         pass_success_model.args["physical_batch_size"] = physical_batch_size
+        pass_success_model.args["physical_runtime_cache_read_only"] = False
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
@@ -214,6 +219,8 @@ def main() -> None:
                 pass_success_model = model_specs.get("pass_success")
                 if pass_success_model is not None:
                     pass_success_model.args["physical_runtime_cache_refresh"] = False
+                    if prewarm_stats:
+                        pass_success_model.args["physical_runtime_cache_read_only"] = True
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
             stats_by_situation[situation_id] = stats
@@ -227,6 +234,15 @@ def main() -> None:
             print(f"  SKIP {situation_id}: {error_summary}")
 
     totals = summarize_hawkeye_stats(stats_by_situation)
+    physical_xpass_required = _pass_success_uses_physical_xpass(model_specs)
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        prewarm_stats=physical_xpass_prewarm_stats,
+        runtime_stats=physical_xpass_runtime_stats,
+    )
     metadata = {
         "run_id": component_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -252,6 +268,7 @@ def main() -> None:
         "processed_situation_ids": processed_situation_ids,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
+        "physical_xpass_cache_summary": physical_xpass_cache_summary,
         "skipped_situations": skipped_situations,
         "totals": totals,
         "models": resolved_model_ids,
@@ -281,6 +298,7 @@ def main() -> None:
         "{skipped_missing_possessor} missing-possessor frames, "
         "{skipped_missing_graph} missing-graph frames.".format(**totals)
     )
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":

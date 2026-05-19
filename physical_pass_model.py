@@ -17,6 +17,7 @@ from torch_geometric.data import Data
 
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
+from datatools.utils import filter_features_and_labels
 from project_config import get_physical_xpass_match_path
 
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
@@ -382,6 +383,43 @@ def physical_state_hash(graph: Data) -> str:
         rows.append(values)
     payload = json.dumps(rows, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def prepare_runtime_physical_xpass_prewarm_items(
+    runtime_objects: list[Any],
+    model: Any,
+    *,
+    match_id_getter: Callable[[Any], str] | None = None,
+) -> list[dict[str, Any]]:
+    """Prepare runtime cache prewarm inputs exactly as pass-success inference sees them."""
+    if model is None or not model_uses_physical_xpass(model.args):
+        return []
+    match_id_getter = match_id_getter or (lambda runtime_object: str(runtime_object.match_id))
+    items: list[dict[str, Any]] = []
+    for runtime_object in runtime_objects:
+        graphs = list(getattr(runtime_object, "graph_features_0", None) or [])
+        labels = getattr(runtime_object, "labels", None)
+        if labels is None or len(graphs) == 0:
+            continue
+        if not isinstance(labels, torch.Tensor):
+            labels = torch.as_tensor(labels, dtype=torch.float32)
+        if labels.numel() == 0:
+            continue
+        filtered_graphs, filtered_labels = filter_features_and_labels(
+            graphs,
+            labels,
+            model.args,
+        )
+        if filtered_labels.numel() == 0 or not filtered_graphs:
+            continue
+        items.append(
+            {
+                "match_id": str(match_id_getter(runtime_object)),
+                "graphs": filtered_graphs,
+                "labels": filtered_labels,
+            }
+        )
+    return items
 
 
 def _extract_simulation_probability(
@@ -1445,6 +1483,106 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
     return target
 
 
+def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict[str, int]:
+    totals = {
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_written": 0,
+        "hash_mismatch_recomputed": 0,
+        "online_graphs": 0,
+    }
+    if not isinstance(stats, dict):
+        return totals
+
+    def visit(value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        if any(key in value for key in totals):
+            for key in totals:
+                totals[key] += int(value.get(key, 0) or 0)
+            return
+        for child in value.values():
+            visit(child)
+
+    visit(stats)
+    return totals
+
+
+def summarize_physical_xpass_cache_usage(
+    *,
+    physical_xpass_required: bool,
+    cache_disabled: bool,
+    refresh_requested: bool,
+    cache_dir: str | Path | None,
+    prewarm_stats: dict[str, object] | None = None,
+    runtime_stats: dict[str, object] | None = None,
+) -> dict[str, object]:
+    prewarm_totals = _aggregate_physical_xpass_stat_tree(prewarm_stats)
+    runtime_totals = _aggregate_physical_xpass_stat_tree(runtime_stats)
+    has_prewarm_work = any(prewarm_totals.values())
+    totals = prewarm_totals if has_prewarm_work else runtime_totals
+
+    cache_hits = int(totals["cache_hits"])
+    cache_misses = int(totals["cache_misses"])
+    cache_written = int(totals["cache_written"])
+    hash_mismatch_recomputed = int(totals["hash_mismatch_recomputed"])
+    online_graphs = int(totals["online_graphs"])
+    requested_rows = cache_hits + cache_misses
+
+    if not physical_xpass_required:
+        reason = "physical_xpass_not_required"
+    elif cache_disabled:
+        reason = "cache_disabled"
+    elif refresh_requested:
+        reason = "refresh_requested"
+    elif hash_mismatch_recomputed > 0:
+        reason = "hash_mismatch"
+    elif cache_misses > 0 or cache_written > 0:
+        reason = "missing_or_cold_cache_rows"
+    elif cache_hits > 0:
+        reason = "cache_hit"
+    else:
+        reason = "no_runtime_physical_xpass_work"
+
+    return {
+        "cache_enabled": bool(not cache_disabled),
+        "physical_xpass_required": bool(physical_xpass_required),
+        "cache_dir": None if cache_dir is None else str(cache_dir),
+        "cache_reused": cache_hits > 0,
+        "cache_fully_reused": requested_rows > 0 and cache_hits == requested_rows,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "cache_written": cache_written,
+        "hash_mismatch_recomputed": hash_mismatch_recomputed,
+        "online_graphs": online_graphs,
+        "requested_rows": requested_rows,
+        "reason": reason,
+    }
+
+
+def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
+    reason = str(summary.get("reason", "unknown"))
+    cache_dir = summary.get("cache_dir")
+    hits = int(summary.get("cache_hits", 0) or 0)
+    misses = int(summary.get("cache_misses", 0) or 0)
+    written = int(summary.get("cache_written", 0) or 0)
+    requested = int(summary.get("requested_rows", hits + misses) or 0)
+    online_graphs = int(summary.get("online_graphs", 0) or 0)
+
+    if reason == "physical_xpass_not_required":
+        return "Physical xPass cache: not used; pass-success model does not require physical xPass."
+    if reason == "cache_disabled":
+        return f"Physical xPass cache: disabled by --no-physical-cache; computed {online_graphs} rows online during inference."
+    if reason == "cache_hit":
+        return f"Physical xPass cache: reused {hits}/{requested} rows from {cache_dir}."
+    if reason in {"hash_mismatch", "missing_or_cold_cache_rows", "refresh_requested"}:
+        return (
+            f"Physical xPass cache: recomputed {written} rows; reason={reason}; "
+            f"hits={hits} misses={misses} written={written}."
+        )
+    return f"Physical xPass cache: no runtime physical xPass work; reason={reason}."
+
+
 def _chunk_items(items: list[dict[str, Any]], chunks: int) -> list[list[dict[str, Any]]]:
     if not items:
         return []
@@ -1776,6 +1914,52 @@ def attach_physical_xpass_to_graphs(
     rows = load_physical_xpass_match(cache_dir, match_id)
     attached: list[Data] = []
     for graph, label in zip(graphs, labels):
+        attached.append(
+            attach_physical_xpass_to_graph(
+                graph,
+                label,
+                rows,
+                match_id=match_id,
+                eps=eps,
+                floor=floor,
+                require_observed_target=require_observed_target,
+            )
+        )
+    return attached
+
+
+def attach_physical_xpass_read_only_to_graphs(
+    graphs: list[Data],
+    labels: torch.Tensor,
+    *,
+    cache_dir: str | Path,
+    match_id: str,
+    eps: float = 1e-4,
+    floor: float | None = None,
+    require_observed_target: bool = True,
+) -> list[Data]:
+    rows = load_physical_xpass_match(cache_dir, match_id)
+    attached: list[Data] = []
+    for graph, label in zip(graphs, labels):
+        action_index = int(label[LABEL_INDEX["action_index"]].item())
+        if action_index not in rows.index:
+            raise FileNotFoundError(
+                f"Physical xPass runtime cache for match {match_id} has no row for action_index={action_index}. "
+                "Runtime prewarm should have written this row before inference."
+            )
+        row = rows.loc[action_index]
+        cached_hash = row.get("physical_state_hash", None)
+        if pd.isna(cached_hash):
+            raise ValueError(
+                f"Physical xPass runtime cache for match {match_id}, action_index={action_index} "
+                "is missing physical_state_hash."
+            )
+        state_hash = physical_state_hash(graph)
+        if str(cached_hash) != state_hash:
+            raise ValueError(
+                f"Physical xPass runtime cache hash mismatch for match {match_id}, action_index={action_index}; "
+                "runtime prewarm and inference graph filtering are not aligned."
+            )
         attached.append(
             attach_physical_xpass_to_graph(
                 graph,

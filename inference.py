@@ -24,6 +24,7 @@ from models.gnn import GNN
 from physical_pass_model import (
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
+    attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graphs,
     load_physical_xpass_match,
     model_uses_physical_xpass,
@@ -212,6 +213,22 @@ def attach_physical_xpass_for_inference(
                 physical_cache_dir = str(get_physical_xpass_dir(feature_root))
         else:
             physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+
+    if bool(model.args.get("physical_runtime_cache_read_only", False)):
+        validate_physical_xpass_cache_metadata(
+            physical_cache_dir,
+            expected_source=source,
+            expected_speed_aggregation=speed_aggregation,
+        )
+        return attach_physical_xpass_read_only_to_graphs(
+            graphs,
+            labels,
+            cache_dir=physical_cache_dir,
+            match_id=resolve_match_id(match),
+            eps=eps,
+            floor=floor,
+            require_observed_target=False,
+        )
 
     if _allows_online_physical_xpass(match) and not bool(model.args.get("physical_runtime_cache_disabled", False)):
         attached, cache_stats = attach_physical_xpass_cached_online_to_graphs(

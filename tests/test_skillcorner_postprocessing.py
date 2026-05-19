@@ -217,6 +217,14 @@ def test_run_skillcorner_progress_formatting_helpers() -> None:
     assert run_skillcorner.format_match_progress(19, 20, "117670") == "[19/20] match_id=117670 | 1 game left"
     assert run_skillcorner.format_possession_progress("117670", 12, 48) == "  match 117670 possession 12/48"
     assert (
+        run_skillcorner.format_skillcorner_inference_progress("117670", 12, 48, 345)
+        == "match 117670 inference 12/48 | event_index=345 | 36 possessions left"
+    )
+    assert (
+        run_skillcorner.format_skillcorner_inference_progress("117670", 47, 48, 987)
+        == "match 117670 inference 47/48 | event_index=987 | 1 possession left"
+    )
+    assert (
         run_skillcorner.format_possession_skip("117670", 12, 48, 345, "ValueError: example")
         == "  SKIP match 117670 possession 12/48 event_index=345: ValueError: example"
     )
@@ -257,6 +265,12 @@ def test_run_skillcorner_main_prints_match_centered_progress(
         run_id="test_run",
         output_dir=str(tmp_path),
         frames_mode="first_and_last",
+        physical_cache_dir=None,
+        no_physical_cache=False,
+        refresh_physical_cache=False,
+        physical_num_workers="auto",
+        physical_worker_thread_limit=1,
+        physical_batch_size=16,
     )
     shared_context = {
         "intended_receiver_mode": "mode",
@@ -332,7 +346,8 @@ def test_run_skillcorner_main_prints_match_centered_progress(
     monkeypatch.setattr(run_skillcorner, "infer_skillcorner_components", lambda possession, model_specs, device: {})
     monkeypatch.setattr(run_skillcorner, "build_skillcorner_component_table", lambda *args, **kwargs: pd.DataFrame())
     monkeypatch.setattr(run_skillcorner, "_save_component_table", lambda *args, **kwargs: None)
-    monkeypatch.setattr(run_skillcorner, "write_run_metadata", lambda *args, **kwargs: None)
+    written_metadata = {}
+    monkeypatch.setattr(run_skillcorner, "write_run_metadata", lambda _path, metadata: written_metadata.update(metadata))
     monkeypatch.setattr(run_skillcorner, "write_latest_run", lambda *args, **kwargs: None)
     postprocessing_calls = []
     filter_calls = []
@@ -363,9 +378,11 @@ def test_run_skillcorner_main_prints_match_centered_progress(
     assert RecordingTqdm.calls[0].kwargs["desc"] == "match m1 possessions"
     assert RecordingTqdm.calls[0].kwargs["total"] == 1
     assert RecordingTqdm.calls[0].postfixes == [{"event_index": 20}]
+    assert RecordingTqdm.calls[0].writes == ["match m1 inference 1/1 | event_index=20 | 0 possessions left"]
     assert RecordingTqdm.calls[1].kwargs["desc"] == "match m2 possessions"
     assert RecordingTqdm.calls[1].kwargs["total"] == 1
     assert RecordingTqdm.calls[1].postfixes == [{"event_index": 30}]
+    assert RecordingTqdm.calls[1].writes == ["match m2 inference 1/1 | event_index=30 | 0 possessions left"]
     output = capsys.readouterr().out
     assert "[1/2] match_id=m1 | 1 game left" in output
     assert "[2/2] match_id=m2 | 0 games left" in output
@@ -392,6 +409,8 @@ def test_run_skillcorner_main_prints_match_centered_progress(
     ]
     assert "Saved SkillCorner summary to" in output
     assert "filtered actions rows: 1" in output
+    assert "Physical xPass cache: not used; pass-success model does not require physical xPass." in output
+    assert written_metadata["physical_xpass_cache_summary"]["reason"] == "physical_xpass_not_required"
 
 
 def test_filter_event_rows_and_drop_empty_columns() -> None:

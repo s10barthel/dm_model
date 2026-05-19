@@ -25,12 +25,15 @@ from datatools.benchmark import (
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    format_physical_xpass_cache_summary,
     model_uses_physical_xpass,
     physical_xpass_source,
     physical_xpass_speed_aggregation,
     physical_xpass_teammate_policy,
+    prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
     resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
 )
 from project_config import (
     BENCHMARK_COMPONENT_RUNS_DIR,
@@ -91,6 +94,16 @@ def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def format_benchmark_state_progress(index: int, total: int, modification_id: int, game_state_id: int) -> str:
+    remaining = max(int(total) - int(index), 0)
+    unit = "state" if remaining == 1 else "states"
+    return (
+        f"benchmark state {int(index)}/{int(total)} | "
+        f"modification_{int(modification_id)} game_state_{int(game_state_id)} | "
+        f"{remaining} {unit} left"
+    )
+
+
 def _pass_success_uses_physical_xpass(model_specs: dict[str, object]) -> bool:
     model = model_specs.get("pass_success")
     return model is not None and model_uses_physical_xpass(model.args)
@@ -108,11 +121,7 @@ def _prewarm_benchmark_physical_xpass(
     model = model_specs.get("pass_success")
     if model is None or not model_uses_physical_xpass(model.args):
         return None
-    items = [
-        {"match_id": str(state.match_id), "graphs": state.graph_features_0, "labels": state.labels}
-        for state in states
-        if state.labels.numel() > 0 and state.graph_features_0
-    ]
+    items = prepare_runtime_physical_xpass_prewarm_items(states, model)
     if not items:
         return None
     source = physical_xpass_source(model.args)
@@ -248,6 +257,7 @@ def main() -> None:
         pass_success_model.args["physical_num_workers"] = physical_num_workers
         pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
         pass_success_model.args["physical_batch_size"] = physical_batch_size
+        pass_success_model.args["physical_runtime_cache_read_only"] = False
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
@@ -310,6 +320,8 @@ def main() -> None:
             pass_success_model = model_specs.get("pass_success")
             if pass_success_model is not None:
                 pass_success_model.args["physical_runtime_cache_refresh"] = False
+                if prewarm_stats:
+                    pass_success_model.args["physical_runtime_cache_read_only"] = True
         except Exception as exc:
             error_summary = summarize_exception(exc)
             for modification_id, game_state_id, _state, _state_rows, _stats in built_states:
@@ -325,9 +337,17 @@ def main() -> None:
 
     processed_state_counts: dict[int, int] = {}
     with tqdm(built_states, total=len(built_states), desc="benchmark states") as progress:
-        for modification_id, game_state_id, state, state_rows, stats in progress:
+        for state_number, (modification_id, game_state_id, state, state_rows, stats) in enumerate(progress, start=1):
             progress.set_postfix(modification=int(modification_id), game_state=int(game_state_id))
             try:
+                progress.write(
+                    format_benchmark_state_progress(
+                        state_number,
+                        len(built_states),
+                        modification_id,
+                        game_state_id,
+                    )
+                )
                 components = infer_benchmark_components(state, model_specs, device=device)
                 export_tables.append(build_benchmark_export(state_rows, state, components))
                 state_key = f"{modification_id}:{game_state_id}"
@@ -368,6 +388,15 @@ def main() -> None:
 
     totals = summarize_benchmark_stats(stats_by_state)
     synthetic_shot_rows = int(benchmark_table["team"].isna().sum()) if "team" in benchmark_table.columns else 0
+    physical_xpass_required = _pass_success_uses_physical_xpass(model_specs)
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        prewarm_stats=physical_xpass_prewarm_stats,
+        runtime_stats=physical_xpass_runtime_stats,
+    )
     metadata = {
         "run_id": component_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -395,6 +424,7 @@ def main() -> None:
         "processed_states": processed_states,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
+        "physical_xpass_cache_summary": physical_xpass_cache_summary,
         "skipped_modifications": _compact_skips(skipped_modifications),
         "skipped_modification_errors": skipped_modification_errors,
         "skipped_states": skipped_state_errors,
@@ -430,6 +460,7 @@ def main() -> None:
         "{skipped_missing_possessor} missing-possessor states, "
         "{skipped_missing_graph} missing-graph states.".format(**totals)
     )
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":
