@@ -2021,6 +2021,232 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual([item["match_id"] for item in benchmark_prewarm.call_args.args[0]], ["benchmark_1", "benchmark_2"])
         self.assertEqual([item["match_id"] for item in skillcorner_prewarm.call_args.args[0]], ["skillcorner_1", "skillcorner_1"])
 
+    def test_benchmark_main_prewarm_runs_once_for_all_built_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_parent = Path(tmpdir) / "runs"
+            args = SimpleNamespace(
+                input_dir=str(Path(tmpdir) / "benchmark"),
+                modification=None,
+                limit=None,
+                device="cpu",
+                bundle_id="bundle",
+                action_intent_model_id=None,
+                pass_intent_model_id=None,
+                pass_success_model_id=None,
+                outcome_scoring_model_id=None,
+                outcome_conceding_model_id=None,
+                run_id="benchmark_component_test",
+                output_dir=str(output_parent),
+                physical_cache_dir="cache",
+                no_physical_cache=False,
+                refresh_physical_cache=True,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
+            )
+            pass_success_model = SimpleNamespace(
+                args={
+                    "task": "pass_success",
+                    "use_physical_xpass": True,
+                    "model_variant": "gat_phys_logit_offset",
+                    "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                    "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                }
+            )
+            model_specs = {"pass_success": pass_success_model}
+
+            def build_state(_game_state, *, modification_id, game_state_id, higher_state_id, add_v_edge_features):
+                del higher_state_id, add_v_edge_features
+                if modification_id == 2 and game_state_id == 2:
+                    raise ValueError("bad state")
+                state = SimpleNamespace(
+                    match_id=f"modification_{modification_id}_game_state_{game_state_id}",
+                    physical_xpass_runtime_stats=None,
+                )
+                rows = pd.DataFrame([{"team": 1, "frame": f"{modification_id}:{game_state_id}"}])
+                stats = {
+                    "states": 1,
+                    "valid_frames": 1,
+                    "total_frames": 1,
+                    "skipped_missing_ball": 0,
+                    "skipped_missing_possessor": 0,
+                    "skipped_missing_graph": 0,
+                }
+                return state, rows, stats
+
+            written_metadata: dict[str, object] = {}
+
+            with patch.object(run_benchmark, "parse_args", return_value=args), \
+                patch.object(
+                    run_benchmark,
+                    "resolve_model_selection",
+                    return_value=(
+                        {
+                            "action_intent": "action_intent/fake",
+                            "pass_intent": "pass_intent/fake",
+                            "pass_success": "pass_success/fake",
+                            "outcome_scoring": "outcome_scoring/fake",
+                            "outcome_conceding": "outcome_conceding/fake",
+                        },
+                        {
+                            "intended_receiver_mode": "angle_only",
+                            "return_type": "disc_0.9",
+                            "target_family": "goal",
+                        },
+                        None,
+                    ),
+                ), \
+                patch.object(run_benchmark, "discover_benchmark_modifications", return_value=([1, 2], {})), \
+                patch.object(run_benchmark, "load_benchmark_models", return_value=model_specs), \
+                patch.object(
+                    run_benchmark,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": True},
+                ), \
+                patch.object(run_benchmark, "get_model_provenance", return_value={"feature_signature": "sig"}), \
+                patch.object(
+                    run_benchmark,
+                    "load_benchmark_modification_data",
+                    side_effect=lambda modification_id, _input_dir: {
+                        "higher_state_id": 1,
+                        "game_state_1": object(),
+                        "game_state_2": object(),
+                    },
+                ), \
+                patch.object(run_benchmark, "build_benchmark_state", side_effect=build_state), \
+                patch.object(
+                    run_benchmark,
+                    "_prewarm_benchmark_physical_xpass",
+                    return_value={"cache_misses": 3},
+                ) as prewarm, \
+                patch.object(run_benchmark, "infer_benchmark_components", side_effect=lambda state, _models, device: {"state": state.match_id}), \
+                patch.object(run_benchmark, "build_benchmark_export", side_effect=lambda rows, _state, _components: rows), \
+                patch.object(run_benchmark, "summarize_benchmark_stats", return_value={"states": 3, "valid_frames": 3, "total_frames": 3, "skipped_missing_ball": 0, "skipped_missing_possessor": 0, "skipped_missing_graph": 0}), \
+                patch.object(run_benchmark.pd.DataFrame, "to_parquet"), \
+                patch.object(run_benchmark.pd.DataFrame, "to_csv"), \
+                patch.object(run_benchmark, "write_run_metadata", side_effect=lambda _path, metadata: written_metadata.update(metadata)), \
+                patch.object(run_benchmark, "write_latest_run"), \
+                patch.object(
+                    run_benchmark,
+                    "run_benchmark_postprocessing",
+                    return_value=(None, {"agreements": 0, "disagreements": 0}, Path("summary.csv"), Path("summary.txt")),
+                ), \
+                patch.object(run_benchmark, "update_benchmark_runs_ledger", return_value=Path("ledger.csv")):
+                run_benchmark.main()
+
+            prewarm.assert_called_once()
+            prewarmed_states = prewarm.call_args.args[0]
+            self.assertEqual(
+                [state.match_id for state in prewarmed_states],
+                [
+                    "modification_1_game_state_1",
+                    "modification_1_game_state_2",
+                    "modification_2_game_state_1",
+                ],
+            )
+            self.assertFalse(pass_success_model.args["physical_runtime_cache_refresh"])
+            self.assertEqual(written_metadata["physical_xpass_prewarm_stats"], {"all": {"cache_misses": 3}})
+            self.assertEqual(written_metadata["processed_modifications"], [1, 2])
+            self.assertEqual(
+                written_metadata["skipped_states"],
+                [{"modification": 2, "game_state": 2, "error": "ValueError: bad state"}],
+            )
+
+    def test_benchmark_main_no_physical_cache_skips_global_prewarm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            args = SimpleNamespace(
+                input_dir=str(Path(tmpdir) / "benchmark"),
+                modification=None,
+                limit=None,
+                device="cpu",
+                bundle_id="bundle",
+                action_intent_model_id=None,
+                pass_intent_model_id=None,
+                pass_success_model_id=None,
+                outcome_scoring_model_id=None,
+                outcome_conceding_model_id=None,
+                run_id="benchmark_component_test",
+                output_dir=str(Path(tmpdir) / "runs"),
+                physical_cache_dir="cache",
+                no_physical_cache=True,
+                refresh_physical_cache=False,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
+            )
+            pass_success_model = SimpleNamespace(
+                args={
+                    "task": "pass_success",
+                    "use_physical_xpass": True,
+                    "model_variant": "gat_phys_logit_offset",
+                    "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                    "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                }
+            )
+            state = SimpleNamespace(match_id="benchmark_1", physical_xpass_runtime_stats=None)
+            stats = {
+                "states": 1,
+                "valid_frames": 1,
+                "total_frames": 1,
+                "skipped_missing_ball": 0,
+                "skipped_missing_possessor": 0,
+                "skipped_missing_graph": 0,
+            }
+
+            with patch.object(run_benchmark, "parse_args", return_value=args), \
+                patch.object(
+                    run_benchmark,
+                    "resolve_model_selection",
+                    return_value=(
+                        {
+                            "action_intent": "action_intent/fake",
+                            "pass_intent": "pass_intent/fake",
+                            "pass_success": "pass_success/fake",
+                            "outcome_scoring": "outcome_scoring/fake",
+                            "outcome_conceding": "outcome_conceding/fake",
+                        },
+                        {
+                            "intended_receiver_mode": "angle_only",
+                            "return_type": "disc_0.9",
+                            "target_family": "goal",
+                        },
+                        None,
+                    ),
+                ), \
+                patch.object(run_benchmark, "discover_benchmark_modifications", return_value=([1], {})), \
+                patch.object(run_benchmark, "load_benchmark_models", return_value={"pass_success": pass_success_model}), \
+                patch.object(run_benchmark, "validate_model_graph_schemas", return_value={"add_v_edge_features": True}), \
+                patch.object(run_benchmark, "get_model_provenance", return_value={"feature_signature": "sig"}), \
+                patch.object(
+                    run_benchmark,
+                    "load_benchmark_modification_data",
+                    return_value={"higher_state_id": 1, "game_state_1": object(), "game_state_2": object()},
+                ), \
+                patch.object(
+                    run_benchmark,
+                    "build_benchmark_state",
+                    side_effect=[(state, pd.DataFrame([{"team": 1}]), stats), ValueError("bad state")],
+                ), \
+                patch.object(run_benchmark, "_prewarm_benchmark_physical_xpass") as prewarm, \
+                patch.object(run_benchmark, "infer_benchmark_components", return_value={}), \
+                patch.object(run_benchmark, "build_benchmark_export", side_effect=lambda rows, _state, _components: rows), \
+                patch.object(run_benchmark, "summarize_benchmark_stats", return_value=stats), \
+                patch.object(run_benchmark.pd.DataFrame, "to_parquet"), \
+                patch.object(run_benchmark.pd.DataFrame, "to_csv"), \
+                patch.object(run_benchmark, "write_run_metadata"), \
+                patch.object(run_benchmark, "write_latest_run"), \
+                patch.object(
+                    run_benchmark,
+                    "run_benchmark_postprocessing",
+                    return_value=(None, {"agreements": 0, "disagreements": 0}, Path("summary.csv"), Path("summary.txt")),
+                ), \
+                patch.object(run_benchmark, "update_benchmark_runs_ledger", return_value=Path("ledger.csv")):
+                run_benchmark.main()
+
+            prewarm.assert_not_called()
+
     def test_generate_physical_xpass_auto_workers_resolves_to_six_on_sixteen_cores(self) -> None:
         with patch("physical_pass_model.os.cpu_count", return_value=16):
             self.assertEqual(resolve_physical_num_workers("auto"), 6)
