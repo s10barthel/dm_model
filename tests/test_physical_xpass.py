@@ -435,6 +435,123 @@ class PhysicalXPassTests(unittest.TestCase):
         np.testing.assert_allclose(calls[0]["v0_grid"][0], expected_speeds)
         self.assertAlmostEqual(float(probs[0]["home_2"]), 0.44)
 
+    def test_batched_ignore_teammates_uses_one_package_call_for_compatible_graphs(self) -> None:
+        calls = []
+
+        def make_extra_teammate_graph(node_ids: list[str]) -> Data:
+            graph = make_graph(node_ids)
+            graph.x[2, config.NODE_FEATURE_IS_TEAMMATE] = 1.0
+            graph.x[3, config.NODE_FEATURE_IS_TEAMMATE] = 0.0
+            return graph
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            return FakeSimulationResult(
+                (4, len(players), AS_DEFAULT_N_ANGLES, 3),
+                [
+                    (0, target_player_index, 0, 2, 0.41),
+                    (1, target_player_index, 0, 2, 0.42),
+                    (2, target_player_index, 0, 2, 0.61),
+                    (3, target_player_index, 0, 2, 0.62),
+                ],
+            )
+
+        graphs = [
+            make_extra_teammate_graph(["home_1", "home_2", "home_3", "away_4"]),
+            make_extra_teammate_graph(["other_1", "other_2", "other_3", "away_9"]),
+        ]
+        probs = compute_graphs_max_player_cum_prob_as_defaults(
+            graphs,
+            consider_teammates=False,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["PLAYER_POS"].shape, (4, 3, 4))
+        self.assertEqual(calls[0]["players"].tolist(), ["passer", "target_player", "defender_0"])
+        self.assertEqual(calls[0]["player_teams"].tolist(), ["attack", "attack", "defense"])
+        self.assertEqual(calls[0]["passers"].tolist(), ["passer", "passer", "passer", "passer"])
+        self.assertTrue(calls[0]["exclude_passer"])
+        self.assertAlmostEqual(float(probs[0]["home_2"]), 0.41)
+        self.assertAlmostEqual(float(probs[0]["home_3"]), 0.42)
+        self.assertAlmostEqual(float(probs[1]["other_2"]), 0.61)
+        self.assertAlmostEqual(float(probs[1]["other_3"]), 0.62)
+
+    def test_batched_ignore_teammates_exact_mode_batches_by_speed(self) -> None:
+        calls = []
+        expected_speeds = as_default_v0_values(max_speed=20)
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            speed = float(kwargs["v0_grid"][0, 0])
+            value = 0.9 if np.isclose(speed, expected_speeds[-1]) else 0.2
+            return FakeSimulationResult(
+                (2, len(players), AS_DEFAULT_N_ANGLES, 3),
+                [
+                    (0, target_player_index, 0, 2, value),
+                    (1, target_player_index, 0, 2, value - 0.1),
+                ],
+            )
+
+        probs = compute_graphs_max_player_cum_prob_as_defaults(
+            [make_graph(), make_graph(["other_1", "other_2", "away_9"])],
+            consider_teammates=False,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            max_speed=20,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+        )
+
+        self.assertEqual(len(calls), len(expected_speeds))
+        self.assertEqual(calls[0]["v0_grid"].shape, (2, 1))
+        self.assertEqual(calls[0]["v0_prob_aggregation_mode"], "mean")
+        self.assertTrue(calls[0]["exclude_passer"])
+        np.testing.assert_allclose([float(call["v0_grid"][0, 0]) for call in calls], expected_speeds)
+        self.assertAlmostEqual(float(probs[0]["home_2"]), 0.9)
+        self.assertAlmostEqual(float(probs[1]["other_2"]), 0.8)
+
+    def test_batched_ignore_teammates_matches_batch_size_one(self) -> None:
+        def fake_simulate_passes(**kwargs):
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("target_player")
+            updates = []
+            for frame_index in range(int(kwargs["PLAYER_POS"].shape[0])):
+                target_x = float(kwargs["PLAYER_POS"][frame_index, target_player_index, 0])
+                value = 0.3 + (target_x + 52.5) / 200.0
+                updates.append((frame_index, target_player_index, 0, 2, value))
+            return FakeSimulationResult(
+                (int(kwargs["PLAYER_POS"].shape[0]), len(players), AS_DEFAULT_N_ANGLES, 3),
+                updates,
+            )
+
+        graph_a = make_graph()
+        graph_b = make_graph(["other_1", "other_2", "away_9"])
+        graph_b.x[1, config.NODE_FEATURE_X] = 35.0
+
+        batch_one = compute_graphs_max_player_cum_prob_as_defaults(
+            [graph_a, graph_b],
+            consider_teammates=False,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=1,
+        )
+        batch_many = compute_graphs_max_player_cum_prob_as_defaults(
+            [graph_a, graph_b],
+            consider_teammates=False,
+            speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+        )
+
+        pd.testing.assert_series_equal(batch_many[0], batch_one[0])
+        pd.testing.assert_series_equal(batch_many[1], batch_one[1])
+
     def test_batched_exact_mode_makes_one_call_per_speed(self) -> None:
         calls = []
 

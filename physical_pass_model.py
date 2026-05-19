@@ -940,25 +940,9 @@ def compute_graphs_max_player_cum_prob_as_defaults(
     batch_size: int = 16,
 ) -> list[pd.Series]:
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
-    if not consider_teammates:
-        return [
-            compute_graph_max_player_cum_prob_as_defaults(
-                graph,
-                eps=eps,
-                consider_teammates=False,
-                speed_aggregation=speed_aggregation,
-                max_speed=max_speed,
-                simulate_passes_fn=simulate_passes_fn,
-                use_progress_bar=use_progress_bar,
-                chunk_size=chunk_size,
-            )
-            for graph in graphs
-        ]
-
-    simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
     batch_size = max(1, int(batch_size))
     results: list[pd.Series | None] = [None] * len(graphs)
-    prepared_groups: dict[tuple[tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
+    prepared_groups: dict[tuple[bool, tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
     for graph_index, graph in enumerate(graphs):
         node_ids = _node_ids(graph)
         candidate_indices = _candidate_target_indices(graph)
@@ -966,11 +950,45 @@ def compute_graphs_max_player_cum_prob_as_defaults(
         if not candidate_indices:
             results[graph_index] = result
             continue
-        player_pos, player_teams, players, ball_pos, raw_target_lookup, possessor_index = _full_as_default_simulation_inputs(
-            graph,
-            candidate_indices=candidate_indices,
+
+        if consider_teammates:
+            player_pos, player_teams, players, ball_pos, raw_target_lookup, possessor_index = _full_as_default_simulation_inputs(
+                graph,
+                candidate_indices=candidate_indices,
+            )
+            player_pos = player_pos[np.newaxis, :, :]
+            frame_count = 1
+            target_lookup = {node_index: (0, int(sim_index)) for node_index, sim_index in raw_target_lookup.items()}
+            passers = np.asarray([node_ids[possessor_index]], dtype=object)
+            playing_direction = np.asarray(
+                [_infer_playing_direction_from_centered_players(player_pos[0], player_teams)],
+                dtype=float,
+            )
+            exclude_passer = False
+        else:
+            (
+                player_pos,
+                player_teams,
+                _players,
+                ball_pos,
+                target_lookup,
+                _possessor_index,
+                playing_direction_value,
+            ) = _reduced_as_default_simulation_inputs(graph, candidate_indices=candidate_indices)
+            frame_count = int(player_pos.shape[0])
+            players = np.asarray(
+                ["passer", "target_player"] + [f"defender_{index}" for index in range(int(player_pos.shape[1]) - 2)],
+                dtype=object,
+            )
+            passers = np.repeat("passer", frame_count).astype(object)
+            playing_direction = np.repeat(float(playing_direction_value), frame_count).astype(float)
+            exclude_passer = True
+
+        key = (
+            bool(exclude_passer),
+            tuple(str(player) for player in players.tolist()),
+            tuple(str(team) for team in player_teams.tolist()),
         )
-        key = (tuple(str(player) for player in players.tolist()), tuple(str(team) for team in player_teams.tolist()))
         prepared_groups.setdefault(key, []).append(
             {
                 "graph_index": graph_index,
@@ -979,21 +997,28 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                 "player_pos": player_pos,
                 "player_teams": player_teams,
                 "players": players,
-                "ball_pos": ball_pos,
-                "target_lookup": raw_target_lookup,
-                "passer": node_ids[possessor_index],
-                "playing_direction": _infer_playing_direction_from_centered_players(player_pos, player_teams),
+                "ball_pos": np.repeat(np.asarray(ball_pos, dtype=float)[np.newaxis, :], frame_count, axis=0),
+                "target_lookup": target_lookup,
+                "passers": passers,
+                "playing_direction": playing_direction,
+                "exclude_passer": exclude_passer,
+                "frame_count": frame_count,
             }
         )
 
+    if not prepared_groups:
+        return [result if result is not None else pd.Series(dtype=float) for result in results]
+
+    simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
     for group_frames in prepared_groups.values():
         for batch_start in range(0, len(group_frames), batch_size):
             batch = group_frames[batch_start : batch_start + batch_size]
             players = np.asarray(batch[0]["players"], dtype=object)
             player_teams = np.asarray(batch[0]["player_teams"], dtype=object)
-            player_pos = np.stack([np.asarray(item["player_pos"], dtype=float) for item in batch], axis=0)
-            ball_pos = np.stack([np.asarray(item["ball_pos"], dtype=float) for item in batch], axis=0)
-            frame_count = len(batch)
+            exclude_passer = bool(batch[0]["exclude_passer"])
+            player_pos = np.concatenate([np.asarray(item["player_pos"], dtype=float) for item in batch], axis=0)
+            ball_pos = np.concatenate([np.asarray(item["ball_pos"], dtype=float) for item in batch], axis=0)
+            frame_count = int(player_pos.shape[0])
             phi_grid = np.repeat(
                 np.linspace(
                     AS_DEFAULT_PHI_OFFSET,
@@ -1005,21 +1030,26 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                 frame_count,
                 axis=0,
             )
-            passers = np.asarray([item["passer"] for item in batch], dtype=object)
+            passers = np.concatenate([np.asarray(item["passers"], dtype=object) for item in batch], axis=0)
             passer_teams = np.repeat("attack", frame_count).astype(object)
-            playing_direction = np.asarray([float(item["playing_direction"]) for item in batch], dtype=float)
-            _validate_simulation_contract(players=players, passers=passers, exclude_passer=False)
+            playing_direction = np.concatenate(
+                [np.asarray(item["playing_direction"], dtype=float) for item in batch],
+                axis=0,
+            )
+            _validate_simulation_contract(players=players, passers=passers, exclude_passer=exclude_passer)
             maxima: dict[int, float] = {}
             target_index_lookup: dict[int, tuple[int, int]] = {}
             target_keys: dict[int, tuple[int, int]] = {}
             next_target_key = 0
-            for frame_index, item in enumerate(batch):
-                for graph_target_index, sim_index in item["target_lookup"].items():
+            frame_offset = 0
+            for item in batch:
+                for graph_target_index, (local_frame_index, sim_index) in item["target_lookup"].items():
                     target_key = next_target_key
                     next_target_key += 1
                     maxima[target_key] = -np.inf
-                    target_index_lookup[target_key] = (frame_index, int(sim_index))
+                    target_index_lookup[target_key] = (frame_offset + int(local_frame_index), int(sim_index))
                     target_keys[target_key] = (int(item["graph_index"]), int(graph_target_index))
+                frame_offset += int(item["frame_count"])
 
             v0_values = as_default_v0_values(max_speed=max_speed)
             if speed_aggregation == PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX:
@@ -1034,7 +1064,7 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                             player_teams=player_teams,
                             players=players,
                             passers=passers,
-                            exclude_passer=False,
+                            exclude_passer=exclude_passer,
                             playing_direction=playing_direction,
                             use_progress_bar=use_progress_bar,
                             chunk_size=chunk_size,
@@ -1054,7 +1084,7 @@ def compute_graphs_max_player_cum_prob_as_defaults(
                             player_teams=player_teams,
                             players=players,
                             passers=passers,
-                            exclude_passer=False,
+                            exclude_passer=exclude_passer,
                             playing_direction=playing_direction,
                             use_progress_bar=use_progress_bar,
                             chunk_size=chunk_size,
