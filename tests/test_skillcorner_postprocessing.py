@@ -536,19 +536,33 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
     model_data = pd.DataFrame(
         [
             {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.20, "risk": 0.02, "reward": 0.22, "game_state_value": 0.25},
+            {"match_id": "117670", "index": 0, "frame": 337, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.30, "risk": 0.03, "reward": 0.33, "game_state_value": 0.25},
             {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.40, "risk": 0.04, "reward": 0.44, "game_state_value": 0.35},
+            {"match_id": "117670", "index": 0, "frame": 346, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.50, "risk": 0.05, "reward": 0.55, "game_state_value": 0.35},
             {"match_id": "117670", "index": 1, "frame": 400, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.10, "risk": 0.01, "reward": 0.11, "game_state_value": 0.10},
+            {"match_id": "117670", "index": 1, "frame": 400, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.20, "risk": 0.02, "reward": 0.22, "game_state_value": 0.10},
             {"match_id": "117670", "index": 1, "frame": 410, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.18, "risk": 0.01, "reward": 0.19, "game_state_value": 0.18},
+            {"match_id": "117670", "index": 1, "frame": 410, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.28, "risk": 0.02, "reward": 0.30, "game_state_value": 0.18},
             {"match_id": "117670", "index": 2, "frame": 500, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.30, "risk": 0.03, "reward": 0.33, "game_state_value": 0.30},
+            {"match_id": "117670", "index": 2, "frame": 500, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.40, "risk": 0.04, "reward": 0.44, "game_state_value": 0.30},
             {"match_id": "117670", "index": 2, "frame": 510, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.31, "risk": 0.03, "reward": 0.34, "game_state_value": 0.31},
+            {"match_id": "117670", "index": 2, "frame": 510, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.41, "risk": 0.04, "reward": 0.45, "game_state_value": 0.31},
             {"match_id": "117670", "index": 3, "frame": 600, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.45, "risk": 0.04, "reward": 0.49, "game_state_value": 0.45},
+            {"match_id": "117670", "index": 3, "frame": 600, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.55, "risk": 0.05, "reward": 0.60, "game_state_value": 0.45},
             {"match_id": "117670", "index": 3, "frame": 610, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.60, "risk": 0.05, "reward": 0.65, "game_state_value": 0.46},
+            {"match_id": "117670", "index": 3, "frame": 610, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.50, "risk": 0.05, "reward": 0.55, "game_state_value": 0.46},
             {"match_id": "117670", "index": 4, "frame": 700, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.20, "risk": 0.02, "reward": 0.22, "game_state_value": 0.20},
+            {"match_id": "117670", "index": 4, "frame": 700, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.30, "risk": 0.03, "reward": 0.33, "game_state_value": 0.20},
             {"match_id": "117670", "index": 4, "frame": 710, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.21, "risk": 0.02, "reward": 0.23, "game_state_value": 0.21},
+            {"match_id": "117670", "index": 4, "frame": 710, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.31, "risk": 0.03, "reward": 0.34, "game_state_value": 0.21},
             {"match_id": "117670", "index": 5, "frame": 800, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.50, "risk": 0.05, "reward": 0.55, "game_state_value": 0.50},
+            {"match_id": "117670", "index": 5, "frame": 800, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.60, "risk": 0.06, "reward": 0.66, "game_state_value": 0.50},
             {"match_id": "117670", "index": 5, "frame": 810, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.65, "risk": 0.06, "reward": 0.71, "game_state_value": 0.51},
+            {"match_id": "117670", "index": 5, "frame": 810, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.60, "risk": 0.06, "reward": 0.66, "game_state_value": 0.51},
             {"match_id": "999", "index": 6, "frame": 900, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.70, "risk": 0.07, "reward": 0.77, "game_state_value": 0.70},
+            {"match_id": "999", "index": 6, "frame": 900, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.80, "risk": 0.08, "reward": 0.88, "game_state_value": 0.70},
             {"match_id": "999", "index": 6, "frame": 910, "player_id": 63637, "receiver_id": 69889, "pass_score": 0.71, "risk": 0.07, "reward": 0.78, "game_state_value": 0.72},
+            {"match_id": "999", "index": 6, "frame": 910, "player_id": 63637, "receiver_id": 70000, "pass_score": 0.81, "risk": 0.08, "reward": 0.89, "game_state_value": 0.72},
         ]
     )
     event_data = pd.DataFrame(
@@ -566,7 +580,7 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
 
     scored = post.add_scores_to_event_data(model_data, event_data)
 
-    assert scored.columns.tolist()[-8:] == [
+    assert scored.columns.tolist()[-14:] == [
         "pass_score",
         "risk",
         "reward",
@@ -575,6 +589,12 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
         "game_state_value_next",
         "action_epv",
         "dm_score",
+        "pass_dm_score",
+        "carry_epv",
+        "pass_epv",
+        "z_dm_score",
+        "z_pass_dm_score",
+        "rank",
     ]
     assert math.isclose(scored.loc[0, "pass_score"], 0.40, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "risk"], 0.04, rel_tol=1e-9, abs_tol=1e-9)
@@ -584,6 +604,12 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
     assert math.isclose(scored.loc[0, "game_state_value_next"], 0.10, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "action_epv"], -0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[0, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "pass_dm_score"], 0.05, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "carry_epv"], 0.10, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "pass_epv"], -0.25, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "z_dm_score"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "z_pass_dm_score"], 0.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[0, "rank"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
 
     assert pd.isna(scored.loc[1, "pass_score"])
     assert pd.isna(scored.loc[1, "risk"])
@@ -592,18 +618,36 @@ def test_add_scores_to_event_data_adds_start_end_next_values_and_special_dm_scor
     assert math.isclose(scored.loc[1, "game_state_value_end"], 0.18, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[1, "action_epv"], 0.20, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[1, "dm_score"], 0.08, rel_tol=1e-9, abs_tol=1e-9)
+    assert pd.isna(scored.loc[1, "pass_dm_score"])
+    assert math.isclose(scored.loc[1, "carry_epv"], 0.08, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[1, "pass_epv"], 0.12, rel_tol=1e-9, abs_tol=1e-9)
+    assert pd.isna(scored.loc[1, "z_dm_score"])
+    assert pd.isna(scored.loc[1, "z_pass_dm_score"])
+    assert pd.isna(scored.loc[1, "rank"])
 
     assert math.isclose(scored.loc[2, "game_state_value_next"], 0.45, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[2, "action_epv"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[2, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[2, "carry_epv"], 0.01, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[2, "pass_epv"], 0.14, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[3, "pass_score"], 0.60, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[3, "action_epv"], -0.25, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[3, "dm_score"], 0.15, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "pass_dm_score"], 0.14, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "pass_epv"], -0.26, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "z_dm_score"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "z_pass_dm_score"], 1.4, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[3, "rank"], 1.0, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[4, "game_state_value_next"], -0.50, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[4, "action_epv"], -0.70, rel_tol=1e-9, abs_tol=1e-9)
     assert math.isclose(scored.loc[4, "dm_score"], -0.70, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[4, "carry_epv"], 0.01, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(scored.loc[4, "pass_epv"], -0.71, rel_tol=1e-9, abs_tol=1e-9)
     assert pd.isna(scored.loc[5, "game_state_value_next"])
     assert pd.isna(scored.loc[5, "action_epv"])
+    assert pd.isna(scored.loc[5, "pass_epv"])
+    assert math.isclose(scored.loc[5, "rank"], 1.0, rel_tol=1e-9, abs_tol=1e-9)
     assert pd.isna(scored.loc[6, "game_state_value_next"])
     assert pd.isna(scored.loc[6, "action_epv"])
+    assert pd.isna(scored.loc[6, "pass_epv"])
     assert pd.isna(scored.loc[6, "dm_score"])

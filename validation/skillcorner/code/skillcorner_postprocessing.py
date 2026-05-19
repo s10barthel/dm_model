@@ -40,6 +40,7 @@ MODEL_KEY_COLUMNS = ["match_id", "frame", "index", "player_id", "receiver_id"]
 GAME_STATE_KEY_COLUMNS = ["match_id", "index"]
 GAME_STATE_FRAME_KEY_COLUMNS = ["match_id", "index", "frame"]
 PASS_SCORE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "receiver_id", "pass_score", "risk", "reward"]
+PASS_SCORE_STATS_LOOKUP_COLUMNS = ["match_id", "index", "frame", "pass_score_std"]
 GAME_STATE_LOOKUP_COLUMNS = ["match_id", "index", "frame", "game_state_value"]
 REQUIRED_EVENT_COLUMNS = [
     "match_id",
@@ -249,13 +250,39 @@ def validate_unique_lookup(df: pd.DataFrame, key_columns: list[str], label: str)
 
 def build_pass_score_candidates(model_data: pd.DataFrame) -> pd.DataFrame:
     if model_data.empty:
-        return pd.DataFrame(columns=PASS_SCORE_LOOKUP_COLUMNS)
+        return pd.DataFrame(columns=PASS_SCORE_LOOKUP_COLUMNS + ["rank"])
 
     max_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("max")
     candidates = model_data.loc[model_data["frame"].eq(max_frames), PASS_SCORE_LOOKUP_COLUMNS].copy()
     candidates = candidates.dropna(subset=["pass_score"]).reset_index(drop=True)
+    candidates["rank"] = candidates.groupby(["match_id", "index", "frame"], dropna=False)["pass_score"].rank(
+        method="dense",
+        ascending=False,
+    )
     validate_unique_lookup(candidates, ["match_id", "index", "frame", "receiver_id"], "pass_score_candidates")
     return candidates
+
+
+def build_pass_score_std_candidates(model_data: pd.DataFrame, frame_position: str) -> pd.DataFrame:
+    if model_data.empty:
+        return pd.DataFrame(columns=PASS_SCORE_STATS_LOOKUP_COLUMNS)
+
+    if frame_position == "start":
+        selected_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("min")
+    elif frame_position == "end":
+        selected_frames = model_data.groupby(GAME_STATE_KEY_COLUMNS, dropna=False)["frame"].transform("max")
+    else:
+        raise ValueError(f"Unsupported pass score stats frame position: {frame_position!r}")
+
+    candidates = model_data.loc[model_data["frame"].eq(selected_frames), PASS_SCORE_LOOKUP_COLUMNS].copy()
+    candidates = candidates.dropna(subset=["pass_score"]).reset_index(drop=True)
+    pass_score_std = (
+        candidates.groupby(["match_id", "index", "frame"], dropna=False)["pass_score"]
+        .std()
+        .rename("pass_score_std")
+        .reset_index()
+    )
+    return pass_score_std.reset_index(drop=True)
 
 
 def build_game_state_candidates(model_data: pd.DataFrame, frame_position: str) -> pd.DataFrame:
@@ -377,6 +404,25 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         value_columns=["game_state_value_start"],
     )
 
+    pass_score_start_std_candidates = rename_value_column(
+        build_pass_score_std_candidates(model_data, "start"),
+        "pass_score_std",
+        "pass_score_std_start",
+    )
+    pass_score_start_std_matches = working[["__event_row_id", "match_id", "index", "frame_start"]].merge(
+        pass_score_start_std_candidates,
+        on=["match_id", "index"],
+        how="left",
+    )
+    selected_pass_score_start_std = select_nearest_frame_match(
+        pass_score_start_std_matches,
+        event_id_column="__event_row_id",
+        event_frame_column="frame_start",
+        candidate_frame_column="frame",
+        tie_break="earlier",
+        value_columns=["pass_score_std_start"],
+    )
+
     game_state_end_candidates = rename_value_column(
         build_game_state_candidates(model_data, "end"),
         "game_state_value",
@@ -396,6 +442,25 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         value_columns=["game_state_value_end"],
     )
 
+    pass_score_end_std_candidates = rename_value_column(
+        build_pass_score_std_candidates(model_data, "end"),
+        "pass_score_std",
+        "pass_score_std_end",
+    )
+    pass_score_end_std_matches = working[["__event_row_id", "match_id", "index", "frame_end"]].merge(
+        pass_score_end_std_candidates,
+        on=["match_id", "index"],
+        how="left",
+    )
+    selected_pass_score_end_std = select_nearest_frame_match(
+        pass_score_end_std_matches,
+        event_id_column="__event_row_id",
+        event_frame_column="frame_end",
+        candidate_frame_column="frame",
+        tie_break="later",
+        value_columns=["pass_score_std_end"],
+    )
+
     pass_score_candidates = build_pass_score_candidates(model_data)
     pass_score_matches = working[["__event_row_id", "match_id", "index", "frame_end", "player_targeted_id"]].merge(
         pass_score_candidates,
@@ -409,11 +474,13 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
         event_frame_column="frame_end",
         candidate_frame_column="frame",
         tie_break="later",
-        value_columns=["pass_score", "risk", "reward"],
+        value_columns=["pass_score", "risk", "reward", "rank"],
     )
 
     scored = base.merge(selected_game_state, on="__event_row_id", how="left")
+    scored = scored.merge(selected_pass_score_start_std, on="__event_row_id", how="left")
     scored = scored.merge(selected_game_state_end, on="__event_row_id", how="left")
+    scored = scored.merge(selected_pass_score_end_std, on="__event_row_id", how="left")
     scored = scored.merge(selected_pass_score, on="__event_row_id", how="left")
 
     scored["__game_state_value_next_raw"] = scored.groupby("match_id", dropna=False)[
@@ -433,6 +500,25 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
     ]
     scored["action_epv"] = scored["game_state_value_next"] - scored["game_state_value_start"]
     scored["dm_score"] = scored["pass_score"] - scored["game_state_value_start"]
+    scored["pass_dm_score"] = scored["pass_score"] - scored["game_state_value_end"]
+    scored["carry_epv"] = scored["game_state_value_end"] - scored["game_state_value_start"]
+    scored["pass_epv"] = scored["game_state_value_next"] - scored["game_state_value_end"]
+
+    pass_score_std_start_values = scored["pass_score_std_start"].dropna()
+    stabilizer = pass_score_std_start_values.quantile(0.01) if not pass_score_std_start_values.empty else pd.NA
+    scored["z_dm_score"] = pd.NA
+    scored["z_pass_dm_score"] = pd.NA
+    if pd.notna(stabilizer):
+        z_dm_denominator = (scored["pass_score_std_start"].pow(2) + stabilizer**2).pow(0.5)
+        z_pass_dm_denominator = (scored["pass_score_std_end"].pow(2) + stabilizer**2).pow(0.5)
+        z_dm_mask = z_dm_denominator.notna() & z_dm_denominator.ne(0)
+        z_pass_dm_mask = z_pass_dm_denominator.notna() & z_pass_dm_denominator.ne(0)
+        scored.loc[z_dm_mask, "z_dm_score"] = (
+            scored.loc[z_dm_mask, "dm_score"] / z_dm_denominator.loc[z_dm_mask]
+        )
+        scored.loc[z_pass_dm_mask, "z_pass_dm_score"] = (
+            scored.loc[z_pass_dm_mask, "pass_dm_score"] / z_pass_dm_denominator.loc[z_pass_dm_mask]
+        )
 
     empty_target = scored["player_targeted_id"].isna() & scored["pass_score"].isna()
     has_start_end = scored["game_state_value_start"].notna() & scored["game_state_value_end"].notna()
@@ -461,6 +547,12 @@ def add_scores_to_event_data(model_data: pd.DataFrame, event_data: pd.DataFrame)
             "game_state_value_next",
             "action_epv",
             "dm_score",
+            "pass_dm_score",
+            "carry_epv",
+            "pass_epv",
+            "z_dm_score",
+            "z_pass_dm_score",
+            "rank",
         ]
     ]
 
@@ -536,6 +628,12 @@ def summarize_scored_events(
         "events_with_game_state_value_next": int(event_data["game_state_value_next"].notna().sum()),
         "events_with_action_epv": int(event_data["action_epv"].notna().sum()),
         "events_with_dm_score": int(event_data["dm_score"].notna().sum()),
+        "events_with_pass_dm_score": int(event_data["pass_dm_score"].notna().sum()),
+        "events_with_carry_epv": int(event_data["carry_epv"].notna().sum()),
+        "events_with_pass_epv": int(event_data["pass_epv"].notna().sum()),
+        "events_with_z_dm_score": int(event_data["z_dm_score"].notna().sum()),
+        "events_with_z_pass_dm_score": int(event_data["z_pass_dm_score"].notna().sum()),
+        "events_with_rank": int(event_data["rank"].notna().sum()),
         "output_file": output_file,
     }
 
