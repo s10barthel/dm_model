@@ -24,7 +24,7 @@ validation/skillcorner/
 
 ### `code/skillcorner_postprocessing.py`
 
-Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates `pass_score`, `risk`, `reward`, and start/end/next `game_state_value` fields, joins those scores back onto filtered SkillCorner event rows, and writes:
+Reads SkillCorner component parquet outputs from `data/component_runs/skillcorner/<component_run_id>/<match_id>/`, reshapes them into long-form model data, calculates pass, risk, reward, game-state, EPV, normalized score, and targeted-pass rank metrics, joins those scores back onto filtered SkillCorner event rows, and writes:
 
 - `output/skillcorner_summary.csv`
 
@@ -57,7 +57,7 @@ Then it:
 1. filters the id table to rows with a non-empty `participant`
 2. filters SkillCorner action rows to players that exist in that id table
 3. writes a raw filtered action export
-4. adds `participant`, keeps only the requested scoring columns, removes rows without `dm_score`
+4. adds `participant`, keeps the requested scoring and event-context columns, removes rows only when all scoring/metric columns are empty
 5. aggregates scores per participant
 
 It writes:
@@ -78,7 +78,33 @@ Row-level SkillCorner event export produced by `skillcorner_postprocessing.py`. 
 - `game_state_value_start`
 - `game_state_value_end`
 - `game_state_value_next`
+- `action_epv`
 - `dm_score`
+- `pass_dm_score`
+- `carry_epv`
+- `pass_epv`
+- `z_dm_score`
+- `z_pass_dm_score`
+- `rank`
+
+Metric definitions:
+
+- `pass_score`: targeted receiver pass value selected at the event end frame
+- `risk`: expected conceding value for the targeted receiver pass
+- `reward`: expected scoring value for the targeted receiver pass
+- `game_state_value_start`: start-frame value calculated as `sum(pass_intent * pass_score)` over receivers
+- `game_state_value_end`: end-frame value calculated the same way
+- `game_state_value_next`: next row's `game_state_value_start`, signed from the current row's team perspective
+- `action_epv`: `game_state_value_next - game_state_value_start`
+- `dm_score`: default `pass_score - game_state_value_start`; for `foul_suffered`, `game_state_value_end - game_state_value_start`; for `possession_loss`, `action_epv`
+- `pass_dm_score`: `pass_score - game_state_value_end`
+- `carry_epv`: `game_state_value_end - game_state_value_start`
+- `pass_epv`: `game_state_value_next - game_state_value_end`
+- `z_dm_score`: `(pass_score - game_state_value_start) / sqrt(pass_score_std_start^2 + r^2)`
+- `z_pass_dm_score`: `(pass_score - game_state_value_end) / sqrt(pass_score_std_end^2 + r^2)`
+- `rank`: dense descending rank of the targeted receiver's end-frame `pass_score`; best available pass is `1`
+
+For the normalized metrics, `pass_score_std_start` and `pass_score_std_end` are computed from all receiver pass scores at the selected start/end component frame. The stabilizer `r` is the 1st percentile of non-empty start-frame pass-score standard deviations.
 
 ### `output/skillcorner_actions_raw.csv`
 
@@ -95,11 +121,40 @@ A reduced row-level action table with only:
 - `game_state_value_start`
 - `game_state_value_end`
 - `game_state_value_next`
+- `action_epv`
 - `dm_score`
+- `pass_dm_score`
+- `carry_epv`
+- `pass_epv`
+- `z_dm_score`
+- `z_pass_dm_score`
+- `rank`
+- `minute_start`
+- `duration`
+- `period`
+- `player_position`
+- `game_state`
+- `team_score`
+- `opponent_team_score`
+- `team_in_possession_phase_type`
+- `team_out_of_possession_phase_type`
+- `distance_covered`
+- `speed_avg`
+- `speed_avg_band`
+- `separation_start`
+- `separation_end`
+- `separation_gain`
+- `one_touch`
+- `quick_pass`
+- `carry`
+- `pass_outcome`
+- `high_pass`
+- `player_targeted_xpass_completion`
+- `player_targeted_xthreat`
 - `end_type`
 - `match_id`
 
-Rows with empty `dm_score` are removed.
+Rows are removed only when all scoring/metric columns are empty.
 
 ### `output/skillcorner_players.csv`
 
@@ -110,4 +165,11 @@ Participant-level aggregates derived from `skillcorner_actions.csv`, including:
 - `risk_sum`, `risk_avg`, `risk_median`
 - `reward_sum`, `reward_avg`, `reward_median`
 - `game_state_value_start_sum`, `game_state_value_start_avg`, `game_state_value_start_median`
+- `action_epv_sum`, `action_epv_avg`, `action_epv_median`
 - `dm_score_sum`, `dm_score_avg`, `dm_score_median`
+- `pass_dm_score_sum`, `pass_dm_score_avg`, `pass_dm_score_median`
+- `carry_epv_sum`, `carry_epv_avg`, `carry_epv_median`
+- `pass_epv_sum`, `pass_epv_avg`, `pass_epv_median`
+- `z_dm_score_sum`, `z_dm_score_avg`, `z_dm_score_median`
+- `z_pass_dm_score_sum`, `z_pass_dm_score_avg`, `z_pass_dm_score_median`
+- `rank_avg`, `rank_median`
