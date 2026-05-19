@@ -168,6 +168,33 @@ class DummyPhysicalInferenceModel(nn.Module):
         return torch.zeros(graphs.x.shape[0], dtype=torch.float32, device=graphs.x.device) + self.weight * 0.0
 
 
+class RecordingTqdm:
+    calls: list["RecordingTqdm"] = []
+
+    def __init__(self, iterable, *args, **kwargs) -> None:
+        self.iterable = list(iterable)
+        self.args = args
+        self.kwargs = kwargs
+        self.postfixes: list[dict[str, object]] = []
+        self.writes: list[str] = []
+        RecordingTqdm.calls.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def set_postfix(self, **kwargs) -> None:
+        self.postfixes.append(dict(kwargs))
+
+    def write(self, message: str) -> None:
+        self.writes.append(message)
+
+
 def decoder_args(**overrides: object) -> dict[str, object]:
     args: dict[str, object] = {
         "task": "pass_success",
@@ -2076,6 +2103,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 return state, rows, stats
 
             written_metadata: dict[str, object] = {}
+            RecordingTqdm.calls = []
 
             with patch.object(run_benchmark, "parse_args", return_value=args), \
                 patch.object(
@@ -2132,9 +2160,21 @@ class PhysicalXPassTests(unittest.TestCase):
                     "run_benchmark_postprocessing",
                     return_value=(None, {"agreements": 0, "disagreements": 0}, Path("summary.csv"), Path("summary.txt")),
                 ), \
+                patch.object(run_benchmark, "tqdm", RecordingTqdm), \
                 patch.object(run_benchmark, "update_benchmark_runs_ledger", return_value=Path("ledger.csv")):
                 run_benchmark.main()
 
+            self.assertEqual(len(RecordingTqdm.calls), 1)
+            self.assertEqual(RecordingTqdm.calls[0].kwargs["desc"], "benchmark states")
+            self.assertEqual(RecordingTqdm.calls[0].kwargs["total"], 3)
+            self.assertEqual(
+                RecordingTqdm.calls[0].postfixes,
+                [
+                    {"modification": 1, "game_state": 1},
+                    {"modification": 1, "game_state": 2},
+                    {"modification": 2, "game_state": 1},
+                ],
+            )
             prewarm.assert_called_once()
             prewarmed_states = prewarm.call_args.args[0]
             self.assertEqual(
@@ -2194,6 +2234,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 "skipped_missing_possessor": 0,
                 "skipped_missing_graph": 0,
             }
+            RecordingTqdm.calls = []
 
             with patch.object(run_benchmark, "parse_args", return_value=args), \
                 patch.object(
@@ -2242,10 +2283,13 @@ class PhysicalXPassTests(unittest.TestCase):
                     "run_benchmark_postprocessing",
                     return_value=(None, {"agreements": 0, "disagreements": 0}, Path("summary.csv"), Path("summary.txt")),
                 ), \
+                patch.object(run_benchmark, "tqdm", RecordingTqdm), \
                 patch.object(run_benchmark, "update_benchmark_runs_ledger", return_value=Path("ledger.csv")):
                 run_benchmark.main()
 
             prewarm.assert_not_called()
+            self.assertEqual(len(RecordingTqdm.calls), 1)
+            self.assertEqual(RecordingTqdm.calls[0].kwargs["total"], 1)
 
     def test_generate_physical_xpass_auto_workers_resolves_to_six_on_sixteen_cores(self) -> None:
         with patch("physical_pass_model.os.cpu_count", return_value=16):

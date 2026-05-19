@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from datatools.skillcorner import (
     COMPONENT_COLUMNS,
@@ -366,37 +367,43 @@ def main() -> None:
                         )
                     built_possessions = []
 
-            for possession_number, event_index, possession in built_possessions:
-                try:
-                    components = infer_skillcorner_components(possession, model_specs, device=device)
-                    runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
-                    if runtime_physical_stats:
-                        physical_xpass_runtime_stats.setdefault(str(match_id), {})[str(event_index)] = runtime_physical_stats
-                    player_meta = context["player_meta"]
-                    for component_name in COMPONENT_COLUMNS:
-                        table = build_skillcorner_component_table(
-                            possession,
-                            components.get(component_name),
-                            player_meta,
-                            include_shot=component_name == "action_intent",
+            with tqdm(
+                built_possessions,
+                total=len(built_possessions),
+                desc=f"match {match_id} possessions",
+            ) as progress:
+                for possession_number, event_index, possession in progress:
+                    progress.set_postfix(event_index=int(event_index))
+                    try:
+                        components = infer_skillcorner_components(possession, model_specs, device=device)
+                        runtime_physical_stats = getattr(possession, "physical_xpass_runtime_stats", None)
+                        if runtime_physical_stats:
+                            physical_xpass_runtime_stats.setdefault(str(match_id), {})[str(event_index)] = runtime_physical_stats
+                        player_meta = context["player_meta"]
+                        for component_name in COMPONENT_COLUMNS:
+                            table = build_skillcorner_component_table(
+                                possession,
+                                components.get(component_name),
+                                player_meta,
+                                include_shot=component_name == "action_intent",
+                            )
+                            tables_by_component[component_name].append(table)
+                        match_stats["processed_possessions"] += 1
+                    except Exception as exc:
+                        error_summary = summarize_exception(exc)
+                        skipped_possessions.setdefault(str(match_id), []).append(
+                            {"event_index": str(event_index), "error": error_summary}
                         )
-                        tables_by_component[component_name].append(table)
-                    match_stats["processed_possessions"] += 1
-                except Exception as exc:
-                    error_summary = summarize_exception(exc)
-                    skipped_possessions.setdefault(str(match_id), []).append(
-                        {"event_index": str(event_index), "error": error_summary}
-                    )
-                    match_stats["skipped_possessions"] += 1
-                    print(
-                        format_possession_skip(
-                            str(match_id),
-                            possession_number,
-                            total_possessions,
-                            event_index,
-                            error_summary,
+                        match_stats["skipped_possessions"] += 1
+                        progress.write(
+                            format_possession_skip(
+                                str(match_id),
+                                possession_number,
+                                total_possessions,
+                                event_index,
+                                error_summary,
+                            )
                         )
-                    )
 
             if match_stats["processed_possessions"] == 0:
                 skipped_matches["processing_error"].append(str(match_id))

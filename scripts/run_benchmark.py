@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 import pandas as pd
 import torch
+from tqdm import tqdm
 
 from datatools.benchmark import (
     build_benchmark_export,
@@ -260,10 +261,10 @@ def main() -> None:
     physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
     skipped_state_errors: list[dict[str, str | int]] = []
     skipped_modification_errors: list[dict[str, str | int]] = []
+    built_states: list[tuple[int, int, object, pd.DataFrame, dict[str, int]]] = []
 
     for index, modification_id in enumerate(selected_modifications, start=1):
         print(f"[{index}/{len(selected_modifications)}] modification_{modification_id}")
-        processed_state_count = 0
 
         try:
             modification_data = load_benchmark_modification_data(modification_id, args.input_dir)
@@ -273,7 +274,6 @@ def main() -> None:
             print(f"  SKIP modification_{modification_id}: {error_summary}")
             continue
 
-        built_states: list[tuple[int, object, pd.DataFrame, dict[str, int]]] = []
         for game_state_id in (1, 2):
             try:
                 state, state_rows, stats = build_benchmark_state(
@@ -283,7 +283,7 @@ def main() -> None:
                     higher_state_id=int(modification_data["higher_state_id"]),
                     add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 )
-                built_states.append((int(game_state_id), state, state_rows, stats))
+                built_states.append((int(modification_id), int(game_state_id), state, state_rows, stats))
             except Exception as exc:
                 error_summary = summarize_exception(exc)
                 skipped_state_errors.append(
@@ -295,35 +295,38 @@ def main() -> None:
                 )
                 print(f"  SKIP game_state_{game_state_id}: {error_summary}")
 
-        if built_states and not no_physical_cache and _pass_success_uses_physical_xpass(model_specs):
-            try:
-                prewarm_stats = _prewarm_benchmark_physical_xpass(
-                    [state for _, state, _, _ in built_states],
-                    model_specs,
-                    cache_dir=physical_cache_dir,
-                    num_workers=physical_num_workers,
-                    worker_thread_limit=physical_worker_thread_limit,
-                    physical_batch_size=physical_batch_size,
+    if built_states and not no_physical_cache and _pass_success_uses_physical_xpass(model_specs):
+        try:
+            prewarm_stats = _prewarm_benchmark_physical_xpass(
+                [state for _, _, state, _, _ in built_states],
+                model_specs,
+                cache_dir=physical_cache_dir,
+                num_workers=physical_num_workers,
+                worker_thread_limit=physical_worker_thread_limit,
+                physical_batch_size=physical_batch_size,
+            )
+            if prewarm_stats:
+                physical_xpass_prewarm_stats["all"] = prewarm_stats
+            pass_success_model = model_specs.get("pass_success")
+            if pass_success_model is not None:
+                pass_success_model.args["physical_runtime_cache_refresh"] = False
+        except Exception as exc:
+            error_summary = summarize_exception(exc)
+            for modification_id, game_state_id, _state, _state_rows, _stats in built_states:
+                skipped_state_errors.append(
+                    {
+                        "modification": int(modification_id),
+                        "game_state": int(game_state_id),
+                        "error": error_summary,
+                    }
                 )
-                if prewarm_stats:
-                    physical_xpass_prewarm_stats[str(modification_id)] = prewarm_stats
-                pass_success_model = model_specs.get("pass_success")
-                if pass_success_model is not None:
-                    pass_success_model.args["physical_runtime_cache_refresh"] = False
-            except Exception as exc:
-                error_summary = summarize_exception(exc)
-                for game_state_id, _state, _state_rows, _stats in built_states:
-                    skipped_state_errors.append(
-                        {
-                            "modification": int(modification_id),
-                            "game_state": int(game_state_id),
-                            "error": error_summary,
-                        }
-                    )
-                    print(f"  SKIP game_state_{game_state_id}: {error_summary}")
-                built_states = []
+                print(f"  SKIP game_state_{game_state_id}: {error_summary}")
+            built_states = []
 
-        for game_state_id, state, state_rows, stats in built_states:
+    processed_state_counts: dict[int, int] = {}
+    with tqdm(built_states, total=len(built_states), desc="benchmark states") as progress:
+        for modification_id, game_state_id, state, state_rows, stats in progress:
+            progress.set_postfix(modification=int(modification_id), game_state=int(game_state_id))
             try:
                 components = infer_benchmark_components(state, model_specs, device=device)
                 export_tables.append(build_benchmark_export(state_rows, state, components))
@@ -335,7 +338,7 @@ def main() -> None:
                     physical_xpass_runtime_stats[state_key] = runtime_physical_stats
                     state_record["physical_xpass_runtime_stats"] = runtime_physical_stats
                 processed_states.append(state_record)
-                processed_state_count += 1
+                processed_state_counts[int(modification_id)] = processed_state_counts.get(int(modification_id), 0) + 1
             except Exception as exc:
                 error_summary = summarize_exception(exc)
                 skipped_state_errors.append(
@@ -345,11 +348,12 @@ def main() -> None:
                         "error": error_summary,
                     }
                 )
-                print(f"  SKIP game_state_{game_state_id}: {error_summary}")
+                progress.write(f"  SKIP game_state_{game_state_id}: {error_summary}")
 
-        if processed_state_count > 0:
+    for modification_id in selected_modifications:
+        if processed_state_counts.get(int(modification_id), 0) > 0:
             processed_modifications.append(int(modification_id))
-        else:
+        elif not any(error["modification"] == int(modification_id) for error in skipped_modification_errors):
             skipped_modification_errors.append({"modification": int(modification_id), "error": "no_usable_states"})
 
     if not processed_states:

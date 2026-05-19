@@ -19,6 +19,33 @@ from datatools.skillcorner import SkillcornerPossession, load_skillcorner_events
 from validation.skillcorner.code import skillcorner_postprocessing as post
 
 
+class RecordingTqdm:
+    calls: list["RecordingTqdm"] = []
+
+    def __init__(self, iterable, *args, **kwargs) -> None:
+        self.iterable = list(iterable)
+        self.args = args
+        self.kwargs = kwargs
+        self.postfixes: list[dict[str, object]] = []
+        self.writes: list[str] = []
+        RecordingTqdm.calls.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def set_postfix(self, **kwargs) -> None:
+        self.postfixes.append(dict(kwargs))
+
+    def write(self, message: str) -> None:
+        self.writes.append(message)
+
+
 def test_load_frame_snapshot_keeps_current_phase_only() -> None:
     tracking = pd.DataFrame(
         [
@@ -327,9 +354,18 @@ def test_run_skillcorner_main_prints_match_centered_progress(
 
     monkeypatch.setattr(run_skillcorner, "run_skillcorner_postprocessing", fake_run_skillcorner_postprocessing)
     monkeypatch.setattr(run_skillcorner, "run_skillcorner_filter", fake_run_skillcorner_filter)
+    RecordingTqdm.calls = []
+    monkeypatch.setattr(run_skillcorner, "tqdm", RecordingTqdm)
 
     run_skillcorner.main()
 
+    assert len(RecordingTqdm.calls) == 2
+    assert RecordingTqdm.calls[0].kwargs["desc"] == "match m1 possessions"
+    assert RecordingTqdm.calls[0].kwargs["total"] == 1
+    assert RecordingTqdm.calls[0].postfixes == [{"event_index": 20}]
+    assert RecordingTqdm.calls[1].kwargs["desc"] == "match m2 possessions"
+    assert RecordingTqdm.calls[1].kwargs["total"] == 1
+    assert RecordingTqdm.calls[1].postfixes == [{"event_index": 30}]
     output = capsys.readouterr().out
     assert "[1/2] match_id=m1 | 1 game left" in output
     assert "[2/2] match_id=m2 | 0 games left" in output
