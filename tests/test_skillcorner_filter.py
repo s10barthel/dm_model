@@ -31,6 +31,9 @@ ACTION_EXTRA_COLUMNS = {
     "high_pass": False,
     "player_targeted_xpass_completion": 0.7,
     "player_targeted_xthreat": 0.03,
+    "minutes_tip": 10.0,
+    "minutes_otip": 20.0,
+    "minutes_played": 45.0,
 }
 
 
@@ -64,6 +67,15 @@ def test_filter_skillcorner_ids_rejects_duplicate_player_id() -> None:
 
     with pytest.raises(ValueError, match="duplicate player_id"):
         filt.filter_skillcorner_ids(skillcorner_ids, expected_rows=2)
+
+
+def test_parse_args_defaults_and_accepts_playing_time() -> None:
+    assert filt.parse_args([]).playing_time == "minutes_played"
+    assert filt.parse_args(["--playing-time", "minutes_tip"]).playing_time == "minutes_tip"
+    assert filt.parse_args(["--playing-time", "minutes_otip"]).playing_time == "minutes_otip"
+
+    with pytest.raises(SystemExit):
+        filt.parse_args(["--playing-time", "duration"])
 
 
 def test_filter_skillcorner_actions_raw_keeps_only_known_players() -> None:
@@ -224,54 +236,143 @@ def test_build_skillcorner_actions_keeps_requested_columns_and_drops_only_all_em
     assert actions["opponent_team_score"].tolist() == [0, 0]
     assert actions["player_targeted_xthreat"].tolist() == [0.03, 0.03]
     assert actions["end_type"].tolist() == ["pass", "pass"]
+    assert actions["minutes_tip"].tolist() == [10.0, 10.0]
+    assert actions["minutes_otip"].tolist() == [20.0, 20.0]
+    assert actions["minutes_played"].tolist() == [45.0, 45.0]
+
+
+def test_aggregate_skillcorner_matches_computes_sums_per90_and_dominant_position() -> None:
+    skillcorner_actions = pd.DataFrame(
+        [
+            {
+                "participant": "DM1",
+                "match_id": "m1",
+                "player_position": "CM",
+                "minutes_tip": 30.0,
+                "minutes_otip": 60.0,
+                "minutes_played": 90.0,
+                **{column: 1.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+            {
+                "participant": "DM1",
+                "match_id": "m1",
+                "player_position": "AM",
+                "minutes_tip": 30.0,
+                "minutes_otip": 60.0,
+                "minutes_played": 90.0,
+                **{column: 2.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+            {
+                "participant": "DM1",
+                "match_id": "m1",
+                "player_position": "CM",
+                "minutes_tip": 30.0,
+                "minutes_otip": 60.0,
+                "minutes_played": 90.0,
+                **{column: 3.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+            {
+                "participant": "DM1",
+                "match_id": "m2",
+                "player_position": "LW",
+                "minutes_tip": 45.0,
+                "minutes_otip": 45.0,
+                "minutes_played": 0.0,
+                **{column: 4.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+        ]
+    )
+
+    matches = filt.aggregate_skillcorner_matches(skillcorner_actions, "minutes_tip")
+
+    assert matches.columns.tolist() == filt.MATCH_SUMMARY_COLUMNS
+    assert matches[["participant", "match_id"]].values.tolist() == [["DM1", "m1"], ["DM1", "m2"]]
+    match1 = matches.loc[matches["match_id"].eq("m1")].iloc[0]
+    assert match1["player_position"] == "CM"
+    assert math.isclose(match1["minutes_tip"], 30.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(match1["pass_score_sum"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(match1["pass_score_per90"], 18.0, rel_tol=1e-9, abs_tol=1e-9)
+    match2 = matches.loc[matches["match_id"].eq("m2")].iloc[0]
+    assert math.isclose(match2["pass_score_sum"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(match2["pass_score_per90"], 8.0, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def test_aggregate_skillcorner_matches_nulls_per90_when_denominator_missing_or_zero() -> None:
+    skillcorner_actions = pd.DataFrame(
+        [
+            {
+                "participant": "DM1",
+                "match_id": "m1",
+                "player_position": "CM",
+                "minutes_tip": 0.0,
+                "minutes_otip": 60.0,
+                "minutes_played": 90.0,
+                **{column: 1.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+            {
+                "participant": "DM2",
+                "match_id": "m2",
+                "player_position": "CB",
+                "minutes_tip": pd.NA,
+                "minutes_otip": 60.0,
+                "minutes_played": 90.0,
+                **{column: 2.0 for column in filt.ACTION_METRIC_COLUMNS},
+            },
+        ]
+    )
+
+    matches = filt.aggregate_skillcorner_matches(skillcorner_actions, "minutes_tip")
+
+    assert matches["pass_score_sum"].tolist() == [1.0, 2.0]
+    assert pd.isna(matches.loc[0, "pass_score_per90"])
+    assert pd.isna(matches.loc[1, "pass_score_per90"])
 
 
 def test_aggregate_skillcorner_players_computes_counts_sums_means_and_medians() -> None:
     skillcorner_actions = pd.DataFrame(
         [
-            {"participant": "DM1", "pass_score": 1.0, "risk": 2.0, "reward": 10.0, "game_state_value_start": 4.0, "action_epv": 5.0, "dm_score": 7.0, "pass_dm_score": 1.0, "carry_epv": 2.0, "pass_epv": 3.0, "z_dm_score": 0.5, "z_pass_dm_score": 0.25, "rank": 2.0, "match_id": "m1"},
-            {"participant": "DM1", "pass_score": 3.0, "risk": 4.0, "reward": 20.0, "game_state_value_start": 6.0, "action_epv": 7.0, "dm_score": 9.0, "pass_dm_score": 3.0, "carry_epv": 4.0, "pass_epv": 5.0, "z_dm_score": 1.5, "z_pass_dm_score": 0.75, "rank": 1.0, "match_id": "m2"},
-            {"participant": "DM2", "pass_score": 5.0, "risk": 6.0, "reward": 30.0, "game_state_value_start": 8.0, "action_epv": 13.0, "dm_score": 11.0, "pass_dm_score": 5.0, "carry_epv": 6.0, "pass_epv": 7.0, "z_dm_score": 2.5, "z_pass_dm_score": 1.25, "rank": 1.0, "match_id": "m3"},
+            {"participant": "DM1", "player_position": "CM", "pass_score": 1.0, "risk": 2.0, "reward": 10.0, "game_state_value_start": 4.0, "game_state_value_end": 5.0, "game_state_value_next": 6.0, "action_epv": 5.0, "dm_score": 7.0, "pass_dm_score": 1.0, "carry_epv": 2.0, "pass_epv": 3.0, "z_dm_score": 0.5, "z_pass_dm_score": 0.25, "rank": 2.0, "match_id": "m1", "minutes_tip": 11.0, "minutes_otip": 12.0, "minutes_played": 45.0},
+            {"participant": "DM1", "player_position": "CM", "pass_score": 3.0, "risk": 4.0, "reward": 20.0, "game_state_value_start": 6.0, "game_state_value_end": 7.0, "game_state_value_next": 8.0, "action_epv": 7.0, "dm_score": 9.0, "pass_dm_score": 3.0, "carry_epv": 4.0, "pass_epv": 5.0, "z_dm_score": 1.5, "z_pass_dm_score": 0.75, "rank": 1.0, "match_id": "m1", "minutes_tip": 11.0, "minutes_otip": 12.0, "minutes_played": 45.0},
+            {"participant": "DM1", "player_position": "CM", "pass_score": 5.0, "risk": 6.0, "reward": 30.0, "game_state_value_start": 8.0, "game_state_value_end": 9.0, "game_state_value_next": 10.0, "action_epv": 13.0, "dm_score": 11.0, "pass_dm_score": 5.0, "carry_epv": 6.0, "pass_epv": 7.0, "z_dm_score": 2.5, "z_pass_dm_score": 1.25, "rank": 1.0, "match_id": "m2", "minutes_tip": 21.0, "minutes_otip": 22.0, "minutes_played": 90.0},
+            {"participant": "DM2", "player_position": "CB", "pass_score": 7.0, "risk": 8.0, "reward": 40.0, "game_state_value_start": 10.0, "game_state_value_end": 11.0, "game_state_value_next": 12.0, "action_epv": 15.0, "dm_score": 13.0, "pass_dm_score": 7.0, "carry_epv": 8.0, "pass_epv": 9.0, "z_dm_score": 3.5, "z_pass_dm_score": 1.75, "rank": 1.0, "match_id": "m3", "minutes_tip": 31.0, "minutes_otip": 32.0, "minutes_played": 90.0},
         ]
     )
+    skillcorner_matches = filt.aggregate_skillcorner_matches(skillcorner_actions)
 
-    players = filt.aggregate_skillcorner_players(skillcorner_actions)
+    players = filt.aggregate_skillcorner_players(skillcorner_matches, skillcorner_actions)
 
     assert players["participant"].tolist() == ["DM1", "DM2"]
     dm1 = players.loc[players["participant"].eq("DM1")].iloc[0]
-    assert int(dm1["actions"]) == 2
-    assert math.isclose(dm1["pass_score_sum"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_score_avg"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_score_median"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["risk_sum"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["risk_avg"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["risk_median"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["reward_sum"], 30.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["reward_avg"], 15.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["reward_median"], 15.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["game_state_value_start_sum"], 10.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["game_state_value_start_avg"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["game_state_value_start_median"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["action_epv_sum"], 12.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["action_epv_avg"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["action_epv_median"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["dm_score_sum"], 16.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["dm_score_avg"], 8.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["dm_score_median"], 8.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_dm_score_sum"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_dm_score_avg"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_dm_score_median"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["carry_epv_sum"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["carry_epv_avg"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["carry_epv_median"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_epv_sum"], 8.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_epv_avg"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["pass_epv_median"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_dm_score_sum"], 2.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_dm_score_avg"], 1.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_dm_score_median"], 1.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_pass_dm_score_sum"], 1.0, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_pass_dm_score_avg"], 0.5, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["z_pass_dm_score_median"], 0.5, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["rank_avg"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
-    assert math.isclose(dm1["rank_median"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert int(dm1["actions"]) == 3
+    assert math.isclose(dm1["minutes_tip"], 32.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["minutes_otip"], 34.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["minutes_played"], 135.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_score_sum"], 9.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_score_per90"], 6.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["game_state_value_end_sum"], 21.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["game_state_value_next_sum"], 24.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["rank_sum"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_score_avg"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_score_median"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["risk_avg"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["risk_median"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["reward_avg"], 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["reward_median"], 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["game_state_value_start_avg"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["game_state_value_start_median"], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["action_epv_avg"], 25 / 3, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["action_epv_median"], 7.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["dm_score_avg"], 9.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["dm_score_median"], 9.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_dm_score_avg"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_dm_score_median"], 3.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["carry_epv_avg"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["carry_epv_median"], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_epv_avg"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["pass_epv_median"], 5.0, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["z_dm_score_avg"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["z_dm_score_median"], 1.5, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["z_pass_dm_score_avg"], 0.75, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["z_pass_dm_score_median"], 0.75, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["rank_avg"], 4 / 3, rel_tol=1e-9, abs_tol=1e-9)
+    assert math.isclose(dm1["rank_median"], 1.0, rel_tol=1e-9, abs_tol=1e-9)

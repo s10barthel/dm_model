@@ -51,6 +51,9 @@ REQUIRED_EVENT_COLUMNS = [
     "event_type_id",
     "start_type_id",
 ]
+PLAYING_TIME_COLUMNS = ["minutes_tip", "minutes_otip", "minutes_played"]
+PLAYING_TIME_MISSING_COLUMNS = ["match_id", "player_id", "reason"]
+PLAYING_TIME_MISSING_FILENAME = "skillcorner_playing_time_missing.csv"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,6 +88,13 @@ def normalize_match_id(series: pd.Series) -> pd.Series:
 
 def coerce_nullable_integer(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").astype("Int64")
+
+
+def coerce_optional_int(value: object) -> int | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    if pd.isna(numeric):
+        return None
+    return int(numeric)
 
 
 def normalize_component_identifiers(df: pd.DataFrame) -> pd.DataFrame:
@@ -347,6 +357,98 @@ def load_event_data(event_data_dir: Path) -> pd.DataFrame:
     event_data = filter_event_rows(event_data)
     event_data = drop_all_empty_columns(event_data)
     return event_data.reset_index(drop=True)
+
+
+def build_playing_time_lookup(
+    event_data: pd.DataFrame,
+    event_data_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    lookup_columns = ["match_id", "player_id"] + PLAYING_TIME_COLUMNS
+    empty_lookup = pd.DataFrame(columns=lookup_columns)
+    empty_missing = pd.DataFrame(columns=PLAYING_TIME_MISSING_COLUMNS)
+    if event_data.empty or "match_id" not in event_data.columns or "player_id" not in event_data.columns:
+        return empty_lookup, empty_missing
+
+    pairs = event_data[["match_id", "player_id"]].copy()
+    pairs["match_id"] = normalize_match_id(pairs["match_id"])
+    pairs["player_id"] = coerce_nullable_integer(pairs["player_id"])
+    pairs = pairs.dropna(subset=["match_id", "player_id"]).drop_duplicates().reset_index(drop=True)
+    if pairs.empty:
+        return empty_lookup, empty_missing
+
+    lookup_rows: list[dict[str, object]] = []
+    missing_rows: list[dict[str, object]] = []
+    for match_id, match_pairs in pairs.groupby("match_id", dropna=False):
+        match_id_text = str(match_id)
+        match_path = Path(event_data_dir) / f"{match_id_text}_match.json"
+        if not match_path.exists():
+            for row in match_pairs.itertuples(index=False):
+                missing_rows.append(
+                    {"match_id": match_id_text, "player_id": int(row.player_id), "reason": "file_missing"}
+                )
+            continue
+
+        payload = json.loads(match_path.read_text(encoding="utf-8"))
+        players = payload.get("players", []) if isinstance(payload, dict) else []
+        players_by_id: dict[int, dict[str, object]] = {}
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+            player_id = coerce_optional_int(player.get("id"))
+            if player_id is not None and player_id not in players_by_id:
+                players_by_id[player_id] = player
+
+        for row in match_pairs.itertuples(index=False):
+            player_id = int(row.player_id)
+            player = players_by_id.get(player_id)
+            if player is None:
+                missing_rows.append(
+                    {"match_id": match_id_text, "player_id": player_id, "reason": "player_missing"}
+                )
+                continue
+
+            playing_time = player.get("playing_time")
+            total = playing_time.get("total") if isinstance(playing_time, dict) else None
+            values = {
+                column: total.get(column) if isinstance(total, dict) else pd.NA
+                for column in PLAYING_TIME_COLUMNS
+            }
+            if any(pd.isna(values[column]) for column in PLAYING_TIME_COLUMNS):
+                missing_rows.append(
+                    {"match_id": match_id_text, "player_id": player_id, "reason": "playing_time_missing"}
+                )
+            lookup_rows.append({"match_id": match_id_text, "player_id": player_id, **values})
+
+    lookup = pd.DataFrame(lookup_rows, columns=lookup_columns)
+    if not lookup.empty:
+        lookup["match_id"] = normalize_match_id(lookup["match_id"])
+        lookup["player_id"] = coerce_nullable_integer(lookup["player_id"])
+    missing = pd.DataFrame(missing_rows, columns=PLAYING_TIME_MISSING_COLUMNS)
+    return lookup, missing
+
+
+def add_playing_time_to_event_data(
+    event_data: pd.DataFrame,
+    event_data_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    enriched = event_data.copy()
+    lookup, missing = build_playing_time_lookup(enriched, event_data_dir)
+    if enriched.empty:
+        for column in PLAYING_TIME_COLUMNS:
+            enriched[column] = pd.Series(dtype=float)
+        return enriched, missing
+
+    enriched["__event_row_id"] = pd.RangeIndex(len(enriched))
+    merge_keys = enriched[["__event_row_id", "match_id", "player_id"]].copy()
+    merge_keys["match_id"] = normalize_match_id(merge_keys["match_id"])
+    merge_keys["player_id"] = coerce_nullable_integer(merge_keys["player_id"])
+    playing_time = merge_keys.merge(lookup, on=["match_id", "player_id"], how="left")
+    enriched = enriched.merge(
+        playing_time[["__event_row_id"] + PLAYING_TIME_COLUMNS],
+        on="__event_row_id",
+        how="left",
+    )
+    return enriched.drop(columns=["__event_row_id"]), missing
 
 
 def select_nearest_frame_match(
@@ -613,8 +715,9 @@ def summarize_scored_events(
     match_dirs: list[Path],
     model_data: pd.DataFrame,
     output_file: Path,
+    playing_time_missing_path: Path | None,
 ) -> dict[str, object]:
-    return {
+    summary = {
         "component_run_id": resolved_run_id,
         "component_run_root": component_run_root,
         "match_dirs": len(match_dirs),
@@ -636,6 +739,11 @@ def summarize_scored_events(
         "events_with_rank": int(event_data["rank"].notna().sum()),
         "output_file": output_file,
     }
+    for column in PLAYING_TIME_COLUMNS:
+        summary[f"events_with_{column}"] = int(event_data[column].notna().sum())
+    if playing_time_missing_path is not None:
+        summary["playing_time_missing_path"] = playing_time_missing_path
+    return summary
 
 
 def run_skillcorner_postprocessing(
@@ -658,10 +766,18 @@ def run_skillcorner_postprocessing(
     model_data = build_model_data(match_dirs)
     event_data = load_event_data(args.event_data_dir)
     event_data = add_scores_to_event_data(model_data, event_data)
+    event_data, playing_time_missing = add_playing_time_to_event_data(event_data, args.event_data_dir)
 
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     event_data.to_csv(output_path, index=False)
+    playing_time_missing_path = output_path.with_name(PLAYING_TIME_MISSING_FILENAME)
+    if not playing_time_missing.empty:
+        playing_time_missing.to_csv(playing_time_missing_path, index=False)
+    else:
+        if playing_time_missing_path.exists():
+            playing_time_missing_path.unlink()
+        playing_time_missing_path = None
 
     summary = summarize_scored_events(
         event_data,
@@ -670,6 +786,7 @@ def run_skillcorner_postprocessing(
         match_dirs=match_dirs,
         model_data=model_data,
         output_file=output_path,
+        playing_time_missing_path=playing_time_missing_path,
     )
     return event_data, summary, output_path
 

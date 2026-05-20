@@ -17,6 +17,8 @@ VALIDATION_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = VALIDATION_ROOT / "output"
 DEFAULT_SKILLCORNER_DATA_PATH = OUTPUT_DIR / "skillcorner_summary.csv"
 DEFAULT_SKILLCORNER_IDS_PATH = OUTPUT_DIR / "skillcorner_id.csv"
+PLAYING_TIME_COLUMNS = ["minutes_tip", "minutes_otip", "minutes_played"]
+DEFAULT_PLAYING_TIME_COLUMN = "minutes_played"
 
 SKILLCORNER_DATA_REQUIRED_COLUMNS = [
     "player_id",
@@ -58,10 +60,12 @@ SKILLCORNER_DATA_REQUIRED_COLUMNS = [
     "player_targeted_xthreat",
     "end_type",
     "match_id",
+    *PLAYING_TIME_COLUMNS,
 ]
 SKILLCORNER_IDS_REQUIRED_COLUMNS = ["player_id", "participant"]
 RAW_ACTIONS_FILENAME = "skillcorner_actions_raw.csv"
 ACTIONS_FILENAME = "skillcorner_actions.csv"
+MATCHES_FILENAME = "skillcorner_matches.csv"
 PLAYERS_FILENAME = "skillcorner_players.csv"
 ACTIONS_COLUMNS = [
     "participant",
@@ -103,6 +107,7 @@ ACTIONS_COLUMNS = [
     "player_targeted_xthreat",
     "end_type",
     "match_id",
+    *PLAYING_TIME_COLUMNS,
 ]
 ACTION_METRIC_COLUMNS = [
     "pass_score",
@@ -120,44 +125,48 @@ ACTION_METRIC_COLUMNS = [
     "z_pass_dm_score",
     "rank",
 ]
+METRIC_SUM_COLUMNS = [f"{column}_sum" for column in ACTION_METRIC_COLUMNS]
+METRIC_PER90_COLUMNS = [f"{column}_per90" for column in ACTION_METRIC_COLUMNS]
+PLAYER_AVG_MEDIAN_METRIC_COLUMNS = [
+    "pass_score",
+    "risk",
+    "reward",
+    "game_state_value_start",
+    "action_epv",
+    "dm_score",
+    "pass_dm_score",
+    "carry_epv",
+    "pass_epv",
+    "z_dm_score",
+    "z_pass_dm_score",
+    "rank",
+]
+PLAYER_AVG_MEDIAN_COLUMNS = [
+    f"{column}_{suffix}"
+    for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+    for suffix in ["avg", "median"]
+]
+MATCH_SUMMARY_COLUMNS = [
+    "participant",
+    "match_id",
+    "player_position",
+    *PLAYING_TIME_COLUMNS,
+    *[
+        output_column
+        for metric in ACTION_METRIC_COLUMNS
+        for output_column in [f"{metric}_sum", f"{metric}_per90"]
+    ],
+]
 PLAYER_SUMMARY_COLUMNS = [
     "participant",
     "actions",
-    "pass_score_sum",
-    "pass_score_avg",
-    "pass_score_median",
-    "risk_sum",
-    "risk_avg",
-    "risk_median",
-    "reward_sum",
-    "reward_avg",
-    "reward_median",
-    "game_state_value_start_sum",
-    "game_state_value_start_avg",
-    "game_state_value_start_median",
-    "action_epv_sum",
-    "action_epv_avg",
-    "action_epv_median",
-    "dm_score_sum",
-    "dm_score_avg",
-    "dm_score_median",
-    "pass_dm_score_sum",
-    "pass_dm_score_avg",
-    "pass_dm_score_median",
-    "carry_epv_sum",
-    "carry_epv_avg",
-    "carry_epv_median",
-    "pass_epv_sum",
-    "pass_epv_avg",
-    "pass_epv_median",
-    "z_dm_score_sum",
-    "z_dm_score_avg",
-    "z_dm_score_median",
-    "z_pass_dm_score_sum",
-    "z_pass_dm_score_avg",
-    "z_pass_dm_score_median",
-    "rank_avg",
-    "rank_median",
+    *PLAYING_TIME_COLUMNS,
+    *[
+        output_column
+        for metric in ACTION_METRIC_COLUMNS
+        for output_column in [f"{metric}_sum", f"{metric}_per90"]
+    ],
+    *PLAYER_AVG_MEDIAN_COLUMNS,
 ]
 
 
@@ -166,6 +175,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skillcorner-data-path", type=Path, default=DEFAULT_SKILLCORNER_DATA_PATH)
     parser.add_argument("--skillcorner-ids-path", type=Path, default=DEFAULT_SKILLCORNER_IDS_PATH)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--playing-time", choices=PLAYING_TIME_COLUMNS, default=DEFAULT_PLAYING_TIME_COLUMN)
     return parser.parse_args(argv)
 
 
@@ -247,53 +257,86 @@ def build_skillcorner_actions(
     return merged
 
 
-def aggregate_skillcorner_players(skillcorner_actions: pd.DataFrame) -> pd.DataFrame:
+def select_dominant_value(series: pd.Series) -> object:
+    values = series.dropna()
+    if values.empty:
+        return pd.NA
+    counts = values.astype("string").value_counts(sort=False)
+    max_count = counts.max()
+    return sorted(counts[counts.eq(max_count)].index.astype(str).tolist())[0]
+
+
+def first_non_null(series: pd.Series) -> object:
+    values = series.dropna()
+    if values.empty:
+        return pd.NA
+    return values.iloc[0]
+
+
+def add_per90_columns(df: pd.DataFrame, playing_time_column: str) -> pd.DataFrame:
+    with_per90 = df.copy()
+    denominator = pd.to_numeric(with_per90[playing_time_column], errors="coerce")
+    valid_denominator = denominator.notna() & denominator.ne(0)
+    for metric in ACTION_METRIC_COLUMNS:
+        per90_column = f"{metric}_per90"
+        with_per90[per90_column] = pd.NA
+        with_per90.loc[valid_denominator, per90_column] = (
+            with_per90.loc[valid_denominator, f"{metric}_sum"] * (90 / denominator.loc[valid_denominator])
+        )
+    return with_per90
+
+
+def aggregate_skillcorner_matches(
+    skillcorner_actions: pd.DataFrame,
+    playing_time_column: str = DEFAULT_PLAYING_TIME_COLUMN,
+) -> pd.DataFrame:
+    if playing_time_column not in PLAYING_TIME_COLUMNS:
+        raise ValueError(f"Unsupported playing time column: {playing_time_column!r}")
+    if skillcorner_actions.empty:
+        return pd.DataFrame(columns=MATCH_SUMMARY_COLUMNS)
+
+    grouped = skillcorner_actions.groupby(["participant", "match_id"], dropna=False, as_index=False)
+    match_rows = grouped.agg(
+        player_position=("player_position", select_dominant_value),
+        **{column: (column, first_non_null) for column in PLAYING_TIME_COLUMNS},
+        **{f"{column}_sum": (column, "sum") for column in ACTION_METRIC_COLUMNS},
+    )
+    match_rows = add_per90_columns(match_rows, playing_time_column)
+    match_rows = match_rows.sort_values(["participant", "match_id"]).reset_index(drop=True)
+    return match_rows[MATCH_SUMMARY_COLUMNS].copy()
+
+
+def aggregate_skillcorner_players(
+    skillcorner_matches: pd.DataFrame,
+    skillcorner_actions: pd.DataFrame,
+) -> pd.DataFrame:
     if skillcorner_actions.empty:
         return pd.DataFrame(columns=PLAYER_SUMMARY_COLUMNS)
 
-    aggregated = (
+    match_aggregates = (
+        skillcorner_matches.groupby("participant", dropna=False, as_index=False)
+        .agg(
+            **{column: (column, "sum") for column in PLAYING_TIME_COLUMNS},
+            **{column: (column, "sum") for column in METRIC_SUM_COLUMNS},
+            **{column: (column, "mean") for column in METRIC_PER90_COLUMNS},
+        )
+    )
+    action_aggregates = (
         skillcorner_actions.groupby("participant", dropna=False, as_index=False)
         .agg(
             actions=("dm_score", "size"),
-            pass_score_sum=("pass_score", "sum"),
-            pass_score_avg=("pass_score", "mean"),
-            pass_score_median=("pass_score", "median"),
-            risk_sum=("risk", "sum"),
-            risk_avg=("risk", "mean"),
-            risk_median=("risk", "median"),
-            reward_sum=("reward", "sum"),
-            reward_avg=("reward", "mean"),
-            reward_median=("reward", "median"),
-            game_state_value_start_sum=("game_state_value_start", "sum"),
-            game_state_value_start_avg=("game_state_value_start", "mean"),
-            game_state_value_start_median=("game_state_value_start", "median"),
-            action_epv_sum=("action_epv", "sum"),
-            action_epv_avg=("action_epv", "mean"),
-            action_epv_median=("action_epv", "median"),
-            dm_score_sum=("dm_score", "sum"),
-            dm_score_avg=("dm_score", "mean"),
-            dm_score_median=("dm_score", "median"),
-            pass_dm_score_sum=("pass_dm_score", "sum"),
-            pass_dm_score_avg=("pass_dm_score", "mean"),
-            pass_dm_score_median=("pass_dm_score", "median"),
-            carry_epv_sum=("carry_epv", "sum"),
-            carry_epv_avg=("carry_epv", "mean"),
-            carry_epv_median=("carry_epv", "median"),
-            pass_epv_sum=("pass_epv", "sum"),
-            pass_epv_avg=("pass_epv", "mean"),
-            pass_epv_median=("pass_epv", "median"),
-            z_dm_score_sum=("z_dm_score", "sum"),
-            z_dm_score_avg=("z_dm_score", "mean"),
-            z_dm_score_median=("z_dm_score", "median"),
-            z_pass_dm_score_sum=("z_pass_dm_score", "sum"),
-            z_pass_dm_score_avg=("z_pass_dm_score", "mean"),
-            z_pass_dm_score_median=("z_pass_dm_score", "median"),
-            rank_avg=("rank", "mean"),
-            rank_median=("rank", "median"),
+            **{
+                f"{column}_avg": (column, "mean")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
+            **{
+                f"{column}_median": (column, "median")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
         )
-        .sort_values("participant")
-        .reset_index(drop=True)
     )
+    aggregated = action_aggregates.merge(match_aggregates, on="participant", how="left")
+    aggregated = aggregated.sort_values("participant").reset_index(drop=True)
     return aggregated[PLAYER_SUMMARY_COLUMNS].copy()
 
 
@@ -308,23 +351,27 @@ def run_skillcorner_filter(
     skillcorner_data_path: Path = DEFAULT_SKILLCORNER_DATA_PATH,
     skillcorner_ids_path: Path = DEFAULT_SKILLCORNER_IDS_PATH,
     output_dir: Path = OUTPUT_DIR,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object], dict[str, Path]]:
+    playing_time_column: str = DEFAULT_PLAYING_TIME_COLUMN,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, object], dict[str, Path]]:
     skillcorner_data = read_skillcorner_data(skillcorner_data_path)
     skillcorner_ids = read_skillcorner_ids(skillcorner_ids_path)
     filtered_skillcorner_ids = filter_skillcorner_ids(skillcorner_ids)
 
     skillcorner_actions_raw = filter_skillcorner_actions_raw(skillcorner_data, filtered_skillcorner_ids)
     skillcorner_actions = build_skillcorner_actions(skillcorner_actions_raw, filtered_skillcorner_ids)
-    skillcorner_players = aggregate_skillcorner_players(skillcorner_actions)
+    skillcorner_matches = aggregate_skillcorner_matches(skillcorner_actions, playing_time_column)
+    skillcorner_players = aggregate_skillcorner_players(skillcorner_matches, skillcorner_actions)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     actions_raw_path = output_dir / RAW_ACTIONS_FILENAME
     actions_path = output_dir / ACTIONS_FILENAME
+    matches_path = output_dir / MATCHES_FILENAME
     players_path = output_dir / PLAYERS_FILENAME
 
     skillcorner_actions_raw.to_csv(actions_raw_path, index=False)
     skillcorner_actions.to_csv(actions_path, index=False)
+    skillcorner_matches.to_csv(matches_path, index=False)
     skillcorner_players.to_csv(players_path, index=False)
 
     summary = {
@@ -332,25 +379,30 @@ def run_skillcorner_filter(
         "filtered_skillcorner_ids_rows": len(filtered_skillcorner_ids),
         "skillcorner_actions_raw_rows": len(skillcorner_actions_raw),
         "skillcorner_actions_rows": len(skillcorner_actions),
+        "skillcorner_matches_rows": len(skillcorner_matches),
         "skillcorner_players_rows": len(skillcorner_players),
+        "playing_time_column": playing_time_column,
         "actions_raw_path": actions_raw_path,
         "actions_path": actions_path,
+        "matches_path": matches_path,
         "players_path": players_path,
     }
     paths = {
         "actions_raw_path": actions_raw_path,
         "actions_path": actions_path,
+        "matches_path": matches_path,
         "players_path": players_path,
     }
-    return skillcorner_actions_raw, skillcorner_actions, skillcorner_players, summary, paths
+    return skillcorner_actions_raw, skillcorner_actions, skillcorner_matches, skillcorner_players, summary, paths
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    _, _, _, summary, _ = run_skillcorner_filter(
+    _, _, _, _, summary, _ = run_skillcorner_filter(
         skillcorner_data_path=args.skillcorner_data_path,
         skillcorner_ids_path=args.skillcorner_ids_path,
         output_dir=args.output_dir,
+        playing_time_column=args.playing_time,
     )
     print_summary(summary)
     return 0

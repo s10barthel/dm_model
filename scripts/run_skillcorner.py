@@ -499,7 +499,7 @@ def main() -> None:
         event_data_dir=Path(args.input_dir),
         output_file=output_dir / "skillcorner_summary.csv",
     )
-    _, _, _, filter_summary, filter_paths = run_skillcorner_filter(
+    _, _, _, _, filter_summary, filter_paths = run_skillcorner_filter(
         skillcorner_data_path=summary_path,
         output_dir=output_dir,
     )
@@ -509,7 +509,8 @@ def main() -> None:
     print(f"Saved SkillCorner components to {output_dir}")
     print(f"Saved SkillCorner summary to {summary_path}")
     print(
-        "Saved SkillCorner filtered outputs to {actions_raw_path}, {actions_path}, and {players_path}".format(
+        "Saved SkillCorner filtered outputs to {actions_raw_path}, {actions_path}, {matches_path}, "
+        "and {players_path}".format(
             **filter_paths
         )
     )

@@ -13,6 +13,7 @@ validation/skillcorner/
 │   ├── skillcorner_summary.csv
 │   ├── skillcorner_actions_raw.csv
 │   ├── skillcorner_actions.csv
+│   ├── skillcorner_matches.csv
 │   └── skillcorner_players.csv
 └── readme.md
 ```
@@ -58,13 +59,17 @@ Then it:
 2. filters SkillCorner action rows to players that exist in that id table
 3. writes a raw filtered action export
 4. adds `participant`, keeps the requested scoring and event-context columns, removes rows only when all scoring/metric columns are empty
-5. aggregates scores per participant
+5. aggregates scores per participant-match
+6. aggregates scores per participant
 
 It writes:
 
 - `output/skillcorner_actions_raw.csv`
 - `output/skillcorner_actions.csv`
+- `output/skillcorner_matches.csv`
 - `output/skillcorner_players.csv`
+
+Use `--playing-time {minutes_played,minutes_tip,minutes_otip}` to choose the denominator for per-90 metrics. The default is `minutes_played`.
 
 ## Outputs
 
@@ -153,23 +158,29 @@ A reduced row-level action table with only:
 - `player_targeted_xthreat`
 - `end_type`
 - `match_id`
+- `minutes_tip`
+- `minutes_otip`
+- `minutes_played`
 
 Rows are removed only when all scoring/metric columns are empty.
 
+### `output/skillcorner_matches.csv`
+
+Participant-match aggregates derived from `skillcorner_actions.csv`, including:
+
+- `participant`, `match_id`
+- `player_position`: most frequent position in that participant-match
+- `minutes_tip`, `minutes_otip`, `minutes_played`
+- `[metric]_sum` and `[metric]_per90` for every action metric listed in `skillcorner_actions.csv`
+
+Per-90 metrics use the playing-time column selected by `--playing-time` and are empty when the selected playing time is empty or zero.
+
 ### `output/skillcorner_players.csv`
 
-Participant-level aggregates derived from `skillcorner_actions.csv`, including:
+Participant-level aggregates derived from `skillcorner_actions.csv` and `skillcorner_matches.csv`, including:
 
 - `actions`
-- `pass_score_sum`, `pass_score_avg`, `pass_score_median`
-- `risk_sum`, `risk_avg`, `risk_median`
-- `reward_sum`, `reward_avg`, `reward_median`
-- `game_state_value_start_sum`, `game_state_value_start_avg`, `game_state_value_start_median`
-- `action_epv_sum`, `action_epv_avg`, `action_epv_median`
-- `dm_score_sum`, `dm_score_avg`, `dm_score_median`
-- `pass_dm_score_sum`, `pass_dm_score_avg`, `pass_dm_score_median`
-- `carry_epv_sum`, `carry_epv_avg`, `carry_epv_median`
-- `pass_epv_sum`, `pass_epv_avg`, `pass_epv_median`
-- `z_dm_score_sum`, `z_dm_score_avg`, `z_dm_score_median`
-- `z_pass_dm_score_sum`, `z_pass_dm_score_avg`, `z_pass_dm_score_median`
-- `rank_avg`, `rank_median`
+- `minutes_tip`, `minutes_otip`, `minutes_played`
+- `[metric]_sum`: sum of match-level metric sums
+- `[metric]_per90`: average of match-level per-90 values
+- existing action-level averages and medians such as `pass_score_avg`, `pass_score_median`, `rank_avg`, and `rank_median`

@@ -40,6 +40,7 @@ __pycache__/
 
 .idea/
 .vscode/
+.codex/config.toml
 
 *.log
 _vendor/defcon/saved

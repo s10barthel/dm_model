@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -363,9 +364,17 @@ def test_run_skillcorner_main_prints_match_centered_progress(
         paths = {
             "actions_raw_path": output_dir / "skillcorner_actions_raw.csv",
             "actions_path": output_dir / "skillcorner_actions.csv",
+            "matches_path": output_dir / "skillcorner_matches.csv",
             "players_path": output_dir / "skillcorner_players.csv",
         }
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {"skillcorner_actions_rows": 1}, paths
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            {"skillcorner_actions_rows": 1},
+            paths,
+        )
 
     monkeypatch.setattr(run_skillcorner, "run_skillcorner_postprocessing", fake_run_skillcorner_postprocessing)
     monkeypatch.setattr(run_skillcorner, "run_skillcorner_filter", fake_run_skillcorner_filter)
@@ -428,6 +437,63 @@ def test_filter_event_rows_and_drop_empty_columns() -> None:
 
     assert filtered["index"].tolist() == [1]
     assert "always_empty" not in filtered.columns
+
+
+def test_add_playing_time_to_event_data_reuses_match_json_and_reports_missing() -> None:
+    match_payload = {
+        "players": [
+            {
+                "id": 10,
+                "playing_time": {
+                    "total": {
+                        "minutes_tip": 11.0,
+                        "minutes_otip": 12.0,
+                        "minutes_played": 45.0,
+                    }
+                },
+            },
+            {
+                "id": 20,
+                "playing_time": {
+                    "total": {
+                        "minutes_tip": 21.0,
+                        "minutes_otip": 22.0,
+                    }
+                },
+            },
+        ]
+    }
+    event_data = pd.DataFrame(
+        [
+            {"match_id": 100, "player_id": 10, "index": 1},
+            {"match_id": 100, "player_id": 10, "index": 2},
+            {"match_id": 100, "player_id": 20, "index": 3},
+            {"match_id": 100, "player_id": 30, "index": 4},
+            {"match_id": 200, "player_id": 40, "index": 5},
+        ]
+    )
+
+    def fake_exists(path: Path) -> bool:
+        return path.name == "100_match.json"
+
+    def fake_read_text(path: Path, *, encoding: str | None = None) -> str:
+        assert path.name == "100_match.json"
+        assert encoding == "utf-8"
+        return json.dumps(match_payload)
+
+    with patch.object(Path, "exists", fake_exists), patch.object(Path, "read_text", fake_read_text):
+        enriched, missing = post.add_playing_time_to_event_data(event_data, Path("skillcorner_data"))
+
+    assert enriched["minutes_tip"].tolist()[:2] == [11.0, 11.0]
+    assert enriched["minutes_otip"].tolist()[:2] == [12.0, 12.0]
+    assert enriched["minutes_played"].tolist()[:2] == [45.0, 45.0]
+    assert enriched.loc[2, "minutes_tip"] == 21.0
+    assert pd.isna(enriched.loc[2, "minutes_played"])
+    assert missing.to_dict("records") == [
+        {"match_id": "100", "player_id": 20, "reason": "playing_time_missing"},
+        {"match_id": "100", "player_id": 30, "reason": "player_missing"},
+        {"match_id": "200", "player_id": 40, "reason": "file_missing"},
+    ]
 
 
 def test_load_skillcorner_events_filters_start_type_id() -> None:
