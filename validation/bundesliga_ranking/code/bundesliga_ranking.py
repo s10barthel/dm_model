@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import unicodedata
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Iterable
 
@@ -19,26 +20,106 @@ EVENT_SYNCED_DIR = PROJECT_ROOT / "data" / "event_synced"
 COMPONENT_RUNS_DIR = PROJECT_ROOT / "data" / "component_runs"
 COMPONENT_LATEST_PATH = COMPONENT_RUNS_DIR / "latest.json"
 FC25_RATINGS_PATH = OUTPUT_DIR / "fc25_ratings.csv"
+DEFAULT_MINUTES_PLAYED_CACHE_DIR = RANKING_ROOT / "minutes_played"
+DEFAULT_BUNDESLIGA_DATA_DIRS = [
+    PROJECT_ROOT / "Bundesliga_season_23_24",
+    PROJECT_ROOT / "Bundesliga_season_24_25",
+]
 
-COMPONENT_IDENTIFIER_COLUMNS = [
+COMPONENT_BASE_IDENTIFIER_COLUMNS = [
     "stats_perform_match_id",
     "action_id",
     "original_event_id",
 ]
-ACTION_JOIN_COLUMNS = ["stats_perform_match_id", "original_event_id"]
-REQUIRED_COMPONENTS = [
-    "action_intent",
+COMPONENT_IDENTIFIER_COLUMNS = COMPONENT_BASE_IDENTIFIER_COLUMNS
+FRAME_SCOPE_COLUMN = "frame_scope"
+STATE_FRAME_ID_COLUMN = "state_frame_id"
+FRAME_ID_SCOPE = "frame_id"
+RECEIVE_FRAME_ID_SCOPE = "receive_frame_id"
+SCOPED_COMPONENT_IDENTIFIER_COLUMNS = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
+ACTION_JOIN_COLUMNS = COMPONENT_BASE_IDENTIFIER_COLUMNS
+REQUIRED_SCOPED_COMPONENTS = [
     "pass_intent",
-    "success_intent",
     "pass_success",
     "outcome_scoring_success",
     "outcome_scoring_failure",
     "outcome_conceding_success",
     "outcome_conceding_failure",
 ]
+REQUIRED_COMPONENTS = ["action_intent", "success_intent", *REQUIRED_SCOPED_COMPONENTS]
 IGNORED_COMPONENT_COLUMNS = {"home_goal", "away_goal"}
 PASS_ACTION_TYPES = {"pass", "cross"}
 SPECIAL_COMPONENT_DIRS = {"benchmark", "hawkeye", "skillcorner"}
+MATCHES_FILENAME = "bundesliga_matches.csv"
+ACTION_METRIC_COLUMNS = [
+    "pass_score",
+    "risk",
+    "reward",
+    "game_state_value_start",
+    "game_state_value_end",
+    "game_state_value_next",
+    "action_epv",
+    "dm_score",
+    "pass_dm_score",
+    "carry_epv",
+    "pass_epv",
+    "z_dm_score",
+    "z_pass_dm_score",
+    "rank",
+]
+METRIC_SUM_COLUMNS = [f"{column}_sum" for column in ACTION_METRIC_COLUMNS]
+METRIC_PER90_COLUMNS = [f"{column}_per90" for column in ACTION_METRIC_COLUMNS]
+PLAYER_AVG_MEDIAN_METRIC_COLUMNS = [
+    "pass_score",
+    "risk",
+    "reward",
+    "game_state_value_start",
+    "action_epv",
+    "dm_score",
+    "pass_dm_score",
+    "carry_epv",
+    "pass_epv",
+    "z_dm_score",
+    "z_pass_dm_score",
+    "rank",
+]
+PLAYER_AVG_MEDIAN_COLUMNS = [
+    f"{column}_{suffix}"
+    for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+    for suffix in ["avg", "median"]
+]
+MATCH_SUMMARY_COLUMNS = [
+    "player_id",
+    "player_name",
+    "match_id",
+    "advanced_position",
+    "minutes_played",
+    *[
+        output_column
+        for metric in ACTION_METRIC_COLUMNS
+        for output_column in [f"{metric}_sum", f"{metric}_per90"]
+    ],
+]
+PLAYER_SUMMARY_COLUMNS = [
+    "player_id",
+    "player_name",
+    "actions",
+    "minutes_played",
+    *[
+        output_column
+        for metric in ACTION_METRIC_COLUMNS
+        for output_column in [f"{metric}_sum", f"{metric}_per90"]
+    ],
+    *PLAYER_AVG_MEDIAN_COLUMNS,
+]
+POSITION_SUMMARY_COLUMNS = [
+    "player_id",
+    "advanced_position",
+    "player_name",
+    "actions",
+    *METRIC_SUM_COLUMNS,
+    *PLAYER_AVG_MEDIAN_COLUMNS,
+]
 TEAM_NAME_ALIASES = {
     "sport club freiburg": "sc freiburg",
     "tsg hoffenheim": "tsg hoffenheim",
@@ -138,6 +219,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lineup-path", type=Path, default=LINEUP_PATH)
     parser.add_argument("--fc25-ratings-path", type=Path, default=FC25_RATINGS_PATH)
     parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument(
+        "--bundesliga-data-dir",
+        action="append",
+        type=Path,
+        dest="bundesliga_data_dirs",
+        help="Raw Bundesliga season directory used for minutes-played derivation. Can be passed more than once.",
+    )
+    parser.add_argument("--minutes-played-cache-dir", type=Path, default=DEFAULT_MINUTES_PLAYED_CACHE_DIR)
+    parser.add_argument("--refresh-minutes-played-cache", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -165,6 +255,30 @@ def normalize_original_event_id(series: pd.Series) -> pd.Series:
 def normalize_object_id(series: pd.Series) -> pd.Series:
     cleaned = series.astype("string").str.strip()
     return cleaned.mask(cleaned.eq(""))
+
+
+def normalize_frame_scope(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip().str.casefold()
+
+
+def coerce_nullable_float(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def first_non_null(series: pd.Series) -> object:
+    values = series.dropna()
+    if values.empty:
+        return pd.NA
+    return values.iloc[0]
+
+
+def select_dominant_value(series: pd.Series) -> object:
+    values = series.dropna()
+    if values.empty:
+        return pd.NA
+    counts = values.astype("string").value_counts(sort=False)
+    max_count = counts.max()
+    return sorted(counts[counts.eq(max_count)].index.astype(str).tolist())[0]
 
 
 def false_success_mask(series: pd.Series) -> pd.Series:
@@ -479,25 +593,48 @@ def discover_match_dirs(
     return match_dirs
 
 
-def read_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
+def normalize_component_identifiers(df: pd.DataFrame) -> pd.DataFrame:
+    normalized = df.copy()
+    normalized["stats_perform_match_id"] = normalize_identifier(normalized["stats_perform_match_id"])
+    normalized["original_event_id"] = normalize_original_event_id(normalized["original_event_id"])
+    normalized["action_id"] = pd.to_numeric(normalized["action_id"], errors="coerce").astype("Int64")
+    if FRAME_SCOPE_COLUMN in normalized.columns:
+        normalized[FRAME_SCOPE_COLUMN] = normalize_frame_scope(normalized[FRAME_SCOPE_COLUMN])
+    return normalized
+
+
+def component_value_columns(component: pd.DataFrame, id_columns: list[str]) -> list[str]:
+    ignored_columns = set(id_columns) | IGNORED_COMPONENT_COLUMNS | {STATE_FRAME_ID_COLUMN}
+    return [column for column in component.columns if column not in ignored_columns]
+
+
+def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
     path = match_dir / f"{component_name}.parquet"
     if not path.exists():
         raise FileNotFoundError(f"Missing required component file: {path}")
 
     component = pd.read_parquet(path)
-    validate_required_columns(component, COMPONENT_IDENTIFIER_COLUMNS, str(path))
+    required_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
+    validate_required_columns(component, required_columns, str(path))
     component = normalize_component_identifiers(component)
+    observed_scopes = set(component[FRAME_SCOPE_COLUMN].dropna().astype(str).tolist())
+    required_scopes = {FRAME_ID_SCOPE, RECEIVE_FRAME_ID_SCOPE}
+    missing_scopes = sorted(required_scopes - observed_scopes)
+    if missing_scopes:
+        raise ValueError(
+            f"{path} is missing required frame_scope values: {', '.join(missing_scopes)}. "
+            "Regenerate the component run with scoped frame_id/receive_frame_id predictions."
+        )
 
-    value_columns = [
-        column
-        for column in component.columns
-        if column not in COMPONENT_IDENTIFIER_COLUMNS and column not in IGNORED_COMPONENT_COLUMNS
-    ]
+    id_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
+    if STATE_FRAME_ID_COLUMN in component.columns:
+        id_columns.append(STATE_FRAME_ID_COLUMN)
+    value_columns = component_value_columns(component, id_columns)
     if not value_columns:
         raise ValueError(f"{path} has no object/player probability columns.")
 
     long_component = component.melt(
-        id_vars=COMPONENT_IDENTIFIER_COLUMNS,
+        id_vars=id_columns,
         value_vars=value_columns,
         var_name="object_id",
         value_name=component_name,
@@ -505,32 +642,62 @@ def read_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
     long_component["object_id"] = normalize_object_id(long_component["object_id"])
     long_component = long_component.dropna(subset=["object_id", component_name]).copy()
     duplicate_mask = long_component.duplicated(
-        subset=COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
+        subset=SCOPED_COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
+        keep=False,
+    )
+    if duplicate_mask.any():
+        raise ValueError(f"{path} produces duplicate identifier/scope/object rows.")
+    return long_component[SCOPED_COMPONENT_IDENTIFIER_COLUMNS + ["object_id", component_name]]
+
+
+def read_frame_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
+    path = match_dir / f"{component_name}.parquet"
+    if not path.exists():
+        return pd.DataFrame(columns=COMPONENT_BASE_IDENTIFIER_COLUMNS + ["object_id", component_name])
+
+    component = pd.read_parquet(path)
+    validate_required_columns(component, COMPONENT_BASE_IDENTIFIER_COLUMNS, str(path))
+    component = normalize_component_identifiers(component)
+    if FRAME_SCOPE_COLUMN in component.columns:
+        component = component.loc[component[FRAME_SCOPE_COLUMN].eq(FRAME_ID_SCOPE)].copy()
+
+    id_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS.copy()
+    if FRAME_SCOPE_COLUMN in component.columns:
+        id_columns.append(FRAME_SCOPE_COLUMN)
+    if STATE_FRAME_ID_COLUMN in component.columns:
+        id_columns.append(STATE_FRAME_ID_COLUMN)
+
+    value_columns = component_value_columns(component, id_columns)
+    if not value_columns:
+        raise ValueError(f"{path} has no object/player probability columns.")
+
+    long_component = component.melt(
+        id_vars=id_columns,
+        value_vars=value_columns,
+        var_name="object_id",
+        value_name=component_name,
+    )
+    long_component["object_id"] = normalize_object_id(long_component["object_id"])
+    long_component = long_component.dropna(subset=["object_id", component_name]).copy()
+    duplicate_mask = long_component.duplicated(
+        subset=COMPONENT_BASE_IDENTIFIER_COLUMNS + ["object_id"],
         keep=False,
     )
     if duplicate_mask.any():
         raise ValueError(f"{path} produces duplicate identifier/object rows.")
-    return long_component
-
-
-def normalize_component_identifiers(df: pd.DataFrame) -> pd.DataFrame:
-    normalized = df.copy()
-    normalized["stats_perform_match_id"] = normalize_identifier(normalized["stats_perform_match_id"])
-    normalized["original_event_id"] = normalize_original_event_id(normalized["original_event_id"])
-    normalized["action_id"] = pd.to_numeric(normalized["action_id"], errors="coerce").astype("Int64")
-    return normalized
+    return long_component[COMPONENT_BASE_IDENTIFIER_COLUMNS + ["object_id", component_name]]
 
 
 def build_match_model_data(match_dir: Path) -> pd.DataFrame:
     merged: pd.DataFrame | None = None
-    for component_name in REQUIRED_COMPONENTS:
-        component = read_component_long(match_dir, component_name)
+    for component_name in REQUIRED_SCOPED_COMPONENTS:
+        component = read_scoped_component_long(match_dir, component_name)
         if merged is None:
             merged = component
         else:
             merged = merged.merge(
                 component,
-                on=COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
+                on=SCOPED_COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
                 how="outer",
             )
     if merged is None:
@@ -542,14 +709,48 @@ def build_match_model_data(match_dir: Path) -> pd.DataFrame:
         + (1 - merged["pass_success"])
         * (merged["outcome_scoring_failure"] - merged["outcome_conceding_failure"])
     )
+    merged["reward"] = (
+        merged["pass_success"] * merged["outcome_scoring_success"]
+        + (1 - merged["pass_success"]) * merged["outcome_scoring_failure"]
+    )
+    merged["risk"] = (
+        merged["pass_success"] * merged["outcome_conceding_success"]
+        + (1 - merged["pass_success"]) * merged["outcome_conceding_failure"]
+    )
     game_state_values = (
         (merged["pass_intent"] * merged["pass_score"])
-        .groupby([merged["stats_perform_match_id"], merged["original_event_id"]])
+        .groupby(
+            [merged[column] for column in SCOPED_COMPONENT_IDENTIFIER_COLUMNS],
+            dropna=False,
+        )
         .sum(min_count=1)
         .rename("game_state_value")
         .reset_index()
     )
-    return merged.merge(game_state_values, on=ACTION_JOIN_COLUMNS, how="left")
+    pass_score_std = (
+        merged.groupby(SCOPED_COMPONENT_IDENTIFIER_COLUMNS, dropna=False)["pass_score"]
+        .std()
+        .rename("pass_score_std")
+        .reset_index()
+    )
+    merged = merged.merge(game_state_values, on=SCOPED_COMPONENT_IDENTIFIER_COLUMNS, how="left")
+    merged = merged.merge(pass_score_std, on=SCOPED_COMPONENT_IDENTIFIER_COLUMNS, how="left")
+
+    frame_mask = merged[FRAME_SCOPE_COLUMN].eq(FRAME_ID_SCOPE)
+    merged["rank"] = pd.NA
+    merged.loc[frame_mask, "rank"] = merged.loc[frame_mask].groupby(
+        SCOPED_COMPONENT_IDENTIFIER_COLUMNS,
+        dropna=False,
+    )["pass_score"].rank(method="dense", ascending=False)
+
+    success_intent = read_frame_component_long(match_dir, "success_intent")
+    if not success_intent.empty:
+        merged = merged.merge(
+            success_intent,
+            on=COMPONENT_BASE_IDENTIFIER_COLUMNS + ["object_id"],
+            how="left",
+        )
+    return merged.reset_index(drop=True)
 
 
 def build_model_data(match_dirs: list[Path]) -> pd.DataFrame:
@@ -565,19 +766,28 @@ def read_pass_cross_events(event_path: Path) -> pd.DataFrame:
             "stats_perform_match_id",
             "action_id",
             "original_event_id",
+            "period_id",
+            "seconds",
+            "frame_id",
+            "receive_frame_id",
             "spadl_type",
             "success",
             "receiver_id",
             "player_id",
+            "object_id",
             "player_name",
             "advanced_position",
+            "team_id",
         ],
         str(event_path),
     )
     events = events.loc[events["spadl_type"].isin(PASS_ACTION_TYPES)].copy()
     events["stats_perform_match_id"] = normalize_identifier(events["stats_perform_match_id"])
     events["original_event_id"] = normalize_original_event_id(events["original_event_id"])
+    events["action_id"] = pd.to_numeric(events["action_id"], errors="coerce").astype("Int64")
     events["receiver_id"] = normalize_object_id(events["receiver_id"])
+    events["object_id"] = normalize_object_id(events["object_id"])
+    events["player_id"] = normalize_identifier(events["player_id"])
     events["receiver_id_original"] = events["receiver_id"]
     return events
 
@@ -593,83 +803,477 @@ def add_scores_to_events(model_data: pd.DataFrame, event_synced_dir: Path) -> pd
         raise ValueError("No event CSV files were available for model data matches.")
     bundesliga_actions = pd.concat(event_frames, ignore_index=True)
 
-    best_intent_receivers = (
-        model_data.sort_values(
-            by=ACTION_JOIN_COLUMNS + ["success_intent"],
-            ascending=[True, True, False],
-            kind="mergesort",
+    frame_model = model_data.loc[model_data[FRAME_SCOPE_COLUMN].eq(FRAME_ID_SCOPE)].copy()
+    receive_model = model_data.loc[model_data[FRAME_SCOPE_COLUMN].eq(RECEIVE_FRAME_ID_SCOPE)].copy()
+    if frame_model.empty or receive_model.empty:
+        raise ValueError("Scoped model data must contain both frame_id and receive_frame_id rows.")
+
+    if "success_intent" in frame_model.columns:
+        best_intent_receivers = (
+            frame_model.dropna(subset=["success_intent"])
+            .sort_values(
+                by=ACTION_JOIN_COLUMNS + ["success_intent"],
+                ascending=[True] * len(ACTION_JOIN_COLUMNS) + [False],
+                kind="mergesort",
+            )
+            .drop_duplicates(subset=ACTION_JOIN_COLUMNS, keep="first")
+            [ACTION_JOIN_COLUMNS + ["object_id"]]
+            .rename(columns={"object_id": "model_receiver_id"})
         )
-        .drop_duplicates(subset=ACTION_JOIN_COLUMNS, keep="first")
-        [ACTION_JOIN_COLUMNS + ["object_id"]]
-        .rename(columns={"object_id": "model_receiver_id"})
-    )
-    bundesliga_actions = bundesliga_actions.merge(
-        best_intent_receivers,
-        on=ACTION_JOIN_COLUMNS,
-        how="left",
-    )
+        bundesliga_actions = bundesliga_actions.merge(
+            best_intent_receivers,
+            on=ACTION_JOIN_COLUMNS,
+            how="left",
+        )
+    else:
+        bundesliga_actions["model_receiver_id"] = pd.NA
 
     receiver_missing = bundesliga_actions["receiver_id"].isna()
     success_false = false_success_mask(bundesliga_actions["success"])
-    replace_receiver = receiver_missing | success_false
+    replace_receiver = (receiver_missing | success_false) & bundesliga_actions["model_receiver_id"].notna()
     bundesliga_actions.loc[replace_receiver, "receiver_id"] = bundesliga_actions.loc[
         replace_receiver,
         "model_receiver_id",
     ]
     bundesliga_actions["receiver_id"] = normalize_object_id(bundesliga_actions["receiver_id"])
 
-    score_lookup = model_data[
-        ACTION_JOIN_COLUMNS + ["object_id", "pass_score", "game_state_value"]
+    target_lookup = frame_model[
+        ACTION_JOIN_COLUMNS + ["object_id", "pass_score", "risk", "reward", "rank"]
     ].rename(columns={"object_id": "receiver_id"})
-    score_lookup["receiver_id"] = normalize_object_id(score_lookup["receiver_id"])
+    target_lookup["receiver_id"] = normalize_object_id(target_lookup["receiver_id"])
     bundesliga_actions = bundesliga_actions.merge(
-        score_lookup,
+        target_lookup,
         on=ACTION_JOIN_COLUMNS + ["receiver_id"],
         how="left",
     )
-    bundesliga_actions["dm_score"] = (
-        bundesliga_actions["pass_score"] - bundesliga_actions["game_state_value"]
+
+    frame_state_lookup = frame_model[
+        ACTION_JOIN_COLUMNS + ["game_state_value", "pass_score_std"]
+    ].drop_duplicates(subset=ACTION_JOIN_COLUMNS)
+    frame_state_lookup = frame_state_lookup.rename(
+        columns={
+            "game_state_value": "game_state_value_end",
+            "pass_score_std": "pass_score_std_end",
+        }
     )
-    return bundesliga_actions
+    receive_state_lookup = receive_model[
+        ACTION_JOIN_COLUMNS + ["game_state_value", "pass_score_std"]
+    ].drop_duplicates(subset=ACTION_JOIN_COLUMNS)
+    receive_state_lookup = receive_state_lookup.rename(
+        columns={
+            "game_state_value": "game_state_value_next",
+            "pass_score_std": "pass_score_std_next",
+        }
+    )
+    bundesliga_actions = bundesliga_actions.merge(frame_state_lookup, on=ACTION_JOIN_COLUMNS, how="left")
+    bundesliga_actions = bundesliga_actions.merge(receive_state_lookup, on=ACTION_JOIN_COLUMNS, how="left")
+
+    original_order = pd.Series(range(len(bundesliga_actions)), index=bundesliga_actions.index)
+    bundesliga_actions["__original_order"] = original_order
+    bundesliga_actions = bundesliga_actions.sort_values(
+        ["stats_perform_match_id", "action_id", "__original_order"],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    grouped = bundesliga_actions.groupby("stats_perform_match_id", dropna=False)
+    bundesliga_actions["__previous_receiver_id"] = grouped["receiver_id"].shift(1)
+    bundesliga_actions["__previous_game_state_value_next"] = grouped["game_state_value_next"].shift(1)
+    bundesliga_actions["__previous_pass_score_std_next"] = grouped["pass_score_std_next"].shift(1)
+    same_possessor = bundesliga_actions["__previous_receiver_id"].eq(bundesliga_actions["object_id"]).fillna(False)
+    bundesliga_actions["game_state_value_start"] = bundesliga_actions["__previous_game_state_value_next"].where(
+        same_possessor
+    )
+    bundesliga_actions["pass_score_std_start"] = bundesliga_actions["__previous_pass_score_std_next"].where(
+        same_possessor
+    )
+
+    bundesliga_actions["action_epv"] = (
+        bundesliga_actions["game_state_value_next"] - bundesliga_actions["game_state_value_start"]
+    )
+    bundesliga_actions["dm_score"] = bundesliga_actions["pass_score"] - bundesliga_actions["game_state_value_start"]
+    bundesliga_actions["pass_dm_score"] = (
+        bundesliga_actions["pass_score"] - bundesliga_actions["game_state_value_end"]
+    )
+    bundesliga_actions["carry_epv"] = (
+        bundesliga_actions["game_state_value_end"] - bundesliga_actions["game_state_value_start"]
+    )
+    bundesliga_actions["pass_epv"] = (
+        bundesliga_actions["game_state_value_next"] - bundesliga_actions["game_state_value_end"]
+    )
+
+    pass_score_std_start_values = bundesliga_actions["pass_score_std_start"].dropna()
+    stabilizer = pass_score_std_start_values.quantile(0.01) if not pass_score_std_start_values.empty else pd.NA
+    bundesliga_actions["z_dm_score"] = pd.NA
+    bundesliga_actions["z_pass_dm_score"] = pd.NA
+    if pd.notna(stabilizer):
+        z_dm_denominator = (bundesliga_actions["pass_score_std_start"].pow(2) + stabilizer**2).pow(0.5)
+        z_pass_dm_denominator = (bundesliga_actions["pass_score_std_end"].pow(2) + stabilizer**2).pow(0.5)
+        z_dm_mask = z_dm_denominator.notna() & z_dm_denominator.ne(0)
+        z_pass_dm_mask = z_pass_dm_denominator.notna() & z_pass_dm_denominator.ne(0)
+        bundesliga_actions.loc[z_dm_mask, "z_dm_score"] = (
+            bundesliga_actions.loc[z_dm_mask, "dm_score"] / z_dm_denominator.loc[z_dm_mask]
+        )
+        bundesliga_actions.loc[z_pass_dm_mask, "z_pass_dm_score"] = (
+            bundesliga_actions.loc[z_pass_dm_mask, "pass_dm_score"] / z_pass_dm_denominator.loc[z_pass_dm_mask]
+        )
+
+    bundesliga_actions = bundesliga_actions.sort_values("__original_order", kind="mergesort").reset_index(drop=True)
+    helper_columns = [
+        "__original_order",
+        "__previous_receiver_id",
+        "__previous_game_state_value_next",
+        "__previous_pass_score_std_next",
+        "pass_score_std_start",
+        "pass_score_std_end",
+        "pass_score_std_next",
+    ]
+    return bundesliga_actions.drop(columns=[column for column in helper_columns if column in bundesliga_actions.columns])
+
+
+def resolve_raw_match_path(match_id: str, bundesliga_data_dirs: list[Path], *relative_candidates: str) -> Path | None:
+    for data_dir in bundesliga_data_dirs:
+        for relative_candidate in relative_candidates:
+            path = data_dir / relative_candidate.format(match_id=match_id)
+            if path.exists():
+                return path
+    return None
+
+
+def parse_event_time(value: str | None) -> pd.Timestamp | pd.NaT:
+    if value is None:
+        return pd.NaT
+    return pd.to_datetime(value, errors="coerce", utc=True)
+
+
+def parse_match_lineup(match_info_path: Path, match_id: str) -> pd.DataFrame:
+    root = ET.parse(match_info_path).getroot()
+    rows: list[dict[str, object]] = []
+    for team in root.iter("Team"):
+        team_id = team.attrib.get("TeamId")
+        for player in team.findall(".//Player"):
+            player_id = player.attrib.get("PersonId")
+            if not player_id:
+                continue
+            rows.append(
+                {
+                    "match_id": match_id,
+                    "player_id": player_id,
+                    "team_id": team_id,
+                    "player_name": player.attrib.get("Shortname")
+                    or " ".join(
+                        part
+                        for part in [player.attrib.get("FirstName"), player.attrib.get("LastName")]
+                        if part
+                    ),
+                    "player_position": player.attrib.get("PlayingPosition"),
+                    "starting": str(player.attrib.get("Starting", "")).casefold() == "true",
+                }
+            )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "match_id",
+            "player_id",
+            "team_id",
+            "player_name",
+            "player_position",
+            "starting",
+        ],
+    )
+
+
+def parse_match_timing_and_substitutions(event_path: Path) -> tuple[dict[str, tuple[pd.Timestamp, pd.Timestamp]], list[dict[str, object]]]:
+    root = ET.parse(event_path).getroot()
+    kickoffs: dict[str, pd.Timestamp] = {}
+    final_whistles: dict[str, pd.Timestamp] = {}
+    substitutions: list[dict[str, object]] = []
+
+    for event in root.iter("Event"):
+        event_time = parse_event_time(event.attrib.get("EventTime"))
+        if pd.isna(event_time):
+            continue
+        for child in list(event):
+            if child.tag == "KickOff":
+                game_section = child.attrib.get("GameSection")
+                if game_section in {"firstHalf", "secondHalf"} and game_section not in kickoffs:
+                    kickoffs[game_section] = event_time
+            elif child.tag == "FinalWhistle":
+                game_section = child.attrib.get("GameSection")
+                if game_section in {"firstHalf", "secondHalf"}:
+                    final_whistles[game_section] = event_time
+            elif child.tag == "Substitution":
+                substitutions.append(
+                    {
+                        "event_time": event_time,
+                        "team_id": child.attrib.get("Team"),
+                        "player_out": child.attrib.get("PlayerOut"),
+                        "player_in": child.attrib.get("PlayerIn"),
+                        "player_position": child.attrib.get("PlayingPosition"),
+                    }
+                )
+
+    periods: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for section in ["firstHalf", "secondHalf"]:
+        if section not in kickoffs or section not in final_whistles:
+            raise ValueError(f"{event_path} is missing kickoff/final-whistle timing for {section}.")
+        periods[section] = (kickoffs[section], final_whistles[section])
+    return periods, substitutions
+
+
+def timestamp_to_match_seconds(timestamp: pd.Timestamp, periods: dict[str, tuple[pd.Timestamp, pd.Timestamp]]) -> float | None:
+    first_start, first_end = periods["firstHalf"]
+    second_start, second_end = periods["secondHalf"]
+    first_duration = (first_end - first_start).total_seconds()
+
+    if first_start <= timestamp <= first_end:
+        return max((timestamp - first_start).total_seconds(), 0.0)
+    if second_start <= timestamp <= second_end:
+        return first_duration + max((timestamp - second_start).total_seconds(), 0.0)
+    return None
+
+
+def derive_match_minutes_played(match_id: str, bundesliga_data_dirs: list[Path]) -> pd.DataFrame:
+    match_info_path = resolve_raw_match_path(
+        match_id,
+        bundesliga_data_dirs,
+        "match_information/{match_id}.xml",
+        "match_information/starting_players/{match_id}",
+        "match_information/starting_players/{match_id}.xml",
+    )
+    event_path = resolve_raw_match_path(
+        match_id,
+        bundesliga_data_dirs,
+        "event_data/{match_id}.xml",
+        "event_data/{match_id}",
+    )
+    if match_info_path is None:
+        raise FileNotFoundError(f"Could not find raw match-information file for {match_id}.")
+    if event_path is None:
+        raise FileNotFoundError(f"Could not find raw event-data file for {match_id}.")
+
+    lineup = parse_match_lineup(match_info_path, match_id)
+    periods, substitutions = parse_match_timing_and_substitutions(event_path)
+    total_seconds = sum((end - start).total_seconds() for start, end in periods.values())
+
+    players: dict[str, dict[str, object]] = {}
+    on_field: dict[str, bool] = {}
+    open_start: dict[str, float | None] = {}
+    intervals: dict[str, list[tuple[float, float]]] = {}
+    for row in lineup.to_dict("records"):
+        player_id = str(row["player_id"])
+        players[player_id] = row
+        on_field[player_id] = bool(row["starting"])
+        open_start[player_id] = 0.0 if on_field[player_id] else None
+        intervals[player_id] = []
+
+    substitutions = sorted(substitutions, key=lambda row: row["event_time"])
+    for substitution in substitutions:
+        elapsed = timestamp_to_match_seconds(substitution["event_time"], periods)
+        if elapsed is None:
+            continue
+        elapsed = min(max(float(elapsed), 0.0), total_seconds)
+        player_out = substitution.get("player_out")
+        player_in = substitution.get("player_in")
+
+        if player_out:
+            player_out = str(player_out)
+            players.setdefault(
+                player_out,
+                {
+                    "match_id": match_id,
+                    "player_id": player_out,
+                    "team_id": substitution.get("team_id"),
+                    "player_name": pd.NA,
+                    "player_position": substitution.get("player_position"),
+                    "starting": pd.NA,
+                },
+            )
+            intervals.setdefault(player_out, [])
+            if on_field.get(player_out) and open_start.get(player_out) is not None:
+                intervals[player_out].append((float(open_start[player_out]), elapsed))
+            on_field[player_out] = False
+            open_start[player_out] = None
+
+        if player_in:
+            player_in = str(player_in)
+            player = players.setdefault(
+                player_in,
+                {
+                    "match_id": match_id,
+                    "player_id": player_in,
+                    "team_id": substitution.get("team_id"),
+                    "player_name": pd.NA,
+                    "player_position": substitution.get("player_position"),
+                    "starting": False,
+                },
+            )
+            if pd.isna(player.get("player_position")) and substitution.get("player_position"):
+                player["player_position"] = substitution.get("player_position")
+            intervals.setdefault(player_in, [])
+            if not on_field.get(player_in, False):
+                open_start[player_in] = elapsed
+            on_field[player_in] = True
+
+    for player_id, is_on_field in list(on_field.items()):
+        if is_on_field and open_start.get(player_id) is not None:
+            intervals.setdefault(player_id, []).append((float(open_start[player_id]), total_seconds))
+
+    rows: list[dict[str, object]] = []
+    for player_id, player in players.items():
+        played_seconds = sum(max(end - start, 0.0) for start, end in intervals.get(player_id, []))
+        player_intervals = intervals.get(player_id, [])
+        rows.append(
+            {
+                **player,
+                "start_time": min((start for start, _end in player_intervals), default=pd.NA),
+                "end_time": max((end for _start, end in player_intervals), default=pd.NA),
+                "minutes_played": played_seconds / 60.0,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def read_or_build_minutes_played_cache(
+    match_ids: list[str],
+    bundesliga_data_dirs: list[Path],
+    cache_dir: Path,
+    *,
+    refresh_cache: bool = False,
+) -> tuple[pd.DataFrame, int, int]:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[pd.DataFrame] = []
+    cache_hits = 0
+    cache_writes = 0
+    for match_id in sorted(set(str(match_id) for match_id in match_ids)):
+        cache_path = cache_dir / f"{match_id}.csv"
+        if cache_path.exists() and not refresh_cache:
+            frames.append(pd.read_csv(cache_path))
+            cache_hits += 1
+            continue
+
+        minutes = derive_match_minutes_played(match_id, bundesliga_data_dirs)
+        minutes.to_csv(cache_path, index=False)
+        frames.append(minutes)
+        cache_writes += 1
+
+    if not frames:
+        return pd.DataFrame(columns=["match_id", "player_id", "minutes_played"]), cache_hits, cache_writes
+    minutes_played = pd.concat(frames, ignore_index=True)
+    minutes_played["match_id"] = normalize_identifier(minutes_played["match_id"])
+    minutes_played["player_id"] = normalize_identifier(minutes_played["player_id"])
+    minutes_played["minutes_played"] = coerce_nullable_float(minutes_played["minutes_played"])
+    return minutes_played, cache_hits, cache_writes
+
+
+def add_minutes_played_to_actions(
+    bundesliga_actions: pd.DataFrame,
+    minutes_played: pd.DataFrame,
+) -> pd.DataFrame:
+    enriched = bundesliga_actions.copy()
+    enriched["match_id"] = normalize_identifier(enriched["stats_perform_match_id"])
+    if minutes_played.empty:
+        enriched["minutes_played"] = pd.NA
+        return enriched
+
+    lookup = minutes_played[["match_id", "player_id", "minutes_played"]].drop_duplicates(
+        subset=["match_id", "player_id"],
+        keep="first",
+    )
+    enriched["player_id"] = normalize_identifier(enriched["player_id"])
+    return enriched.merge(lookup, on=["match_id", "player_id"], how="left")
+
+
+def add_per90_columns(df: pd.DataFrame) -> pd.DataFrame:
+    with_per90 = df.copy()
+    denominator = pd.to_numeric(with_per90["minutes_played"], errors="coerce")
+    valid_denominator = denominator.notna() & denominator.ne(0)
+    for metric in ACTION_METRIC_COLUMNS:
+        per90_column = f"{metric}_per90"
+        with_per90[per90_column] = pd.NA
+        with_per90.loc[valid_denominator, per90_column] = (
+            with_per90.loc[valid_denominator, f"{metric}_sum"] * (90 / denominator.loc[valid_denominator])
+        )
+    return with_per90
+
+
+def aggregate_bundesliga_matches(bundesliga_actions: pd.DataFrame) -> pd.DataFrame:
+    if bundesliga_actions.empty:
+        return pd.DataFrame(columns=MATCH_SUMMARY_COLUMNS)
+
+    grouped = bundesliga_actions.groupby(["player_id", "match_id"], dropna=False, as_index=False)
+    match_rows = grouped.agg(
+        player_name=("player_name", first_non_null),
+        advanced_position=("advanced_position", select_dominant_value),
+        minutes_played=("minutes_played", first_non_null),
+        **{f"{column}_sum": (column, "sum") for column in ACTION_METRIC_COLUMNS},
+    )
+    match_rows = add_per90_columns(match_rows)
+    match_rows = match_rows.sort_values(["player_id", "match_id"]).reset_index(drop=True)
+    return match_rows[MATCH_SUMMARY_COLUMNS].copy()
+
+
+def aggregate_bundesliga_players(
+    bundesliga_matches: pd.DataFrame,
+    bundesliga_actions: pd.DataFrame,
+) -> pd.DataFrame:
+    if bundesliga_actions.empty:
+        return pd.DataFrame(columns=PLAYER_SUMMARY_COLUMNS)
+
+    match_aggregates = (
+        bundesliga_matches.groupby("player_id", dropna=False, as_index=False)
+        .agg(
+            minutes_played=("minutes_played", "sum"),
+            **{column: (column, "sum") for column in METRIC_SUM_COLUMNS},
+            **{column: (column, "mean") for column in METRIC_PER90_COLUMNS},
+        )
+    )
+    action_aggregates = (
+        bundesliga_actions.groupby("player_id", dropna=False, as_index=False)
+        .agg(
+            player_name=("player_name", first_non_null),
+            actions=("dm_score", "size"),
+            **{
+                f"{column}_avg": (column, "mean")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
+            **{
+                f"{column}_median": (column, "median")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
+        )
+    )
+    aggregated = action_aggregates.merge(match_aggregates, on="player_id", how="left")
+    aggregated = aggregated.sort_values("player_id").reset_index(drop=True)
+    return aggregated[PLAYER_SUMMARY_COLUMNS].copy()
 
 
 def aggregate_scores(
     bundesliga_actions: pd.DataFrame,
     group_columns: list[str],
 ) -> pd.DataFrame:
-    scored_actions = bundesliga_actions.dropna(subset=["dm_score", "player_id"]).copy()
-    if scored_actions.empty:
-        base_columns = group_columns + [
-            "player_name",
-            "actions",
-            "pass_score_avg",
-            "game_state_value_avg",
-            "dm_score_avg",
-            "dm_score_median",
-            "dm_score_sum",
-        ]
-        return pd.DataFrame(columns=base_columns)
+    if bundesliga_actions.empty:
+        return pd.DataFrame(columns=POSITION_SUMMARY_COLUMNS)
 
     aggregated = (
-        scored_actions.groupby(group_columns, dropna=False, as_index=False)
+        bundesliga_actions.groupby(group_columns, dropna=False, as_index=False)
         .agg(
-            player_name=("player_name", "first"),
+            player_name=("player_name", first_non_null),
             actions=("dm_score", "size"),
-            pass_score_avg=("pass_score", "mean"),
-            game_state_value_avg=("game_state_value", "mean"),
-            dm_score_avg=("dm_score", "mean"),
-            dm_score_median=("dm_score", "median"),
-            dm_score_sum=("dm_score", "sum"),
+            **{f"{column}_sum": (column, "sum") for column in ACTION_METRIC_COLUMNS},
+            **{
+                f"{column}_avg": (column, "mean")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
+            **{
+                f"{column}_median": (column, "median")
+                for column in PLAYER_AVG_MEDIAN_METRIC_COLUMNS
+            },
         )
     )
     ordered_columns = group_columns + [
         "player_name",
         "actions",
-        "pass_score_avg",
-        "game_state_value_avg",
-        "dm_score_avg",
-        "dm_score_median",
-        "dm_score_sum",
+        *METRIC_SUM_COLUMNS,
+        *PLAYER_AVG_MEDIAN_COLUMNS,
     ]
     return aggregated[ordered_columns]
 
@@ -691,6 +1295,11 @@ def print_summary(summary: dict[str, object]) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    bundesliga_data_dirs = (
+        [Path(path) for path in args.bundesliga_data_dirs]
+        if args.bundesliga_data_dirs
+        else DEFAULT_BUNDESLIGA_DATA_DIRS
+    )
 
     bundesliga_ids = read_bundesliga_ids(args.lineup_path, args.season_prefix)
     fc25_ratings = read_fc25_ratings(args.fc25_ratings_path)
@@ -700,8 +1309,17 @@ def main(argv: list[str] | None = None) -> int:
     match_dirs = discover_match_dirs(component_run_root, args.event_synced_dir, args.season_prefix)
     model_data = build_model_data(match_dirs)
     bundesliga_actions = add_scores_to_events(model_data, args.event_synced_dir)
+    match_ids = sorted(bundesliga_actions["stats_perform_match_id"].dropna().astype(str).unique().tolist())
+    minutes_played, minutes_cache_hits, minutes_cache_writes = read_or_build_minutes_played_cache(
+        match_ids,
+        bundesliga_data_dirs,
+        args.minutes_played_cache_dir,
+        refresh_cache=args.refresh_minutes_played_cache,
+    )
+    bundesliga_actions = add_minutes_played_to_actions(bundesliga_actions, minutes_played)
 
-    bundesliga_players = aggregate_scores(bundesliga_actions, ["player_id"])
+    bundesliga_matches = aggregate_bundesliga_matches(bundesliga_actions)
+    bundesliga_players = aggregate_bundesliga_players(bundesliga_matches, bundesliga_actions)
     bundesliga_positions = aggregate_scores(
         bundesliga_actions,
         ["player_id", "advanced_position"],
@@ -711,11 +1329,13 @@ def main(argv: list[str] | None = None) -> int:
 
     fc25_ratings_ids_path = args.output_dir / "fc25_ratings_ids.csv"
     bundesliga_actions_path = args.output_dir / "bundesliga_actions.csv"
+    bundesliga_matches_path = args.output_dir / MATCHES_FILENAME
     bundesliga_players_path = args.output_dir / "bundesliga_players.csv"
     bundesliga_positions_path = args.output_dir / "bundesliga_positions.csv"
 
     fc25_ratings_ids.to_csv(fc25_ratings_ids_path, index=False)
     bundesliga_actions.to_csv(bundesliga_actions_path, index=False)
+    bundesliga_matches.to_csv(bundesliga_matches_path, index=False)
     bundesliga_players.to_csv(bundesliga_players_path, index=False)
     bundesliga_positions.to_csv(bundesliga_positions_path, index=False)
 
@@ -728,10 +1348,15 @@ def main(argv: list[str] | None = None) -> int:
         "model_rows": len(model_data),
         "bundesliga_actions_rows": len(bundesliga_actions),
         "bundesliga_actions_scored": int(bundesliga_actions["dm_score"].notna().sum()),
+        "bundesliga_matches_rows": len(bundesliga_matches),
         "bundesliga_players_rows": len(bundesliga_players),
         "bundesliga_positions_rows": len(bundesliga_positions),
+        "minutes_played_cache_dir": args.minutes_played_cache_dir,
+        "minutes_played_cache_hits": minutes_cache_hits,
+        "minutes_played_cache_writes": minutes_cache_writes,
         "fc25_ratings_ids_path": fc25_ratings_ids_path,
         "bundesliga_actions_path": bundesliga_actions_path,
+        "bundesliga_matches_path": bundesliga_matches_path,
         "bundesliga_players_path": bundesliga_players_path,
         "bundesliga_positions_path": bundesliga_positions_path,
     }
