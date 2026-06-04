@@ -32,6 +32,7 @@ from project_config import (
     INTENDED_RECEIVER_MODES,
     generate_run_id,
     get_action_graph_dir,
+    get_post_action_graph_dir,
     get_resolved_action_path,
     get_success_intent_graph_dir,
     load_base_splits,
@@ -134,10 +135,46 @@ def load_match(
     if count_valid_graphs(match.graph_features_0) == 0:
         raise ValueError("No usable action graphs are available for this match.")
 
+    match.actions = match.label_post_actions(match.actions)
+    post_graph_path = get_post_action_graph_dir(feature_root) / f"{match_id}.pt"
+    if post_graph_path.exists():
+        try:
+            match.graph_features_1 = torch.load(post_graph_path, weights_only=False)
+        except Exception as exc:
+            print(f"  Rebuilding cached post-action graphs after read failure: {summarize_exception(exc)}")
+            match.graph_features_1 = construct_graph_features(
+                match,
+                extend=True,
+                post_action=True,
+                add_v_edge_features=add_v_edge_features,
+            )
+        else:
+            if count_valid_graphs(match.graph_features_1) == 0:
+                print("  Rebuilding cached post-action graphs because the cached file contains no usable graphs.")
+                match.graph_features_1 = construct_graph_features(
+                    match,
+                    extend=True,
+                    post_action=True,
+                    add_v_edge_features=add_v_edge_features,
+                )
+    else:
+        match.graph_features_1 = construct_graph_features(
+            match,
+            extend=True,
+            post_action=True,
+            add_v_edge_features=add_v_edge_features,
+        )
+    if count_valid_graphs(match.graph_features_1) == 0:
+        raise ValueError("No usable post-action graphs are available for this match.")
+
     return match
 
 
 COMPONENT_IDENTIFIER_COLUMNS = ["stats_perform_match_id", "action_id", "original_event_id"]
+FRAME_SCOPE_COLUMN = "frame_scope"
+STATE_FRAME_ID_COLUMN = "state_frame_id"
+FRAME_ID_SCOPE = "frame_id"
+RECEIVE_FRAME_ID_SCOPE = "receive_frame_id"
 
 
 def save_component_table(frame: pd.DataFrame, actions: pd.DataFrame, output_path: Path) -> None:
@@ -174,26 +211,136 @@ def save_component_table(frame: pd.DataFrame, actions: pd.DataFrame, output_path
     table.to_parquet(output_path, index=False)
 
 
+def add_prediction_scope(
+    frame: pd.DataFrame,
+    actions: pd.DataFrame,
+    *,
+    frame_scope: str,
+) -> pd.DataFrame:
+    if frame_scope not in {FRAME_ID_SCOPE, RECEIVE_FRAME_ID_SCOPE}:
+        raise ValueError(f"Unsupported frame scope: {frame_scope!r}")
+
+    missing_columns = [
+        column
+        for column in COMPONENT_IDENTIFIER_COLUMNS + [frame_scope]
+        if column not in actions.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            "Cannot export scoped component table because match.actions is missing: "
+            f"{', '.join(missing_columns)}"
+        )
+    if not frame.index.is_unique:
+        raise ValueError("Cannot export scoped component table because prediction rows have duplicate action indexes.")
+    if not actions.index.is_unique:
+        raise ValueError("Cannot export scoped component table because match.actions has duplicate indexes.")
+
+    missing_action_indexes = frame.index.difference(actions.index)
+    if len(missing_action_indexes) > 0:
+        sample = missing_action_indexes[:5].tolist()
+        raise ValueError(
+            "Cannot export scoped component table because prediction action indexes are missing from match.actions: "
+            f"{sample}"
+        )
+
+    identifiers = actions.loc[frame.index, COMPONENT_IDENTIFIER_COLUMNS].reset_index(drop=True)
+    scoped = frame.reset_index(drop=True)
+    duplicate_columns = [
+        column
+        for column in COMPONENT_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN, STATE_FRAME_ID_COLUMN]
+        if column in scoped.columns
+    ]
+    if duplicate_columns:
+        raise ValueError(
+            "Cannot export scoped component table because prediction columns duplicate identifiers: "
+            f"{', '.join(duplicate_columns)}"
+        )
+
+    identifiers[FRAME_SCOPE_COLUMN] = frame_scope
+    identifiers[STATE_FRAME_ID_COLUMN] = actions.loc[frame.index, frame_scope].reset_index(drop=True)
+    return pd.concat([identifiers, scoped], axis=1)
+
+
+def save_scoped_component_table(
+    frame_predictions: pd.DataFrame,
+    receive_predictions: pd.DataFrame | None,
+    actions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    scoped_frames = [add_prediction_scope(frame_predictions, actions, frame_scope=FRAME_ID_SCOPE)]
+    if receive_predictions is not None:
+        scoped_frames.append(
+            add_prediction_scope(receive_predictions, actions, frame_scope=RECEIVE_FRAME_ID_SCOPE)
+        )
+
+    table = pd.concat(scoped_frames, ignore_index=True)
+    duplicate_mask = table.duplicated(
+        subset=COMPONENT_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN],
+        keep=False,
+    )
+    if duplicate_mask.any():
+        raise ValueError(f"Scoped component table has duplicate action/scope rows for {output_path}.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(output_path, index=False)
+
+
 def save_match_component_tables(
     match_output_dir: Path,
     actions: pd.DataFrame,
     *,
     action_intent: pd.DataFrame,
     pass_intent: pd.DataFrame,
+    pass_intent_receive: pd.DataFrame,
     pass_success: pd.DataFrame | None,
+    pass_success_receive: pd.DataFrame | None,
     scoring_success: pd.DataFrame,
+    scoring_success_receive: pd.DataFrame,
     scoring_failure: pd.DataFrame,
+    scoring_failure_receive: pd.DataFrame,
     conceding_success: pd.DataFrame,
+    conceding_success_receive: pd.DataFrame,
     conceding_failure: pd.DataFrame,
+    conceding_failure_receive: pd.DataFrame,
 ) -> None:
     save_component_table(action_intent, actions, match_output_dir / "action_intent.parquet")
-    save_component_table(pass_intent, actions, match_output_dir / "pass_intent.parquet")
+    save_scoped_component_table(
+        pass_intent,
+        pass_intent_receive,
+        actions,
+        match_output_dir / "pass_intent.parquet",
+    )
     if pass_success is not None:
-        save_component_table(pass_success, actions, match_output_dir / "pass_success.parquet")
-    save_component_table(scoring_success, actions, match_output_dir / "outcome_scoring_success.parquet")
-    save_component_table(scoring_failure, actions, match_output_dir / "outcome_scoring_failure.parquet")
-    save_component_table(conceding_success, actions, match_output_dir / "outcome_conceding_success.parquet")
-    save_component_table(conceding_failure, actions, match_output_dir / "outcome_conceding_failure.parquet")
+        save_scoped_component_table(
+            pass_success,
+            pass_success_receive,
+            actions,
+            match_output_dir / "pass_success.parquet",
+        )
+    save_scoped_component_table(
+        scoring_success,
+        scoring_success_receive,
+        actions,
+        match_output_dir / "outcome_scoring_success.parquet",
+    )
+    save_scoped_component_table(
+        scoring_failure,
+        scoring_failure_receive,
+        actions,
+        match_output_dir / "outcome_scoring_failure.parquet",
+    )
+    save_scoped_component_table(
+        conceding_success,
+        conceding_success_receive,
+        actions,
+        match_output_dir / "outcome_conceding_success.parquet",
+    )
+    save_scoped_component_table(
+        conceding_failure,
+        conceding_failure_receive,
+        actions,
+        match_output_dir / "outcome_conceding_failure.parquet",
+    )
 
 
 def resolve_optional_success_intent_model_id(
@@ -420,22 +567,50 @@ def main() -> None:
 
             action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
             pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
+            pass_intent_receive, _ = inference_gnn(
+                match,
+                model_specs["pass_intent"],
+                device=device,
+                post_action=True,
+            )
             pass_success = None
+            pass_success_receive = None
             try:
                 pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
             except PhysicalXPassNoUsableRowsError as exc:
-                print(f"  WARN {match_id}: pass_success export skipped: {summarize_exception(exc)}")
+                print(f"  WARN {match_id}: pass_success frame_id export skipped: {summarize_exception(exc)}")
+            try:
+                pass_success_receive, _ = inference_gnn(
+                    match,
+                    model_specs["pass_success"],
+                    device=device,
+                    post_action=True,
+                )
+            except PhysicalXPassNoUsableRowsError as exc:
+                print(f"  WARN {match_id}: pass_success receive_frame_id export skipped: {summarize_exception(exc)}")
             scoring_failure, scoring_success = inference_gnn(
                 match,
                 model_specs["outcome_scoring"],
                 device=device,
                 post_action=False,
             )
+            scoring_failure_receive, scoring_success_receive = inference_gnn(
+                match,
+                model_specs["outcome_scoring"],
+                device=device,
+                post_action=True,
+            )
             conceding_failure, conceding_success = inference_gnn(
                 match,
                 model_specs["outcome_conceding"],
                 device=device,
                 post_action=False,
+            )
+            conceding_failure_receive, conceding_success_receive = inference_gnn(
+                match,
+                model_specs["outcome_conceding"],
+                device=device,
+                post_action=True,
             )
             if action_intent.empty:
                 raise ValueError("No usable inference rows were produced for this match.")
@@ -445,11 +620,17 @@ def main() -> None:
                 match.actions,
                 action_intent=action_intent,
                 pass_intent=pass_intent,
+                pass_intent_receive=pass_intent_receive,
                 pass_success=pass_success,
+                pass_success_receive=pass_success_receive,
                 scoring_success=scoring_success,
+                scoring_success_receive=scoring_success_receive,
                 scoring_failure=scoring_failure,
+                scoring_failure_receive=scoring_failure_receive,
                 conceding_success=conceding_success,
+                conceding_success_receive=conceding_success_receive,
                 conceding_failure=conceding_failure,
+                conceding_failure_receive=conceding_failure_receive,
             )
             physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
             if physical_skip_stats:

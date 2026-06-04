@@ -13,8 +13,10 @@ validation/bundesliga_ranking/
 │   ├── fc25_ratings.csv
 │   ├── fc25_ratings_ids.csv
 │   ├── bundesliga_actions.csv
+│   ├── bundesliga_matches.csv
 │   ├── bundesliga_players.csv
 │   └── bundesliga_positions.csv
+├── minutes_played/
 ├── soccerdata_cache/
 ├── test/
 └── tmp/
@@ -22,6 +24,7 @@ validation/bundesliga_ranking/
 
 - `code/`: executable scripts
 - `output/`: generated CSV outputs
+- `minutes_played/`: reusable per-match cache derived from raw Bundesliga XML
 - `soccerdata_cache/`: cached SoFIFA HTML pages used by `soccerdata`
 - `test/`: tests for validation logic
 - `tmp/`: temporary files created during SoFIFA scraping
@@ -72,13 +75,25 @@ What it does:
 - resolves the component run to use
 - reads model component outputs for each Bundesliga match
 - joins model scores back to synced events
-- exports row-level, player-level, and player-position-level summaries
+- derives and caches `minutes_played` from raw Bundesliga lineup/event XML
+- exports row-level, match-level, player-level, and player-position-level summaries
 
 Default outputs:
 - `validation/bundesliga_ranking/output/fc25_ratings_ids.csv`
 - `validation/bundesliga_ranking/output/bundesliga_actions.csv`
+- `validation/bundesliga_ranking/output/bundesliga_matches.csv`
 - `validation/bundesliga_ranking/output/bundesliga_players.csv`
 - `validation/bundesliga_ranking/output/bundesliga_positions.csv`
+
+The ranking outputs use the same DM metric set as the SkillCorner validation:
+`pass_score`, `risk`, `reward`, `game_state_value_start`, `game_state_value_end`,
+`game_state_value_next`, `action_epv`, `dm_score`, `pass_dm_score`, `carry_epv`,
+`pass_epv`, `z_dm_score`, `z_pass_dm_score`, and `rank`.
+
+`bundesliga_matches.csv` contains one row per `player_id` and `match_id`, with
+`minutes_played`, dominant `advanced_position`, `[metric]_sum`, and `[metric]_per90`.
+`bundesliga_players.csv` keeps player totals, averages, medians, and the same
+match-derived `[metric]_sum` and `[metric]_per90` columns.
 
 How to run:
 
@@ -113,6 +128,14 @@ Example with an explicit season prefix:
   - overrides the default `validation/bundesliga_ranking/output/fc25_ratings.csv`
 - `--output-dir`
   - overrides the default `validation/bundesliga_ranking/output`
+- `--bundesliga-data-dir`
+  - raw Bundesliga season directory used for `minutes_played` derivation
+  - can be passed more than once
+  - defaults to `Bundesliga_season_23_24` and `Bundesliga_season_24_25`
+- `--minutes-played-cache-dir`
+  - overrides the default `validation/bundesliga_ranking/minutes_played`
+- `--refresh-minutes-played-cache`
+  - rebuilds cached `minutes_played` files from raw XML instead of reusing them
 
 Run help:
 
@@ -143,5 +166,6 @@ Use the season prefix that exists in your current lineup and component-run data.
   - `dm_model/data/lineup/line_up.parquet`
   - `dm_model/data/event_synced/`
   - `dm_model/data/component_runs/`
+  - `Bundesliga_season_23_24/` and/or `Bundesliga_season_24_25/` for `minutes_played`
 - `fc25_ratings.csv` must exist before running `bundesliga_ranking.py`
 - the default season prefix in the script may need to be overridden if your current data uses a different DFL prefix

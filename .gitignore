@@ -26,6 +26,7 @@ tests/AS_viz/
 !tests/test_physical_xpass.py
 !tests/test_skillcorner_postprocessing.py
 !tests/test_skillcorner_filter.py
+!tests/test_bundesliga_ranking.py
 !tests/test_visualization_versioning.py
 test_kpi_final/
 test_nan_xg/
