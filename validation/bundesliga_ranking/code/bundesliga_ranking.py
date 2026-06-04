@@ -29,13 +29,13 @@ ACTION_JOIN_COLUMNS = ["stats_perform_match_id", "original_event_id"]
 REQUIRED_COMPONENTS = [
     "action_intent",
     "pass_intent",
-    "success_intent",
     "pass_success",
     "outcome_scoring_success",
     "outcome_scoring_failure",
     "outcome_conceding_success",
     "outcome_conceding_failure",
 ]
+OPTIONAL_COMPONENTS = ["success_intent"]
 IGNORED_COMPONENT_COLUMNS = {"home_goal", "away_goal"}
 PASS_ACTION_TYPES = {"pass", "cross"}
 SPECIAL_COMPONENT_DIRS = {"benchmark", "hawkeye", "skillcorner"}
@@ -513,6 +513,19 @@ def read_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
     return long_component
 
 
+def merge_component(
+    merged: pd.DataFrame | None,
+    component: pd.DataFrame,
+) -> pd.DataFrame:
+    if merged is None:
+        return component
+    return merged.merge(
+        component,
+        on=COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
+        how="outer",
+    )
+
+
 def normalize_component_identifiers(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
     normalized["stats_perform_match_id"] = normalize_identifier(normalized["stats_perform_match_id"])
@@ -525,16 +538,15 @@ def build_match_model_data(match_dir: Path) -> pd.DataFrame:
     merged: pd.DataFrame | None = None
     for component_name in REQUIRED_COMPONENTS:
         component = read_component_long(match_dir, component_name)
-        if merged is None:
-            merged = component
-        else:
-            merged = merged.merge(
-                component,
-                on=COMPONENT_IDENTIFIER_COLUMNS + ["object_id"],
-                how="outer",
-            )
+        merged = merge_component(merged, component)
     if merged is None:
         raise ValueError(f"No component data loaded for {match_dir}")
+
+    for component_name in OPTIONAL_COMPONENTS:
+        path = match_dir / f"{component_name}.parquet"
+        if path.exists():
+            component = read_component_long(match_dir, component_name)
+            merged = merge_component(merged, component)
 
     merged["pass_score"] = (
         merged["pass_success"]
@@ -593,21 +605,28 @@ def add_scores_to_events(model_data: pd.DataFrame, event_synced_dir: Path) -> pd
         raise ValueError("No event CSV files were available for model data matches.")
     bundesliga_actions = pd.concat(event_frames, ignore_index=True)
 
-    best_intent_receivers = (
-        model_data.sort_values(
-            by=ACTION_JOIN_COLUMNS + ["success_intent"],
-            ascending=[True, True, False],
-            kind="mergesort",
+    if "success_intent" in model_data.columns:
+        best_intent_receivers = (
+            model_data.sort_values(
+                by=ACTION_JOIN_COLUMNS + ["success_intent"],
+                ascending=[True, True, False],
+                kind="mergesort",
+            )
+            .drop_duplicates(subset=ACTION_JOIN_COLUMNS, keep="first")
+            [ACTION_JOIN_COLUMNS + ["object_id"]]
+            .rename(columns={"object_id": "model_receiver_id"})
         )
-        .drop_duplicates(subset=ACTION_JOIN_COLUMNS, keep="first")
-        [ACTION_JOIN_COLUMNS + ["object_id"]]
-        .rename(columns={"object_id": "model_receiver_id"})
-    )
-    bundesliga_actions = bundesliga_actions.merge(
-        best_intent_receivers,
-        on=ACTION_JOIN_COLUMNS,
-        how="left",
-    )
+        bundesliga_actions = bundesliga_actions.merge(
+            best_intent_receivers,
+            on=ACTION_JOIN_COLUMNS,
+            how="left",
+        )
+    else:
+        print(
+            "INFO: success_intent component is unavailable; failed or receiver-missing "
+            "passes will keep blank model_receiver_id values and may remain unscored."
+        )
+        bundesliga_actions["model_receiver_id"] = pd.NA
 
     receiver_missing = bundesliga_actions["receiver_id"].isna()
     success_false = false_success_mask(bundesliga_actions["success"])
