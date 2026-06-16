@@ -37,6 +37,12 @@ from datatools.skillcorner import (
 )
 from physical_pass_model import (
     AS_DEFAULT_V0_MIN,
+    AS_DEFAULT_ANGLE_STEP_DEG,
+    AS_DEFAULT_COARSE_N_ANGLES,
+    AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
+    AS_DEFAULT_REFINE_TOP_K_ANGLES,
+    AS_DEFAULT_SPEED_STEP,
+    AS_DEFAULT_V0_MAX,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
@@ -143,7 +149,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=sorted(PHYSICAL_XPASS_SPEED_AGGREGATIONS),
         default=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     )
-    parser.add_argument("--max-speed", "--max_speed", dest="max_speed", type=int, default=None)
+    parser.add_argument("--max-speed", "--max_speed", dest="max_speed", type=float, default=AS_DEFAULT_V0_MAX)
+    parser.add_argument("--speed-step", "--speed_step", dest="speed_step", type=float, default=AS_DEFAULT_SPEED_STEP)
+    parser.add_argument("--coarse-n-angles", "--coarse_n_angles", dest="coarse_n_angles", type=int, default=AS_DEFAULT_COARSE_N_ANGLES)
+    parser.add_argument("--refine-top-k-angles", "--refine_top_k_angles", dest="refine_top_k_angles", type=int, default=AS_DEFAULT_REFINE_TOP_K_ANGLES)
+    parser.add_argument("--refine-angle-radius", "--refine_angle_radius", dest="refine_angle_radius", type=float, default=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG)
+    parser.add_argument("--angle-step", "--angle_step", dest="angle_step", type=float, default=AS_DEFAULT_ANGLE_STEP_DEG)
     parser.add_argument("--num-workers", default="auto")
     parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.add_argument("--worker-thread-limit", type=int, default=1)
@@ -166,6 +177,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--worker-thread-limit must be positive.")
     if args.max_speed is not None and args.max_speed < int(AS_DEFAULT_V0_MIN):
         parser.error(f"--max-speed must be at least {AS_DEFAULT_V0_MIN:g} m/s.")
+    if args.speed_step <= 0:
+        parser.error("--speed-step must be positive.")
+    if args.coarse_n_angles < 1:
+        parser.error("--coarse-n-angles must be positive.")
+    if args.refine_top_k_angles < 1:
+        parser.error("--refine-top-k-angles must be positive.")
+    if args.refine_angle_radius < 0:
+        parser.error("--refine-angle-radius must be non-negative.")
+    if args.angle_step <= 0:
+        parser.error("--angle-step must be positive.")
     try:
         resolve_physical_num_workers(args.num_workers)
     except ValueError as exc:
@@ -231,6 +252,7 @@ def validate_reuse_cache_dir(
     speed_aggregation: str,
     physical_eps: float,
     max_speed: int | None = None,
+    speed_step: float | None = None,
 ) -> Path:
     cache_path = Path(cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_path)
@@ -238,6 +260,7 @@ def validate_reuse_cache_dir(
         teammate_policy,
         speed_aggregation=speed_aggregation,
         max_speed=max_speed,
+        speed_step=speed_step,
     )
     mismatches: list[str] = []
     for key, expected_value in expected_metadata.items():
@@ -277,6 +300,7 @@ def compute_match_rows(
     consider_teammates: bool,
     speed_aggregation: str = PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     max_speed: int | None = None,
+    speed_step: float | None = None,
     physical_batch_size: int = 16,
     limit: int | None,
     reuse_rows: pd.DataFrame | None = None,
@@ -350,6 +374,7 @@ def compute_match_rows(
                 consider_teammates=consider_teammates,
                 speed_aggregation=speed_aggregation,
                 max_speed=max_speed,
+                speed_step=speed_step,
                 batch_size=physical_batch_size,
             )
         else:
@@ -360,6 +385,7 @@ def compute_match_rows(
                     consider_teammates=consider_teammates,
                     speed_aggregation=speed_aggregation,
                     max_speed=max_speed,
+                    speed_step=speed_step,
                 )
                 for item in pending
             ]
@@ -392,6 +418,7 @@ def process_match_task(task: dict[str, object]) -> dict[str, object]:
         consider_teammates=bool(task["consider_teammates"]),
         speed_aggregation=str(task["speed_aggregation"]),
         max_speed=task.get("max_speed"),
+        speed_step=task.get("speed_step"),
         physical_batch_size=int(task["physical_batch_size"]),
         limit=task.get("limit"),
         reuse_rows=load_reuse_rows(reuse_cache_path, match_id),
@@ -474,6 +501,12 @@ def prewarm_runtime_items(
         worker_thread_limit=int(args.worker_thread_limit),
         physical_batch_size=int(args.physical_batch_size),
         reuse_cache_dir=reuse_cache_dir,
+        max_speed=args.max_speed,
+        speed_step=args.speed_step,
+        coarse_n_angles=int(args.coarse_n_angles),
+        refine_top_k_angles=int(args.refine_top_k_angles),
+        refine_angle_radius=float(args.refine_angle_radius),
+        angle_step=float(args.angle_step),
     )
 
 
@@ -491,6 +524,11 @@ def write_runtime_dataset_metadata(
             teammate_policy_from_args(args),
             speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
             max_speed=args.max_speed,
+            speed_step=args.speed_step,
+            coarse_n_angles=args.coarse_n_angles,
+            refine_top_k_angles=args.refine_top_k_angles,
+            refine_angle_radius=args.refine_angle_radius,
+            angle_step=args.angle_step,
         ),
         "created_for": "runtime_physical_xpass_cache",
         "dataset": dataset,
@@ -503,6 +541,7 @@ def write_runtime_dataset_metadata(
         "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers)),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
+        "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
     write_run_metadata(cache_dir, metadata)
@@ -528,6 +567,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             teammate_policy=teammate_policy_from_args(args),
             speed_aggregation=speed_aggregation,
             max_speed=args.max_speed,
+            speed_step=args.speed_step,
             physical_eps=float(args.physical_eps),
         )
         if args.reuse_cache_dir
@@ -564,6 +604,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             "consider_teammates": bool(args.consider_teammates),
             "speed_aggregation": speed_aggregation,
             "max_speed": args.max_speed,
+            "speed_step": args.speed_step,
             "physical_batch_size": int(args.physical_batch_size),
             "limit": remaining,
             "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
@@ -605,7 +646,15 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             executor.shutdown()
 
     metadata = {
-        **physical_xpass_as_default_metadata(teammate_policy_from_args(args), speed_aggregation=speed_aggregation, max_speed=args.max_speed),
+        **physical_xpass_as_default_metadata(
+            teammate_policy_from_args(args),
+            speed_aggregation=speed_aggregation,
+            max_speed=args.max_speed,
+            speed_step=args.speed_step,
+            default_metric="max_xpass",
+            available_metrics=["max_xpass"],
+            metric_schema_version=1,
+        ),
         "feature_run_id": feature_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "graph_dir": str(graph_dir),
@@ -620,7 +669,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
         "n_reused_actions": int(total_reused),
         "reuse_stats": {key: int(value) for key, value in sorted(reuse_stats.items())},
         "physical_eps": float(args.physical_eps),
-        "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed).tolist()],
+        "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
         "num_workers": int(num_workers),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
@@ -810,8 +859,6 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
         warnings.warn("--overwrite is ignored in runtime mode; runtime physical xPass caches are updated in place.")
     if not args.normalize:
         warnings.warn("--no-normalize is ignored; AS-default physical xPass always uses normalize=True.")
-    if args.max_speed is not None:
-        raise ValueError("--max-speed is only supported in legacy --feature-run-id mode.")
     configure_physical_worker_thread_limit(int(args.worker_thread_limit))
     runners = {
         "sportec": run_runtime_sportec,

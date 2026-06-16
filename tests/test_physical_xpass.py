@@ -26,8 +26,13 @@ from models.utils import run_epoch
 from physical_pass_model import (
     AS_DEFAULT_N_ANGLES,
     AS_DEFAULT_N_V0,
+    AS_DEFAULT_ANGLE_STEP_DEG,
+    AS_DEFAULT_COARSE_N_ANGLES,
     AS_DEFAULT_NORMALIZE,
+    AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
+    AS_DEFAULT_REFINE_TOP_K_ANGLES,
     AS_DEFAULT_RESPECT_OFFSIDE,
+    AS_DEFAULT_SPEED_STEP,
     AS_DEFAULT_V0_MAX,
     AS_DEFAULT_V0_MIN,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
@@ -36,6 +41,11 @@ from physical_pass_model import (
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
     PHYSICAL_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_SOURCE,
+    PHYSICAL_XPASS_DEFAULT_METRIC,
+    PHYSICAL_XPASS_METRIC_MAX,
+    PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
+    PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
+    PHYSICAL_XPASS_METRIC_TOP10MEAN,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
@@ -58,8 +68,12 @@ from physical_pass_model import (
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
+    physical_xpass_kernel_sigmas,
+    physical_xpass_metric,
+    physical_xpass_metric_column,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
+    refined_angle_grid_from_coarse_angles,
     resolve_physical_num_workers,
     runtime_physical_xpass_speed_aggregation,
     summarize_physical_xpass_cache_usage,
@@ -399,6 +413,91 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=120.0)),
             0.9,
+        )
+
+    def test_physical_xpass_robust_defaults_and_kernel_sigmas(self) -> None:
+        speeds = as_default_v0_values()
+        self.assertEqual(speeds.tolist(), [float(value) for value in range(3, 23)])
+        self.assertEqual(AS_DEFAULT_V0_MAX, 22.0)
+        self.assertEqual(AS_DEFAULT_SPEED_STEP, 1.0)
+        self.assertEqual(AS_DEFAULT_COARSE_N_ANGLES, 36)
+        self.assertEqual(AS_DEFAULT_REFINE_TOP_K_ANGLES, 2)
+        self.assertEqual(AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG, 10.0)
+        self.assertEqual(AS_DEFAULT_ANGLE_STEP_DEG, 2.5)
+
+        sigma_angle, sigma_speed, sigma_distance = physical_xpass_kernel_sigmas(20.0, 30.0)
+
+        self.assertAlmostEqual(sigma_angle, np.deg2rad(5.0), places=8)
+        self.assertAlmostEqual(sigma_speed, 2.0, places=8)
+        self.assertAlmostEqual(sigma_distance, 3.0, places=8)
+
+    def test_adaptive_refined_angles_include_local_two_and_half_degree_grid(self) -> None:
+        coarse = np.deg2rad(np.arange(0.0, 360.0, 10.0))
+
+        refined = refined_angle_grid_from_coarse_angles(coarse, [0], refine_angle_radius=10.0, angle_step=2.5)
+
+        expected = np.mod(np.deg2rad(np.arange(-10.0, 10.0 + 0.1, 2.5)), 2.0 * np.pi)
+        for angle in expected:
+            self.assertTrue(np.any(np.isclose(refined, angle, atol=1e-12)))
+
+    def test_physical_xpass_metadata_records_robust_metric_schema(self) -> None:
+        metadata = physical_xpass_as_default_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+
+        self.assertEqual(metadata["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
+        self.assertEqual(metadata["default_metric"], PHYSICAL_XPASS_DEFAULT_METRIC)
+        self.assertEqual(
+            metadata["available_metrics"],
+            [PHYSICAL_XPASS_METRIC_NOISE_KERNEL, PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOP10MEAN],
+        )
+        self.assertEqual(metadata["max_speed"], 22.0)
+        self.assertEqual(metadata["speed_step"], 1.0)
+        self.assertEqual(metadata["coarse_n_angles"], 36)
+        self.assertEqual(metadata["refine_top_k_angles"], 2)
+        self.assertEqual(metadata["refine_angle_radius_deg"], 10.0)
+        self.assertEqual(metadata["angle_step_deg"], 2.5)
+
+    def test_physical_xpass_attach_selects_exported_metric_columns(self) -> None:
+        labels = make_label(action_index=5)
+        rows = pd.DataFrame(
+            [
+                {
+                    "match_id": "m1",
+                    "action_index": 5,
+                    "home_2": 0.4,
+                    physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX): 0.9,
+                    physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_TOP10MEAN): 0.7,
+                }
+            ]
+        ).set_index("action_index", drop=False)
+
+        default_graph = attach_physical_xpass_to_graph(make_graph(), labels, rows, match_id="m1", require_observed_target=False)
+        max_graph = attach_physical_xpass_to_graph(
+            make_graph(),
+            labels,
+            rows,
+            match_id="m1",
+            require_observed_target=False,
+            metric=PHYSICAL_XPASS_METRIC_MAX,
+        )
+        top10_graph = attach_physical_xpass_to_graph(
+            make_graph(),
+            labels,
+            rows,
+            match_id="m1",
+            require_observed_target=False,
+            metric=PHYSICAL_XPASS_METRIC_TOP10MEAN,
+        )
+
+        self.assertAlmostEqual(float(default_graph.physical_xpass[1]), 0.4)
+        self.assertAlmostEqual(float(max_graph.physical_xpass[1]), 0.9)
+        self.assertAlmostEqual(float(top10_graph.physical_xpass[1]), 0.7)
+
+    def test_physical_xpass_metric_flags_select_inference_metric(self) -> None:
+        self.assertEqual(physical_xpass_metric({"task": "pass_success"}), PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
+        self.assertEqual(physical_xpass_metric({"task": "pass_success", "max_xpass": True}), PHYSICAL_XPASS_METRIC_MAX)
+        self.assertEqual(
+            physical_xpass_metric({"task": "pass_success", "top10mean_xpass": True}),
+            PHYSICAL_XPASS_METRIC_TOP10MEAN,
         )
 
     def test_pass_distance_is_reserved_sidecar_column(self) -> None:
@@ -1210,7 +1309,7 @@ class PhysicalXPassTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.73}, dtype=float)],
             ) as compute:
                 attached, stats = attach_physical_xpass_cached_online_to_graphs(
@@ -1231,7 +1330,7 @@ class PhysicalXPassTests(unittest.TestCase):
             self.assertTrue((cache_dir / "metadata.json").exists())
             self.assertTrue((cache_dir / "matches" / "runtime_match.parquet").exists())
 
-            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute_again:
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute_again:
                 attached_again, reuse_stats = attach_physical_xpass_cached_online_to_graphs(
                     [make_graph()],
                     labels,
@@ -1276,7 +1375,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 ]
             ).to_parquet(reuse_dir / "matches" / "runtime_match.parquet", index=False)
 
-            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute:
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute:
                 stats = prewarm_physical_xpass_runtime_cache(
                     [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
                     cache_dir=cache_dir,
@@ -1300,7 +1399,7 @@ class PhysicalXPassTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.41}, dtype=float)],
             ):
                 attach_physical_xpass_cached_online_to_graphs(
@@ -1316,7 +1415,7 @@ class PhysicalXPassTests(unittest.TestCase):
             changed_graph = make_graph()
             changed_graph.x[1, config.NODE_FEATURE_X] += 1.0
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.81}, dtype=float)],
             ) as compute:
                 attached, stats = attach_physical_xpass_cached_online_to_graphs(
@@ -1432,7 +1531,7 @@ class PhysicalXPassTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.37}, dtype=float)],
             ):
                 first_stats = prewarm_physical_xpass_runtime_cache(
@@ -1444,7 +1543,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     num_workers=1,
                     physical_batch_size=4,
                 )
-            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute_again:
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute_again:
                 second_stats = prewarm_physical_xpass_runtime_cache(
                     [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
                     cache_dir=cache_dir,
@@ -1468,7 +1567,7 @@ class PhysicalXPassTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.25}, dtype=float)],
             ):
                 prewarm_physical_xpass_runtime_cache(
@@ -1480,7 +1579,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     num_workers=1,
                 )
             with patch(
-                "physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults",
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
                 return_value=[pd.Series({"home_2": 0.92}, dtype=float)],
             ) as compute:
                 stats = prewarm_physical_xpass_runtime_cache(
@@ -1701,7 +1800,7 @@ class PhysicalXPassTests(unittest.TestCase):
             ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
             model = DummyBaselineInferenceModel(cache_dir)
 
-            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute:
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute:
                 probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
 
         compute.assert_not_called()
@@ -1867,7 +1966,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(metadata["v0_max"], float(expected_speeds[-1]))
         self.assertLessEqual(metadata["v0_max"], 20.0)
 
-    def test_generate_physical_xpass_reuse_cache_validation_allows_old_full_grid_metadata(self) -> None:
+    def test_generate_physical_xpass_reuse_cache_validation_rejects_old_full_grid_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
             cache_dir.mkdir()
@@ -1879,14 +1978,13 @@ class PhysicalXPassTests(unittest.TestCase):
             metadata["physical_eps"] = 1e-4
             (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
-            path = generate_physical_xpass.validate_reuse_cache_dir(
-                cache_dir,
-                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
-                physical_eps=1e-4,
-            )
-
-        self.assertEqual(path, cache_dir)
+            with self.assertRaisesRegex(ValueError, "max_speed"):
+                generate_physical_xpass.validate_reuse_cache_dir(
+                    cache_dir,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    physical_eps=1e-4,
+                )
 
     def test_generate_physical_xpass_reuses_row_without_hash_and_skips_compute(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2312,7 +2410,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
             row = load_physical_xpass_component(cache_dir, "m1", 3)
 
-        self.assertEqual(row.name, "max_player_cum_prob")
+        self.assertEqual(row.name, "noise_kernel_xpass")
         self.assertAlmostEqual(float(row["home_1"]), 0.2)
         self.assertTrue(np.isnan(row["home_2"]))
         self.assertNotIn("physical_state_hash", row.index)
@@ -2321,7 +2419,12 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run"])
         self.assertTrue(args.consider_teammates)
         self.assertEqual(args.speed_aggregation, PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION)
-        self.assertIsNone(args.max_speed)
+        self.assertEqual(args.max_speed, 22.0)
+        self.assertEqual(args.speed_step, 1.0)
+        self.assertEqual(args.coarse_n_angles, 36)
+        self.assertEqual(args.refine_top_k_angles, 2)
+        self.assertEqual(args.refine_angle_radius, 10.0)
+        self.assertEqual(args.angle_step, 2.5)
 
     def test_generate_physical_xpass_cli_default_runtime_selects_all_datasets(self) -> None:
         args = generate_physical_xpass.parse_args([])
