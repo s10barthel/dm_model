@@ -1409,6 +1409,13 @@ def run_epoch(
                     pred_i = out[batch == graph_index]
                     target_i = target[graph_index]
 
+                pred_i = pred_i.reshape(-1)
+                if target_i.numel() != 1:
+                    raise ValueError(
+                        f"Expected one node-selection target for graph {int(graph_index.item())}, "
+                        f"got shape {tuple(target_i.shape)}."
+                    )
+                target_i = target_i.reshape(())
                 pred_loss += loss_fn(pred_i.unsqueeze(0), target_i.unsqueeze(0))
                 accuracy += (pred_i.argmax() == target_i).float()
 

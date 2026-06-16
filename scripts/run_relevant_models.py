@@ -25,6 +25,13 @@ from models.utils import (
     validate_feature_graph_schema,
     validate_model_graph_schemas,
 )
+from physical_pass_model import (
+    format_physical_xpass_cache_summary,
+    inference_uses_physical_xpass,
+    model_uses_physical_xpass,
+    resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
+)
 from project_config import (
     COMPONENT_RUNS_DIR,
     DATA_ROOT,
@@ -34,6 +41,7 @@ from project_config import (
     get_action_graph_dir,
     get_post_action_graph_dir,
     get_resolved_action_path,
+    get_runtime_physical_xpass_dir,
     get_success_intent_graph_dir,
     load_base_splits,
     write_latest_run,
@@ -58,7 +66,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir")
-    return parser.parse_args()
+    parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
+    parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
+    parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
+    parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
+    parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
+    parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
+    parser.add_argument("--physical-batch-size", type=int, default=16)
+    args = parser.parse_args()
+    try:
+        resolve_physical_num_workers(args.physical_num_workers)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.physical_worker_thread_limit < 1:
+        parser.error("--physical-worker-thread-limit must be positive.")
+    if args.physical_batch_size < 1:
+        parser.error("--physical-batch-size must be positive.")
+    return args
 
 
 def summarize_exception(exc: Exception) -> str:
@@ -497,6 +521,24 @@ def main() -> None:
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("sportec"))
+    physical_num_workers = getattr(args, "physical_num_workers", "auto")
+    physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
+    physical_batch_size = int(getattr(args, "physical_batch_size", 16))
+    pass_success_model = model_specs.get("pass_success")
+    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
+        pass_success_model.args["inference_use_physical_xpass"] = True
+    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
+        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_model.args["physical_runtime_cache_refresh"] = False
+        pass_success_model.args["physical_num_workers"] = physical_num_workers
+        pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
+        pass_success_model.args["physical_batch_size"] = physical_batch_size
+        pass_success_model.args["physical_runtime_cache_read_only"] = True
+        if not no_physical_cache:
+            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
     success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
     (
@@ -542,6 +584,14 @@ def main() -> None:
         "processed_match_ids": [],
         "skipped_matches": [],
         "physical_xpass_skipped_actions": {},
+        "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_cache_disabled": no_physical_cache,
+        "refresh_physical_cache": refresh_physical_cache,
+        "physical_num_workers": physical_num_workers,
+        "physical_worker_thread_limit": physical_worker_thread_limit,
+        "physical_batch_size": physical_batch_size,
+        "physical_xpass_runtime_stats": {},
         "status": "completed",
     }
     if success_intent_model_id and success_intent_model_record is not None:
@@ -635,6 +685,9 @@ def main() -> None:
             physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
             if physical_skip_stats:
                 metadata["physical_xpass_skipped_actions"][match_id] = physical_skip_stats
+            runtime_physical_stats = getattr(match, "physical_xpass_runtime_stats", None)
+            if runtime_physical_stats:
+                metadata["physical_xpass_runtime_stats"][match_id] = runtime_physical_stats
 
             if success_intent_model is not None:
                 try:
@@ -661,11 +714,25 @@ def main() -> None:
         raise RuntimeError("No usable matches were available for component inference.")
     if metadata["skipped_matches"]:
         print(f"Skipped {len(metadata['skipped_matches'])} matches during component inference.")
+    physical_xpass_required = bool(
+        model_uses_physical_xpass(model_specs["pass_success"].args)
+        or inference_uses_physical_xpass(model_specs["pass_success"].args)
+    )
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        runtime_stats=metadata["physical_xpass_runtime_stats"],
+    )
+    metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
+    write_run_metadata(output_dir, metadata)
 
     if output_parent.resolve() == COMPONENT_RUNS_DIR.resolve():
         write_latest_run("component", component_run_id)
     print(f"Component run id: {component_run_id}")
     print(f"Saved component predictions to {output_dir}")
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":

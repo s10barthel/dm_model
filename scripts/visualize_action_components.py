@@ -30,7 +30,14 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
-from physical_pass_model import load_physical_xpass_component
+from physical_pass_model import (
+    format_physical_xpass_cache_summary,
+    inference_uses_physical_xpass,
+    load_physical_xpass_component,
+    model_uses_physical_xpass,
+    resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
+)
 from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -39,6 +46,7 @@ from project_config import (
     generate_run_id,
     get_action_graph_dir,
     get_physical_xpass_dir,
+    get_runtime_physical_xpass_dir,
     get_resolved_action_path,
     write_run_metadata,
 )
@@ -93,6 +101,12 @@ def parse_args() -> argparse.Namespace:
         help="Render max_player_cum_prob.png from physical xPass sidecars.",
     )
     parser.add_argument("--physical-cache-dir", help="Physical xPass sidecar directory override.")
+    parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
+    parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
+    parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
+    parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
+    parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
+    parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
@@ -102,7 +116,16 @@ def parse_args() -> argparse.Namespace:
     add_component_selection_args(parser, include_intended_recipient=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(VISUALIZATION_DIR))
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        resolve_physical_num_workers(args.physical_num_workers)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.physical_worker_thread_limit < 1:
+        parser.error("--physical-worker-thread-limit must be positive.")
+    if args.physical_batch_size < 1:
+        parser.error("--physical-batch-size must be positive.")
+    return args
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -719,10 +742,25 @@ def main() -> None:
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
-    physical_cache_dir = args.physical_cache_dir or str(get_physical_xpass_dir(feature_root))
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = args.physical_cache_dir or (
+        str(get_runtime_physical_xpass_dir("sportec"))
+        if bool(getattr(args, "use_physical_xpass", False))
+        else str(get_physical_xpass_dir(feature_root))
+    )
     pass_success_model = loaded_models.get("pass_success")
-    if pass_success_model is not None and pass_success_model.args.get("use_physical_xpass", False):
-        pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
+        pass_success_model.args["inference_use_physical_xpass"] = True
+    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
+        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_model.args["physical_runtime_cache_refresh"] = False
+        pass_success_model.args["physical_num_workers"] = getattr(args, "physical_num_workers", "auto")
+        pass_success_model.args["physical_worker_thread_limit"] = int(getattr(args, "physical_worker_thread_limit", 1))
+        pass_success_model.args["physical_batch_size"] = int(getattr(args, "physical_batch_size", 16))
+        pass_success_model.args["physical_runtime_cache_read_only"] = True
+        if not no_physical_cache:
+            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
 
     match = load_match(
         args.match_id,
@@ -738,6 +776,7 @@ def main() -> None:
     saved_dirs: list[Path] = []
     rendered_actions: list[dict[str, object]] = []
     skipped_actions: list[dict[str, object]] = []
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     for action_index, display_action_id in selected_actions:
         output_dir = output_root / args.match_id / display_action_id
         try:
@@ -766,6 +805,9 @@ def main() -> None:
             warn_skip(f"action_id={display_action_id} in match {args.match_id} failed during rendering: {exc}")
             continue
         saved_dirs.append(output_dir)
+        runtime_physical_stats = getattr(match, "physical_xpass_runtime_stats", None)
+        if runtime_physical_stats:
+            physical_xpass_runtime_stats[str(action_index)] = runtime_physical_stats
         rendered_actions.append(
             {
                 "match_id": args.match_id,
@@ -810,11 +852,28 @@ def main() -> None:
         "show_trajectories": bool(args.show_trajectories),
         "show_physical_xpass": bool(args.show_physical_xpass),
         "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_cache_disabled": no_physical_cache,
+        "refresh_physical_cache": refresh_physical_cache,
+        "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
     }
+    metadata_path = write_run_metadata(output_root, metadata)
+    physical_xpass_required = pass_success_model is not None and (
+        model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
+    )
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        runtime_stats=physical_xpass_runtime_stats,
+    )
+    metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved component plots for {len(saved_dirs)} action(s).")
     print(f"Visualization run id: {visualization_run_id}")
     print(f"Visualization metadata: {metadata_path}")
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":

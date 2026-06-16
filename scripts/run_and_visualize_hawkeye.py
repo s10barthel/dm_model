@@ -23,12 +23,20 @@ from datatools.hawkeye import (
 )
 from inference import inference_gnn
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
+from physical_pass_model import (
+    format_physical_xpass_cache_summary,
+    inference_uses_physical_xpass,
+    model_uses_physical_xpass,
+    resolve_physical_num_workers,
+    summarize_physical_xpass_cache_usage,
+)
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
     HAWKEYE_VISUALIZATION_DIR,
     PROJECT_ROOT,
     generate_run_id,
+    get_runtime_physical_xpass_dir,
     write_run_metadata,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
@@ -61,11 +69,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-success-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
+    parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
+    parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
+    parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
+    parser.add_argument("--physical-batch-size", type=int, default=16)
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    try:
+        resolve_physical_num_workers(args.physical_num_workers)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.physical_worker_thread_limit < 1:
+        parser.error("--physical-worker-thread-limit must be positive.")
+    if args.physical_batch_size < 1:
+        parser.error("--physical-batch-size must be positive.")
+    return args
 
 
 def resolve_situation_ids(args: argparse.Namespace) -> list[str]:
@@ -298,6 +322,21 @@ def main() -> None:
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("hawkeye"))
+    pass_success_model = model_specs.get("pass_success")
+    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
+        pass_success_model.args["inference_use_physical_xpass"] = True
+    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
+        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_model.args["physical_runtime_cache_refresh"] = False
+        pass_success_model.args["physical_num_workers"] = getattr(args, "physical_num_workers", "auto")
+        pass_success_model.args["physical_worker_thread_limit"] = int(getattr(args, "physical_worker_thread_limit", 1))
+        pass_success_model.args["physical_batch_size"] = int(getattr(args, "physical_batch_size", 16))
+        pass_success_model.args["physical_runtime_cache_read_only"] = True
+        if not no_physical_cache:
+            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
     graph_schema = validate_model_graph_schemas(model_specs)
 
     output_dirs: list[Path] = []
@@ -354,6 +393,10 @@ def main() -> None:
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
         "rendered_situations": rendered_situations,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_cache_disabled": no_physical_cache,
+        "refresh_physical_cache": refresh_physical_cache,
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
         "ball_csv": str(Path(args.ball_csv).resolve()),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
@@ -362,9 +405,22 @@ def main() -> None:
         "graph_schema": graph_schema,
     }
     metadata_path = write_run_metadata(output_root, metadata)
+    physical_xpass_required = pass_success_model is not None and (
+        model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
+    )
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=no_physical_cache,
+        refresh_requested=refresh_physical_cache,
+        cache_dir=None if no_physical_cache else physical_cache_dir,
+        runtime_stats=physical_xpass_runtime_stats,
+    )
+    metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
+    metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved Hawkeye animations for {len(output_dirs)} situation(s).")
     print(f"Hawkeye visualization run id: {visualization_run_id}")
     print(f"Hawkeye visualization metadata: {metadata_path}")
+    print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
 
 
 if __name__ == "__main__":

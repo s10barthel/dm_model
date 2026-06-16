@@ -33,6 +33,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_XPASS_LEGACY_SOURCE,
     PHYSICAL_XPASS_LOGIT_ATTR,
+    PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
     PHYSICAL_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
@@ -45,18 +46,22 @@ from physical_pass_model import (
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graph,
+    blend_physical_xpass_predictions,
     compute_graphs_max_player_cum_prob_as_defaults,
     compute_graph_physical_xpass_for_source,
     compute_graph_max_player_cum_prob_as_defaults,
     compute_graph_player_cum_prob,
     format_physical_xpass_cache_summary,
+    inference_uses_physical_xpass,
     load_physical_xpass_match,
     load_physical_xpass_component,
+    observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
     resolve_physical_num_workers,
+    runtime_physical_xpass_speed_aggregation,
     summarize_physical_xpass_cache_usage,
     validate_physical_xpass_cache_metadata,
 )
@@ -169,6 +174,19 @@ class DummyOffsetModel(nn.Module):
         return torch.tensor(self.output_values[:node_count], dtype=torch.float32, device=batch_graphs.x.device) + self.weight * 0.0
 
 
+class DummyColumnNodeSelectionModel(nn.Module):
+    def __init__(self, output_values: list[float]) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+        self.output_values = output_values
+
+    def forward(self, batch_graphs, batch_dests=None):
+        del batch_dests
+        node_count = batch_graphs.x.shape[0]
+        values = torch.tensor(self.output_values[:node_count], dtype=torch.float32, device=batch_graphs.x.device)
+        return values.unsqueeze(-1) + self.weight * 0.0
+
+
 class DummyPhysicalInferenceModel(nn.Module):
     def __init__(self, cache_dir: Path) -> None:
         super().__init__()
@@ -199,6 +217,42 @@ class DummyPhysicalInferenceModel(nn.Module):
 
     def forward(self, graphs: Data, _batch_dests: torch.Tensor | None = None) -> torch.Tensor:
         return torch.zeros(graphs.x.shape[0], dtype=torch.float32, device=graphs.x.device) + self.weight * 0.0
+
+
+class DummyBaselineInferenceModel(nn.Module):
+    def __init__(self, cache_dir: Path) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1))
+        self.args = {
+            "task": "pass_success",
+            "node_in_dim": 25,
+            "include_out": False,
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "accel_aware": True,
+            "offside_aware": True,
+            "extend_features": False,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+            "filter_blockers": False,
+            "use_physical_xpass": False,
+            "inference_use_physical_xpass": True,
+            "model_variant": "gat_baseline",
+            "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+            "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+            "physical_cache_dir": str(cache_dir),
+        }
+
+    def forward(self, graphs: Data, _batch_dests: torch.Tensor | None = None) -> torch.Tensor:
+        out = torch.full((graphs.x.shape[0],), -10.0, dtype=torch.float32, device=graphs.x.device)
+        teammate_mask = graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+        out[teammate_mask] = torch.logit(torch.tensor(0.9, dtype=torch.float32, device=graphs.x.device))
+        return out + self.weight * 0.0
 
 
 class RecordingTqdm:
@@ -306,24 +360,73 @@ def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -
         ),
         encoding="utf-8",
     )
-    rows = [
-        {
-            "match_id": "match_1",
-            "action_index": int(action_index),
-            "physical_state_hash": f"hash_{action_index}",
-            "home_1": 0.2,
-            "home_2": 0.8,
-            "away_3": 0.1,
-        }
-        for action_index in action_indexes
-    ]
+    graph = make_graph(["home_1", "home_2", "away_3"])
+    label = make_label(action_index=0, intent_index=1)
+    rows = []
+    for action_index in action_indexes:
+        label[LABEL_INDEX["action_index"]] = int(action_index)
+        rows.append(
+            {
+                "match_id": "match_1",
+                "action_index": int(action_index),
+                "physical_state_hash": physical_state_hash(graph),
+                PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: observed_pass_distance(graph, label),
+                "home_1": 0.2,
+                "home_2": 0.8,
+                "away_3": 0.1,
+            }
+        )
     pd.DataFrame(
         rows,
-        columns=["match_id", "action_index", "physical_state_hash", "home_1", "home_2", "away_3"],
+        columns=["match_id", "action_index", "physical_state_hash", PHYSICAL_XPASS_PASS_DISTANCE_COLUMN, "home_1", "home_2", "away_3"],
     ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
 
 
 class PhysicalXPassTests(unittest.TestCase):
+    def test_inference_physical_xpass_blend_formula(self) -> None:
+        self.assertAlmostEqual(
+            float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=10.0)),
+            0.54,
+        )
+        self.assertAlmostEqual(
+            float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=0.0)),
+            0.5,
+        )
+        self.assertAlmostEqual(
+            float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=100.0)),
+            0.9,
+        )
+        self.assertAlmostEqual(
+            float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=120.0)),
+            0.9,
+        )
+
+    def test_pass_distance_is_reserved_sidecar_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        "home_2": 0.64,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+
+            component = load_physical_xpass_component(cache_dir, "match_1", 5)
+
+        self.assertIn("home_2", component.index)
+        self.assertNotIn(PHYSICAL_XPASS_PASS_DISTANCE_COLUMN, component.index)
+
+    def test_observed_pass_distance_uses_passer_and_intended_receiver(self) -> None:
+        graph = make_graph()
+        label = make_label(intent_index=1)
+
+        self.assertAlmostEqual(observed_pass_distance(graph, label), 20.0)
+
     def test_pass_success_inference_skips_non_pass_actions_missing_from_static_physical_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
@@ -1144,6 +1247,54 @@ class PhysicalXPassTests(unittest.TestCase):
             self.assertEqual(reuse_stats["cache_hits"], 1)
             self.assertEqual(reuse_stats["cache_misses"], 0)
 
+    def test_runtime_physical_xpass_cache_copies_reuse_row_and_fills_pass_distance(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cache_dir = root / "runtime" / "physical_xpass"
+            reuse_dir = root / "feature" / "physical_xpass"
+            (reuse_dir / "matches").mkdir(parents=True)
+            (reuse_dir / "metadata.json").write_text(
+                json.dumps(
+                    physical_xpass_as_default_metadata(
+                        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    )
+                    | {"physical_eps": 1e-4}
+                ),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "runtime_match",
+                        "action_index": 5,
+                        "physical_state_hash": physical_state_hash(graph),
+                        "home_2": 0.77,
+                    }
+                ]
+            ).to_parquet(reuse_dir / "matches" / "runtime_match.parquet", index=False)
+
+            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
+                    cache_dir=cache_dir,
+                    reuse_cache_dir=reuse_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        compute.assert_not_called()
+        self.assertEqual(stats["copied_from_reuse"], 1)
+        self.assertEqual(stats["pass_distance_filled"], 1)
+        self.assertEqual(stats["cache_written"], 1)
+        self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.77)
+        self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_PASS_DISTANCE_COLUMN]), 20.0)
+
     def test_runtime_physical_xpass_cache_hash_mismatch_recomputes_and_replaces(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1422,7 +1573,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(disabled["reason"], "cache_disabled")
         self.assertEqual(not_required["reason"], "physical_xpass_not_required")
 
-    def test_inference_missing_synthetic_sidecar_uses_runtime_cache_when_enabled(self) -> None:
+    def test_inference_missing_synthetic_sidecar_does_not_compute_online(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
         match = RuntimeState()
         match.match_id = "modification_50_game_state_2"
@@ -1441,28 +1592,58 @@ class PhysicalXPassTests(unittest.TestCase):
             }
         )
 
-        cache_stats = {
-            "cache_dir": "missing_cache",
-            "cache_hits": 0,
-            "cache_misses": 1,
-            "cache_written": 1,
-            "hash_mismatch_recomputed": 0,
-            "online_graphs": 1,
-            "cache_disabled": False,
-        }
         with patch.object(inference, "validate_physical_xpass_cache_metadata", side_effect=FileNotFoundError("missing")):
-            with patch.object(
-                inference,
-                "attach_physical_xpass_cached_online_to_graphs",
-                return_value=(graphs, cache_stats),
-            ) as cached_attach:
-                result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+            with patch.object(inference, "attach_physical_xpass_cached_online_to_graphs") as cached_attach:
+                with self.assertRaises(FileNotFoundError):
+                    inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+
+        cached_attach.assert_not_called()
+
+    def test_inference_only_physical_xpass_uses_generator_defaults(self) -> None:
+        RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
+        match = RuntimeState()
+        match.match_id = "modification_50_game_state_2"
+        graphs = [make_graph()]
+        labels = torch.stack([make_label(action_index=0)])
+        model = SimpleNamespace(
+            args={
+                "task": "pass_success",
+                "model_id": "pass_success/baseline",
+                "use_physical_xpass": False,
+                "inference_use_physical_xpass": True,
+                "model_variant": "gat_baseline",
+                "physical_cache_dir": "missing_cache",
+                "physical_eps": 1e-4,
+            }
+        )
+
+        with patch.object(inference, "validate_physical_xpass_cache_metadata") as validate:
+            with patch.object(inference, "attach_physical_xpass_read_only_to_graphs", return_value=graphs) as read_only:
+                with patch.object(inference, "attach_physical_xpass_cached_online_to_graphs") as cached_attach:
+                    result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
 
         self.assertIs(result, graphs)
-        cached_attach.assert_called_once()
-        self.assertEqual(cached_attach.call_args.kwargs["floor"], 0.2)
-        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["cache_misses"], 1)
-        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["cache_written"], 1)
+        validate.assert_called_once()
+        read_only.assert_called_once()
+        cached_attach.assert_not_called()
+        self.assertEqual(
+            validate.call_args.kwargs["expected_speed_aggregation"],
+            PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+        )
+        self.assertEqual(runtime_physical_xpass_speed_aggregation(model.args), PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
+
+    def test_legacy_physical_checkpoint_preserves_saved_speed_aggregation(self) -> None:
+        args = make_pass_success_args(
+            use_physical_xpass=True,
+            model_variant="gat_phys_logit_offset",
+            physical_xpass_speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            inference_use_physical_xpass=True,
+        )
+
+        self.assertEqual(
+            runtime_physical_xpass_speed_aggregation(args),
+            PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+        )
 
     def test_inference_runtime_read_only_uses_cache_without_online_compute(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
@@ -1490,7 +1671,44 @@ class PhysicalXPassTests(unittest.TestCase):
         read_only.assert_called_once()
         cached_online.assert_not_called()
 
-    def test_inference_missing_synthetic_sidecar_computes_physical_xpass_online_when_cache_disabled(self) -> None:
+    def test_baseline_pass_success_inference_blends_with_physical_xpass_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            match = make_physical_inference_match([0], [1])
+            graph = match.graph_features_0[0]
+            (cache_dir / "matches").mkdir(parents=True)
+            (cache_dir / "metadata.json").write_text(
+                json.dumps(
+                    physical_xpass_as_default_metadata(
+                        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 0,
+                        "physical_state_hash": physical_state_hash(graph),
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        "home_1": 0.2,
+                        "home_2": 0.5,
+                        "away_3": 0.1,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+            model = DummyBaselineInferenceModel(cache_dir)
+
+            with patch("physical_pass_model.compute_graphs_max_player_cum_prob_as_defaults") as compute:
+                probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        compute.assert_not_called()
+        self.assertTrue(inference_uses_physical_xpass(model.args))
+        self.assertAlmostEqual(float(probs.loc[0, "home_2"]), 0.58, places=5)
+
+    def test_inference_missing_synthetic_sidecar_stays_read_only_when_cache_disabled(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
         match = RuntimeState()
         match.match_id = "modification_50_game_state_2"
@@ -1512,17 +1730,10 @@ class PhysicalXPassTests(unittest.TestCase):
 
         with patch.object(inference, "validate_physical_xpass_cache_metadata", side_effect=FileNotFoundError("missing")):
             with patch.object(inference, "attach_physical_xpass_online_to_graphs", return_value=graphs) as online_attach:
-                result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
+                with self.assertRaises(FileNotFoundError):
+                    inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
 
-        self.assertIs(result, graphs)
-        online_attach.assert_called_once()
-        self.assertEqual(online_attach.call_args.kwargs["source"], PHYSICAL_XPASS_LEGACY_SOURCE)
-        self.assertEqual(
-            online_attach.call_args.kwargs["speed_aggregation"],
-            PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
-        )
-        self.assertEqual(online_attach.call_args.kwargs["floor"], 0.2)
-        self.assertEqual(match.physical_xpass_runtime_stats["pass_success"]["online_graphs"], 1)
+        online_attach.assert_not_called()
 
     def test_inference_cached_sidecar_uses_physical_xpass_floor(self) -> None:
         match = SimpleNamespace(match_id="DFL-MAT-REAL", runtime_feature_root=Path("feature_run"))
@@ -1541,7 +1752,7 @@ class PhysicalXPassTests(unittest.TestCase):
         )
 
         with patch.object(inference, "validate_physical_xpass_cache_metadata", return_value={}):
-            with patch.object(inference, "attach_physical_xpass_to_graphs", return_value=graphs) as cached_attach:
+            with patch.object(inference, "attach_physical_xpass_read_only_to_graphs", return_value=graphs) as cached_attach:
                 result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
 
         self.assertIs(result, graphs)
@@ -1949,6 +2160,34 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["residual_l2"], (2.0**2 + 3.0**2) / 2.0, places=6)
         self.assertAlmostEqual(metrics["ce_loss"], expected_bce + expected_penalty, places=6)
 
+    def test_run_epoch_node_selection_accepts_singleton_column_logits(self) -> None:
+        graph = make_graph(["home_1", "home_2", "away_3"])
+        label = make_label(intent_index=0)
+        loader = DataLoader([(graph, label, torch.tensor(1.0, dtype=torch.float32))], batch_size=1)
+        args = SimpleNamespace(
+            gnn_task="node_selection",
+            task="success_intent",
+            include_out=False,
+            lambda_l1=0.0,
+            use_xg=False,
+            use_xt=False,
+            use_goal_distance=False,
+            use_epv=False,
+            print_freq=99,
+            clip=10,
+        )
+
+        metrics = run_epoch(
+            args,
+            DummyColumnNodeSelectionModel([2.0, 1.0, -1.0]),
+            loader,
+            device="cpu",
+            train=False,
+        )
+
+        self.assertAlmostEqual(metrics["accuracy"], 1.0, places=6)
+        self.assertAlmostEqual(metrics["mrr"], 1.0, places=6)
+
     def test_wrapper_physical_flags_reach_only_pass_success(self) -> None:
         args = SimpleNamespace(
             use_physical_xpass=True,
@@ -2083,6 +2322,29 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(args.consider_teammates)
         self.assertEqual(args.speed_aggregation, PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION)
         self.assertIsNone(args.max_speed)
+
+    def test_generate_physical_xpass_cli_default_runtime_selects_all_datasets(self) -> None:
+        args = generate_physical_xpass.parse_args([])
+
+        self.assertIsNone(args.feature_run_id)
+        self.assertEqual(
+            generate_physical_xpass.selected_runtime_datasets(args),
+            ["sportec", "skillcorner", "benchmark", "hawkeye"],
+        )
+        self.assertEqual(args.num_workers, "auto")
+        self.assertEqual(args.physical_batch_size, 16)
+        self.assertEqual(args.worker_thread_limit, 1)
+
+    def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
+        args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])
+
+        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["sportec", "benchmark"])
+
+    def test_generate_physical_xpass_cli_feature_run_uses_legacy_mode(self) -> None:
+        args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run"])
+
+        self.assertEqual(args.feature_run_id, "feature_run")
+        self.assertFalse(args.runtime_sportec_cache)
 
     def test_generate_physical_xpass_cli_accepts_ignore_teammates(self) -> None:
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--ignore-teammates"])
@@ -2254,7 +2516,7 @@ class PhysicalXPassTests(unittest.TestCase):
             "benchmark state 99/100 | modification_50 game_state_1 | 1 state left",
         )
 
-    def test_benchmark_main_prewarm_runs_once_for_all_built_states(self) -> None:
+    def test_benchmark_main_does_not_prewarm_during_inference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output_parent = Path(tmpdir) / "runs"
             args = SimpleNamespace(
@@ -2389,21 +2651,12 @@ class PhysicalXPassTests(unittest.TestCase):
                     "benchmark state 3/3 | modification_2 game_state_1 | 0 states left",
                 ],
             )
-            prewarm.assert_called_once()
-            prewarmed_states = prewarm.call_args.args[0]
-            self.assertEqual(
-                [state.match_id for state in prewarmed_states],
-                [
-                    "modification_1_game_state_1",
-                    "modification_1_game_state_2",
-                    "modification_2_game_state_1",
-                ],
-            )
+            prewarm.assert_not_called()
             self.assertFalse(pass_success_model.args["physical_runtime_cache_refresh"])
             self.assertTrue(pass_success_model.args["physical_runtime_cache_read_only"])
-            self.assertEqual(written_metadata["physical_xpass_prewarm_stats"], {"all": {"cache_misses": 3}})
+            self.assertEqual(written_metadata["physical_xpass_prewarm_stats"], {})
             self.assertEqual(written_metadata["physical_xpass_cache_summary"]["reason"], "refresh_requested")
-            self.assertEqual(written_metadata["physical_xpass_cache_summary"]["cache_misses"], 3)
+            self.assertEqual(written_metadata["physical_xpass_cache_summary"]["cache_misses"], 0)
             self.assertEqual(written_metadata["processed_modifications"], [1, 2])
             self.assertEqual(
                 written_metadata["skipped_states"],

@@ -22,16 +22,24 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 from physical_pass_model import (
+    PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
+    PHYSICAL_XPASS_PROB_ATTR,
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graphs,
+    blend_physical_xpass_predictions,
+    inference_uses_physical_xpass,
     load_physical_xpass_match,
     model_uses_physical_xpass,
+    physical_state_hash,
     physical_xpass_floor,
+    runtime_physical_xpass_speed_aggregation,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
+    requires_physical_xpass_for_inference,
     validate_physical_xpass_cache_metadata,
 )
 from project_config import get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
@@ -158,6 +166,8 @@ def _record_online_physical_xpass(
             "cache_hits": 0,
             "cache_misses": 0,
             "cache_written": 0,
+            "copied_from_reuse": 0,
+            "pass_distance_filled": 0,
             "hash_mismatch_recomputed": 0,
             "online_graphs": 0,
             "cache_disabled": False,
@@ -169,6 +179,8 @@ def _record_online_physical_xpass(
             "cache_hits",
             "cache_misses",
             "cache_written",
+            "copied_from_reuse",
+            "pass_distance_filled",
             "hash_mismatch_recomputed",
             "online_graphs",
         ]:
@@ -197,14 +209,20 @@ def attach_physical_xpass_for_inference(
     model: GNN,
 ) -> list[Data]:
     source = physical_xpass_source(model.args)
-    speed_aggregation = physical_xpass_speed_aggregation(model.args)
+    speed_aggregation = (
+        runtime_physical_xpass_speed_aggregation(model.args)
+        if inference_uses_physical_xpass(model.args)
+        else physical_xpass_speed_aggregation(model.args)
+    )
     eps = float(model.args.get("physical_eps", 1e-4))
     floor = physical_xpass_floor(model.args)
-    teammate_policy = physical_xpass_teammate_policy(model.args, source=source)
     feature_root = _runtime_feature_root(match)
     physical_cache_dir = model.args.get("physical_cache_dir")
     if not physical_cache_dir:
-        if feature_root is None:
+        if inference_uses_physical_xpass(model.args):
+            runtime_source_name = _runtime_physical_xpass_source_name(match)
+            physical_cache_dir = str(get_runtime_physical_xpass_dir(runtime_source_name or "sportec"))
+        elif feature_root is None:
             runtime_source_name = _runtime_physical_xpass_source_name(match)
             if runtime_source_name is not None:
                 physical_cache_dir = str(get_runtime_physical_xpass_dir(runtime_source_name))
@@ -214,87 +232,20 @@ def attach_physical_xpass_for_inference(
         else:
             physical_cache_dir = str(get_physical_xpass_dir(feature_root))
 
-    if bool(model.args.get("physical_runtime_cache_read_only", False)):
-        validate_physical_xpass_cache_metadata(
-            physical_cache_dir,
-            expected_source=source,
-            expected_speed_aggregation=speed_aggregation,
-        )
-        return attach_physical_xpass_read_only_to_graphs(
-            graphs,
-            labels,
-            cache_dir=physical_cache_dir,
-            match_id=resolve_match_id(match),
-            eps=eps,
-            floor=floor,
-            require_observed_target=False,
-        )
-
-    if _allows_online_physical_xpass(match) and not bool(model.args.get("physical_runtime_cache_disabled", False)):
-        attached, cache_stats = attach_physical_xpass_cached_online_to_graphs(
-            graphs,
-            labels,
-            cache_dir=physical_cache_dir,
-            match_id=resolve_match_id(match),
-            source=source,
-            eps=eps,
-            floor=floor,
-            teammate_policy=teammate_policy,
-            speed_aggregation=speed_aggregation,
-            refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
-            num_workers=model.args.get("physical_num_workers", 1),
-            worker_thread_limit=int(model.args.get("physical_worker_thread_limit", 1)),
-            physical_batch_size=int(model.args.get("physical_batch_size", 16)),
-            require_observed_target=False,
-        )
-        _record_online_physical_xpass(
-            match,
-            model,
-            source=source,
-            speed_aggregation=speed_aggregation,
-            graph_count=int(cache_stats.get("online_graphs", 0)),
-            extra_stats=cache_stats,
-        )
-        return attached
-
-    try:
-        validate_physical_xpass_cache_metadata(
-            physical_cache_dir,
-            expected_source=source,
-            expected_speed_aggregation=speed_aggregation,
-        )
-        return attach_physical_xpass_to_graphs(
-            graphs,
-            labels,
-            cache_dir=physical_cache_dir,
-            match_id=resolve_match_id(match),
-            eps=eps,
-            floor=floor,
-            require_observed_target=False,
-        )
-    except FileNotFoundError:
-        if not _allows_online_physical_xpass(match):
-            raise
-
-    attached = attach_physical_xpass_online_to_graphs(
+    validate_physical_xpass_cache_metadata(
+        physical_cache_dir,
+        expected_source=source,
+        expected_speed_aggregation=speed_aggregation,
+    )
+    return attach_physical_xpass_read_only_to_graphs(
         graphs,
         labels,
-        source=source,
+        cache_dir=physical_cache_dir,
+        match_id=resolve_match_id(match),
         eps=eps,
         floor=floor,
-        teammate_policy=teammate_policy,
-        speed_aggregation=speed_aggregation,
         require_observed_target=False,
     )
-    _record_online_physical_xpass(
-        match,
-        model,
-        source=source,
-        speed_aggregation=speed_aggregation,
-        graph_count=len(attached),
-        extra_stats={"cache_disabled": bool(model.args.get("physical_runtime_cache_disabled", False))},
-    )
-    return attached
 
 
 def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
@@ -302,6 +253,10 @@ def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
     physical_cache_dir = model.args.get("physical_cache_dir")
     if physical_cache_dir:
         return str(physical_cache_dir)
+
+    if inference_uses_physical_xpass(model.args):
+        runtime_source_name = _runtime_physical_xpass_source_name(match)
+        return str(get_runtime_physical_xpass_dir(runtime_source_name or "sportec"))
 
     if feature_root is None:
         runtime_source_name = _runtime_physical_xpass_source_name(match)
@@ -320,6 +275,7 @@ def _record_physical_xpass_skipped_actions(
     requested_count: int,
     kept_count: int,
     skipped_action_indexes: list[int],
+    reason: str | None = None,
 ) -> None:
     if not skipped_action_indexes:
         return
@@ -337,6 +293,34 @@ def _record_physical_xpass_skipped_actions(
         "skipped_count": int(len(skipped_action_indexes)),
         "sample_action_indexes": [int(action_index) for action_index in skipped_action_indexes[:10]],
     }
+    if reason:
+        stats[task]["reason"] = str(reason)
+
+
+def _physical_xpass_row_skip_reason(
+    row: pd.Series,
+    graph: Data,
+    *,
+    match_id: str,
+    action_index: int,
+    require_pass_distance: bool,
+) -> str | None:
+    cached_hash = row.get("physical_state_hash", None)
+    if pd.isna(cached_hash):
+        return "missing_physical_state_hash"
+    state_hash = physical_state_hash(graph)
+    if str(cached_hash) != state_hash:
+        return "physical_state_hash_mismatch"
+    if require_pass_distance:
+        if PHYSICAL_XPASS_PASS_DISTANCE_COLUMN not in row.index:
+            return "missing_pass_distance"
+        try:
+            pass_distance = float(row.get(PHYSICAL_XPASS_PASS_DISTANCE_COLUMN))
+        except (TypeError, ValueError):
+            return "invalid_pass_distance"
+        if not np.isfinite(pass_distance):
+            return "invalid_pass_distance"
+    return None
 
 
 def filter_missing_physical_xpass_rows_for_inference(
@@ -345,30 +329,60 @@ def filter_missing_physical_xpass_rows_for_inference(
     labels: torch.Tensor,
     model: GNN,
 ) -> tuple[list[Data], torch.Tensor]:
-    if not model_uses_physical_xpass(model.args) or _allows_online_physical_xpass(match):
+    if not requires_physical_xpass_for_inference(model.args):
         return graphs, labels
 
+    use_inference_blend = inference_uses_physical_xpass(model.args)
     source = physical_xpass_source(model.args)
-    speed_aggregation = physical_xpass_speed_aggregation(model.args)
+    speed_aggregation = runtime_physical_xpass_speed_aggregation(model.args) if use_inference_blend else physical_xpass_speed_aggregation(model.args)
     cache_dir = _physical_xpass_cache_dir_for_inference(match, model)
-    validate_physical_xpass_cache_metadata(
-        cache_dir,
-        expected_source=source,
-        expected_speed_aggregation=speed_aggregation,
-    )
-    physical_rows = load_physical_xpass_match(cache_dir, resolve_match_id(match))
+    match_id = resolve_match_id(match)
+    all_action_indexes = [int(label[config.LABEL_INDEX["action_index"]].item()) for label in labels]
+    try:
+        validate_physical_xpass_cache_metadata(
+            cache_dir,
+            expected_source=source,
+            expected_speed_aggregation=speed_aggregation,
+        )
+        physical_rows = load_physical_xpass_match(cache_dir, match_id)
+    except (FileNotFoundError, ValueError) as exc:
+        _record_physical_xpass_skipped_actions(
+            match,
+            model,
+            cache_dir=cache_dir,
+            requested_count=len(graphs),
+            kept_count=0,
+            skipped_action_indexes=all_action_indexes,
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise PhysicalXPassNoUsableRowsError(
+            "No usable graph/label pairs remain because the physical xPass cache is missing or invalid."
+        ) from exc
     available_action_indexes = set(physical_rows.index.astype(int).tolist())
 
     kept_graphs: list[Data] = []
     kept_labels: list[torch.Tensor] = []
     skipped_action_indexes: list[int] = []
+    skip_reasons: dict[str, int] = {}
     for graph, label in zip(graphs, labels):
         action_index = int(label[config.LABEL_INDEX["action_index"]].item())
-        if action_index in available_action_indexes:
-            kept_graphs.append(graph)
-            kept_labels.append(label)
-        else:
+        if action_index not in available_action_indexes:
             skipped_action_indexes.append(action_index)
+            skip_reasons["missing_row"] = skip_reasons.get("missing_row", 0) + 1
+            continue
+        reason = _physical_xpass_row_skip_reason(
+            physical_rows.loc[action_index],
+            graph,
+            match_id=match_id,
+            action_index=action_index,
+            require_pass_distance=use_inference_blend,
+        )
+        if reason is not None:
+            skipped_action_indexes.append(action_index)
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+            continue
+        kept_graphs.append(graph)
+        kept_labels.append(label)
 
     _record_physical_xpass_skipped_actions(
         match,
@@ -377,6 +391,7 @@ def filter_missing_physical_xpass_rows_for_inference(
         requested_count=len(graphs),
         kept_count=len(kept_graphs),
         skipped_action_indexes=skipped_action_indexes,
+        reason=", ".join(f"{key}={value}" for key, value in sorted(skip_reasons.items())) if skip_reasons else None,
     )
     if not kept_labels:
         raise PhysicalXPassNoUsableRowsError(
@@ -504,8 +519,9 @@ def inference_gnn(
         event_indices,
         feature_action_indices=feature_action_indices,
     )
-    if model_uses_physical_xpass(model.args):
+    if requires_physical_xpass_for_inference(model.args):
         graphs, labels = filter_missing_physical_xpass_rows_for_inference(match, graphs, labels, model)
+    if requires_physical_xpass_for_inference(model.args):
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model)
 
     graphs = Batch.from_data_list(graphs).to(device)
@@ -534,6 +550,8 @@ def inference_gnn(
             batch = graphs.batch
             out = model(graphs)
             offside_out_mask = offside_node_mask
+            physical_xpass_out = getattr(graphs, PHYSICAL_XPASS_PROB_ATTR, None)
+            physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
 
             if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
@@ -541,6 +559,10 @@ def inference_gnn(
                 batch = batch[teammate_mask]
                 out = out[teammate_mask]  # [N',]
                 offside_out_mask = offside_out_mask[teammate_mask]
+                if physical_xpass_out is not None:
+                    physical_xpass_out = physical_xpass_out[teammate_mask]
+                if physical_distance_out is not None:
+                    physical_distance_out = physical_distance_out[teammate_mask]
 
             if "receiver" in model.args["task"] and model.args["include_out"]:
                 batch = torch.cat([batch, torch.unique(graphs.batch)])
@@ -550,6 +572,20 @@ def inference_gnn(
                         torch.zeros(graphs.num_graphs, dtype=torch.bool, device=offside_out_mask.device),
                     ]
                 )
+                if physical_xpass_out is not None:
+                    physical_xpass_out = torch.cat(
+                        [
+                            physical_xpass_out,
+                            torch.full((graphs.num_graphs,), np.nan, dtype=physical_xpass_out.dtype, device=physical_xpass_out.device),
+                        ]
+                    )
+                if physical_distance_out is not None:
+                    physical_distance_out = torch.cat(
+                        [
+                            physical_distance_out,
+                            torch.full((graphs.num_graphs,), np.nan, dtype=physical_distance_out.dtype, device=physical_distance_out.device),
+                        ]
+                    )
 
     players = set()
 
@@ -594,6 +630,26 @@ def inference_gnn(
             probs_i = np.asarray(probs_i, dtype=float).copy()
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
+            if inference_uses_physical_xpass(model.args):
+                if physical_xpass_out is None or physical_distance_out is None:
+                    raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
+                xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
+                distance_i = physical_distance_out[batch == i].cpu().detach().numpy().astype(float)
+                if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
+                    raise ValueError(
+                        "Physical xPass blend tensors do not match pass-success probabilities: "
+                        f"probs={probs_i.shape}, xpass={xpass_i.shape}, pass_distance={distance_i.shape}."
+                    )
+                finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
+                blended_i = np.asarray(
+                    blend_physical_xpass_predictions(
+                        pass_success_model=probs_i[finite_mask],
+                        xpass=xpass_i[finite_mask],
+                        pass_distance=distance_i[finite_mask],
+                    ),
+                    dtype=float,
+                )
+                probs_i[finite_mask] = blended_i
 
         if model.args["task"] in two_case_tasks:
             probs_i0 = dict(zip(player_indices_i, probs_i[:, 0].tolist()))

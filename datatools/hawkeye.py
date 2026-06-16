@@ -13,7 +13,7 @@ from torch_geometric.data import Data
 from datatools import config, utils
 import datatools.preprocess as proc
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
-from inference import inference_gnn
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn
 
 FRAME_KEY_COLUMNS = ["game_id", "half", "abs_time"]
 SITUATION_FRAME_KEY_COLUMNS = ["id", *FRAME_KEY_COLUMNS]
@@ -656,7 +656,10 @@ def infer_hawkeye_components(
 
     action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
     pass_intent, _ = inference_gnn(situation, model_specs["pass_intent"], device=device, post_action=False)
-    pass_success, _ = inference_gnn(situation, model_specs["pass_success"], device=device, post_action=False)
+    try:
+        pass_success, _ = inference_gnn(situation, model_specs["pass_success"], device=device, post_action=False)
+    except PhysicalXPassNoUsableRowsError:
+        pass_success = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         situation,
         model_specs["outcome_scoring"],
