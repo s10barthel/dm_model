@@ -21,6 +21,9 @@ from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import inference_gnn, load_success_intent_labels, resolve_match_id
 from models.utils import (
+    aggregate_graph_schemas,
+    get_model_record,
+    load_bundle_record,
     load_model,
     resolve_model_selection,
     resolve_runtime_return_type,
@@ -555,6 +558,72 @@ def render_action_components(
         )
 
 
+def shared_context_from_bundle(bundle: dict[str, object] | None) -> dict[str, object]:
+    if bundle is None:
+        return {}
+
+    shared: dict[str, object] = {}
+    for key in (
+        "feature_run_id",
+        "intended_receiver_mode",
+        "return_type",
+        "target_family",
+        "source_feature_run_ids",
+        "source_intended_receiver_modes",
+        "source_return_types",
+        "source_target_families",
+        "graph_schema",
+    ):
+        if key in bundle:
+            shared[key] = bundle[key]
+    if bundle.get("feature_run_id"):
+        shared["bundle_feature_run_id"] = bundle["feature_run_id"]
+    shared["model_records"] = {}
+    return shared
+
+
+def merge_success_intent_context(shared_context: dict[str, object], model_id: str) -> dict[str, object]:
+    shared = dict(shared_context)
+    record = get_model_record(model_id)
+    records = dict(shared.get("model_records", {}))
+    records["intended_recipient"] = record
+    shared["model_records"] = records
+
+    source_feature_run_ids = dict(shared.get("source_feature_run_ids", {}))
+    if record.get("feature_run_id"):
+        source_feature_run_ids["intended_recipient"] = record["feature_run_id"]
+    shared["source_feature_run_ids"] = source_feature_run_ids
+    shared["feature_run_id"] = shared.get("feature_run_id") or record.get("feature_run_id")
+
+    intended_receiver_mode = record.get("intended_receiver_mode")
+    source_intended_receiver_modes = dict(shared.get("source_intended_receiver_modes", {}))
+    if intended_receiver_mode not in (None, "unknown"):
+        source_intended_receiver_modes["intended_recipient"] = intended_receiver_mode
+        shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or intended_receiver_mode
+    shared["source_intended_receiver_modes"] = source_intended_receiver_modes
+
+    source_return_types = dict(shared.get("source_return_types", {}))
+    if record.get("return_type"):
+        source_return_types["intended_recipient"] = record["return_type"]
+    shared["source_return_types"] = source_return_types
+    shared["return_type"] = shared.get("return_type") or record.get("return_type")
+
+    source_target_families = dict(shared.get("source_target_families", {}))
+    if record.get("target_family"):
+        source_target_families["intended_recipient"] = record["target_family"]
+    shared["source_target_families"] = source_target_families
+    shared["target_family"] = shared.get("target_family") or record.get("target_family")
+
+    schemas = {
+        task: model_record["graph_schema"]
+        for task, model_record in records.items()
+        if isinstance(model_record, dict) and model_record.get("graph_schema")
+    }
+    if schemas:
+        shared["graph_schema"] = aggregate_graph_schemas(schemas)
+    return shared
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -588,15 +657,21 @@ def main() -> None:
         ]
         if task in initial_component_selection.requested_component_groups
     ]
-    resolved_model_ids, shared_context, bundle = resolve_model_selection(
-        required_tasks=required_model_tasks,
-        bundle_id=args.bundle_id,
-        explicit_model_ids=explicit_model_ids,
-        require_feature_run_id=False,
-        require_intended_receiver_mode=False,
-        require_return_type=False,
-        require_target_family=False,
-    )
+    if required_model_tasks:
+        resolved_model_ids, shared_context, bundle = resolve_model_selection(
+            required_tasks=required_model_tasks,
+            bundle_id=args.bundle_id,
+            explicit_model_ids=explicit_model_ids,
+            require_feature_run_id=False,
+            require_intended_receiver_mode=False,
+            require_return_type=False,
+            require_target_family=False,
+        )
+    else:
+        resolved_model_ids = {}
+        bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
+        shared_context = shared_context_from_bundle(bundle)
+
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
@@ -604,6 +679,8 @@ def main() -> None:
         getattr(args, "only_intended_recipient", False) or getattr(args, "no_intended_recipient", False)
     ):
         raise ValueError("--only-intended-recipient/--no-intended-recipient require a selected success_intent model.")
+    if success_intent_model_id:
+        shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
     component_selection = resolve_component_selection(
         args,
         include_intended_recipient=bool(success_intent_model_id),

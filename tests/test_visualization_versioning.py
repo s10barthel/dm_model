@@ -61,6 +61,22 @@ def make_action_args(output_dir: Path) -> SimpleNamespace:
     return args
 
 
+def success_intent_record(model_id: str = "success_intent/selected", feature_run_id: str = "feature_success") -> dict[str, object]:
+    return {
+        "model_id": model_id,
+        "task": "success_intent",
+        "feature_run_id": feature_run_id,
+        "intended_receiver_mode": "unknown",
+        "return_type": "next_5",
+        "target_family": "goal",
+        "graph_schema": {
+            "node_in_dim": 23,
+            "edge_in_dim": 4,
+            "add_v_edge_features": True,
+        },
+    }
+
+
 class VisualizationVersioningTests(unittest.TestCase):
     def test_action_visualization_writes_run_metadata_with_model_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,6 +127,11 @@ class VisualizationVersioningTests(unittest.TestCase):
                     visualize_action_components,
                     "resolve_runtime_feature_run_context",
                     return_value=runtime_context,
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "get_model_record",
+                    return_value=success_intent_record("success_intent/1", "feature_1"),
                 ),
                 patch.object(visualize_action_components, "resolve_runtime_return_type", return_value="disc_0.9"),
                 patch.object(visualize_action_components, "load_match", return_value=SimpleNamespace()),
@@ -200,6 +221,227 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["model_ids"], {"pass_success": "pass_success/selected"})
             self.assertEqual(metadata["selected_model_ids"], {"pass_success": "pass_success/selected"})
             self.assertEqual(metadata["rendered_components"], ["pass_success"])
+
+    def test_action_visualization_only_intended_recipient_uses_explicit_success_intent_without_core_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = make_action_args(root)
+            args.bundle_id = None
+            args.only_intended_recipient = True
+            args.success_intent_model_id = "success_intent/selected"
+            runtime_context = {
+                "feature_run_id": "feature_success",
+                "intended_receiver_mode": "angle_only",
+                "feature_root": root / "features",
+                "selection": "newest_compatible",
+            }
+
+            def fake_resolve_runtime_feature_run_context(
+                _explicit_feature_run_id: object,
+                shared_context: dict[str, object],
+                bundle: dict[str, object] | None,
+                *_args: object,
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                self.assertIsNone(bundle)
+                self.assertEqual(
+                    shared_context["source_feature_run_ids"],
+                    {"intended_recipient": "feature_success"},
+                )
+                return runtime_context
+
+            def fake_render_action_components(**kwargs: object) -> None:
+                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                output_dir = Path(kwargs["output_dir"])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+
+            with (
+                patch.object(visualize_action_components, "parse_args", return_value=args),
+                patch.object(visualize_action_components.torch.cuda, "is_available", return_value=False),
+                patch.object(visualize_action_components, "resolve_model_selection") as resolve_model_selection_mock,
+                patch.object(
+                    visualize_action_components,
+                    "get_model_record",
+                    return_value=success_intent_record("success_intent/selected", "feature_success"),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "load_model",
+                    return_value=SimpleNamespace(args={}),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": True},
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "resolve_runtime_feature_run_context",
+                    side_effect=fake_resolve_runtime_feature_run_context,
+                ),
+                patch.object(visualize_action_components, "resolve_runtime_return_type", return_value="next_5"),
+                patch.object(visualize_action_components, "load_match", return_value=SimpleNamespace()),
+                patch.object(visualize_action_components, "resolve_action_indices", return_value=[(7, "123")]),
+                patch.object(
+                    visualize_action_components,
+                    "render_action_components",
+                    side_effect=fake_render_action_components,
+                ),
+            ):
+                visualize_action_components.main()
+
+            resolve_model_selection_mock.assert_not_called()
+            metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["model_ids"], {"intended_recipient": "success_intent/selected"})
+            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/selected"})
+            self.assertEqual(metadata["rendered_components"], ["intended_recipient"])
+
+    def test_action_visualization_only_intended_recipient_keeps_bundle_context_with_explicit_success_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = make_action_args(root)
+            args.only_intended_recipient = True
+            args.success_intent_model_id = "success_intent/explicit"
+            bundle = {
+                "bundle_id": "bundle_1",
+                "feature_run_id": "feature_bundle",
+                "return_type": "disc_0.9",
+                "model_ids": {"success_intent": "success_intent/bundle"},
+                "source_feature_run_ids": {"pass_success": "feature_bundle"},
+            }
+            runtime_context = {
+                "feature_run_id": "feature_bundle",
+                "intended_receiver_mode": "model",
+                "feature_root": root / "features",
+                "selection": "newest_compatible",
+            }
+
+            def fake_resolve_runtime_feature_run_context(
+                _explicit_feature_run_id: object,
+                shared_context: dict[str, object],
+                selected_bundle: dict[str, object] | None,
+                *_args: object,
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                self.assertEqual(selected_bundle, bundle)
+                self.assertEqual(shared_context["bundle_feature_run_id"], "feature_bundle")
+                self.assertEqual(
+                    shared_context["source_feature_run_ids"],
+                    {"pass_success": "feature_bundle", "intended_recipient": "feature_success"},
+                )
+                return runtime_context
+
+            def fake_render_action_components(**kwargs: object) -> None:
+                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                output_dir = Path(kwargs["output_dir"])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+
+            with (
+                patch.object(visualize_action_components, "parse_args", return_value=args),
+                patch.object(visualize_action_components.torch.cuda, "is_available", return_value=False),
+                patch.object(visualize_action_components, "resolve_model_selection") as resolve_model_selection_mock,
+                patch.object(visualize_action_components, "load_bundle_record", return_value=bundle),
+                patch.object(
+                    visualize_action_components,
+                    "get_model_record",
+                    return_value=success_intent_record("success_intent/explicit", "feature_success"),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "load_model",
+                    return_value=SimpleNamespace(args={}),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": True},
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "resolve_runtime_feature_run_context",
+                    side_effect=fake_resolve_runtime_feature_run_context,
+                ),
+                patch.object(visualize_action_components, "resolve_runtime_return_type", return_value="next_5"),
+                patch.object(visualize_action_components, "load_match", return_value=SimpleNamespace()),
+                patch.object(visualize_action_components, "resolve_action_indices", return_value=[(7, "123")]),
+                patch.object(
+                    visualize_action_components,
+                    "render_action_components",
+                    side_effect=fake_render_action_components,
+                ),
+            ):
+                visualize_action_components.main()
+
+            resolve_model_selection_mock.assert_not_called()
+            metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["model_ids"], {"intended_recipient": "success_intent/explicit"})
+            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/explicit"})
+
+    def test_action_visualization_only_intended_recipient_uses_bundle_success_intent_when_not_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = make_action_args(root)
+            args.only_intended_recipient = True
+            bundle = {
+                "bundle_id": "bundle_1",
+                "feature_run_id": "feature_bundle",
+                "model_ids": {"success_intent": "success_intent/bundle"},
+            }
+            runtime_context = {
+                "feature_run_id": "feature_bundle",
+                "intended_receiver_mode": "model",
+                "feature_root": root / "features",
+                "selection": "newest_compatible",
+            }
+
+            def fake_render_action_components(**kwargs: object) -> None:
+                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                output_dir = Path(kwargs["output_dir"])
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+
+            with (
+                patch.object(visualize_action_components, "parse_args", return_value=args),
+                patch.object(visualize_action_components.torch.cuda, "is_available", return_value=False),
+                patch.object(visualize_action_components, "resolve_model_selection") as resolve_model_selection_mock,
+                patch.object(visualize_action_components, "load_bundle_record", return_value=bundle),
+                patch.object(
+                    visualize_action_components,
+                    "get_model_record",
+                    return_value=success_intent_record("success_intent/bundle", "feature_success"),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "load_model",
+                    return_value=SimpleNamespace(args={}),
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": True},
+                ),
+                patch.object(
+                    visualize_action_components,
+                    "resolve_runtime_feature_run_context",
+                    return_value=runtime_context,
+                ),
+                patch.object(visualize_action_components, "resolve_runtime_return_type", return_value="next_5"),
+                patch.object(visualize_action_components, "load_match", return_value=SimpleNamespace()),
+                patch.object(visualize_action_components, "resolve_action_indices", return_value=[(7, "123")]),
+                patch.object(
+                    visualize_action_components,
+                    "render_action_components",
+                    side_effect=fake_render_action_components,
+                ),
+            ):
+                visualize_action_components.main()
+
+            resolve_model_selection_mock.assert_not_called()
+            metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["success_intent_model_id"], "success_intent/bundle")
+            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/bundle"})
 
     def test_hawkeye_component_visualization_generates_run_id_and_records_component_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -485,7 +727,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 output_dir = output_root / situation_id
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / "pass_score.gif").write_text("gif", encoding="utf-8")
-                return output_dir
+                return output_dir, {}
 
             with (
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
@@ -574,7 +816,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 output_dir = output_root / situation_id
                 output_dir.mkdir(parents=True, exist_ok=True)
                 (output_dir / "outcome_scoring_success.mp4").write_text("video", encoding="utf-8")
-                return output_dir
+                return output_dir, {}
 
             with (
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),

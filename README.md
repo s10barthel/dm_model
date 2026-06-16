@@ -1257,6 +1257,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-id <action_id>`: CSV `action_id` from `data/event_synced/<match_id>.csv`. Default: one of the identifier options is required.
 - `--row-index <index>`: legacy modeled-action row index. Default: off.
 - `--original-event-id <id>`: raw Sportec event id lookup. Default: off.
+- `--player-id <id>`, `--object-id <id>`, `--advanced-position <value>`, `--team-id <id>`, `--spadl-type <value>`, `--success <true|false>`, `--offside <true|false>`, and `--next-type <value>`: filter rows from `data/event_synced/<match_id>.csv`; repeat a flag to OR values within that column. Example: `--spadl-type pass --success false` visualizes unsuccessful passes.
+- `--start-x-lt <n>`, `--start-x-gt <n>`, `--start-y-lt <n>`, `--start-y-gt <n>`, `--end-x-lt <n>`, `--end-x-gt <n>`, `--end-y-lt <n>`, and `--end-y-gt <n>`: strict coordinate filters. Different filter types are combined with AND logic.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
