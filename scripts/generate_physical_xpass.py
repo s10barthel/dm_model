@@ -44,6 +44,7 @@ from physical_pass_model import (
     AS_DEFAULT_SPEED_STEP,
     AS_DEFAULT_V0_MAX,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+    PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     PHYSICAL_XPASS_SPEED_AGGREGATIONS,
@@ -89,6 +90,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--split", choices=["train", "test", "all"], default="all", help="Sportec split subset.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
+    parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
     parser.add_argument("--overwrite", action="store_true", help="Deprecated outside legacy --feature-run-id mode.")
     parser.add_argument(
         "--runtime-sportec-cache",
@@ -156,6 +158,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refine-angle-radius", "--refine_angle_radius", dest="refine_angle_radius", type=float, default=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG)
     parser.add_argument("--angle-step", "--angle_step", dest="angle_step", type=float, default=AS_DEFAULT_ANGLE_STEP_DEG)
     parser.add_argument("--num-workers", default="auto")
+    parser.add_argument("--max-auto-workers", type=int, default=PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
     parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.add_argument("--worker-thread-limit", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true", help="Scan runtime cache hits/misses without computing or writing rows.")
@@ -170,12 +173,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         value = getattr(args, name, None)
         if value is not None and int(value) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
+    if args.sportec_runtime_match_window < 1:
+        parser.error("--sportec-runtime-match-window must be positive.")
     if not (0.0 < args.physical_eps < 0.5):
         parser.error("--physical-eps must be between 0 and 0.5.")
     if args.physical_batch_size < 1:
         parser.error("--physical-batch-size must be positive.")
     if args.worker_thread_limit < 1:
         parser.error("--worker-thread-limit must be positive.")
+    if args.max_auto_workers < 1:
+        parser.error("--max-auto-workers must be positive.")
     if args.max_speed is not None and args.max_speed < int(AS_DEFAULT_V0_MIN):
         parser.error(f"--max-speed must be at least {AS_DEFAULT_V0_MIN:g} m/s.")
     if args.speed_step <= 0:
@@ -189,7 +196,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.angle_step <= 0:
         parser.error("--angle-step must be positive.")
     try:
-        resolve_physical_num_workers(args.num_workers)
+        resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -238,8 +245,8 @@ def teammate_policy_from_args(args: argparse.Namespace) -> str:
     return PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER if bool(args.consider_teammates) else PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
 
 
-def resolve_num_workers(value: str | int) -> int:
-    return resolve_physical_num_workers(value)
+def resolve_num_workers(value: str | int, *, max_auto_workers: int = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
+    return resolve_physical_num_workers(value, max_auto_workers=max_auto_workers)
 
 
 def configure_worker_thread_limit(limit: int) -> None:
@@ -501,8 +508,15 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
     target["dry_run"] = bool(target.get("dry_run", False)) or bool(source.get("dry_run", False))
     target["num_workers"] = source.get("num_workers", target.get("num_workers"))
+    target["max_auto_workers"] = source.get("max_auto_workers", target.get("max_auto_workers"))
     target["worker_thread_limit"] = source.get("worker_thread_limit", target.get("worker_thread_limit"))
     target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
+    for key in ["cache_scan_seconds", "compute_seconds", "write_seconds"]:
+        target[key] = float(target.get(key, 0.0) or 0.0) + float(source.get(key, 0.0) or 0.0)
+    compute_seconds = float(target.get("compute_seconds", 0.0) or 0.0)
+    if compute_seconds > 0.0:
+        target["rows_per_second"] = float(target.get("online_graphs", 0) or 0) / compute_seconds
+        target["chunks_per_second"] = float(target.get("compute_chunks", 0) or 0) / compute_seconds
     matches = dict(target.get("matches", {}))
     for match_id, source_match_stats in (source.get("matches", {}) or {}).items():
         current = dict(matches.get(str(match_id), {}))
@@ -510,6 +524,8 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
             for key, value in source_match_stats.items():
                 if isinstance(value, int):
                     current[key] = int(current.get(key, 0)) + int(value)
+                elif isinstance(value, float):
+                    current[key] = float(current.get(key, 0.0) or 0.0) + float(value)
                 else:
                     current[key] = value
         matches[str(match_id)] = current
@@ -532,6 +548,12 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "compute_chunks": 0,
         "skipped_all_nan": 0,
         "dry_run": False,
+        "max_auto_workers": None,
+        "cache_scan_seconds": 0.0,
+        "compute_seconds": 0.0,
+        "write_seconds": 0.0,
+        "rows_per_second": None,
+        "chunks_per_second": None,
         "matches": {},
     }
 
@@ -558,6 +580,7 @@ def prewarm_runtime_items(
         speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
         refresh=False,
         num_workers=args.num_workers,
+        max_auto_workers=int(args.max_auto_workers),
         worker_thread_limit=int(args.worker_thread_limit),
         physical_batch_size=int(args.physical_batch_size),
         reuse_cache_dir=reuse_cache_dir,
@@ -606,7 +629,8 @@ def write_runtime_dataset_metadata(
         "dry_run": bool(getattr(args, "dry_run", False)),
         "physical_eps": float(args.physical_eps),
         "num_workers": args.num_workers,
-        "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers)),
+        "max_auto_workers": int(args.max_auto_workers),
+        "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
         "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
@@ -617,7 +641,7 @@ def write_runtime_dataset_metadata(
 
 def run_legacy_feature_mode(args: argparse.Namespace) -> None:
     speed_aggregation = normalize_physical_xpass_speed_aggregation(args.speed_aggregation)
-    num_workers = resolve_physical_num_workers(args.num_workers)
+    num_workers = resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
     if args.limit is not None and num_workers > 1:
         raise ValueError("--limit cannot be used with --num-workers > 1. Use --num-workers 1 for limited smoke tests.")
     if args.runtime_sportec_cache:
@@ -739,6 +763,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
         "physical_eps": float(args.physical_eps),
         "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
         "num_workers": int(num_workers),
+        "max_auto_workers": int(args.max_auto_workers),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
@@ -758,6 +783,44 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
 
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
+    pending_items: list[dict[str, Any]] = []
+    pending_match_ids: list[str] = []
+
+    def flush_pending_window() -> None:
+        nonlocal pending_items, pending_match_ids
+        if not pending_items:
+            pending_match_ids = []
+            return
+        first_match = pending_match_ids[0]
+        last_match = pending_match_ids[-1]
+        try:
+            merge_stats(
+                stats,
+                prewarm_runtime_items(
+                    pending_items,
+                    cache_dir=cache_dir,
+                    args=args,
+                    reuse_cache_dir=reuse_cache_dir,
+                    progress_desc=f"sportec {first_match}..{last_match}",
+                ),
+            )
+            for pending_match_id in pending_match_ids:
+                match_stats = (stats.get("matches", {}) or {}).get(str(pending_match_id), {})
+                print(
+                    f"sportec {pending_match_id}: hits={int(match_stats.get('cache_hits', 0) or 0)} "
+                    f"misses={int(match_stats.get('cache_misses', 0) or 0)} "
+                    f"written={int(match_stats.get('cache_written', 0) or 0)} "
+                    f"copied={int(match_stats.get('copied_from_reuse', 0) or 0)} "
+                    f"pass_distance_filled={int(match_stats.get('pass_distance_filled', 0) or 0)} "
+                    f"skipped_all_nan={int(match_stats.get('skipped_all_nan', 0) or 0)}"
+                )
+        except Exception as exc:
+            for pending_match_id in pending_match_ids:
+                skipped[str(pending_match_id)] = f"{type(exc).__name__}: {exc}"
+        finally:
+            pending_items = []
+            pending_match_ids = []
+
     for match_id in tqdm(resolve_match_ids(args, graph_dir), desc="sportec runtime"):
         graph_path = graph_dir / f"{match_id}.pt"
         label_path = label_dir / f"{match_id}.pt"
@@ -767,27 +830,15 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
         try:
             graphs = torch.load(graph_path, weights_only=False)
             labels = torch.load(label_path, weights_only=False)
-            merge_stats(
-                stats,
-                prewarm_runtime_items(
-                    runtime_cache_items_from_graphs(str(match_id), list(graphs), labels),
-                    cache_dir=cache_dir,
-                    args=args,
-                    reuse_cache_dir=reuse_cache_dir,
-                    progress_desc=f"sportec {match_id}",
-                ),
-            )
-            match_stats = (stats.get("matches", {}) or {}).get(str(match_id), {})
-            print(
-                f"sportec {match_id}: hits={int(match_stats.get('cache_hits', 0) or 0)} "
-                f"misses={int(match_stats.get('cache_misses', 0) or 0)} "
-                f"written={int(match_stats.get('cache_written', 0) or 0)} "
-                f"copied={int(match_stats.get('copied_from_reuse', 0) or 0)} "
-                f"pass_distance_filled={int(match_stats.get('pass_distance_filled', 0) or 0)} "
-                f"skipped_all_nan={int(match_stats.get('skipped_all_nan', 0) or 0)}"
-            )
+            items = runtime_cache_items_from_graphs(str(match_id), list(graphs), labels)
+            if items:
+                pending_items.extend(items)
+                pending_match_ids.append(str(match_id))
+            if len(pending_match_ids) >= int(args.sportec_runtime_match_window):
+                flush_pending_window()
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
+    flush_pending_window()
     write_runtime_dataset_metadata(
         "sportec",
         cache_dir,
@@ -798,6 +849,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
             "graph_dir": str(graph_dir),
             "label_dir": str(label_dir),
             "split": args.split,
+            "match_window": int(args.sportec_runtime_match_window),
             "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
             "implicit_reuse_cache_dir": str(feature_cache_dir) if not args.reuse_cache_dir and feature_cache_dir.exists() else None,
             "implicit_reuse_cache_skipped_reason": implicit_reuse_cache_skipped_reason,

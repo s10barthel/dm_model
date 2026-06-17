@@ -36,6 +36,7 @@ from physical_pass_model import (
     AS_DEFAULT_V0_MAX,
     AS_DEFAULT_V0_MIN,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+    PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_LEGACY_SOURCE,
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
@@ -58,6 +59,7 @@ from physical_pass_model import (
     attach_physical_xpass_to_graph,
     blend_physical_xpass_predictions,
     compute_graphs_max_player_cum_prob_as_defaults,
+    compute_graphs_physical_xpass_metrics_as_defaults,
     compute_graph_physical_xpass_for_source,
     compute_graph_max_player_cum_prob_as_defaults,
     compute_graph_physical_xpass_metrics_as_defaults,
@@ -493,6 +495,88 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertFalse(any("All-NaN slice encountered" in str(item.message) for item in caught))
         self.assertTrue(np.isnan(float(probs["home_2"])))
+
+    def test_batched_robust_physical_xpass_matches_batch_size_one(self) -> None:
+        def make_fake(calls):
+            def fake_simulate_passes(**kwargs):
+                calls.append(kwargs)
+                frame_count = int(kwargs["PLAYER_POS"].shape[0])
+                players = kwargs["players"].tolist()
+                target_player_index = players.index("home_2")
+                angle_count = int(kwargs["phi_grid"].shape[1])
+                speed = float(kwargs["v0_grid"][0, 0])
+                updates = []
+                for frame_index in range(frame_count):
+                    target_x = float(kwargs["PLAYER_POS"][frame_index, target_player_index, 0])
+                    for angle_index, angle in enumerate(kwargs["phi_grid"][frame_index]):
+                        value = 0.2 + 0.02 * speed + 0.03 * np.cos(float(angle)) + target_x / 1000.0
+                        updates.append((frame_index, target_player_index, angle_index, 1, value))
+                return FakeSimulationResult((frame_count, len(players), angle_count, 3), updates)
+
+            return fake_simulate_passes
+
+        graphs = [make_graph(), make_graph()]
+        calls_one: list[dict[str, object]] = []
+        calls_many: list[dict[str, object]] = []
+
+        batch_one = compute_graphs_physical_xpass_metrics_as_defaults(
+            graphs,
+            max_speed=4,
+            speed_step=1,
+            coarse_n_angles=4,
+            refine_top_k_angles=1,
+            refine_angle_radius=5,
+            angle_step=5,
+            simulate_passes_fn=make_fake(calls_one),
+            batch_size=1,
+        )
+        batch_many = compute_graphs_physical_xpass_metrics_as_defaults(
+            graphs,
+            max_speed=4,
+            speed_step=1,
+            coarse_n_angles=4,
+            refine_top_k_angles=1,
+            refine_angle_radius=5,
+            angle_step=5,
+            simulate_passes_fn=make_fake(calls_many),
+            batch_size=16,
+        )
+
+        self.assertEqual(len(calls_one), 8)
+        self.assertEqual(len(calls_many), 4)
+        for actual, expected in zip(batch_many, batch_one):
+            pd.testing.assert_series_equal(actual, expected)
+
+    def test_batched_robust_physical_xpass_call_shape_scales_by_batch_not_graph(self) -> None:
+        calls = []
+
+        def fake_simulate_passes(**kwargs):
+            calls.append(kwargs)
+            frame_count = int(kwargs["PLAYER_POS"].shape[0])
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("home_2")
+            angle_count = int(kwargs["phi_grid"].shape[1])
+            speed = float(kwargs["v0_grid"][0, 0])
+            updates = []
+            for frame_index in range(frame_count):
+                for angle_index, angle in enumerate(kwargs["phi_grid"][frame_index]):
+                    updates.append((frame_index, target_player_index, angle_index, 1, 0.2 + 0.01 * speed + 0.01 * np.cos(float(angle))))
+            return FakeSimulationResult((frame_count, len(players), angle_count, 3), updates)
+
+        compute_graphs_physical_xpass_metrics_as_defaults(
+            [make_graph() for _ in range(32)],
+            max_speed=4,
+            speed_step=1,
+            coarse_n_angles=4,
+            refine_top_k_angles=1,
+            refine_angle_radius=5,
+            angle_step=5,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+        )
+
+        self.assertEqual(len(calls), 8)
+        self.assertEqual(calls[0]["PLAYER_POS"].shape[0], 16)
 
     def test_physical_xpass_metadata_records_robust_metric_schema(self) -> None:
         metadata = physical_xpass_as_default_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
@@ -2788,6 +2872,8 @@ class PhysicalXPassTests(unittest.TestCase):
             ["sportec", "skillcorner", "benchmark", "hawkeye"],
         )
         self.assertEqual(args.num_workers, "auto")
+        self.assertEqual(args.max_auto_workers, PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
+        self.assertEqual(args.sportec_runtime_match_window, 4)
         self.assertEqual(args.physical_batch_size, 16)
         self.assertEqual(args.worker_thread_limit, 1)
         self.assertFalse(args.dry_run)
@@ -3224,10 +3310,12 @@ class PhysicalXPassTests(unittest.TestCase):
             self.assertEqual(len(RecordingTqdm.calls), 1)
             self.assertEqual(RecordingTqdm.calls[0].kwargs["total"], 1)
 
-    def test_generate_physical_xpass_auto_workers_resolves_to_six_on_sixteen_cores(self) -> None:
+    def test_generate_physical_xpass_auto_workers_resolves_with_higher_default_cap(self) -> None:
         with patch("physical_pass_model.os.cpu_count", return_value=16):
-            self.assertEqual(resolve_physical_num_workers("auto"), 6)
-            self.assertEqual(generate_physical_xpass.resolve_num_workers("auto"), 6)
+            self.assertEqual(resolve_physical_num_workers("auto"), PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
+            self.assertEqual(generate_physical_xpass.resolve_num_workers("auto"), PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
+            self.assertEqual(resolve_physical_num_workers("auto", max_auto_workers=8), 8)
+            self.assertEqual(generate_physical_xpass.resolve_num_workers("auto", max_auto_workers=8), 8)
 
     def test_compare_speed_modes_long_frame_and_top_option_metrics(self) -> None:
         exact = pd.DataFrame(

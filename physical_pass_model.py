@@ -4,6 +4,7 @@ import hashlib
 import math
 import json
 import os
+import time
 import warnings
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -38,6 +39,7 @@ PHYSICAL_XPASS_SPEED_AGGREGATIONS = {
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
 }
 PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION = PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX
+PHYSICAL_DEFAULT_MAX_AUTO_WORKERS = 12
 PHYSICAL_MODEL_VARIANTS = {
     "gat_baseline",
     "gat_plus_phys_feature",
@@ -1263,6 +1265,22 @@ def _target_grid_values(
     return values, r_grid
 
 
+def _top_angle_indices_from_values(values: np.ndarray, refine_top_k_angles: int) -> list[int]:
+    finite_values = np.isfinite(values)
+    if not bool(finite_values.any()):
+        return []
+    per_angle = np.full(values.shape[1], np.nan, dtype=float)
+    for angle_index in range(values.shape[1]):
+        angle_values = values[:, angle_index, :]
+        if np.isfinite(angle_values).any():
+            per_angle[angle_index] = float(np.nanmax(angle_values))
+    finite_indices = np.flatnonzero(np.isfinite(per_angle))
+    if finite_indices.size == 0:
+        return []
+    top_count = min(max(1, int(refine_top_k_angles)), int(finite_indices.size))
+    return [int(index) for index in finite_indices[np.argsort(per_angle[finite_indices])[-top_count:]].tolist()]
+
+
 def _robust_xpass_metrics_from_values(values: np.ndarray, speeds: np.ndarray, angles: np.ndarray, distances: np.ndarray) -> dict[str, float]:
     finite = np.isfinite(values)
     if not finite.any():
@@ -1367,20 +1385,7 @@ def _compute_as_default_robust_metrics_from_simulation_inputs(
             frame_count=frame_count,
             player_count=len(players),
         )
-        finite_values = np.isfinite(values)
-        if not bool(finite_values.any()):
-            continue
-        per_angle = np.full(values.shape[1], np.nan, dtype=float)
-        for angle_index in range(values.shape[1]):
-            angle_values = values[:, angle_index, :]
-            if np.isfinite(angle_values).any():
-                per_angle[angle_index] = float(np.nanmax(angle_values))
-        finite_indices = np.flatnonzero(np.isfinite(per_angle))
-        if finite_indices.size == 0:
-            continue
-        top_count = min(max(1, int(refine_top_k_angles)), int(finite_indices.size))
-        top_local = finite_indices[np.argsort(per_angle[finite_indices])[-top_count:]]
-        selected_angle_indices.extend(int(index) for index in top_local.tolist())
+        selected_angle_indices.extend(_top_angle_indices_from_values(values, refine_top_k_angles))
 
     refined_angles = refined_angle_grid_from_coarse_angles(
         coarse_angles,
@@ -1578,24 +1583,215 @@ def compute_graphs_physical_xpass_metrics_as_defaults(
     chunk_size: int = 150,
     batch_size: int = 16,
 ) -> list[pd.Series]:
-    del batch_size
-    return [
-        compute_graph_physical_xpass_metrics_as_defaults(
-            graph,
-            eps=eps,
-            consider_teammates=consider_teammates,
-            max_speed=max_speed,
-            speed_step=speed_step,
-            coarse_n_angles=coarse_n_angles,
-            refine_top_k_angles=refine_top_k_angles,
-            refine_angle_radius=refine_angle_radius,
-            angle_step=angle_step,
-            simulate_passes_fn=simulate_passes_fn,
-            use_progress_bar=use_progress_bar,
-            chunk_size=chunk_size,
+    batch_size = max(1, int(batch_size))
+    results: list[pd.Series | None] = [None] * len(graphs)
+    prepared_groups: dict[tuple[bool, tuple[str, ...], tuple[str, ...]], list[dict[str, Any]]] = {}
+
+    for graph_index, graph in enumerate(graphs):
+        node_ids = _node_ids(graph)
+        candidate_indices = _candidate_target_indices(graph)
+        result_columns: list[str] = []
+        for node_id in node_ids:
+            result_columns.append(str(node_id))
+            result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_MAX))
+            result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOP10MEAN))
+        result = pd.Series(np.nan, index=result_columns, dtype=float)
+        results[graph_index] = result
+        if not candidate_indices:
+            continue
+
+        if consider_teammates:
+            player_pos, player_teams, players, ball_pos, raw_target_lookup, possessor_index = _full_as_default_simulation_inputs(
+                graph,
+                candidate_indices=candidate_indices,
+            )
+            player_pos = player_pos[np.newaxis, :, :]
+            frame_count = 1
+            target_lookup = {node_index: (0, int(sim_index)) for node_index, sim_index in raw_target_lookup.items()}
+            passers = np.asarray([node_ids[possessor_index]], dtype=object)
+            playing_direction = np.asarray(
+                [_infer_playing_direction_from_centered_players(player_pos[0], player_teams)],
+                dtype=float,
+            )
+            exclude_passer = False
+        else:
+            (
+                player_pos,
+                player_teams,
+                _players,
+                ball_pos,
+                target_lookup,
+                _possessor_index,
+                playing_direction_value,
+            ) = _reduced_as_default_simulation_inputs(graph, candidate_indices=candidate_indices)
+            frame_count = int(player_pos.shape[0])
+            players = np.asarray(
+                ["passer", "target_player"] + [f"defender_{index}" for index in range(int(player_pos.shape[1]) - 2)],
+                dtype=object,
+            )
+            passers = np.repeat("passer", frame_count).astype(object)
+            playing_direction = np.repeat(float(playing_direction_value), frame_count).astype(float)
+            exclude_passer = True
+
+        key = (
+            bool(exclude_passer),
+            tuple(str(player) for player in players.tolist()),
+            tuple(str(team) for team in player_teams.tolist()),
         )
-        for graph in graphs
-    ]
+        prepared_groups.setdefault(key, []).append(
+            {
+                "graph_index": graph_index,
+                "node_ids": node_ids,
+                "candidate_indices": candidate_indices,
+                "player_pos": player_pos,
+                "player_teams": player_teams,
+                "players": players,
+                "ball_pos": np.repeat(np.asarray(ball_pos, dtype=float)[np.newaxis, :], frame_count, axis=0),
+                "target_lookup": target_lookup,
+                "passers": passers,
+                "playing_direction": playing_direction,
+                "exclude_passer": exclude_passer,
+                "frame_count": frame_count,
+            }
+        )
+
+    if not prepared_groups:
+        return [result if result is not None else pd.Series(dtype=float) for result in results]
+
+    simulate_passes_fn = simulate_passes_fn or _resolve_simulate_passes_fn()
+    speeds = as_default_v0_values(max_speed=max_speed, speed_step=speed_step)
+    coarse_angles = _angle_grid(coarse_n_angles)
+
+    for group_frames in prepared_groups.values():
+        for batch_start in range(0, len(group_frames), batch_size):
+            batch = group_frames[batch_start : batch_start + batch_size]
+            players = np.asarray(batch[0]["players"], dtype=object)
+            player_teams = np.asarray(batch[0]["player_teams"], dtype=object)
+            exclude_passer = bool(batch[0]["exclude_passer"])
+            player_pos = np.concatenate([np.asarray(item["player_pos"], dtype=float) for item in batch], axis=0)
+            ball_pos = np.concatenate([np.asarray(item["ball_pos"], dtype=float) for item in batch], axis=0)
+            frame_count = int(player_pos.shape[0])
+            passers = np.concatenate([np.asarray(item["passers"], dtype=object) for item in batch], axis=0)
+            passer_teams = np.repeat("attack", frame_count).astype(object)
+            playing_direction = np.concatenate(
+                [np.asarray(item["playing_direction"], dtype=float) for item in batch],
+                axis=0,
+            )
+            _validate_simulation_contract(players=players, passers=passers, exclude_passer=exclude_passer)
+
+            target_index_lookup: dict[int, tuple[int, int]] = {}
+            target_keys: dict[int, tuple[int, int, int]] = {}
+            selected_angle_indices_by_item: dict[int, list[int]] = {item_index: [] for item_index in range(len(batch))}
+            next_target_key = 0
+            frame_offset = 0
+            for item_index, item in enumerate(batch):
+                for graph_target_index, (local_frame_index, sim_index) in item["target_lookup"].items():
+                    target_key = next_target_key
+                    next_target_key += 1
+                    target_index_lookup[target_key] = (frame_offset + int(local_frame_index), int(sim_index))
+                    target_keys[target_key] = (item_index, int(item["graph_index"]), int(graph_target_index))
+                frame_offset += int(item["frame_count"])
+
+            coarse_results = _simulate_as_default_per_speed(
+                simulate_passes_fn=simulate_passes_fn,
+                PLAYER_POS=player_pos,
+                BALL_POS=ball_pos,
+                phi_values=coarse_angles,
+                speeds=speeds,
+                passer_teams=passer_teams,
+                player_teams=player_teams,
+                players=players,
+                passers=passers,
+                exclude_passer=exclude_passer,
+                playing_direction=playing_direction,
+                use_progress_bar=use_progress_bar,
+                chunk_size=chunk_size,
+            )
+
+            for target_key, (frame_index, target_sim_index) in target_index_lookup.items():
+                values, _distances = _target_grid_values(
+                    coarse_results,
+                    speeds=speeds,
+                    angles=coarse_angles,
+                    frame_index=frame_index,
+                    target_sim_index=target_sim_index,
+                    frame_count=frame_count,
+                    player_count=len(players),
+                )
+                item_index, _graph_index, _graph_target_index = target_keys[target_key]
+                selected_angle_indices_by_item[item_index].extend(
+                    _top_angle_indices_from_values(values, refine_top_k_angles)
+                )
+
+            refined_angles_by_item: dict[int, np.ndarray] = {}
+            refined_angle_values: list[float] = []
+            for item_index, selected_angle_indices in selected_angle_indices_by_item.items():
+                item_refined_angles = refined_angle_grid_from_coarse_angles(
+                    coarse_angles,
+                    selected_angle_indices,
+                    refine_angle_radius=refine_angle_radius,
+                    angle_step=angle_step,
+                )
+                if item_refined_angles.size == 0:
+                    item_refined_angles = coarse_angles
+                refined_angles_by_item[item_index] = item_refined_angles
+                refined_angle_values.extend(float(angle) for angle in item_refined_angles.tolist())
+
+            if refined_angle_values:
+                batch_refined_angles = np.asarray(
+                    sorted({round(float(angle), 12): float(angle) for angle in refined_angle_values}.values()),
+                    dtype=float,
+                )
+            else:
+                batch_refined_angles = coarse_angles
+            refined_angle_lookup = {round(float(angle), 12): index for index, angle in enumerate(batch_refined_angles)}
+
+            refined_results = _simulate_as_default_per_speed(
+                simulate_passes_fn=simulate_passes_fn,
+                PLAYER_POS=player_pos,
+                BALL_POS=ball_pos,
+                phi_values=batch_refined_angles,
+                speeds=speeds,
+                passer_teams=passer_teams,
+                player_teams=player_teams,
+                players=players,
+                passers=passers,
+                exclude_passer=exclude_passer,
+                playing_direction=playing_direction,
+                use_progress_bar=use_progress_bar,
+                chunk_size=chunk_size,
+            )
+
+            for target_key, (frame_index, target_sim_index) in target_index_lookup.items():
+                item_index, graph_index, graph_target_index = target_keys[target_key]
+                item_refined_angles = refined_angles_by_item[item_index]
+                item_angle_indices = [refined_angle_lookup[round(float(angle), 12)] for angle in item_refined_angles]
+                values, distances = _target_grid_values(
+                    refined_results,
+                    speeds=speeds,
+                    angles=batch_refined_angles,
+                    frame_index=frame_index,
+                    target_sim_index=target_sim_index,
+                    frame_count=frame_count,
+                    player_count=len(players),
+                )
+                metrics = _robust_xpass_metrics_from_values(
+                    values[:, item_angle_indices, :],
+                    speeds,
+                    item_refined_angles,
+                    distances,
+                )
+                node_id = str(batch[item_index]["node_ids"][graph_target_index])
+                result = results[graph_index]
+                if result is None:
+                    continue
+                for metric, value in metrics.items():
+                    if math.isfinite(value):
+                        result.loc[physical_xpass_metric_column(node_id, metric)] = float(
+                            np.clip(value, float(eps), 1.0 - float(eps))
+                        )
+
+    return [result if result is not None else pd.Series(dtype=float) for result in results]
 
 
 def compute_graphs_max_player_cum_prob_as_defaults(
@@ -2055,14 +2251,15 @@ def load_runtime_physical_xpass_visualization_table(
     return table.sort_index()
 
 
-def resolve_physical_num_workers(value: str | int) -> int:
+def resolve_physical_num_workers(value: str | int, *, max_auto_workers: int | None = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
     if isinstance(value, int):
         workers = value
     else:
         text = str(value).strip().lower()
         if text == "auto":
             cpu_count = os.cpu_count() or 1
-            workers = max(1, min(6, cpu_count - 2))
+            available = max(1, cpu_count - 2)
+            workers = available if max_auto_workers is None else min(int(max_auto_workers), available)
         else:
             workers = int(text)
     if workers < 1:
@@ -2219,8 +2416,14 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
         "cache_disabled": False,
         "dry_run": False,
         "num_workers": 1,
+        "max_auto_workers": PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
         "worker_thread_limit": None,
         "physical_batch_size": 16,
+        "cache_scan_seconds": 0.0,
+        "compute_seconds": 0.0,
+        "write_seconds": 0.0,
+        "rows_per_second": None,
+        "chunks_per_second": None,
         "matches": {},
     }
 
@@ -2244,8 +2447,11 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
     target["cache_disabled"] = bool(target.get("cache_disabled", False)) or bool(source.get("cache_disabled", False))
     target["dry_run"] = bool(target.get("dry_run", False)) or bool(source.get("dry_run", False))
     target["num_workers"] = source.get("num_workers", target.get("num_workers"))
+    target["max_auto_workers"] = source.get("max_auto_workers", target.get("max_auto_workers"))
     target["worker_thread_limit"] = source.get("worker_thread_limit", target.get("worker_thread_limit"))
     target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
+    for key in ["cache_scan_seconds", "compute_seconds", "write_seconds"]:
+        target[key] = float(target.get(key, 0.0) or 0.0) + float(source.get(key, 0.0) or 0.0)
     target_matches = target.setdefault("matches", {})
     source_matches = source.get("matches", {})
     if isinstance(target_matches, dict) and isinstance(source_matches, dict):
@@ -2280,6 +2486,9 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
         "online_graphs": 0,
         "compute_chunks": 0,
         "skipped_all_nan": 0,
+        "cache_scan_seconds": 0.0,
+        "compute_seconds": 0.0,
+        "write_seconds": 0.0,
     }
     if not isinstance(stats, dict):
         return totals
@@ -2511,6 +2720,7 @@ def prewarm_physical_xpass_runtime_cache(
     speed_aggregation: str | None = PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     refresh: bool = False,
     num_workers: str | int = "auto",
+    max_auto_workers: int | None = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     worker_thread_limit: int = 1,
     physical_batch_size: int = 16,
     reuse_cache_dir: str | Path | None = None,
@@ -2536,7 +2746,7 @@ def prewarm_physical_xpass_runtime_cache(
     if int(physical_batch_size) < 1:
         raise ValueError("--physical-batch-size must be positive.")
 
-    resolved_workers = resolve_physical_num_workers(num_workers)
+    resolved_workers = resolve_physical_num_workers(num_workers, max_auto_workers=max_auto_workers)
     _ensure_runtime_physical_xpass_cache(
         cache_dir,
         source=source,
@@ -2553,6 +2763,7 @@ def prewarm_physical_xpass_runtime_cache(
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
+    stats["max_auto_workers"] = max_auto_workers
     stats["worker_thread_limit"] = int(worker_thread_limit)
     stats["physical_batch_size"] = int(physical_batch_size)
     stats["dry_run"] = bool(dry_run)
@@ -2574,6 +2785,7 @@ def prewarm_physical_xpass_runtime_cache(
         if len(graphs) != int(labels.shape[0]):
             raise ValueError(f"Runtime physical xPass item for {match_id} has {len(graphs)} graphs and {int(labels.shape[0])} labels.")
 
+        scan_start = time.perf_counter()
         if match_id not in cache_by_match:
             try:
                 cache_by_match[match_id] = load_physical_xpass_match(cache_dir, match_id)
@@ -2661,6 +2873,9 @@ def prewarm_physical_xpass_runtime_cache(
                     "graph": graph,
                 }
             )
+        scan_elapsed = time.perf_counter() - scan_start
+        stats["cache_scan_seconds"] = float(stats.get("cache_scan_seconds", 0.0) or 0.0) + scan_elapsed
+        match_stats["cache_scan_seconds"] = float(match_stats.get("cache_scan_seconds", 0.0) or 0.0) + scan_elapsed
 
     if verbose_status:
         for match_id, match_stats in sorted(match_stats_by_id.items()):
@@ -2685,11 +2900,15 @@ def prewarm_physical_xpass_runtime_cache(
         for match_id, match_rows in copied_by_match.items():
             frame = pd.DataFrame(match_rows)
             frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+            write_start = time.perf_counter()
             _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
+            write_elapsed = time.perf_counter() - write_start
             written = int(len(frame))
             stats["cache_written"] = int(stats["cache_written"]) + written
+            stats["write_seconds"] = float(stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
             match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
             match_stats["cache_written"] += written
+            match_stats["write_seconds"] = float(match_stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
 
     if misses:
         worker_count = min(int(resolved_workers), len(misses))
@@ -2713,6 +2932,8 @@ def prewarm_physical_xpass_runtime_cache(
             leave=False,
             disable=not show_progress,
         )
+        write_seconds_before_compute = float(stats.get("write_seconds", 0.0) or 0.0)
+        compute_start = time.perf_counter()
 
         def handle_chunk_result(result: dict[str, object]) -> None:
             rows = list(result.get("rows") or [])
@@ -2726,13 +2947,17 @@ def prewarm_physical_xpass_runtime_cache(
             for match_id, match_rows in rows_by_match.items():
                 frame = pd.DataFrame(match_rows)
                 frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+                write_start = time.perf_counter()
                 _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
+                write_elapsed = time.perf_counter() - write_start
                 written = int(len(frame))
                 stats["cache_written"] = int(stats["cache_written"]) + written
                 stats["online_graphs"] = int(stats["online_graphs"]) + written
+                stats["write_seconds"] = float(stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
                 match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
                 match_stats["cache_written"] += written
                 match_stats["online_graphs"] += written
+                match_stats["write_seconds"] = float(match_stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
             stats["compute_chunks"] = int(stats["compute_chunks"]) + 1
             stats["skipped_all_nan"] = int(stats["skipped_all_nan"]) + skipped_all_nan
             for match_id, match_rows in rows_by_match.items():
@@ -2760,8 +2985,17 @@ def prewarm_physical_xpass_runtime_cache(
                     result = future.result()
                     handle_chunk_result(result)
         progress.close()
+        write_seconds_during_compute = float(stats.get("write_seconds", 0.0) or 0.0) - write_seconds_before_compute
+        stats["compute_seconds"] = float(stats.get("compute_seconds", 0.0) or 0.0) + max(
+            0.0,
+            time.perf_counter() - compute_start - write_seconds_during_compute,
+        )
 
     stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
+    compute_seconds = float(stats.get("compute_seconds", 0.0) or 0.0)
+    if compute_seconds > 0.0:
+        stats["rows_per_second"] = float(stats.get("online_graphs", 0) or 0) / compute_seconds
+        stats["chunks_per_second"] = float(stats.get("compute_chunks", 0) or 0) / compute_seconds
     return stats
 
 
