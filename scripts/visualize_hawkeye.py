@@ -27,11 +27,16 @@ from datatools.hawkeye import (
 )
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
+from physical_pass_model import (
+    load_runtime_physical_xpass_visualization_table,
+    physical_xpass_metric,
+)
 from project_config import (
     HAWKEYE_VISUALIZATION_DIR,
     PROJECT_ROOT,
     generate_run_id,
     get_hawkeye_component_run_root,
+    get_runtime_physical_xpass_dir,
     resolve_named_component_run_id,
     write_run_metadata,
 )
@@ -56,6 +61,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--component-run-id", default=None, help="Optional versioned Hawkeye component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for visualization.")
+    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Use top-10%-mean physical xPass columns for visualization.")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
@@ -179,10 +188,14 @@ def main() -> None:
         requested_ids=args.situation_id,
     )
     freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", True))
+    physical_cache_dir = args.physical_cache_dir or str(get_runtime_physical_xpass_dir("hawkeye"))
+    selected_physical_xpass_metric = physical_xpass_metric(args)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    component_names = component_selection.rendered_components
+    component_names = list(component_selection.rendered_components)
+    if bool(args.show_physical_xpass):
+        component_names.append("physical_xpass")
     rendered_situations: list[dict[str, object]] = []
 
     for situation_id in situation_ids:
@@ -197,6 +210,18 @@ def main() -> None:
             build_graphs=False,
         )
         component_tables = build_hawkeye_component_tables(component_export, situation)
+        if bool(args.show_physical_xpass):
+            physical_frame_ids = (
+                [int(index) for index in component_tables["pass_success"].index.tolist()]
+                if not component_tables["pass_success"].empty
+                else [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
+            )
+            component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
+                physical_cache_dir,
+                str(situation.match_id),
+                physical_frame_ids,
+                metric=selected_physical_xpass_metric,
+            )
         frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
         output_dir = output_root / str(situation_id)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +275,10 @@ def main() -> None:
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
+        "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_metric": selected_physical_xpass_metric,
+        "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)

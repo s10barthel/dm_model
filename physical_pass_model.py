@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from tqdm import tqdm
 from torch_geometric.data import Data
 
 from datatools import config
@@ -1366,7 +1367,14 @@ def _compute_as_default_robust_metrics_from_simulation_inputs(
             frame_count=frame_count,
             player_count=len(players),
         )
-        per_angle = np.nanmax(values, axis=(0, 2))
+        finite_values = np.isfinite(values)
+        if not bool(finite_values.any()):
+            continue
+        per_angle = np.full(values.shape[1], np.nan, dtype=float)
+        for angle_index in range(values.shape[1]):
+            angle_values = values[:, angle_index, :]
+            if np.isfinite(angle_values).any():
+                per_angle[angle_index] = float(np.nanmax(angle_values))
         finite_indices = np.flatnonzero(np.isfinite(per_angle))
         if finite_indices.size == 0:
             continue
@@ -1981,6 +1989,72 @@ def load_physical_xpass_component(
     return series
 
 
+def validate_runtime_physical_xpass_visualization_cache(cache_dir: str | Path) -> dict[str, Any]:
+    return validate_physical_xpass_cache_metadata(
+        cache_dir,
+        expected_source=PHYSICAL_XPASS_SOURCE,
+        expected_speed_aggregation=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+        expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
+        expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC,
+        expected_max_speed=AS_DEFAULT_V0_MAX,
+        expected_speed_step=AS_DEFAULT_SPEED_STEP,
+        expected_coarse_n_angles=AS_DEFAULT_COARSE_N_ANGLES,
+        expected_refine_top_k_angles=AS_DEFAULT_REFINE_TOP_K_ANGLES,
+        expected_refine_angle_radius=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
+        expected_angle_step=AS_DEFAULT_ANGLE_STEP_DEG,
+    )
+
+
+def load_runtime_physical_xpass_visualization_component(
+    cache_dir: str | Path,
+    match_id: str,
+    action_index: int,
+    *,
+    metric: str | None = None,
+) -> pd.Series:
+    selected_metric = normalize_physical_xpass_metric(metric)
+    validate_runtime_physical_xpass_visualization_cache(cache_dir)
+    try:
+        series = load_physical_xpass_component(cache_dir, match_id, action_index, metric=selected_metric)
+    except (FileNotFoundError, KeyError, ValueError) as exc:
+        raise type(exc)(
+            f"Could not load runtime physical xPass visualization row for "
+            f"match_id={match_id}, action_index={int(action_index)}, metric={selected_metric!r} "
+            f"from {Path(cache_dir)}. Run scripts/generate_physical_xpass.py first. {exc}"
+        ) from exc
+    if series.empty:
+        raise ValueError(
+            f"Runtime physical xPass cache row for match_id={match_id}, action_index={int(action_index)} "
+            f"does not contain columns for metric {selected_metric!r} in {Path(cache_dir)}."
+        )
+    series.name = int(action_index)
+    return series
+
+
+def load_runtime_physical_xpass_visualization_table(
+    cache_dir: str | Path,
+    match_id: str,
+    action_indices: list[int] | tuple[int, ...],
+    *,
+    metric: str | None = None,
+) -> pd.DataFrame:
+    rows = [
+        load_runtime_physical_xpass_visualization_component(
+            cache_dir,
+            match_id,
+            int(action_index),
+            metric=metric,
+        )
+        for action_index in action_indices
+    ]
+    if not rows:
+        return pd.DataFrame(dtype=float)
+    table = pd.DataFrame(rows)
+    table.index = [int(action_index) for action_index in action_indices]
+    table.index.name = "action_index"
+    return table.sort_index()
+
+
 def resolve_physical_num_workers(value: str | int) -> int:
     if isinstance(value, int):
         workers = value
@@ -2049,6 +2123,7 @@ def _ensure_runtime_physical_xpass_cache(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
     metadata_path = cache_root / "metadata.json"
@@ -2089,13 +2164,14 @@ def _ensure_runtime_physical_xpass_cache(
             )
         return metadata
 
-    (cache_root / "matches").mkdir(parents=True, exist_ok=True)
     metadata = {
         **expected_metadata,
         "created_for": "runtime_physical_xpass_cache",
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    if create_if_missing:
+        (cache_root / "matches").mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     return metadata
 
 
@@ -2129,6 +2205,8 @@ def _write_runtime_physical_xpass_rows(
 def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
     return {
         "cache_dir": str(Path(cache_dir)),
+        "rows_scanned": 0,
+        "pass_rows": 0,
         "cache_hits": 0,
         "cache_misses": 0,
         "cache_written": 0,
@@ -2136,7 +2214,10 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
         "pass_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
+        "compute_chunks": 0,
+        "skipped_all_nan": 0,
         "cache_disabled": False,
+        "dry_run": False,
         "num_workers": 1,
         "worker_thread_limit": None,
         "physical_batch_size": 16,
@@ -2146,6 +2227,8 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
 
 def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[str, object]) -> dict[str, object]:
     for key in [
+        "rows_scanned",
+        "pass_rows",
         "cache_hits",
         "cache_misses",
         "cache_written",
@@ -2153,10 +2236,13 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
         "pass_distance_filled",
         "hash_mismatch_recomputed",
         "online_graphs",
+        "compute_chunks",
+        "skipped_all_nan",
     ]:
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
     target["cache_disabled"] = bool(target.get("cache_disabled", False)) or bool(source.get("cache_disabled", False))
+    target["dry_run"] = bool(target.get("dry_run", False)) or bool(source.get("dry_run", False))
     target["num_workers"] = source.get("num_workers", target.get("num_workers"))
     target["worker_thread_limit"] = source.get("worker_thread_limit", target.get("worker_thread_limit"))
     target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
@@ -2167,6 +2253,8 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
             current = target_matches.setdefault(str(match_id), {})
             if isinstance(current, dict) and isinstance(match_stats, dict):
                 for key in [
+                    "rows_scanned",
+                    "pass_rows",
                     "cache_hits",
                     "cache_misses",
                     "cache_written",
@@ -2174,6 +2262,8 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
                     "pass_distance_filled",
                     "hash_mismatch_recomputed",
                     "online_graphs",
+                    "compute_chunks",
+                    "skipped_all_nan",
                 ]:
                     current[key] = int(current.get(key, 0)) + int(match_stats.get(key, 0))
     return target
@@ -2188,6 +2278,8 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
         "pass_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
+        "compute_chunks": 0,
+        "skipped_all_nan": 0,
     }
     if not isinstance(stats, dict):
         return totals
@@ -2299,6 +2391,26 @@ def _chunk_items(items: list[dict[str, Any]], chunks: int) -> list[list[dict[str
     return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
 
 
+def _chunk_items_by_size(items: list[dict[str, Any]], chunk_size: int) -> list[list[dict[str, Any]]]:
+    if not items:
+        return []
+    chunk_size = max(1, int(chunk_size))
+    return [items[index : index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def _physical_xpass_row_has_finite_metric(row: dict[str, Any]) -> bool:
+    metadata_columns = {"match_id", "action_index", "physical_state_hash", PHYSICAL_XPASS_PASS_DISTANCE_COLUMN}
+    for key, value in row.items():
+        if key in metadata_columns:
+            continue
+        try:
+            if math.isfinite(float(value)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, object]:
     misses = list(task["misses"])
     source = str(task["source"])
@@ -2352,7 +2464,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
         }
         row.update({str(player_id): float(value) for player_id, value in probs.items()})
         rows.append(row)
-    return {"rows": rows, "computed": len(rows)}
+    skipped_all_nan = sum(1 for row in rows if not _physical_xpass_row_has_finite_metric(row))
+    return {"rows": rows, "computed": len(rows), "skipped_all_nan": int(skipped_all_nan)}
 
 
 def _has_finite_pass_distance(row: pd.Series) -> bool:
@@ -2374,6 +2487,8 @@ def _physical_row_hash_matches_or_missing(row: pd.Series, state_hash: str) -> tu
 
 def _runtime_match_stats_template() -> dict[str, int]:
     return {
+        "rows_scanned": 0,
+        "pass_rows": 0,
         "cache_hits": 0,
         "cache_misses": 0,
         "cache_written": 0,
@@ -2381,6 +2496,8 @@ def _runtime_match_stats_template() -> dict[str, int]:
         "pass_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
+        "compute_chunks": 0,
+        "skipped_all_nan": 0,
     }
 
 
@@ -2403,6 +2520,10 @@ def prewarm_physical_xpass_runtime_cache(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    dry_run: bool = False,
+    show_progress: bool = False,
+    progress_desc: str | None = None,
+    verbose_status: bool = False,
 ) -> dict[str, object]:
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     teammate_policy = teammate_policy or (
@@ -2427,12 +2548,14 @@ def prewarm_physical_xpass_runtime_cache(
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        create_if_missing=not bool(dry_run),
     )
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
     stats["worker_thread_limit"] = int(worker_thread_limit)
     stats["physical_batch_size"] = int(physical_batch_size)
+    stats["dry_run"] = bool(dry_run)
     match_stats_by_id: dict[str, dict[str, int]] = {}
     misses: list[dict[str, Any]] = []
     copied_rows: list[dict[str, Any]] = []
@@ -2464,6 +2587,15 @@ def prewarm_physical_xpass_runtime_cache(
                 reuse_by_match[match_id] = None
         reuse_rows = reuse_by_match.get(match_id)
         match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
+        row_count = int(labels.shape[0])
+        try:
+            pass_count = int((labels[:, LABEL_INDEX["is_pass"]] == 1).sum().item())
+        except Exception:
+            pass_count = row_count
+        stats["rows_scanned"] = int(stats["rows_scanned"]) + row_count
+        stats["pass_rows"] = int(stats["pass_rows"]) + pass_count
+        match_stats["rows_scanned"] += row_count
+        match_stats["pass_rows"] += pass_count
 
         for graph, label in zip(graphs, labels):
             action_index = int(label[LABEL_INDEX["action_index"]].item())
@@ -2530,6 +2662,22 @@ def prewarm_physical_xpass_runtime_cache(
                 }
             )
 
+    if verbose_status:
+        for match_id, match_stats in sorted(match_stats_by_id.items()):
+            print(
+                "physical xPass "
+                f"{match_id}: rows={int(match_stats.get('rows_scanned', 0))} "
+                f"passes={int(match_stats.get('pass_rows', 0))} "
+                f"hits={int(match_stats.get('cache_hits', 0))} "
+                f"misses={int(match_stats.get('cache_misses', 0))} "
+                f"to_compute={int(match_stats.get('cache_misses', 0))} "
+                f"copied={int(match_stats.get('copied_from_reuse', 0))}"
+            )
+
+    if dry_run:
+        stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
+        return stats
+
     if copied_rows:
         copied_by_match: dict[str, list[dict[str, Any]]] = {}
         for row in copied_rows:
@@ -2545,6 +2693,7 @@ def prewarm_physical_xpass_runtime_cache(
 
     if misses:
         worker_count = min(int(resolved_workers), len(misses))
+        chunks = _chunk_items_by_size(misses, int(physical_batch_size))
         task_template = {
             "source": source,
             "eps": float(eps),
@@ -2558,11 +2707,45 @@ def prewarm_physical_xpass_runtime_cache(
             "refine_angle_radius": float(refine_angle_radius),
             "angle_step": float(angle_step),
         }
-        rows: list[dict[str, Any]] = []
+        progress = tqdm(
+            total=len(misses),
+            desc=progress_desc or "physical xPass runtime",
+            leave=False,
+            disable=not show_progress,
+        )
+
+        def handle_chunk_result(result: dict[str, object]) -> None:
+            rows = list(result.get("rows") or [])
+            progress.update(int(result.get("computed", len(rows)) or 0))
+            if not rows:
+                return
+            skipped_all_nan = int(result.get("skipped_all_nan", 0) or 0)
+            rows_by_match: dict[str, list[dict[str, Any]]] = {}
+            for row in rows:
+                rows_by_match.setdefault(str(row["match_id"]), []).append(row)
+            for match_id, match_rows in rows_by_match.items():
+                frame = pd.DataFrame(match_rows)
+                frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+                _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
+                written = int(len(frame))
+                stats["cache_written"] = int(stats["cache_written"]) + written
+                stats["online_graphs"] = int(stats["online_graphs"]) + written
+                match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
+                match_stats["cache_written"] += written
+                match_stats["online_graphs"] += written
+            stats["compute_chunks"] = int(stats["compute_chunks"]) + 1
+            stats["skipped_all_nan"] = int(stats["skipped_all_nan"]) + skipped_all_nan
+            for match_id, match_rows in rows_by_match.items():
+                match_stats = match_stats_by_id.setdefault(str(match_id), _runtime_match_stats_template())
+                match_stats["compute_chunks"] += 1
+                match_stats["skipped_all_nan"] += sum(
+                    1 for row in match_rows if not _physical_xpass_row_has_finite_metric(row)
+                )
+
         if worker_count == 1:
-            for chunk in _chunk_items(misses, 1):
+            for chunk in chunks:
                 result = _compute_runtime_physical_xpass_chunk({**task_template, "misses": chunk})
-                rows.extend(result["rows"])
+                handle_chunk_result(result)
         else:
             with ProcessPoolExecutor(
                 max_workers=worker_count,
@@ -2571,25 +2754,12 @@ def prewarm_physical_xpass_runtime_cache(
             ) as executor:
                 futures = [
                     executor.submit(_compute_runtime_physical_xpass_chunk, {**task_template, "misses": chunk})
-                    for chunk in _chunk_items(misses, worker_count)
+                    for chunk in chunks
                 ]
                 for future in as_completed(futures):
                     result = future.result()
-                    rows.extend(result["rows"])
-
-        rows_by_match: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            rows_by_match.setdefault(str(row["match_id"]), []).append(row)
-        for match_id, match_rows in rows_by_match.items():
-            frame = pd.DataFrame(match_rows)
-            frame = frame.drop_duplicates(subset=["action_index"], keep="last")
-            _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
-            written = int(len(frame))
-            stats["cache_written"] = int(stats["cache_written"]) + written
-            stats["online_graphs"] = int(stats["online_graphs"]) + written
-            match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
-            match_stats["cache_written"] += written
-            match_stats["online_graphs"] += written
+                    handle_chunk_result(result)
+        progress.close()
 
     stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
     return stats

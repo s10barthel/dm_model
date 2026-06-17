@@ -23,11 +23,16 @@ from datatools.benchmark import (
 )
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image
 from datatools.viz_snapshot import SnapshotVisualizer
+from physical_pass_model import (
+    load_runtime_physical_xpass_visualization_table,
+    physical_xpass_metric,
+)
 from project_config import (
     BENCHMARK_VISUALIZATION_DIR,
     PROJECT_ROOT,
     generate_run_id,
     get_benchmark_component_run_root,
+    get_runtime_physical_xpass_dir,
     resolve_named_component_run_id,
     write_run_metadata,
 )
@@ -41,6 +46,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--game-state", action="append", type=int, choices=[1, 2], help="Restrict visualization to one or more benchmark game states.")
     parser.add_argument("--component-run-id", default=None, help="Optional versioned benchmark component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit benchmark component-run root override.")
+    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for visualization.")
+    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Use top-10%-mean physical xPass columns for visualization.")
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created benchmark visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(BENCHMARK_VISUALIZATION_DIR))
@@ -146,6 +155,10 @@ def _probs_for_component_frame(
             ),
         )
 
+    if component_name == "physical_xpass":
+        row = _row_for_frame(component_tables[component_name], frame_id)
+        return pd.Series(dtype=float) if row is None else pd.to_numeric(row, errors="coerce").dropna().astype(float).sort_values(ascending=False)
+
     return build_benchmark_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
 
@@ -171,7 +184,11 @@ def main() -> None:
         requested_game_states=args.game_state,
     )
 
-    component_names = component_selection.rendered_components
+    physical_cache_dir = args.physical_cache_dir or str(get_runtime_physical_xpass_dir("benchmark"))
+    selected_physical_xpass_metric = physical_xpass_metric(args)
+    component_names = list(component_selection.rendered_components)
+    if bool(args.show_physical_xpass):
+        component_names.append("physical_xpass")
     pairs_by_modification: dict[int, set[int]] = {}
     for modification_id, game_state_id in state_pairs:
         pairs_by_modification.setdefault(int(modification_id), set()).add(int(game_state_id))
@@ -210,6 +227,14 @@ def main() -> None:
                 build_benchmark_component_tables(component_export, state),
                 int(state.frame_meta.index.min()),
             )
+            if bool(args.show_physical_xpass):
+                frame_id = int(state.frame_meta.index.min())
+                state_contexts[game_state_id][1]["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
+                    physical_cache_dir,
+                    str(state.match_id),
+                    [frame_id],
+                    metric=selected_physical_xpass_metric,
+                )
 
         output_paths: list[str] = []
         modification_output_dir = output_root / f"modification_{modification_id}"
@@ -264,6 +289,10 @@ def main() -> None:
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
+        "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_metric": selected_physical_xpass_metric,
+        "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)

@@ -33,8 +33,9 @@ from models.utils import (
 from physical_pass_model import (
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
-    load_physical_xpass_component,
+    load_runtime_physical_xpass_visualization_component,
     model_uses_physical_xpass,
+    physical_xpass_metric,
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
@@ -45,7 +46,6 @@ from project_config import (
     VISUALIZATION_DIR,
     generate_run_id,
     get_action_graph_dir,
-    get_physical_xpass_dir,
     get_runtime_physical_xpass_dir,
     get_resolved_action_path,
     write_run_metadata,
@@ -510,6 +510,7 @@ def render_action_components(
     show_trajectories: bool = False,
     show_physical_xpass: bool = False,
     physical_cache_dir: Path | str | None = None,
+    physical_xpass_metric_name: str | None = None,
     rendered_components: list[str] | None = None,
 ) -> None:
     rendered_components = rendered_components or [
@@ -550,11 +551,12 @@ def render_action_components(
                 component_prob_rows[component_name] = probs.loc[action_index]
 
     if show_physical_xpass:
-        cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_physical_xpass_dir(feature_root)
-        component_prob_rows["max_player_cum_prob"] = load_physical_xpass_component(
+        cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
+        component_prob_rows["physical_xpass"] = load_runtime_physical_xpass_visualization_component(
             cache_dir,
             resolve_match_id(match),
             action_index,
+            metric=physical_xpass_metric_name,
         )
 
     if "pass_score" in rendered_components:
@@ -568,7 +570,7 @@ def render_action_components(
 
     component_order = list(rendered_components)
     if show_physical_xpass:
-        component_order.append("max_player_cum_prob")
+        component_order.append("physical_xpass")
     for component_name in component_order:
         if component_name not in component_prob_rows:
             continue
@@ -746,11 +748,8 @@ def main() -> None:
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = args.physical_cache_dir or (
-        str(get_runtime_physical_xpass_dir("sportec"))
-        if bool(getattr(args, "use_physical_xpass", False))
-        else str(get_physical_xpass_dir(feature_root))
-    )
+    physical_cache_dir = args.physical_cache_dir or str(get_runtime_physical_xpass_dir("sportec"))
+    selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = loaded_models.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -795,6 +794,7 @@ def main() -> None:
                 show_trajectories=args.show_trajectories,
                 show_physical_xpass=args.show_physical_xpass,
                 physical_cache_dir=physical_cache_dir,
+                physical_xpass_metric_name=selected_physical_xpass_metric,
                 rendered_components=component_selection.rendered_components,
             )
         except Exception as exc:
@@ -855,7 +855,9 @@ def main() -> None:
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,

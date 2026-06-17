@@ -22,12 +22,17 @@ from datatools.skillcorner import (
 )
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
 from datatools.viz_snapshot import SnapshotVisualizer
+from physical_pass_model import (
+    load_runtime_physical_xpass_visualization_table,
+    physical_xpass_metric,
+)
 from project_config import (
     COMPONENT_DIR,
     PROJECT_ROOT,
     SKILLCORNER_VISUALIZATION_DIR,
     generate_run_id,
     get_skillcorner_component_run_root,
+    get_runtime_physical_xpass_dir,
     load_run_metadata,
     resolve_named_component_run_id,
     write_run_metadata,
@@ -48,6 +53,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
+    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
+    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for visualization.")
+    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Use top-10%-mean physical xPass columns for visualization.")
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created SkillCorner visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SKILLCORNER_VISUALIZATION_DIR))
@@ -162,6 +171,10 @@ def _probs_for_component_frame(
             ),
         )
 
+    if component_name == "physical_xpass":
+        row = _row_for_frame(component_tables[component_name], frame_id)
+        return pd.Series(dtype=float) if row is None else pd.to_numeric(row, errors="coerce").dropna().astype(float).sort_values(ascending=False)
+
     return build_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
 
@@ -172,6 +185,8 @@ def render_possession(
     possession_index: int,
     output_root: Path,
     rendered_components: list[str],
+    physical_cache_dir: str | Path | None = None,
+    physical_xpass_metric_name: str | None = None,
 ) -> Path:
     output_dir = output_root / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +205,19 @@ def render_possession(
             component_table = component_table.sort_values("frame").drop_duplicates(subset=["frame"], keep="last")
             component_table = component_table.set_index("frame")
         possession_component_tables[component_name] = component_table
+
+    if bool(getattr(args, "show_physical_xpass", False)):
+        physical_frame_ids = (
+            [int(index) for index in possession_component_tables["pass_success"].index.tolist()]
+            if not possession_component_tables["pass_success"].empty
+            else frame_ids
+        )
+        possession_component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
+            physical_cache_dir,
+            str(possession.match_id),
+            physical_frame_ids,
+            metric=physical_xpass_metric_name,
+        )
 
     for component_name in component_names:
         def iter_component_images():
@@ -229,6 +257,11 @@ def main() -> None:
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
     component_metadata = load_run_metadata(component_dir, required=False) or {}
+    physical_cache_dir = args.physical_cache_dir or str(get_runtime_physical_xpass_dir("skillcorner"))
+    selected_physical_xpass_metric = physical_xpass_metric(args)
+    rendered_components = list(component_selection.rendered_components)
+    if bool(args.show_physical_xpass):
+        rendered_components.append("physical_xpass")
 
     output_dirs: list[Path] = []
     rendered_possessions: list[dict[str, object]] = []
@@ -239,7 +272,9 @@ def main() -> None:
             component_tables=component_tables,
             possession_index=possession_index,
             output_root=output_root,
-            rendered_components=component_selection.rendered_components,
+            rendered_components=rendered_components,
+            physical_cache_dir=physical_cache_dir,
+            physical_xpass_metric_name=selected_physical_xpass_metric,
         )
         output_dirs.append(output_dir)
         rendered_possessions.append(
@@ -273,6 +308,10 @@ def main() -> None:
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
+        "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_metric": selected_physical_xpass_metric,
+        "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)

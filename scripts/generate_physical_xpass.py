@@ -158,6 +158,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-workers", default="auto")
     parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.add_argument("--worker-thread-limit", type=int, default=1)
+    parser.add_argument("--dry-run", action="store_true", help="Scan runtime cache hits/misses without computing or writing rows.")
     teammate_policy_group = parser.add_mutually_exclusive_group()
     teammate_policy_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
     teammate_policy_group.add_argument("--consider-teammates", dest="consider_teammates", action="store_true")
@@ -288,6 +289,35 @@ def load_reuse_rows(cache_dir: Path | None, match_id: str) -> pd.DataFrame | Non
         return load_physical_xpass_match(cache_dir, match_id)
     except FileNotFoundError:
         return None
+
+
+def resolve_runtime_sportec_reuse_cache(
+    args: argparse.Namespace,
+    feature_cache_dir: Path,
+) -> tuple[Path | None, str | None]:
+    explicit_reuse = bool(args.reuse_cache_dir)
+    candidate = Path(args.reuse_cache_dir) if explicit_reuse else (feature_cache_dir if feature_cache_dir.exists() else None)
+    if candidate is None:
+        return None, None
+
+    try:
+        return (
+            validate_reuse_cache_dir(
+                candidate,
+                teammate_policy=teammate_policy_from_args(args),
+                speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
+                max_speed=args.max_speed,
+                speed_step=args.speed_step,
+                physical_eps=float(args.physical_eps),
+            ),
+            None,
+        )
+    except ValueError as exc:
+        if explicit_reuse:
+            raise
+        reason = f"{type(exc).__name__}: {exc}"
+        print(f"Skipping incompatible implicit Sportec physical xPass reuse cache {candidate}: {exc}")
+        return None, reason
 
 
 def compute_match_rows(
@@ -454,14 +484,35 @@ def runtime_cache_items_from_graphs(match_id: str, graphs: list[Any], labels: to
 def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[str, Any]:
     if not source:
         return target
-    for key in ["cache_hits", "cache_misses", "cache_written", "copied_from_reuse", "pass_distance_filled", "hash_mismatch_recomputed", "online_graphs"]:
+    for key in [
+        "rows_scanned",
+        "pass_rows",
+        "cache_hits",
+        "cache_misses",
+        "cache_written",
+        "copied_from_reuse",
+        "pass_distance_filled",
+        "hash_mismatch_recomputed",
+        "online_graphs",
+        "compute_chunks",
+        "skipped_all_nan",
+    ]:
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
+    target["dry_run"] = bool(target.get("dry_run", False)) or bool(source.get("dry_run", False))
     target["num_workers"] = source.get("num_workers", target.get("num_workers"))
     target["worker_thread_limit"] = source.get("worker_thread_limit", target.get("worker_thread_limit"))
     target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
     matches = dict(target.get("matches", {}))
-    matches.update(source.get("matches", {}) or {})
+    for match_id, source_match_stats in (source.get("matches", {}) or {}).items():
+        current = dict(matches.get(str(match_id), {}))
+        if isinstance(source_match_stats, dict):
+            for key, value in source_match_stats.items():
+                if isinstance(value, int):
+                    current[key] = int(current.get(key, 0)) + int(value)
+                else:
+                    current[key] = value
+        matches[str(match_id)] = current
     target["matches"] = matches
     return target
 
@@ -469,6 +520,8 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
 def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
     return {
         "cache_dir": str(cache_dir),
+        "rows_scanned": 0,
+        "pass_rows": 0,
         "cache_hits": 0,
         "cache_misses": 0,
         "cache_written": 0,
@@ -476,6 +529,9 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "pass_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
+        "compute_chunks": 0,
+        "skipped_all_nan": 0,
+        "dry_run": False,
         "matches": {},
     }
 
@@ -486,9 +542,13 @@ def prewarm_runtime_items(
     cache_dir: Path,
     args: argparse.Namespace,
     reuse_cache_dir: Path | None = None,
+    progress_desc: str | None = None,
 ) -> dict[str, Any] | None:
     if not items:
         return None
+    if progress_desc is None:
+        match_ids = sorted({str(item.get("match_id")) for item in items})
+        progress_desc = f"physical xPass {match_ids[0]}" if len(match_ids) == 1 else "physical xPass runtime"
     return prewarm_physical_xpass_runtime_cache(
         items,
         cache_dir=cache_dir,
@@ -507,6 +567,10 @@ def prewarm_runtime_items(
         refine_top_k_angles=int(args.refine_top_k_angles),
         refine_angle_radius=float(args.refine_angle_radius),
         angle_step=float(args.angle_step),
+        dry_run=bool(args.dry_run),
+        show_progress=not bool(args.dry_run),
+        progress_desc=progress_desc,
+        verbose_status=True,
     )
 
 
@@ -519,6 +583,9 @@ def write_runtime_dataset_metadata(
     source_inputs: dict[str, Any],
     skipped: dict[str, Any],
 ) -> None:
+    if bool(getattr(args, "dry_run", False)):
+        print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
+        return
     metadata = {
         **physical_xpass_as_default_metadata(
             teammate_policy_from_args(args),
@@ -536,6 +603,7 @@ def write_runtime_dataset_metadata(
         "source_inputs": source_inputs,
         "skipped": skipped,
         "stats": stats,
+        "dry_run": bool(getattr(args, "dry_run", False)),
         "physical_eps": float(args.physical_eps),
         "num_workers": args.num_workers,
         "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers)),
@@ -686,15 +754,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
     label_dir = resolve_reference_label_dir(str(feature_run_id), feature_root, args)
     cache_dir = get_runtime_physical_xpass_dir("sportec")
     feature_cache_dir = get_physical_xpass_dir(feature_root)
-    reuse_cache_dir = Path(args.reuse_cache_dir) if args.reuse_cache_dir else (feature_cache_dir if feature_cache_dir.exists() else None)
-    if reuse_cache_dir is not None:
-        reuse_cache_dir = validate_reuse_cache_dir(
-            reuse_cache_dir,
-            teammate_policy=teammate_policy_from_args(args),
-            speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
-            max_speed=args.max_speed,
-            physical_eps=float(args.physical_eps),
-        )
+    reuse_cache_dir, implicit_reuse_cache_skipped_reason = resolve_runtime_sportec_reuse_cache(args, feature_cache_dir)
 
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
@@ -714,7 +774,17 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
                     cache_dir=cache_dir,
                     args=args,
                     reuse_cache_dir=reuse_cache_dir,
+                    progress_desc=f"sportec {match_id}",
                 ),
+            )
+            match_stats = (stats.get("matches", {}) or {}).get(str(match_id), {})
+            print(
+                f"sportec {match_id}: hits={int(match_stats.get('cache_hits', 0) or 0)} "
+                f"misses={int(match_stats.get('cache_misses', 0) or 0)} "
+                f"written={int(match_stats.get('cache_written', 0) or 0)} "
+                f"copied={int(match_stats.get('copied_from_reuse', 0) or 0)} "
+                f"pass_distance_filled={int(match_stats.get('pass_distance_filled', 0) or 0)} "
+                f"skipped_all_nan={int(match_stats.get('skipped_all_nan', 0) or 0)}"
             )
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
@@ -723,7 +793,15 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
         cache_dir,
         args,
         stats=stats,
-        source_inputs={"feature_run_id": str(feature_run_id), "graph_dir": str(graph_dir), "label_dir": str(label_dir), "split": args.split},
+        source_inputs={
+            "feature_run_id": str(feature_run_id),
+            "graph_dir": str(graph_dir),
+            "label_dir": str(label_dir),
+            "split": args.split,
+            "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
+            "implicit_reuse_cache_dir": str(feature_cache_dir) if not args.reuse_cache_dir and feature_cache_dir.exists() else None,
+            "implicit_reuse_cache_skipped_reason": implicit_reuse_cache_skipped_reason,
+        },
         skipped=skipped,
     )
     return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
@@ -748,7 +826,15 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             items: list[dict[str, Any]] = []
             for state in states:
                 items.extend(runtime_cache_items_from_graphs(str(state.match_id), state.graph_features_0, state.labels))
-            merge_stats(stats, prewarm_runtime_items(items, cache_dir=cache_dir, args=args))
+            merge_stats(
+                stats,
+                prewarm_runtime_items(
+                    items,
+                    cache_dir=cache_dir,
+                    args=args,
+                    progress_desc=f"benchmark {modification_id}",
+                ),
+            )
         except Exception as exc:
             skipped[str(modification_id)] = f"{type(exc).__name__}: {exc}"
     write_runtime_dataset_metadata(
@@ -783,6 +869,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                     runtime_cache_items_from_graphs(str(situation.match_id), situation.graph_features_0, situation.labels),
                     cache_dir=cache_dir,
                     args=args,
+                    progress_desc=f"hawkeye {situation_id}",
                 ),
             )
         except Exception as exc:
@@ -824,6 +911,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                             runtime_cache_items_from_graphs(str(possession.match_id), possession.graph_features_0, possession.labels),
                             cache_dir=cache_dir,
                             args=args,
+                            progress_desc=f"skillcorner {match_id}:{event_index}",
                         ),
                     )
                 except Exception as exc:

@@ -60,11 +60,13 @@ from physical_pass_model import (
     compute_graphs_max_player_cum_prob_as_defaults,
     compute_graph_physical_xpass_for_source,
     compute_graph_max_player_cum_prob_as_defaults,
+    compute_graph_physical_xpass_metrics_as_defaults,
     compute_graph_player_cum_prob,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     load_physical_xpass_match,
     load_physical_xpass_component,
+    load_runtime_physical_xpass_visualization_component,
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
@@ -81,10 +83,12 @@ from physical_pass_model import (
 )
 from scripts import compare_physical_xpass_speed_modes
 from scripts import generate_physical_xpass
+from scripts import run_and_visualize_hawkeye
 from scripts import run_benchmark
 from scripts import run_hawkeye
 from scripts import run_skillcorner
 from scripts import train_relevant_models as train_wrapper
+from scripts import visualize_action_components
 
 
 def make_graph(node_ids: list[str] | None = None) -> Data:
@@ -396,6 +400,35 @@ def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -
     ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
 
 
+def write_runtime_visualization_xpass_cache(cache_dir: Path, match_id: str = "match_1", action_indexes: list[int] | None = None) -> None:
+    action_indexes = action_indexes or [0]
+    (cache_dir / "matches").mkdir(parents=True)
+    metadata = physical_xpass_as_default_metadata(
+        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+        max_speed=22,
+        speed_step=1,
+    )
+    (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    rows = []
+    for action_index in action_indexes:
+        rows.append(
+            {
+                "match_id": str(match_id),
+                "action_index": int(action_index),
+                "physical_state_hash": "hash",
+                PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 12.0,
+                "home_1": 0.2,
+                "home_2": 0.4,
+                "home_1__max_xpass": 0.8,
+                "home_2__max_xpass": 0.9,
+                "home_1__top10mean_xpass": 0.5,
+                "home_2__top10mean_xpass": 0.6,
+            }
+        )
+    pd.DataFrame(rows).to_parquet(cache_dir / "matches" / f"{match_id}.parquet", index=False)
+
+
 class PhysicalXPassTests(unittest.TestCase):
     def test_inference_physical_xpass_blend_formula(self) -> None:
         self.assertAlmostEqual(
@@ -439,6 +472,27 @@ class PhysicalXPassTests(unittest.TestCase):
         expected = np.mod(np.deg2rad(np.arange(-10.0, 10.0 + 0.1, 2.5)), 2.0 * np.pi)
         for angle in expected:
             self.assertTrue(np.any(np.isclose(refined, angle, atol=1e-12)))
+
+    def test_robust_physical_xpass_skips_all_nan_coarse_angle_candidates_without_warning(self) -> None:
+        def fake_simulate_passes(**kwargs):
+            frame_count = int(kwargs["PLAYER_POS"].shape[0])
+            player_count = len(kwargs["players"])
+            angle_count = int(kwargs["phi_grid"].shape[1])
+            result = FakeSimulationResult((frame_count, player_count, angle_count, 3), [])
+            result.player_cum_prob[:] = np.nan
+            return result
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            probs = compute_graph_physical_xpass_metrics_as_defaults(
+                make_graph(),
+                max_speed=3,
+                speed_step=1,
+                simulate_passes_fn=fake_simulate_passes,
+            )
+
+        self.assertFalse(any("All-NaN slice encountered" in str(item.message) for item in caught))
+        self.assertTrue(np.isnan(float(probs["home_2"])))
 
     def test_physical_xpass_metadata_records_robust_metric_schema(self) -> None:
         metadata = physical_xpass_as_default_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
@@ -499,6 +553,140 @@ class PhysicalXPassTests(unittest.TestCase):
             physical_xpass_metric({"task": "pass_success", "top10mean_xpass": True}),
             PHYSICAL_XPASS_METRIC_TOP10MEAN,
         )
+
+    def test_runtime_visualization_xpass_loader_selects_metric_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            write_runtime_visualization_xpass_cache(cache_dir, action_indexes=[3])
+
+            default = load_runtime_physical_xpass_visualization_component(cache_dir, "match_1", 3)
+            max_row = load_runtime_physical_xpass_visualization_component(
+                cache_dir,
+                "match_1",
+                3,
+                metric=PHYSICAL_XPASS_METRIC_MAX,
+            )
+            top10 = load_runtime_physical_xpass_visualization_component(
+                cache_dir,
+                "match_1",
+                3,
+                metric=PHYSICAL_XPASS_METRIC_TOP10MEAN,
+            )
+
+        self.assertAlmostEqual(float(default["home_2"]), 0.4)
+        self.assertAlmostEqual(float(max_row["home_2"]), 0.9)
+        self.assertAlmostEqual(float(top10["home_2"]), 0.6)
+
+    def test_runtime_visualization_xpass_loader_rejects_missing_metric_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                max_speed=22,
+                speed_step=1,
+            )
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            pd.DataFrame([{"match_id": "match_1", "action_index": 3, "home_2": 0.4}]).to_parquet(
+                cache_dir / "matches" / "match_1.parquet",
+                index=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not contain columns"):
+                load_runtime_physical_xpass_visualization_component(
+                    cache_dir,
+                    "match_1",
+                    3,
+                    metric=PHYSICAL_XPASS_METRIC_MAX,
+                )
+
+    def test_visualize_action_components_uses_runtime_xpass_cache_by_default(self) -> None:
+        match = SimpleNamespace(match_id="match_1")
+        loaded_models: dict[str, object] = {}
+        with patch.object(visualize_action_components, "get_runtime_physical_xpass_dir", return_value=Path("runtime_cache")):
+            with patch.object(
+                visualize_action_components,
+                "load_runtime_physical_xpass_visualization_component",
+                return_value=pd.Series({"home_2": 0.7}, dtype=float),
+            ) as load_xpass:
+                with patch.object(visualize_action_components, "render_component") as render_component:
+                    visualize_action_components.render_action_components(
+                        match=match,
+                        loaded_models=loaded_models,
+                        feature_root=Path("feature_root"),
+                        device="cpu",
+                        action_index=5,
+                        display_action_id="a5",
+                        output_dir=Path("out"),
+                        show_physical_xpass=True,
+                        physical_cache_dir=None,
+                        physical_xpass_metric_name=PHYSICAL_XPASS_METRIC_TOP10MEAN,
+                        rendered_components=["unused_component"],
+                    )
+
+        load_xpass.assert_called_once_with(
+            Path("runtime_cache"),
+            "match_1",
+            5,
+            metric=PHYSICAL_XPASS_METRIC_TOP10MEAN,
+        )
+        render_component.assert_called_once()
+        self.assertEqual(render_component.call_args.kwargs["component_name"], "physical_xpass")
+
+    def test_run_and_visualize_hawkeye_physical_xpass_uses_selected_metric(self) -> None:
+        frame_meta = pd.DataFrame(
+            [{"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 0.0}],
+            index=pd.Index([0], name="frame_id"),
+        )
+        tracking = pd.DataFrame({"id": ["s1"], "ball_x": [0.0], "ball_y": [0.0]}, index=pd.Index([0], name="frame_id"))
+        situation = SimpleNamespace(
+            situation_id="s1",
+            match_id="s1",
+            tracking=tracking,
+            frame_meta=frame_meta,
+            labels=torch.empty((0, len(LABEL_COLUMNS))),
+            graph_features_0=[],
+        )
+        args = SimpleNamespace(
+            tracking_csv="tracking.csv",
+            freeze_ballreceipt=True,
+            show_physical_xpass=True,
+            physical_cache_dir="hawkeye_cache",
+            max_xpass=True,
+            top10mean_xpass=False,
+            gif=True,
+            show_trajectories=False,
+        )
+
+        with patch.object(run_and_visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, {}, {})):
+            with patch.object(
+                run_and_visualize_hawkeye,
+                "load_runtime_physical_xpass_visualization_table",
+                return_value=pd.DataFrame({"home_2": [0.9]}, index=pd.Index([0], name="action_index")),
+            ) as load_xpass:
+                with patch.object(run_and_visualize_hawkeye, "render_frame_image", return_value=object()):
+                    with patch.object(run_and_visualize_hawkeye, "save_animation") as save_animation:
+                        run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=pd.DataFrame({"id": ["s1"]}),
+                            ball=pd.DataFrame(),
+                            model_specs={},
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+
+        load_xpass.assert_called_once_with(
+            "hawkeye_cache",
+            "s1",
+            [0],
+            metric=PHYSICAL_XPASS_METRIC_MAX,
+        )
+        save_animation.assert_called_once()
+        self.assertEqual(save_animation.call_args.args[1], Path("out") / "s1" / "physical_xpass.gif")
 
     def test_pass_distance_is_reserved_sidecar_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1562,6 +1750,82 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(second_stats["cache_hits"], 1)
         self.assertEqual(second_stats["cache_misses"], 0)
 
+    def test_runtime_physical_xpass_prewarm_writes_batch_chunks_incrementally_and_resumes(self) -> None:
+        labels = torch.stack(
+            [
+                make_label(action_index=5),
+                make_label(action_index=6),
+                make_label(action_index=7),
+            ]
+        )
+        graphs = [make_graph(), make_graph(), make_graph()]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            call_count = 0
+
+            def fake_compute(chunk_graphs, **kwargs):
+                nonlocal call_count
+                del kwargs
+                call_count += 1
+                if call_count == 2:
+                    partial = load_physical_xpass_match(cache_dir, "runtime_match")
+                    self.assertEqual(partial.index.tolist(), [5, 6])
+                return [pd.Series({"home_2": 0.3 + index}, dtype=float) for index, _graph in enumerate(chunk_graphs)]
+
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults", side_effect=fake_compute) as compute:
+                first_stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": graphs, "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    physical_batch_size=2,
+                )
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute_again:
+                second_stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": graphs, "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    physical_batch_size=2,
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        self.assertEqual(compute.call_count, 2)
+        self.assertEqual(first_stats["cache_misses"], 3)
+        self.assertEqual(first_stats["cache_written"], 3)
+        self.assertEqual(first_stats["compute_chunks"], 2)
+        self.assertEqual(rows.index.tolist(), [5, 6, 7])
+        compute_again.assert_not_called()
+        self.assertEqual(second_stats["cache_hits"], 3)
+        self.assertEqual(second_stats["cache_misses"], 0)
+
+    def test_runtime_physical_xpass_prewarm_dry_run_scans_without_compute_or_writes(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    dry_run=True,
+                )
+
+            self.assertFalse((cache_dir / "matches" / "runtime_match.parquet").exists())
+            self.assertFalse((cache_dir / "metadata.json").exists())
+
+        compute.assert_not_called()
+        self.assertTrue(stats["dry_run"])
+        self.assertEqual(stats["cache_misses"], 1)
+        self.assertEqual(stats["cache_written"], 0)
+
     def test_runtime_physical_xpass_prewarm_refresh_recomputes_cached_row_once(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1985,6 +2249,95 @@ class PhysicalXPassTests(unittest.TestCase):
                     speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
                     physical_eps=1e-4,
                 )
+
+    def test_runtime_sportec_implicit_incompatible_feature_cache_is_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                max_speed=20,
+                default_metric="max_xpass",
+                available_metrics=["max_xpass"],
+                metric_schema_version=1,
+            )
+            metadata["metric"] = "max_player_cum_prob"
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            args = generate_physical_xpass.parse_args([])
+
+            with patch("builtins.print") as print_mock:
+                reuse_cache_dir, reason = generate_physical_xpass.resolve_runtime_sportec_reuse_cache(args, cache_dir)
+
+        self.assertIsNone(reuse_cache_dir)
+        self.assertIsNotNone(reason)
+        self.assertIn("metric", str(reason))
+        print_mock.assert_called_once()
+
+    def test_runtime_sportec_explicit_incompatible_reuse_cache_still_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            (cache_dir / "metadata.json").write_text(
+                json.dumps({"source": PHYSICAL_XPASS_LEGACY_SOURCE}),
+                encoding="utf-8",
+            )
+            args = generate_physical_xpass.parse_args(["--reuse-cache-dir", str(cache_dir)])
+
+            with self.assertRaisesRegex(ValueError, "incompatible source"):
+                generate_physical_xpass.resolve_runtime_sportec_reuse_cache(args, cache_dir)
+
+    def test_runtime_sportec_implicit_compatible_feature_cache_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                max_speed=22,
+                speed_step=1,
+            )
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            args = generate_physical_xpass.parse_args([])
+
+            reuse_cache_dir, reason = generate_physical_xpass.resolve_runtime_sportec_reuse_cache(args, cache_dir)
+
+        self.assertEqual(reuse_cache_dir, cache_dir)
+        self.assertIsNone(reason)
+
+    def test_runtime_sportec_metadata_records_implicit_reuse_skip_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_root = root / "feature"
+            graph_dir = feature_root / "action_graphs"
+            label_dir = feature_root / "labels"
+            cache_dir = root / "runtime" / "sportec" / "physical_xpass"
+            feature_cache_dir = feature_root / "physical_xpass"
+            feature_cache_dir.mkdir(parents=True)
+            (feature_cache_dir / "metadata.json").write_text(
+                json.dumps({"source": PHYSICAL_XPASS_LEGACY_SOURCE}),
+                encoding="utf-8",
+            )
+            args = generate_physical_xpass.parse_args(["--match-id", "m1"])
+
+            with patch.object(generate_physical_xpass, "resolve_feature_run_id", return_value="feature_run"):
+                with patch.object(generate_physical_xpass, "resolve_feature_root", return_value=feature_root):
+                    with patch.object(generate_physical_xpass, "get_action_graph_dir", return_value=graph_dir):
+                        with patch.object(generate_physical_xpass, "resolve_reference_label_dir", return_value=label_dir):
+                            with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=cache_dir):
+                                with patch.object(generate_physical_xpass, "get_physical_xpass_dir", return_value=feature_cache_dir):
+                                    with patch.object(generate_physical_xpass, "resolve_match_ids", return_value=[]):
+                                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata") as metadata_mock:
+                                            with patch("builtins.print"):
+                                                generate_physical_xpass.run_runtime_sportec(args)
+
+        metadata_mock.assert_called_once()
+        source_inputs = metadata_mock.call_args.kwargs["source_inputs"]
+        self.assertEqual(source_inputs["implicit_reuse_cache_dir"], str(feature_cache_dir))
+        self.assertIsNone(source_inputs["reuse_cache_dir"])
+        self.assertIn("incompatible source", source_inputs["implicit_reuse_cache_skipped_reason"])
 
     def test_generate_physical_xpass_reuses_row_without_hash_and_skips_compute(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2437,6 +2790,13 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.num_workers, "auto")
         self.assertEqual(args.physical_batch_size, 16)
         self.assertEqual(args.worker_thread_limit, 1)
+        self.assertFalse(args.dry_run)
+
+    def test_generate_physical_xpass_cli_accepts_dry_run(self) -> None:
+        args = generate_physical_xpass.parse_args(["--dry-run", "--no-skillcorner"])
+
+        self.assertTrue(args.dry_run)
+        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["sportec", "benchmark", "hawkeye"])
 
     def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
         args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])

@@ -26,7 +26,9 @@ from models.utils import load_model, resolve_model_selection, validate_model_gra
 from physical_pass_model import (
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
+    load_runtime_physical_xpass_visualization_table,
     model_uses_physical_xpass,
+    physical_xpass_metric,
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
@@ -62,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
@@ -254,8 +257,24 @@ def render_situation(
             outcome_conceding_failure=component_frames["outcome_conceding_failure"],
         )
 
+    if bool(getattr(args, "show_physical_xpass", False)):
+        physical_frame_ids = (
+            [int(index) for index in component_frames["pass_success"].index.tolist()]
+            if component_frames.get("pass_success") is not None
+            else [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
+        )
+        component_frames["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
+            args.physical_cache_dir,
+            str(situation.match_id),
+            physical_frame_ids,
+            metric=physical_xpass_metric(args),
+        )
+
     frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
-    for component_name in rendered_components:
+    component_names = list(rendered_components)
+    if bool(getattr(args, "show_physical_xpass", False)):
+        component_names.append("physical_xpass")
+    for component_name in component_names:
         component_table = component_frames.get(component_name)
 
         def iter_component_images():
@@ -327,6 +346,8 @@ def main() -> None:
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("hawkeye"))
+    args.physical_cache_dir = physical_cache_dir
+    selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -398,7 +419,10 @@ def main() -> None:
         "rendered_situations": rendered_situations,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
+        "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
