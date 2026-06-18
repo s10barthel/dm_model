@@ -558,6 +558,79 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
     }
 
 
+def _runtime_unit_stats(stats: dict[str, Any], match_id: str) -> dict[str, Any]:
+    return dict((stats.get("matches", {}) or {}).get(str(match_id), {}))
+
+
+def _format_runtime_stats_line(prefix: str, stats: dict[str, Any]) -> str:
+    return (
+        f"{prefix}: rows={int(stats.get('rows_scanned', 0) or 0)} "
+        f"passes={int(stats.get('pass_rows', 0) or 0)} "
+        f"hits={int(stats.get('cache_hits', 0) or 0)} "
+        f"misses={int(stats.get('cache_misses', 0) or 0)} "
+        f"written={int(stats.get('cache_written', 0) or 0)} "
+        f"copied={int(stats.get('copied_from_reuse', 0) or 0)} "
+        f"pass_distance_filled={int(stats.get('pass_distance_filled', 0) or 0)} "
+        f"skipped_all_nan={int(stats.get('skipped_all_nan', 0) or 0)}"
+    )
+
+
+def _runtime_stats_has_work(stats: dict[str, Any]) -> bool:
+    return any(
+        int(stats.get(key, 0) or 0) > 0
+        for key in [
+            "rows_scanned",
+            "pass_rows",
+            "cache_hits",
+            "cache_misses",
+            "cache_written",
+            "copied_from_reuse",
+            "pass_distance_filled",
+            "skipped_all_nan",
+        ]
+    )
+
+
+def _skip_reason_label(reason: Any) -> str:
+    text = str(reason)
+    if "incompatible" in text:
+        return "incompatible_cache"
+    if "missing" in text:
+        return "missing_input"
+    if "empty" in text or "no pass" in text.lower():
+        return "empty_or_no_pass_rows"
+    if ":" in text:
+        return text.split(":", 1)[0]
+    return text or "unknown"
+
+
+def _flatten_skip_reasons(skipped: Any) -> list[str]:
+    if not skipped:
+        return []
+    if isinstance(skipped, dict):
+        reasons: list[str] = []
+        for value in skipped.values():
+            if isinstance(value, dict):
+                reasons.extend(_flatten_skip_reasons(value))
+            elif isinstance(value, list):
+                if value:
+                    reasons.append("discovery")
+            else:
+                reasons.append(_skip_reason_label(value))
+        return reasons
+    return [_skip_reason_label(skipped)]
+
+
+def summarize_skip_reasons(skipped: Any) -> str:
+    reasons = _flatten_skip_reasons(skipped)
+    if not reasons:
+        return "none"
+    counts: dict[str, int] = {}
+    for reason in reasons:
+        counts[reason] = counts.get(reason, 0) + 1
+    return ", ".join(f"{reason}={count}" for reason, count in sorted(counts.items()))
+
+
 def prewarm_runtime_items(
     items: list[dict[str, Any]],
     *,
@@ -805,15 +878,8 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             )
             for pending_match_id in pending_match_ids:
-                match_stats = (stats.get("matches", {}) or {}).get(str(pending_match_id), {})
-                print(
-                    f"sportec {pending_match_id}: hits={int(match_stats.get('cache_hits', 0) or 0)} "
-                    f"misses={int(match_stats.get('cache_misses', 0) or 0)} "
-                    f"written={int(match_stats.get('cache_written', 0) or 0)} "
-                    f"copied={int(match_stats.get('copied_from_reuse', 0) or 0)} "
-                    f"pass_distance_filled={int(match_stats.get('pass_distance_filled', 0) or 0)} "
-                    f"skipped_all_nan={int(match_stats.get('skipped_all_nan', 0) or 0)}"
-                )
+                match_stats = _runtime_unit_stats(stats, str(pending_match_id))
+                tqdm.write(_format_runtime_stats_line(f"sportec match {pending_match_id}", match_stats))
         except Exception as exc:
             for pending_match_id in pending_match_ids:
                 skipped[str(pending_match_id)] = f"{type(exc).__name__}: {exc}"
@@ -821,7 +887,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
             pending_items = []
             pending_match_ids = []
 
-    for match_id in tqdm(resolve_match_ids(args, graph_dir), desc="sportec runtime"):
+    for match_id in tqdm(resolve_match_ids(args, graph_dir), desc="sportec runtime", unit="matches"):
         graph_path = graph_dir / f"{match_id}.pt"
         label_path = label_dir / f"{match_id}.pt"
         if not graph_path.exists() or not label_path.exists():
@@ -868,7 +934,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         requested_modifications=args.benchmark_modification,
         limit=args.benchmark_limit,
     )
-    for modification_id in tqdm(selected, desc="benchmark runtime"):
+    for modification_id in tqdm(selected, desc="benchmark runtime", unit="modifications"):
         try:
             data = load_benchmark_modification_data(int(modification_id), args.benchmark_input_dir)
             states = [
@@ -878,17 +944,23 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             items: list[dict[str, Any]] = []
             for state in states:
                 items.extend(runtime_cache_items_from_graphs(str(state.match_id), state.graph_features_0, state.labels))
-            merge_stats(
-                stats,
-                prewarm_runtime_items(
-                    items,
-                    cache_dir=cache_dir,
-                    args=args,
-                    progress_desc=f"benchmark {modification_id}",
-                ),
+            unit_stats = prewarm_runtime_items(
+                items,
+                cache_dir=cache_dir,
+                args=args,
+                progress_desc=f"benchmark modification {modification_id}",
             )
+            merge_stats(stats, unit_stats)
+            if unit_stats:
+                tqdm.write(
+                    _format_runtime_stats_line(
+                        f"benchmark modification {modification_id}",
+                        unit_stats,
+                    )
+                )
         except Exception as exc:
             skipped[str(modification_id)] = f"{type(exc).__name__}: {exc}"
+            tqdm.write(f"benchmark modification {modification_id}: skipped={_skip_reason_label(skipped[str(modification_id)])}")
     write_runtime_dataset_metadata(
         "benchmark",
         cache_dir,
@@ -907,7 +979,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.hawkeye_tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.hawkeye_ball_csv))
     situation_ids = resolve_situation_ids(tracking, requested_ids=args.hawkeye_situation_id, limit=args.hawkeye_limit)
-    for situation_id in tqdm(situation_ids, desc="hawkeye runtime"):
+    for situation_id in tqdm(situation_ids, desc="hawkeye runtime", unit="situations"):
         try:
             situation_tracking = tracking.loc[tracking["id"] == situation_id].copy()
             situation = build_hawkeye_situation(
@@ -915,17 +987,20 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 ball,
                 freeze_ballreceipt=args.freeze_ballreceipt,
             )[0]
-            merge_stats(
-                stats,
-                prewarm_runtime_items(
-                    runtime_cache_items_from_graphs(str(situation.match_id), situation.graph_features_0, situation.labels),
-                    cache_dir=cache_dir,
-                    args=args,
-                    progress_desc=f"hawkeye {situation_id}",
-                ),
+            unit_stats = prewarm_runtime_items(
+                runtime_cache_items_from_graphs(str(situation.match_id), situation.graph_features_0, situation.labels),
+                cache_dir=cache_dir,
+                args=args,
+                progress_desc=f"hawkeye situation {situation_id}",
             )
+            merge_stats(stats, unit_stats)
+            if unit_stats:
+                tqdm.write(_format_runtime_stats_line(f"hawkeye situation {situation_id}", unit_stats))
+            else:
+                tqdm.write(f"hawkeye situation {situation_id}: rows=0 passes=0 hits=0 misses=0 written=0 skipped_all_nan=0")
         except Exception as exc:
             skipped[str(situation_id)] = f"{type(exc).__name__}: {exc}"
+            tqdm.write(f"hawkeye situation {situation_id}: skipped={_skip_reason_label(skipped[str(situation_id)])}")
     write_runtime_dataset_metadata(
         "hawkeye",
         cache_dir,
@@ -946,30 +1021,55 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
         requested_match_ids=args.skillcorner_match_id,
         limit=args.skillcorner_limit,
     )
-    for match_id in tqdm(selected, desc="skillcorner runtime"):
+    for match_id in tqdm(selected, desc="skillcorner matches", unit="matches"):
         try:
             context = build_skillcorner_match_context(str(match_id), args.skillcorner_input_dir)
             events = context["events"]
-            for event_index in events["index"].astype(int).tolist():
+            match_before = dict(stats)
+            event_ids = events["index"].astype(int).tolist()
+            event_skipped = 0
+            for event_index in tqdm(event_ids, desc=f"skillcorner {match_id} events", unit="events", leave=False):
                 try:
                     possession, _stats = build_skillcorner_possession(
                         context,
                         int(event_index),
                         frames_mode=args.skillcorner_frames_mode,
                     )
-                    merge_stats(
-                        stats,
-                        prewarm_runtime_items(
-                            runtime_cache_items_from_graphs(str(possession.match_id), possession.graph_features_0, possession.labels),
-                            cache_dir=cache_dir,
-                            args=args,
-                            progress_desc=f"skillcorner {match_id}:{event_index}",
-                        ),
+                    unit_stats = prewarm_runtime_items(
+                        runtime_cache_items_from_graphs(str(possession.match_id), possession.graph_features_0, possession.labels),
+                        cache_dir=cache_dir,
+                        args=args,
+                        progress_desc=f"skillcorner {match_id}:{event_index}",
                     )
+                    merge_stats(stats, unit_stats)
+                    if unit_stats and _runtime_stats_has_work(unit_stats):
+                        tqdm.write(_format_runtime_stats_line(f"skillcorner {match_id}:{event_index}", unit_stats))
                 except Exception as exc:
                     skipped[f"{match_id}:{event_index}"] = f"{type(exc).__name__}: {exc}"
+                    event_skipped += 1
+                    tqdm.write(f"skillcorner {match_id}:{event_index}: skipped={_skip_reason_label(skipped[f'{match_id}:{event_index}'])}")
+            match_delta = {
+                key: int(stats.get(key, 0) or 0) - int(match_before.get(key, 0) or 0)
+                for key in [
+                    "rows_scanned",
+                    "pass_rows",
+                    "cache_hits",
+                    "cache_misses",
+                    "cache_written",
+                    "copied_from_reuse",
+                    "pass_distance_filled",
+                    "skipped_all_nan",
+                ]
+            }
+            tqdm.write(
+                _format_runtime_stats_line(
+                    f"skillcorner match {match_id} events={len(event_ids)} skipped_events={event_skipped}",
+                    match_delta,
+                )
+            )
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
+            tqdm.write(f"skillcorner match {match_id}: skipped={_skip_reason_label(skipped[str(match_id)])}")
     write_runtime_dataset_metadata(
         "skillcorner",
         cache_dir,
@@ -1017,7 +1117,8 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
             f"  {summary['dataset']}: {summary['cache_dir']} | "
             f"hits={int(stats.get('cache_hits', 0))}, misses={int(stats.get('cache_misses', 0))}, "
             f"written={int(stats.get('cache_written', 0))}, filled_distance={int(stats.get('pass_distance_filled', 0))}, "
-            f"skipped={len(summary.get('skipped') or {})}"
+            f"skipped={len(_flatten_skip_reasons(summary.get('skipped') or {}))}, "
+            f"skip_reasons={summarize_skip_reasons(summary.get('skipped') or {})}"
         )
 
 

@@ -2884,6 +2884,45 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(args.dry_run)
         self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["sportec", "benchmark", "hawkeye"])
 
+    def test_generate_physical_xpass_runtime_status_line_includes_core_counts(self) -> None:
+        line = generate_physical_xpass._format_runtime_stats_line(
+            "hawkeye situation s1",
+            {
+                "rows_scanned": 12,
+                "pass_rows": 3,
+                "cache_hits": 1,
+                "cache_misses": 2,
+                "cache_written": 2,
+                "copied_from_reuse": 0,
+                "pass_distance_filled": 1,
+                "skipped_all_nan": 0,
+            },
+        )
+
+        self.assertIn("hawkeye situation s1", line)
+        self.assertIn("rows=12", line)
+        self.assertIn("passes=3", line)
+        self.assertIn("hits=1", line)
+        self.assertIn("misses=2", line)
+        self.assertIn("written=2", line)
+        self.assertIn("pass_distance_filled=1", line)
+        self.assertIn("skipped_all_nan=0", line)
+
+    def test_generate_physical_xpass_skip_reason_summary_groups_common_errors(self) -> None:
+        skipped = {
+            "hawkeye": {
+                "s1": "ValueError: Physical xPass sidecars use incompatible speed_aggregation",
+                "s2": "FileNotFoundError: missing input",
+            },
+            "skillcorner": {"processing": {"m1:7": "RuntimeError: no pass rows"}},
+        }
+
+        summary = generate_physical_xpass.summarize_skip_reasons(skipped)
+
+        self.assertIn("empty_or_no_pass_rows=1", summary)
+        self.assertIn("incompatible_cache=1", summary)
+        self.assertIn("missing_input=1", summary)
+
     def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
         args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])
 
