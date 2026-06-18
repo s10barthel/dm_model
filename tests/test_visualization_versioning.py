@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,8 @@ from unittest.mock import patch
 import pandas as pd
 from PIL import Image
 
+import project_config
+from scripts import run_relevant_models
 from scripts import run_and_visualize_hawkeye
 from scripts import visualize_action_components
 from scripts import visualize_benchmark
@@ -120,6 +123,22 @@ def success_intent_record(model_id: str = "success_intent/selected", feature_run
 
 
 class VisualizationVersioningTests(unittest.TestCase):
+    def test_sportec_defaults_use_dataset_subfolders(self) -> None:
+        self.assertEqual(
+            project_config.COMPONENT_LATEST_PATH,
+            project_config.SPORTEC_COMPONENT_RUNS_DIR / "latest.json",
+        )
+        self.assertEqual(
+            project_config.get_component_run_root("component_1"),
+            project_config.SPORTEC_COMPONENT_RUNS_DIR / "component_1",
+        )
+        self.assertEqual(
+            visualize_action_components.parse_args(["--match-id", "DFL-MAT-1"]).output_dir,
+            str(project_config.SPORTEC_VISUALIZATION_DIR),
+        )
+        with patch.object(sys, "argv", ["run_relevant_models.py"]):
+            self.assertIsNone(run_relevant_models.parse_args().output_dir)
+
     def test_resolve_action_indices_first_limits_eligible_modeled_events(self) -> None:
         match = make_selection_match()
         args = make_selection_args(first=2, spadl_type=["pass"])
@@ -525,15 +544,15 @@ class VisualizationVersioningTests(unittest.TestCase):
                 component_run_id=None,
                 component_dir=None,
                 show_trajectories=False,
-                gif=False,
+                output="png",
+                time_norm=[0.0],
+                show_physical_xpass=False,
+                physical_cache_dir=None,
+                max_xpass=False,
+                top10mean_xpass=False,
                 run_id=None,
                 output_dir=str(root),
             )
-
-            def fake_save_animation(_images: object, output_path: str | Path, **_kwargs: object) -> None:
-                path = Path(output_path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("video", encoding="utf-8")
 
             with (
                 patch.object(visualize_hawkeye, "parse_args", return_value=args),
@@ -558,25 +577,41 @@ class VisualizationVersioningTests(unittest.TestCase):
                 ),
                 patch.object(visualize_hawkeye, "resolve_hawkeye_component_situation_ids", return_value=["sit1"]),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
-                patch.object(visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame({"id": ["sit1"]})),
+                patch.object(
+                    visualize_hawkeye,
+                    "clean_hawkeye_tracking",
+                    return_value=pd.DataFrame({"id": ["sit1"], "BallReceipt": [10.0]}),
+                ),
                 patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(
                     visualize_hawkeye,
                     "build_hawkeye_situation",
-                    return_value=(SimpleNamespace(frame_meta=pd.DataFrame(index=[0])), None, None),
+                    return_value=(
+                        SimpleNamespace(
+                            situation_id="sit1",
+                            match_id="sit1",
+                            frame_meta=pd.DataFrame({"abs_time": [10.0]}, index=[0]),
+                        ),
+                        None,
+                        None,
+                    ),
                 ),
                 patch.object(visualize_hawkeye, "build_hawkeye_component_tables", return_value={}),
-                patch.object(visualize_hawkeye, "save_animation", side_effect=fake_save_animation),
+                patch.object(visualize_hawkeye, "_probs_for_component_frame", return_value=pd.Series(dtype=float)),
+                patch.object(visualize_hawkeye, "render_frame_image", return_value=Image.new("RGB", (10, 8), "white")),
             ):
                 visualize_hawkeye.main()
 
             output_root = root / "hawkeye_visualization_generated"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            self.assertTrue((output_root / "sit1" / "pass_score.mp4").exists())
+            self.assertTrue((output_root / "sit1" / "pass_score_time_norm_0.png").exists())
+            self.assertFalse((output_root / "sit1" / "pass_score.mp4").exists())
             self.assertEqual(metadata["component_run_id"], "hawkeye_component_1")
             self.assertEqual(metadata["component_metadata_run_id"], "hawkeye_component_1")
             self.assertEqual(metadata["source_models"]["pass_success"], "pass_success/1")
+            self.assertEqual(metadata["output"], "png")
+            self.assertEqual(metadata["time_norm"], [0.0])
 
     def test_hawkeye_component_visualization_only_flag_limits_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -589,16 +624,16 @@ class VisualizationVersioningTests(unittest.TestCase):
                 component_run_id="hawkeye_component_1",
                 component_dir=None,
                 show_trajectories=False,
-                gif=False,
+                output="png",
+                time_norm=[0.0],
+                show_physical_xpass=False,
+                physical_cache_dir=None,
+                max_xpass=False,
+                top10mean_xpass=False,
                 only_pass_success=True,
                 run_id="hawkeye_visualization_only",
                 output_dir=str(root),
             )
-
-            def fake_save_animation(_images: object, output_path: str | Path, **_kwargs: object) -> None:
-                path = Path(output_path)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("video", encoding="utf-8")
 
             with (
                 patch.object(visualize_hawkeye, "parse_args", return_value=args),
@@ -615,23 +650,36 @@ class VisualizationVersioningTests(unittest.TestCase):
                 ),
                 patch.object(visualize_hawkeye, "resolve_hawkeye_component_situation_ids", return_value=["sit1"]),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
-                patch.object(visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame({"id": ["sit1"]})),
+                patch.object(
+                    visualize_hawkeye,
+                    "clean_hawkeye_tracking",
+                    return_value=pd.DataFrame({"id": ["sit1"], "BallReceipt": [10.0]}),
+                ),
                 patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(
                     visualize_hawkeye,
                     "build_hawkeye_situation",
-                    return_value=(SimpleNamespace(frame_meta=pd.DataFrame(index=[0])), None, None),
+                    return_value=(
+                        SimpleNamespace(
+                            situation_id="sit1",
+                            match_id="sit1",
+                            frame_meta=pd.DataFrame({"abs_time": [10.0]}, index=[0]),
+                        ),
+                        None,
+                        None,
+                    ),
                 ),
                 patch.object(visualize_hawkeye, "build_hawkeye_component_tables", return_value={}),
-                patch.object(visualize_hawkeye, "save_animation", side_effect=fake_save_animation),
+                patch.object(visualize_hawkeye, "_probs_for_component_frame", return_value=pd.Series(dtype=float)),
+                patch.object(visualize_hawkeye, "render_frame_image", return_value=Image.new("RGB", (10, 8), "white")),
             ):
                 visualize_hawkeye.main()
 
             output_root = root / "hawkeye_visualization_only"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            self.assertTrue((output_root / "sit1" / "pass_success.mp4").exists())
-            self.assertFalse((output_root / "sit1" / "pass_score.mp4").exists())
+            self.assertTrue((output_root / "sit1" / "pass_success_time_norm_0.png").exists())
+            self.assertFalse((output_root / "sit1" / "pass_score_time_norm_0.png").exists())
             self.assertEqual(metadata["requested_component_groups"], ["pass_success"])
             self.assertEqual(metadata["rendered_components"], ["pass_success"])
             self.assertIn("pass_score", metadata["disabled_components"])
@@ -648,6 +696,10 @@ class VisualizationVersioningTests(unittest.TestCase):
                 run_id="benchmark_visualization_explicit",
                 output_dir=str(root),
                 show_trajectories=False,
+                show_physical_xpass=False,
+                physical_cache_dir=None,
+                max_xpass=False,
+                top10mean_xpass=False,
             )
 
             with (
@@ -706,6 +758,68 @@ class VisualizationVersioningTests(unittest.TestCase):
         self.assertEqual(combined.getpixel((0, 0)), (255, 0, 0))
         self.assertEqual(combined.getpixel((0, 3)), (0, 0, 255))
 
+    def test_hawkeye_time_norm_resolves_nearest_ballreceipt_relative_frames(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="sit1",
+            frame_meta=pd.DataFrame({"abs_time": [9.8, 10.0, 10.6, 11.0]}, index=[0, 1, 2, 3]),
+        )
+
+        selected = visualize_hawkeye.resolve_hawkeye_png_frames(situation, ballreceipt=10.0, time_norms=[0.0, 1.0])
+
+        self.assertEqual(
+            selected,
+            [
+                {
+                    "label": "time_norm_0",
+                    "requested_time_norm": 0.0,
+                    "frame_id": 1,
+                    "resolved_time_norm": 0.0,
+                    "abs_time": 10.0,
+                },
+                {
+                    "label": "time_norm_1",
+                    "requested_time_norm": 1.0,
+                    "frame_id": 3,
+                    "resolved_time_norm": 1.0,
+                    "abs_time": 11.0,
+                },
+            ],
+        )
+
+    def test_hawkeye_parse_args_rejects_time_norm_for_animations(self) -> None:
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--output", "mp4", "--time-norm", "0"])
+
+        with self.assertRaises(SystemExit):
+            run_and_visualize_hawkeye.parse_args(["--situation-id", "sit1", "--output", "gif", "--time-norm", "0"])
+
+    def test_skillcorner_png_frame_selection_defaults_to_first_and_last(self) -> None:
+        args = SimpleNamespace(only_first=False, only_last=False)
+
+        selected = visualize_skillcorner.resolve_skillcorner_png_frames([10, 20, 30], args)
+
+        self.assertEqual(selected, [{"label": "first", "frame_id": 10}, {"label": "last", "frame_id": 30}])
+
+    def test_skillcorner_png_frame_selection_can_select_one_endpoint(self) -> None:
+        only_first = SimpleNamespace(only_first=True, only_last=False)
+        only_last = SimpleNamespace(only_first=False, only_last=True)
+
+        self.assertEqual(
+            visualize_skillcorner.resolve_skillcorner_png_frames([10, 20, 30], only_first),
+            [{"label": "first", "frame_id": 10}],
+        )
+        self.assertEqual(
+            visualize_skillcorner.resolve_skillcorner_png_frames([10, 20, 30], only_last),
+            [{"label": "last", "frame_id": 30}],
+        )
+
+    def test_skillcorner_parse_args_rejects_invalid_png_endpoint_flags(self) -> None:
+        with self.assertRaises(SystemExit):
+            visualize_skillcorner.parse_args(["--match-id", "m1", "--index", "3", "--only-first", "--only-last"])
+
+        with self.assertRaises(SystemExit):
+            visualize_skillcorner.parse_args(["--match-id", "m1", "--index", "3", "--output", "mp4", "--only-first"])
+
     def test_skillcorner_visualization_records_component_id_and_possession_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -718,7 +832,13 @@ class VisualizationVersioningTests(unittest.TestCase):
                 run_id="skillcorner_visualization_explicit",
                 output_dir=str(root),
                 show_trajectories=False,
-                gif=True,
+                output="png",
+                only_first=False,
+                only_last=False,
+                show_physical_xpass=False,
+                physical_cache_dir=None,
+                max_xpass=False,
+                top10mean_xpass=False,
             )
 
             def fake_render_possession(
@@ -728,12 +848,19 @@ class VisualizationVersioningTests(unittest.TestCase):
                 possession_index: int,
                 output_root: Path,
                 rendered_components: list[str],
-            ) -> Path:
-                del context, component_tables, rendered_components
+                physical_cache_dir: str | Path | None = None,
+                physical_xpass_metric_name: str | None = None,
+            ) -> tuple[Path, dict[str, object]]:
+                del context, component_tables, rendered_components, physical_cache_dir, physical_xpass_metric_name
                 output_dir = output_root / args.match_id / str(possession_index)
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "pass_score.gif").write_text("gif", encoding="utf-8")
-                return output_dir
+                output_path = output_dir / "pass_score_first.png"
+                output_path.write_text("image", encoding="utf-8")
+                return output_dir, {
+                    "frame_ids": [10, 20],
+                    "selected_frames": [{"label": "first", "frame_id": 10}],
+                    "output_paths": [str(output_path.resolve())],
+                }
 
             with (
                 patch.object(visualize_skillcorner, "parse_args", return_value=args),
@@ -756,9 +883,11 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             output_root = root / "skillcorner_visualization_explicit"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            self.assertTrue((output_root / "match1" / "3" / "pass_score.gif").exists())
+            self.assertTrue((output_root / "match1" / "3" / "pass_score_first.png").exists())
             self.assertEqual(metadata["component_run_id"], "skillcorner_component_1")
             self.assertEqual(metadata["rendered_possessions"][0]["index"], 3)
+            self.assertEqual(metadata["rendered_possessions"][0]["selected_frames"], [{"label": "first", "frame_id": 10}])
+            self.assertEqual(metadata["output"], "png")
             self.assertEqual(metadata["source_models"]["pass_intent"], "pass_intent/1")
 
     def test_direct_hawkeye_visualization_records_model_ids(self) -> None:
@@ -772,13 +901,24 @@ class VisualizationVersioningTests(unittest.TestCase):
                 freeze_ballreceipt=True,
                 device="cpu",
                 show_trajectories=False,
-                gif=True,
+                output="png",
+                time_norm=[0.0],
                 bundle_id=None,
                 action_intent_model_id="action_intent/1",
                 pass_intent_model_id="pass_intent/1",
                 pass_success_model_id="pass_success/1",
                 outcome_scoring_model_id="outcome_scoring/1",
                 outcome_conceding_model_id="outcome_conceding/1",
+                show_physical_xpass=False,
+                use_physical_xpass=False,
+                max_xpass=False,
+                top10mean_xpass=False,
+                physical_cache_dir=None,
+                no_physical_cache=False,
+                refresh_physical_cache=False,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
                 run_id="hawkeye_visualization_direct",
                 output_dir=str(root),
             )
@@ -793,12 +933,17 @@ class VisualizationVersioningTests(unittest.TestCase):
                 device: str,
                 output_root: Path,
                 rendered_components: list[str],
-            ) -> Path:
+            ) -> tuple[Path, dict[str, object], dict[str, object]]:
                 del tracking, ball, model_specs, graph_schema, args, device, rendered_components
                 output_dir = output_root / situation_id
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "pass_score.gif").write_text("gif", encoding="utf-8")
-                return output_dir, {}
+                output_path = output_dir / "pass_score_time_norm_0.png"
+                output_path.write_text("image", encoding="utf-8")
+                return output_dir, {}, {
+                    "frame_ids": [0],
+                    "selected_frames": [{"label": "time_norm_0", "frame_id": 0}],
+                    "output_paths": [str(output_path.resolve())],
+                }
 
             with (
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
@@ -822,7 +967,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                         None,
                     ),
                 ),
-                patch.object(run_and_visualize_hawkeye, "load_model", return_value=SimpleNamespace()),
+                patch.object(run_and_visualize_hawkeye, "load_model", return_value=SimpleNamespace(args={})),
                 patch.object(
                     run_and_visualize_hawkeye,
                     "validate_model_graph_schemas",
@@ -834,9 +979,10 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             output_root = root / "hawkeye_visualization_direct"
             metadata = json.loads((output_root / "metadata.json").read_text(encoding="utf-8"))
-            self.assertTrue((output_root / "sit1" / "pass_score.gif").exists())
+            self.assertTrue((output_root / "sit1" / "pass_score_time_norm_0.png").exists())
             self.assertEqual(metadata["model_ids"]["pass_success"], "pass_success/1")
             self.assertEqual(metadata["rendered_situation_ids"], ["sit1"])
+            self.assertEqual(metadata["output"], "png")
 
     def test_direct_hawkeye_only_outcome_scoring_loads_only_selected_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -849,7 +995,8 @@ class VisualizationVersioningTests(unittest.TestCase):
                 freeze_ballreceipt=True,
                 device="cpu",
                 show_trajectories=False,
-                gif=False,
+                output="mp4",
+                time_norm=None,
                 bundle_id=None,
                 action_intent_model_id="action_intent/1",
                 pass_intent_model_id="pass_intent/1",
@@ -857,6 +1004,16 @@ class VisualizationVersioningTests(unittest.TestCase):
                 outcome_scoring_model_id="outcome_scoring/1",
                 outcome_conceding_model_id="outcome_conceding/1",
                 only_outcome_scoring=True,
+                show_physical_xpass=False,
+                use_physical_xpass=False,
+                max_xpass=False,
+                top10mean_xpass=False,
+                physical_cache_dir=None,
+                no_physical_cache=False,
+                refresh_physical_cache=False,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
                 run_id="hawkeye_visualization_only_scoring",
                 output_dir=str(root),
             )
@@ -880,14 +1037,19 @@ class VisualizationVersioningTests(unittest.TestCase):
                 device: str,
                 output_root: Path,
                 rendered_components: list[str],
-            ) -> Path:
+            ) -> tuple[Path, dict[str, object], dict[str, object]]:
                 del tracking, ball, graph_schema, args, device
                 self.assertEqual(list(model_specs), ["outcome_scoring"])
                 self.assertEqual(rendered_components, ["outcome_scoring_success", "outcome_scoring_failure"])
                 output_dir = output_root / situation_id
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "outcome_scoring_success.mp4").write_text("video", encoding="utf-8")
-                return output_dir, {}
+                output_path = output_dir / "outcome_scoring_success.mp4"
+                output_path.write_text("video", encoding="utf-8")
+                return output_dir, {}, {
+                    "frame_ids": [0],
+                    "selected_frames": [],
+                    "output_paths": [str(output_path.resolve())],
+                }
 
             with (
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
@@ -925,13 +1087,24 @@ class VisualizationVersioningTests(unittest.TestCase):
             freeze_ballreceipt=True,
             device="cpu",
             show_trajectories=False,
-            gif=False,
+            output="png",
+            time_norm=[0.0],
             action_intent_model_id="action_intent/1",
             pass_intent_model_id="pass_intent/1",
             pass_success_model_id="pass_success/1",
             outcome_scoring_model_id="outcome_scoring/1",
             outcome_conceding_model_id="outcome_conceding/1",
             only_pass_score=True,
+            show_physical_xpass=False,
+            use_physical_xpass=False,
+            max_xpass=False,
+            top10mean_xpass=False,
+            physical_cache_dir=None,
+            no_physical_cache=False,
+            refresh_physical_cache=False,
+            physical_num_workers="auto",
+            physical_worker_thread_limit=1,
+            physical_batch_size=16,
             run_id="bad",
             output_dir="out",
         )

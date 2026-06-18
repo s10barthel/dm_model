@@ -42,9 +42,15 @@ from project_config import (
     write_run_metadata,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
+from scripts.visualize_hawkeye import (
+    output_mode,
+    requested_time_norms,
+    resolve_ballreceipt,
+    resolve_hawkeye_png_frames,
+)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--situation-id",
@@ -65,7 +71,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
-    parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
+    parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
+    parser.add_argument(
+        "--time-norm",
+        "--time_norm",
+        dest="time_norm",
+        action="append",
+        type=float,
+        help="BallReceipt-relative Hawkeye frame time to export in PNG mode. Repeat to export multiple frames.",
+    )
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -85,7 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.output != "png" and args.time_norm is not None:
+        parser.error("--time-norm is only valid with --output png.")
+    if args.output == "png" and args.time_norm is None:
+        args.time_norm = [0.0]
     try:
         resolve_physical_num_workers(args.physical_num_workers)
     except ValueError as exc:
@@ -179,7 +197,7 @@ def render_situation(
     device: str,
     output_root: Path,
     rendered_components: list[str],
-) -> tuple[Path, dict[str, object]]:
+) -> tuple[Path, dict[str, object], dict[str, object]]:
     output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     situation_tracking = tracking.loc[tracking["id"] == str(situation_id)].copy()
@@ -274,25 +292,56 @@ def render_situation(
     component_names = list(rendered_components)
     if bool(getattr(args, "show_physical_xpass", False)):
         component_names.append("physical_xpass")
-    for component_name in component_names:
-        component_table = component_frames.get(component_name)
+    selected_output_mode = output_mode(args)
+    output_paths: list[str] = []
+    selected_frames: list[dict[str, object]] = []
 
-        def iter_component_images():
-            for frame_id in frame_ids:
+    if selected_output_mode == "png":
+        selected_frames = resolve_hawkeye_png_frames(
+            situation,
+            resolve_ballreceipt(situation_tracking),
+            requested_time_norms(args),
+        )
+        for component_name in component_names:
+            component_table = component_frames.get(component_name)
+            for frame_selection in selected_frames:
+                frame_id = int(frame_selection["frame_id"])
                 frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
-                yield render_frame_image(
+                image = render_frame_image(
                     situation,
                     frame_id,
                     component_name,
                     frame_probs,
                     show_trajectories=args.show_trajectories,
                 )
+                output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
+                image.save(output_path)
+                output_paths.append(str(output_path.resolve()))
+    else:
+        for component_name in component_names:
+            component_table = component_frames.get(component_name)
 
-        suffix = "gif" if args.gif else "mp4"
-        output_path = output_dir / f"{component_name}.{suffix}"
-        save_animation(iter_component_images(), output_path, fps=25.0, gif=args.gif)
+            def iter_component_images():
+                for frame_id in frame_ids:
+                    frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
+                    yield render_frame_image(
+                        situation,
+                        frame_id,
+                        component_name,
+                        frame_probs,
+                        show_trajectories=args.show_trajectories,
+                    )
 
-    return output_dir, getattr(situation, "physical_xpass_runtime_stats", {})
+            output_path = output_dir / f"{component_name}.{selected_output_mode}"
+            save_animation(iter_component_images(), output_path, fps=25.0, gif=selected_output_mode == "gif")
+            output_paths.append(str(output_path.resolve()))
+
+    render_info = {
+        "frame_ids": frame_ids,
+        "selected_frames": selected_frames,
+        "output_paths": output_paths,
+    }
+    return output_dir, getattr(situation, "physical_xpass_runtime_stats", {}), render_info
 
 
 def main() -> None:
@@ -367,8 +416,9 @@ def main() -> None:
     output_dirs: list[Path] = []
     rendered_situations: list[dict[str, object]] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    selected_output_mode = output_mode(args)
     for situation_id in situation_ids:
-        output_dir, runtime_physical_stats = render_situation(
+        output_dir, runtime_physical_stats, render_info = render_situation(
             situation_id=situation_id,
             tracking=tracking,
             ball=ball,
@@ -385,11 +435,13 @@ def main() -> None:
         rendered_situations.append(
             {
                 "situation_id": str(situation_id),
+                "frame_ids": render_info["frame_ids"],
+                "selected_frames": render_info["selected_frames"],
                 "output_dir": str(output_dir.resolve()),
-                "output_paths": [str(path.resolve()) for path in sorted(output_dir.glob("*")) if path.is_file()],
+                "output_paths": render_info["output_paths"],
             }
         )
-        print(f"Saved Hawkeye animations to {output_dir}")
+        print(f"Saved Hawkeye {selected_output_mode} visualizations to {output_dir}")
 
     metadata = {
         "run_id": visualization_run_id,
@@ -428,7 +480,8 @@ def main() -> None:
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
         "ball_csv": str(Path(args.ball_csv).resolve()),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
-        "gif": bool(args.gif),
+        "output": selected_output_mode,
+        "time_norm": requested_time_norms(args) if selected_output_mode == "png" else [],
         "show_trajectories": bool(args.show_trajectories),
         "graph_schema": graph_schema,
     }
@@ -445,7 +498,7 @@ def main() -> None:
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     metadata_path = write_run_metadata(output_root, metadata)
-    print(f"Saved Hawkeye animations for {len(output_dirs)} situation(s).")
+    print(f"Saved Hawkeye {selected_output_mode} visualizations for {len(output_dirs)} situation(s).")
     print(f"Hawkeye visualization run id: {visualization_run_id}")
     print(f"Hawkeye visualization metadata: {metadata_path}")
     print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))

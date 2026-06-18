@@ -43,7 +43,7 @@ from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODES,
-    VISUALIZATION_DIR,
+    SPORTEC_VISUALIZATION_DIR,
     generate_run_id,
     get_action_graph_dir,
     get_runtime_physical_xpass_dir,
@@ -122,7 +122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     add_component_selection_args(parser, include_intended_recipient=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
-    parser.add_argument("--output-dir", default=str(VISUALIZATION_DIR))
+    parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
     args = parser.parse_args(argv)
     if args.first is not None and args.first < 1:
         parser.error("--first must be positive.")

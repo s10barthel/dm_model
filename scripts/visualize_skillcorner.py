@@ -40,7 +40,7 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
@@ -61,8 +61,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created SkillCorner visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SKILLCORNER_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
-    parser.add_argument("--gif", action="store_true", help="Save GIFs instead of the default MP4 animations.")
-    return parser.parse_args()
+    parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
+    parser.add_argument("--only-first", action="store_true", help="In PNG mode, render only the first possession frame.")
+    parser.add_argument("--only-last", action="store_true", help="In PNG mode, render only the last possession frame.")
+    args = parser.parse_args(argv)
+    if args.output != "png" and (args.only_first or args.only_last):
+        parser.error("--only-first/--only-last are only valid with --output png.")
+    if args.only_first and args.only_last:
+        parser.error("--only-first and --only-last cannot be combined.")
+    return args
 
 
 def resolve_indices(args: argparse.Namespace) -> list[int]:
@@ -178,6 +185,22 @@ def _probs_for_component_frame(
     return build_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
 
+def output_mode(args: argparse.Namespace) -> str:
+    return str(getattr(args, "output", "gif" if getattr(args, "gif", False) else "png"))
+
+
+def resolve_skillcorner_png_frames(frame_ids: list[int], args: argparse.Namespace) -> list[dict[str, object]]:
+    if not frame_ids:
+        return []
+    first_frame = int(frame_ids[0])
+    last_frame = int(frame_ids[-1])
+    if bool(getattr(args, "only_last", False)):
+        return [{"label": "last", "frame_id": last_frame}]
+    if bool(getattr(args, "only_first", False)) or first_frame == last_frame:
+        return [{"label": "first", "frame_id": first_frame}]
+    return [{"label": "first", "frame_id": first_frame}, {"label": "last", "frame_id": last_frame}]
+
+
 def render_possession(
     args: argparse.Namespace,
     context,
@@ -187,7 +210,7 @@ def render_possession(
     rendered_components: list[str],
     physical_cache_dir: str | Path | None = None,
     physical_xpass_metric_name: str | None = None,
-) -> Path:
+) -> tuple[Path, dict[str, object]]:
     output_dir = output_root / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
     possession, _ = build_skillcorner_possession(context, possession_index)
@@ -219,23 +242,47 @@ def render_possession(
             metric=physical_xpass_metric_name,
         )
 
-    for component_name in component_names:
-        def iter_component_images():
-            for frame_id in frame_ids:
+    selected_output_mode = output_mode(args)
+    output_paths: list[str] = []
+    selected_frames: list[dict[str, object]] = []
+    if selected_output_mode == "png":
+        selected_frames = resolve_skillcorner_png_frames(frame_ids, args)
+        for component_name in component_names:
+            for frame_selection in selected_frames:
+                frame_id = int(frame_selection["frame_id"])
                 probs = _probs_for_component_frame(component_name, possession_component_tables, frame_id)
-                yield render_frame_image(
+                image = render_frame_image(
                     possession,
                     frame_id,
                     component_name,
                     probs,
                     show_trajectories=args.show_trajectories,
                 )
+                output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
+                image.save(output_path)
+                output_paths.append(str(output_path.resolve()))
+    else:
+        for component_name in component_names:
+            def iter_component_images():
+                for frame_id in frame_ids:
+                    probs = _probs_for_component_frame(component_name, possession_component_tables, frame_id)
+                    yield render_frame_image(
+                        possession,
+                        frame_id,
+                        component_name,
+                        probs,
+                        show_trajectories=args.show_trajectories,
+                    )
 
-        suffix = "gif" if args.gif else "mp4"
-        output_path = output_dir / f"{component_name}.{suffix}"
-        save_animation(iter_component_images(), output_path, fps=float(possession.fps), gif=args.gif)
+            output_path = output_dir / f"{component_name}.{selected_output_mode}"
+            save_animation(iter_component_images(), output_path, fps=float(possession.fps), gif=selected_output_mode == "gif")
+            output_paths.append(str(output_path.resolve()))
 
-    return output_dir
+    return output_dir, {
+        "frame_ids": frame_ids,
+        "selected_frames": selected_frames,
+        "output_paths": output_paths,
+    }
 
 
 def main() -> None:
@@ -265,8 +312,9 @@ def main() -> None:
 
     output_dirs: list[Path] = []
     rendered_possessions: list[dict[str, object]] = []
+    selected_output_mode = output_mode(args)
     for possession_index in resolve_indices(args):
-        output_dir = render_possession(
+        output_dir, render_info = render_possession(
             args=args,
             context=context,
             component_tables=component_tables,
@@ -281,11 +329,13 @@ def main() -> None:
             {
                 "match_id": str(args.match_id),
                 "index": int(possession_index),
+                "frame_ids": render_info["frame_ids"],
+                "selected_frames": render_info["selected_frames"],
                 "output_dir": str(output_dir.resolve()),
-                "output_paths": [str(path.resolve()) for path in sorted(output_dir.glob("*")) if path.is_file()],
+                "output_paths": render_info["output_paths"],
             }
         )
-        print(f"Saved SkillCorner animations to {output_dir}")
+        print(f"Saved SkillCorner {selected_output_mode} visualizations to {output_dir}")
 
     metadata = {
         "run_id": visualization_run_id,
@@ -302,7 +352,9 @@ def main() -> None:
         "requested_indices": [int(value) for value in (args.index or [])],
         "rendered_possessions": rendered_possessions,
         "input_dir": str(Path(args.input_dir).resolve()),
-        "gif": bool(args.gif),
+        "output": selected_output_mode,
+        "only_first": bool(getattr(args, "only_first", False)),
+        "only_last": bool(getattr(args, "only_last", False)),
         "show_trajectories": bool(args.show_trajectories),
         "source_models": component_metadata.get("models", {}),
         "requested_component_groups": component_selection.requested_component_groups,
@@ -315,7 +367,7 @@ def main() -> None:
         "disabled_components": component_selection.disabled_components,
     }
     metadata_path = write_run_metadata(output_root, metadata)
-    print(f"Saved SkillCorner animations for {len(output_dirs)} possession(s).")
+    print(f"Saved SkillCorner {selected_output_mode} visualizations for {len(output_dirs)} possession(s).")
     print(f"SkillCorner visualization run id: {visualization_run_id}")
     print(f"SkillCorner visualization metadata: {metadata_path}")
 
