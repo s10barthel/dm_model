@@ -20,6 +20,7 @@ from datatools import config
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from dataset import ActionDataset, pass_success_observed_target_invalid_reason
 import inference
+import project_config
 from models.gnn import Decoder
 from models import utils as model_utils
 from models.utils import run_epoch
@@ -2397,7 +2398,7 @@ class PhysicalXPassTests(unittest.TestCase):
             feature_root = root / "feature"
             graph_dir = feature_root / "action_graphs"
             label_dir = feature_root / "labels"
-            cache_dir = root / "runtime" / "sportec" / "physical_xpass"
+            cache_dir = root / "runtime" / "sportec"
             feature_cache_dir = feature_root / "physical_xpass"
             feature_cache_dir.mkdir(parents=True)
             (feature_cache_dir / "metadata.json").write_text(
@@ -2422,6 +2423,19 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(source_inputs["implicit_reuse_cache_dir"], str(feature_cache_dir))
         self.assertIsNone(source_inputs["reuse_cache_dir"])
         self.assertIn("incompatible source", source_inputs["implicit_reuse_cache_skipped_reason"])
+
+    def test_runtime_physical_xpass_dir_points_directly_to_dataset_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            self.assertEqual(
+                project_config.get_runtime_physical_xpass_dir("sportec", root=root),
+                root / "sportec",
+            )
+            self.assertEqual(
+                project_config.get_runtime_physical_xpass_dir("benchmark", root=root),
+                root / "benchmark",
+            )
 
     def test_generate_physical_xpass_reuses_row_without_hash_and_skips_compute(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

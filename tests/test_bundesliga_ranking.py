@@ -6,6 +6,7 @@ import sys
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -30,6 +31,26 @@ STATE_FRAMES = {
     (1, ranking.FRAME_ID_SCOPE): 30,
     (1, ranking.RECEIVE_FRAME_ID_SCOPE): 40,
 }
+
+
+def test_default_component_runs_dir_points_to_sportec_subfolder() -> None:
+    assert ranking.COMPONENT_RUNS_DIR == PROJECT_ROOT / "data" / "component_runs" / "sportec"
+    assert "sportec" in ranking.SPECIAL_COMPONENT_DIRS
+
+
+def test_component_run_discovery_ignores_dataset_subfolders() -> None:
+    with workspace_temp_dir("component_roots") as root:
+        (root / "sportec").mkdir()
+        (root / "hawkeye").mkdir()
+        run_root = root / "component_1"
+        run_root.mkdir()
+        args = SimpleNamespace(
+            component_run_root=None,
+            component_run_id=None,
+            component_runs_dir=root,
+        )
+
+        assert ranking.resolve_component_run_root(args) == run_root
 
 
 @contextmanager

@@ -33,10 +33,10 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 from project_config import (
-    COMPONENT_RUNS_DIR,
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODES,
+    SPORTEC_COMPONENT_RUNS_DIR,
     generate_run_id,
     get_action_graph_dir,
     get_post_action_graph_dir,
@@ -485,7 +485,7 @@ def main() -> None:
         require_target_family=False,
     )
     component_run_id = args.run_id or generate_run_id("component")
-    output_parent = Path(args.output_dir) if args.output_dir else COMPONENT_RUNS_DIR
+    output_parent = Path(args.output_dir) if args.output_dir else SPORTEC_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
 
     model_specs = {
@@ -732,7 +732,7 @@ def main() -> None:
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     write_run_metadata(output_dir, metadata)
 
-    if output_parent.resolve() == COMPONENT_RUNS_DIR.resolve():
+    if output_parent.resolve() == SPORTEC_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("component", component_run_id)
     print(f"Component run id: {component_run_id}")
     print(f"Saved component predictions to {output_dir}")

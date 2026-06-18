@@ -17,7 +17,7 @@ OUTPUT_DIR = RANKING_ROOT / "output"
 
 LINEUP_PATH = PROJECT_ROOT / "data" / "lineup" / "line_up.parquet"
 EVENT_SYNCED_DIR = PROJECT_ROOT / "data" / "event_synced"
-COMPONENT_RUNS_DIR = PROJECT_ROOT / "data" / "component_runs"
+COMPONENT_RUNS_DIR = PROJECT_ROOT / "data" / "component_runs" / "sportec"
 COMPONENT_LATEST_PATH = COMPONENT_RUNS_DIR / "latest.json"
 FC25_RATINGS_PATH = OUTPUT_DIR / "fc25_ratings.csv"
 DEFAULT_MINUTES_PLAYED_CACHE_DIR = RANKING_ROOT / "minutes_played"
@@ -49,7 +49,7 @@ REQUIRED_SCOPED_COMPONENTS = [
 OPTIONAL_COMPONENTS = ["success_intent"]
 IGNORED_COMPONENT_COLUMNS = {"home_goal", "away_goal"}
 PASS_ACTION_TYPES = {"pass", "cross"}
-SPECIAL_COMPONENT_DIRS = {"benchmark", "hawkeye", "skillcorner"}
+SPECIAL_COMPONENT_DIRS = {"benchmark", "hawkeye", "skillcorner", "sportec"}
 MATCHES_FILENAME = "bundesliga_matches.csv"
 ACTION_METRIC_COLUMNS = [
     "pass_score",

@@ -40,18 +40,20 @@ MODEL_BUNDLES_DIR = SAVED_DIR / "bundles"
 COMPONENT_DIR = DATA_ROOT / "defcon_components"
 FEATURE_RUNS_DIR = FEATURE_DIR / "runs"
 COMPONENT_RUNS_DIR = DATA_ROOT / "component_runs"
+SPORTEC_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "sportec"
 HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
 BENCHMARK_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "benchmark"
 SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
 RUNTIME_PHYSICAL_XPASS_DIR = DATA_ROOT / "runtime_physical_xpass"
 VISUALIZATION_DIR = DATA_ROOT / "visualizations"
+SPORTEC_VISUALIZATION_DIR = VISUALIZATION_DIR / "sportec"
 HAWKEYE_VISUALIZATION_DIR = VISUALIZATION_DIR / "hawkeye"
 BENCHMARK_VISUALIZATION_DIR = VISUALIZATION_DIR / "benchmark"
 SKILLCORNER_VISUALIZATION_DIR = VISUALIZATION_DIR / "skillcorner"
 SPLIT_DIR = DATA_ROOT / "splits"
 SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 FEATURE_LATEST_PATH = FEATURE_RUNS_DIR / "latest.json"
-COMPONENT_LATEST_PATH = COMPONENT_RUNS_DIR / "latest.json"
+COMPONENT_LATEST_PATH = SPORTEC_COMPONENT_RUNS_DIR / "latest.json"
 HAWKEYE_COMPONENT_LATEST_PATH = HAWKEYE_COMPONENT_RUNS_DIR / "latest.json"
 BENCHMARK_COMPONENT_LATEST_PATH = BENCHMARK_COMPONENT_RUNS_DIR / "latest.json"
 SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.json"
@@ -156,11 +158,13 @@ def ensure_project_dirs() -> None:
         EPV_MATCH_DIR,
         COMPONENT_DIR,
         COMPONENT_RUNS_DIR,
+        SPORTEC_COMPONENT_RUNS_DIR,
         HAWKEYE_COMPONENT_RUNS_DIR,
         BENCHMARK_COMPONENT_RUNS_DIR,
         SKILLCORNER_COMPONENT_RUNS_DIR,
         RUNTIME_PHYSICAL_XPASS_DIR,
         VISUALIZATION_DIR,
+        SPORTEC_VISUALIZATION_DIR,
         HAWKEYE_VISUALIZATION_DIR,
         BENCHMARK_VISUALIZATION_DIR,
         SKILLCORNER_VISUALIZATION_DIR,
@@ -317,7 +321,7 @@ def get_physical_xpass_match_path(match_id: str, root: Path | None = None) -> Pa
 
 def get_runtime_physical_xpass_dir(source: str, root: Path | None = None) -> Path:
     cache_root = Path(root) if root is not None else RUNTIME_PHYSICAL_XPASS_DIR
-    return cache_root / str(source) / PHYSICAL_XPASS_DIR_NAME
+    return cache_root / str(source)
 
 
 def get_feature_run_root(run_id: str) -> Path:
@@ -325,7 +329,7 @@ def get_feature_run_root(run_id: str) -> Path:
 
 
 def get_component_run_root(run_id: str) -> Path:
-    return COMPONENT_RUNS_DIR / str(run_id)
+    return SPORTEC_COMPONENT_RUNS_DIR / str(run_id)
 
 
 def get_hawkeye_component_run_root(run_id: str) -> Path:

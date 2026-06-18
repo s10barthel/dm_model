@@ -66,7 +66,7 @@ Notes:
 
 Builds the Bundesliga validation outputs by combining:
 - lineup and event data from `dm_model/data`
-- component run outputs from `dm_model/data/component_runs`
+- component run outputs from `dm_model/data/component_runs/sportec`
 - FC25 ratings from `output/fc25_ratings.csv`
 
 What it does:
@@ -115,11 +115,11 @@ Example with an explicit season prefix:
   - default: `DFL-MAT-J04`
   - filters lineup rows and match directories to one DFL season prefix
 - `--component-run-id`
-  - selects a specific component run id from `data/component_runs`
+  - selects a specific component run id from `data/component_runs/sportec`
 - `--component-run-root`
   - directly points to a specific component run folder
 - `--component-runs-dir`
-  - overrides the default `dm_model/data/component_runs`
+  - overrides the default `dm_model/data/component_runs/sportec`
 - `--event-synced-dir`
   - overrides the default `dm_model/data/event_synced`
 - `--lineup-path`
@@ -165,7 +165,7 @@ Use the season prefix that exists in your current lineup and component-run data.
 - `bundesliga_ranking.py` expects access to:
   - `dm_model/data/lineup/line_up.parquet`
   - `dm_model/data/event_synced/`
-  - `dm_model/data/component_runs/`
+  - `dm_model/data/component_runs/sportec/`
   - `Bundesliga_season_23_24/` and/or `Bundesliga_season_24_25/` for `minutes_played`
 - `fc25_ratings.csv` must exist before running `bundesliga_ranking.py`
 - the default season prefix in the script may need to be overridden if your current data uses a different DFL prefix

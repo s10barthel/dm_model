@@ -106,8 +106,8 @@ After preprocessing, the project writes DEFCON-style files under `data`:
 - `lineup/line_up.parquet`
 - `features/runs/<feature_run_id>/...`
 - `features/runs/latest.json`
-- `component_runs/<component_run_id>/...`
-- `component_runs/latest.json`
+- `component_runs/sportec/<component_run_id>/...`
+- `component_runs/sportec/latest.json`
 - `component_runs/hawkeye/<component_run_id>/...`
 - `component_runs/benchmark/<component_run_id>/...`
 - `component_runs/skillcorner/<component_run_id>/...`
@@ -122,11 +122,11 @@ The main output directories are:
 - `data/goal_distance` for goal-distance exports
 - `data/epv` for model-derived EPV exports
 - `data/features/runs/<feature_run_id>` for versioned graph tensors and label tensors used by training/evaluation
-- `data/component_runs/<component_run_id>` for versioned per-match component prediction exports from `scripts/run_relevant_models.py`
+- `data/component_runs/sportec/<component_run_id>` for versioned per-match component prediction exports from `scripts/run_relevant_models.py`
 - `data/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
 - `data/component_runs/benchmark/<component_run_id>` for versioned benchmark exports
 - `data/component_runs/skillcorner/<component_run_id>` for versioned SkillCorner exports
-- `data/visualizations/<visualization_run_id>` and visualization subfamilies for versioned rendered outputs and metadata
+- `data/visualizations/sportec/<visualization_run_id>` and visualization subfamilies for versioned rendered outputs and metadata
 - `saved/<task>/<model_run_id>` for trained checkpoint runs
 - `saved/bundles/<bundle_id>` for machine-readable training bundle manifests
 
@@ -136,13 +136,13 @@ There are now four different versioned artifact families:
 
 - `feature_run_id` for generated Sportec graph/label artifacts under `data/features/runs/...`
 - `model_id = <task>/<model_run_id>` for trained checkpoints under `saved/<task>/...`
-- `component_run_id` for exported predictions under `data/component_runs/...`
-- `visualization_run_id` for rendered plots/animations under `data/visualizations/...`
+- `component_run_id` for exported Sportec predictions under `data/component_runs/sportec/...`
+- `visualization_run_id` for rendered Sportec plots under `data/visualizations/sportec/...`
 
 Feature and component runs use explicit `latest.json` pointers:
 
 - `data/features/runs/latest.json`
-- `data/component_runs/latest.json`
+- `data/component_runs/sportec/latest.json`
 - `data/component_runs/hawkeye/latest.json`
 - `data/component_runs/benchmark/latest.json`
 - `data/component_runs/skillcorner/latest.json`
@@ -170,15 +170,15 @@ The feature run root mirrors the old flat layout, but inside one dedicated run f
 
 The component run root contains one folder per processed match:
 
-- `data/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
-- `data/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
-- optionally `data/component_runs/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is provided
-- `data/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
-- `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
-- `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
-- `data/component_runs/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
-- `data/component_runs/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
-- `data/component_runs/<component_run_id>/metadata.json`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/action_intent.parquet`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/pass_intent.parquet`
+- optionally `data/component_runs/sportec/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is provided
+- `data/component_runs/sportec/<component_run_id>/<match_id>/pass_success.parquet`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
+- `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
+- `data/component_runs/sportec/<component_run_id>/metadata.json`
 
 The external-data adapters follow the same pattern:
 
@@ -193,7 +193,7 @@ The external-data adapters follow the same pattern:
 
 Visualization run roots contain rendered media plus `metadata.json`:
 
-- `data/visualizations/<visualization_run_id>/metadata.json`
+- `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 - `data/visualizations/benchmark/<visualization_run_id>/metadata.json`
 - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
@@ -560,7 +560,7 @@ Inputs:
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
-Each invocation creates a new component run under `data/component_runs/<component_run_id>/` and updates `data/component_runs/latest.json`.
+Each invocation creates a new component run under `data/component_runs/sportec/<component_run_id>/` and updates `data/component_runs/sportec/latest.json`.
 When a `success_intent` checkpoint is supplied explicitly or present in the selected bundle, each processed match also gets `success_intent.parquet`.
 
 Useful options:
@@ -595,16 +595,16 @@ Inputs:
 
 Outputs:
 
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
-- `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
 - optionally `intended_recipient.png` when a `success_intent` checkpoint is supplied
-- `data/visualizations/<visualization_run_id>/metadata.json`
+- `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 
 Useful options:
 
@@ -913,10 +913,10 @@ python scripts/generate_physical_xpass.py --no-sportec --benchmark-modification 
 
 Default runtime output locations:
 
-- `data/runtime_physical_xpass/sportec/physical_xpass`
-- `data/runtime_physical_xpass/skillcorner/physical_xpass`
-- `data/runtime_physical_xpass/benchmark/physical_xpass`
-- `data/runtime_physical_xpass/hawkeye/physical_xpass`
+- `data/runtime_physical_xpass/sportec`
+- `data/runtime_physical_xpass/skillcorner`
+- `data/runtime_physical_xpass/benchmark`
+- `data/runtime_physical_xpass/hawkeye`
 
 If `--feature-run-id` is specified, the script falls back to the original Sportec feature-run sidecar mode:
 
@@ -964,7 +964,7 @@ pass_success = (1 - w) * physical_xpass + w * pass_success_model
 w = min(pass_distance / 100, 1.0)
 ```
 
-This inference blend works with normal pass-success checkpoints and can also be combined with old physical-xpass-trained checkpoints, although that double-counts physical xPass. Sportec inference uses `data/runtime_physical_xpass/sportec/physical_xpass` by default, while Benchmark, HawkEye, and SkillCorner keep their source-specific runtime cache directories. Inference reads physical xPass caches only; it does not compute or prewarm missing rows. If cache metadata, match rows, state hashes, or required `pass_distance` values are missing/unusable, the affected pass rows are skipped and reported.
+This inference blend works with normal pass-success checkpoints and can also be combined with old physical-xpass-trained checkpoints, although that double-counts physical xPass. Sportec inference uses `data/runtime_physical_xpass/sportec` by default, while Benchmark, HawkEye, and SkillCorner keep their source-specific runtime cache directories. Inference reads physical xPass caches only; it does not compute or prewarm missing rows. If cache metadata, match rows, state hashes, or required `pass_distance` values are missing/unusable, the affected pass rows are skipped and reported.
 
 Train pass success with the recommended default:
 
@@ -1126,7 +1126,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
-- default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>/physical_xpass`.
+- default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>`.
 - `--feature-run-id <feature_run_id>`: enable legacy Sportec feature-run sidecar mode under `data/features/runs/<feature_run_id>/physical_xpass`.
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
 - `--match-id <id>`: restrict Sportec matches. Default: all matches in the selected split.
@@ -1210,7 +1210,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
-- `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs`.
+- `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs/sportec`.
 
 ### `scripts/run_hawkeye.py`
 
@@ -1229,7 +1229,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/component_runs/hawkeye`.
-- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye/physical_xpass`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
 - `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
 - `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
@@ -1250,7 +1250,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/component_runs/benchmark`.
-- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark/physical_xpass`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
 - `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
 - `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
@@ -1272,7 +1272,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/component_runs/skillcorner`.
-- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner/physical_xpass`.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
 - `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
 - `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
@@ -1301,7 +1301,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
-- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations`.
+- `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/sportec`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `intended-recipient`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_hawkeye.py`
@@ -1312,7 +1312,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--component-run-id <component_run_id>`: versioned Hawkeye component run to visualize. Default: latest successful Hawkeye component run.
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+- `--output {png,mp4,gif}`: visualization format. Default: `png`.
+- `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
@@ -1339,7 +1340,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+- `--output {png,mp4,gif}`: visualization format. Default: `png`.
+- `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
 - `--bundle-id <bundle_id>`: preferred model bundle containing the enabled component checkpoints. Default: none.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id override. Default: none.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id override. Default: none.
@@ -1360,7 +1362,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <visualization_run_id>`: pin the created SkillCorner visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/skillcorner`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--gif`: write GIFs instead of MP4s. Default: off, so MP4s are written.
+- `--output {png,mp4,gif}`: visualization format. Default: `png`.
+- `--only-first`: in PNG mode, render only the first addressable possession frame. Default: off.
+- `--only-last`: in PNG mode, render only the last addressable possession frame. Default: off.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ## Script I/O Reference
@@ -1473,15 +1477,15 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - feature artifacts from the selected runtime feature run
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
-  - `data/component_runs/<component_run_id>/<match_id>/action_intent.parquet`
-  - `data/component_runs/<component_run_id>/<match_id>/pass_intent.parquet`
-  - optionally `data/component_runs/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is selected
-  - `data/component_runs/<component_run_id>/<match_id>/pass_success.parquet`
-  - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
-  - `data/component_runs/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
-  - `data/component_runs/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
-  - `data/component_runs/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
-  - `data/component_runs/<component_run_id>/metadata.json`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/action_intent.parquet`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/pass_intent.parquet`
+  - optionally `data/component_runs/sportec/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is selected
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/pass_success.parquet`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
+  - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_conceding_failure.parquet`
+  - `data/component_runs/sportec/<component_run_id>/metadata.json`
 
 ### `scripts/visualize_action_components.py`
 
@@ -1490,16 +1494,16 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/<match_id>.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
-  - `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
-  - optionally `data/visualizations/<visualization_run_id>/<match_id>/<action_id>/intended_recipient.png`
-  - `data/visualizations/<visualization_run_id>/metadata.json`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
+  - optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/intended_recipient.png`
+  - `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_hawkeye.py`
 
@@ -1520,8 +1524,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `hawkeye_data/centroid_data_team.csv`
   - `hawkeye_data/ball_data_selected.csv`
 - Outputs:
-  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.mp4`
-  - or `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.{png,mp4,gif}`
   - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_benchmark.py`
@@ -1555,8 +1558,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `hawkeye_data/ball_data_selected.csv`
   - `saved/<task>/<model_run_id>/...`
 - Outputs:
-  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.mp4`
-  - or `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.gif`
+  - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.{png,mp4,gif}`
   - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_skillcorner.py`
@@ -1584,6 +1586,5 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `skillcorner_data/<match_id>_match.json`
   - `skillcorner_data/<match_id>_dynamic_events.csv`
 - Outputs:
-  - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.mp4`
-  - or `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.gif`
+  - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.{png,mp4,gif}`
   - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
