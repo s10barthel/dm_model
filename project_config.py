@@ -460,6 +460,9 @@ def write_run_metadata(run_root: Path, payload: dict[str, Any]) -> Path:
     run_root.mkdir(parents=True, exist_ok=True)
     metadata_path = run_root / "metadata.json"
     metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    from datatools.metadata_summary import update_summary_for_run
+
+    update_summary_for_run(run_root)
     return metadata_path
 
 

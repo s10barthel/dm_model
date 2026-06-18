@@ -20,6 +20,7 @@ tests/*.py
 tests/AS_viz/
 !tests/test_success_intent_mode_independent.py
 !tests/test_benchmark_no_accel.py
+!tests/test_metadata_summary.py
 !tests/test_return_type_in_state.py
 !tests/test_graph_feature_regressions.py
 !tests/test_feature_run_extension.py
