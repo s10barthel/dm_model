@@ -30,6 +30,7 @@ def make_action_args(output_dir: Path) -> SimpleNamespace:
         action_id=[123],
         row_index=None,
         original_event_id=None,
+        first=None,
         player_id=None,
         object_id=None,
         advanced_position=None,
@@ -61,6 +62,47 @@ def make_action_args(output_dir: Path) -> SimpleNamespace:
     return args
 
 
+def make_selection_args(**overrides: object) -> SimpleNamespace:
+    args = SimpleNamespace(
+        match_id="DFL-MAT-1",
+        action_id=None,
+        row_index=None,
+        original_event_id=None,
+        first=None,
+        player_id=None,
+        object_id=None,
+        advanced_position=None,
+        team_id=None,
+        spadl_type=None,
+        success=None,
+        offside=None,
+        next_type=None,
+    )
+    for column in ("start_x", "start_y", "end_x", "end_y"):
+        setattr(args, f"{column}_lt", None)
+        setattr(args, f"{column}_gt", None)
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def make_selection_match() -> SimpleNamespace:
+    events = pd.DataFrame(
+        [
+            {"action_id": 10, "spadl_type": "pass", "success": True, "offside": False, "original_event_id": "e10"},
+            {"action_id": 11, "spadl_type": "pass", "success": True, "offside": False, "original_event_id": "e11"},
+            {"action_id": 12, "spadl_type": "pass", "success": False, "offside": False, "original_event_id": "e12"},
+            {"action_id": 13, "spadl_type": "pass", "success": True, "offside": False, "original_event_id": "e13"},
+            {"action_id": 14, "spadl_type": "pass", "success": True, "offside": False, "original_event_id": "e14"},
+        ],
+        index=[0, 1, 2, 3, 4],
+    )
+    for column in ("start_x", "start_y", "end_x", "end_y"):
+        events[column] = 0.0
+    actions = pd.DataFrame({"action_id": [10, 12, 13, 14]}, index=[0, 2, 3, 4])
+    return SimpleNamespace(match_id="DFL-MAT-1", events=events, actions=actions)
+
+
 def success_intent_record(model_id: str = "success_intent/selected", feature_run_id: str = "feature_success") -> dict[str, object]:
     return {
         "model_id": model_id,
@@ -78,6 +120,35 @@ def success_intent_record(model_id: str = "success_intent/selected", feature_run
 
 
 class VisualizationVersioningTests(unittest.TestCase):
+    def test_resolve_action_indices_first_limits_eligible_modeled_events(self) -> None:
+        match = make_selection_match()
+        args = make_selection_args(first=2, spadl_type=["pass"])
+
+        selected = visualize_action_components.resolve_action_indices(match, args)
+
+        self.assertEqual(selected, [(0, "10"), (2, "12")])
+
+    def test_resolve_action_indices_without_first_preserves_all_eligible_events(self) -> None:
+        match = make_selection_match()
+        args = make_selection_args(spadl_type=["pass"])
+
+        selected = visualize_action_components.resolve_action_indices(match, args)
+
+        self.assertEqual(selected, [(0, "10"), (2, "12"), (3, "13"), (4, "14")])
+
+    def test_parse_args_rejects_invalid_first_values(self) -> None:
+        with self.assertRaises(SystemExit):
+            visualize_action_components.parse_args(["--match-id", "DFL-MAT-1", "--first", "0"])
+
+        with self.assertRaises(SystemExit):
+            visualize_action_components.parse_args(["--match-id", "DFL-MAT-1", "--first", "-1"])
+
+    def test_parse_args_rejects_first_with_explicit_selectors(self) -> None:
+        with self.assertRaises(SystemExit):
+            visualize_action_components.parse_args(
+                ["--match-id", "DFL-MAT-1", "--first", "10", "--action-id", "123"]
+            )
+
     def test_action_visualization_writes_run_metadata_with_model_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

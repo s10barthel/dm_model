@@ -53,7 +53,7 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
@@ -72,6 +72,11 @@ def parse_args() -> argparse.Namespace:
         "--original-event-id",
         action="append",
         help="Original Sportec event id from the original_event_id column. Repeat to visualize multiple events.",
+    )
+    parser.add_argument(
+        "--first",
+        type=int,
+        help="Only visualize the first N eligible modeled events after filters. Incompatible with explicit selectors.",
     )
     parser.add_argument("--player-id", action="append", help="Filter by player_id. Repeat for OR within this column.")
     parser.add_argument("--object-id", action="append", help="Filter by object_id. Repeat for OR within this column.")
@@ -118,7 +123,11 @@ def parse_args() -> argparse.Namespace:
     add_component_selection_args(parser, include_intended_recipient=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(VISUALIZATION_DIR))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.first is not None and args.first < 1:
+        parser.error("--first must be positive.")
+    if args.first is not None and any([args.action_id, args.row_index, args.original_event_id]):
+        parser.error("--first cannot be combined with --action-id, --row-index, or --original-event-id.")
     try:
         resolve_physical_num_workers(args.physical_num_workers)
     except ValueError as exc:
@@ -401,6 +410,8 @@ def resolve_action_indices(match: Match, args: argparse.Namespace) -> list[tuple
             )
             continue
         selected.append((event_index, str(int(match.actions.at[event_index, "action_id"]))))
+        if getattr(args, "first", None) is not None and len(selected) >= int(args.first):
+            break
 
     return selected
 
@@ -837,6 +848,7 @@ def main() -> None:
         "requested_action_ids": [int(value) for value in (args.action_id or [])],
         "requested_row_indexes": [int(value) for value in (args.row_index or [])],
         "requested_original_event_ids": [str(value) for value in (args.original_event_id or [])],
+        "first": getattr(args, "first", None),
         "filters": selected_filter_metadata(args),
         "rendered_actions": rendered_actions,
         "skipped_actions": skipped_actions,

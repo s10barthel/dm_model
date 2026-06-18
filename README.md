@@ -581,6 +581,7 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --player-id DFL-OBJ-... --spadl-type pass --success false --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --start-x-gt 50 --end-x-lt 105 --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --first 100 --bundle-id <bundle_id>
 ```
 
 `--action-id` refers to the `action_id` column in `data/event_synced/<match_id>.csv`.
@@ -1284,6 +1285,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-id <action_id>`: CSV `action_id` from `data/event_synced/<match_id>.csv`. Default: one of the identifier options is required.
 - `--row-index <index>`: legacy modeled-action row index. Default: off.
 - `--original-event-id <id>`: raw Sportec event id lookup. Default: off.
+- `--first <N>`: visualize only the first `N` eligible modeled events after filters. Only valid when selecting by filters; incompatible with `--action-id`, `--row-index`, and `--original-event-id`.
 - `--player-id <id>`, `--object-id <id>`, `--advanced-position <value>`, `--team-id <id>`, `--spadl-type <value>`, `--success <true|false>`, `--offside <true|false>`, and `--next-type <value>`: filter rows from `data/event_synced/<match_id>.csv`; repeat a flag to OR values within that column. Example: `--spadl-type pass --success false` visualizes unsuccessful passes.
 - `--start-x-lt <n>`, `--start-x-gt <n>`, `--start-y-lt <n>`, `--start-y-gt <n>`, `--end-x-lt <n>`, `--end-x-gt <n>`, `--end-y-lt <n>`, and `--end-y-gt <n>`: strict coordinate filters. Different filter types are combined with AND logic.
 - `--device <device>`: inference device. Default: `cuda:0`.
