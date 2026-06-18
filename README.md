@@ -126,6 +126,7 @@ The main output directories are:
 - `data/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
 - `data/component_runs/benchmark/<component_run_id>` for versioned benchmark exports
 - `data/component_runs/skillcorner/<component_run_id>` for versioned SkillCorner exports
+- `data/runtime_physical_xpass/<dataset>` for runtime physical xPass caches used by inference and visualization
 - `data/visualizations/sportec/<visualization_run_id>` and visualization subfamilies for versioned rendered outputs and metadata
 - `saved/<task>/<model_run_id>` for trained checkpoint runs
 - `saved/bundles/<bundle_id>` for machine-readable training bundle manifests
@@ -549,6 +550,7 @@ Outputs:
 
 ```powershell
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id>
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --run-id component_20260414T123456_abcdef12
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
 python scripts/run_relevant_models.py --split test --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
@@ -570,11 +572,14 @@ Useful options:
 - `--run-id <component_run_id>` to pin the created component run id instead of auto-generating one
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
+- `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/sportec` first
+- `--max-xpass` or `--top10mean-xpass` to use an alternative cached xPass metric for the blend
 
 ### 7. Visualize action components
 
 ```powershell
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-outcome-scoring
@@ -615,6 +620,9 @@ Useful options:
 - `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
 - `--only-pass-score` also requires pass-success, outcome-scoring, and outcome-conceding to be selected, because pass score is derived from those components
 - `--show-trajectories` to render dashed recent player trajectories
+- `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
+- `--show-physical-xpass` to render the cached physical xPass metric itself
+- `--max-xpass` or `--top10mean-xpass` to use an alternative cached xPass metric for both blending and physical xPass rendering
 - `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
 - `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
@@ -624,6 +632,7 @@ Useful options:
 
 ```powershell
 python scripts/run_hawkeye.py --bundle-id <bundle_id>
+python scripts/run_hawkeye.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_hawkeye.py --bundle-id <bundle_id> --run-id hawkeye_component_20260414T123456_abcdef12
 ```
 
@@ -646,11 +655,14 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` situations
 - `--run-id <component_run_id>` to pin the created HawkEye export run id instead of auto-generating one
 - `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
+- `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/hawkeye` first
+- `--max-xpass` or `--top10mean-xpass` to use an alternative cached xPass metric for the blend
 
 To visualize one HawkEye situation as MP4s:
 
 ```powershell
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --show-physical-xpass
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --only-pass-success --only-outcome-scoring --only-outcome-conceding --only-pass-score
@@ -660,6 +672,7 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 
 ```powershell
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2> --bundle-id <bundle_id>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --only-outcome-scoring
@@ -669,6 +682,7 @@ python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle
 
 ```powershell
 python scripts/run_benchmark.py --bundle-id <bundle_id>
+python scripts/run_benchmark.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_benchmark.py --bundle-id <bundle_id> --modification 1
 python scripts/run_benchmark.py --bundle-id <bundle_id> --run-id benchmark_component_20260420T123456_abcdef12
 ```
@@ -693,11 +707,14 @@ Useful options:
 - `--modification ...` to restrict inference to selected benchmark modifications
 - `--limit N` to smoke-test on the first `N` selected modifications
 - `--run-id <component_run_id>` to pin the created benchmark export run id instead of auto-generating one
+- `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/benchmark` first
+- `--max-xpass` or `--top10mean-xpass` to use an alternative cached xPass metric for the blend
 
 To visualize one benchmark state as PNGs:
 
 ```powershell
 python scripts/visualize_benchmark.py --modification 1 --game-state 1
+python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --show-physical-xpass
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id>
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --run-id benchmark_visualization_20260420T123456_abcdef12
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --no-pass-intent --no-pass-score
@@ -709,6 +726,7 @@ Benchmark visualizations are written under `data/visualizations/benchmark/<visua
 
 ```powershell
 python scripts/run_skillcorner.py --bundle-id <bundle_id>
+python scripts/run_skillcorner.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_skillcorner.py --bundle-id <bundle_id> --run-id skillcorner_component_20260414T123456_abcdef12
 ```
 
@@ -730,11 +748,14 @@ Useful options:
 - `--match-id ...` to restrict inference to selected matches
 - `--limit N` to smoke-test on the first `N` selected matches
 - `--run-id <component_run_id>` to pin the created SkillCorner export run id instead of auto-generating one
+- `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/skillcorner` first
+- `--max-xpass` or `--top10mean-xpass` to use an alternative cached xPass metric for the blend
 
 To visualize one SkillCorner possession as MP4s:
 
 ```powershell
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index>
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --show-physical-xpass
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index_1> --index <player_possession_index_2>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id>
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --run-id skillcorner_visualization_20260414T123456_abcdef12
@@ -890,20 +911,9 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 
 ## physical_xpass_workflow
 
-Physical xPass adds a precompute-first pass-success signal from Jonas Bischofberger's `accessible-space` package. The stored signal is the maximum AS/DAS-default `simulation_result.player_cum_prob` for each candidate teammate:
+Physical xPass is now a precompute-first runtime signal from Jonas Bischofberger's `accessible-space` package. Generate the runtime caches once, then inference and visualization read those caches without running the expensive physical simulation.
 
-```text
-physical_xpass_p =
-    max over AS/DAS-default pass angles, speeds, and on-pitch ray distances
-    of player_cum_prob_p
-```
-
-This is no longer tied to the teammate's current location. It represents the best physically achievable player-level interception/reception opportunity from the current ball state, using the AS/DAS-style angle grid, speed grid, and on-pitch pass rays. It is stored as a sidecar under the feature run, not appended to the graph tensors:
-
-- `data/features/runs/<feature_run_id>/physical_xpass/metadata.json`
-- `data/features/runs/<feature_run_id>/physical_xpass/matches/<match_id>.parquet`
-
-Generate runtime inference caches once:
+Runtime mode is the default:
 
 ```powershell
 python scripts/generate_physical_xpass.py
@@ -918,6 +928,57 @@ Default runtime output locations:
 - `data/runtime_physical_xpass/benchmark`
 - `data/runtime_physical_xpass/hawkeye`
 
+The cached row contains `pass_distance`, the default robust physical xPass value in unsuffixed player-id columns, and comparison metrics:
+
+- `<player_id>`: default `noise_kernel_xpass`
+- `<player_id>__max_xpass`: original max-over-grid xPass
+- `<player_id>__top10mean_xpass`: mean of the top 10% finite grid values
+
+Current runtime defaults are `--consider-teammates`, `--speed-aggregation package_max`, speeds `3..22 m/s` in `1 m/s` steps, coarse angle search plus adaptive `2.5` degree local refinement, `--num-workers auto`, `--physical-batch-size 16`, and `--worker-thread-limit 1`. Runtime caches are updated in place and compatible existing rows are reused; old max-only runtime caches are incompatible and should be deleted or moved before regeneration.
+
+### Inference-time blending
+
+Use physical xPass at inference by adding `--use-physical-xpass` to the inference script. The pass-success model still runs normally, then each receiver probability is blended with cached physical xPass:
+
+```text
+pass_success = (1 - w) * physical_xpass + w * pass_success_model
+w = min(pass_distance / 100, 1.0)
+```
+
+Examples:
+
+```powershell
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --use-physical-xpass
+python scripts/run_hawkeye.py --bundle-id <bundle_id> --use-physical-xpass
+python scripts/run_benchmark.py --bundle-id <bundle_id> --use-physical-xpass
+python scripts/run_skillcorner.py --bundle-id <bundle_id> --use-physical-xpass
+```
+
+Metric selection applies only to inference-time physical xPass blending:
+
+- default: use noise-kernel xPass from unsuffixed player columns
+- `--max-xpass`: use `<player_id>__max_xpass`
+- `--top10mean-xpass` / `--top10mean_xpass`: use `<player_id>__top10mean_xpass`
+
+Inference reads physical xPass caches only. It does not compute or prewarm missing rows. If cache metadata, match rows, state hashes, selected metric columns, or required `pass_distance` values are missing/unusable, the affected pass rows are skipped and reported.
+
+### Visualization
+
+Use `--show-physical-xpass` to render the cached physical xPass surface/option values next to the model visualizations. Visualization scripts also read runtime caches only and fail clearly if the requested cache or metric is missing.
+
+```powershell
+python scripts/visualize_action_components.py --match-id <match_id> --action-id <action_id> --bundle-id <bundle_id> --show-physical-xpass
+python scripts/visualize_action_components.py --match-id <match_id> --action-id <action_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --show-physical-xpass
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --show-physical-xpass
+python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --show-physical-xpass
+```
+
+For scripts that both run inference and visualize (`visualize_action_components.py` and `run_and_visualize_hawkeye.py`), `--max-xpass` and `--top10mean-xpass` select the same physical metric for both inference blending and the physical xPass visualization.
+
+### Legacy training sidecars
+
 If `--feature-run-id` is specified, the script falls back to the original Sportec feature-run sidecar mode:
 
 ```powershell
@@ -929,59 +990,28 @@ python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --sp
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --reuse-cache-dir data/features/runs/<old_feature_run_id>/physical_xpass --overwrite
 ```
 
-The generator uses existing preprocessed graph data: `graph.node_ids`, player positions and velocities, teammate flags, and the possessor flag. No additional raw Sportec processing is needed. Each match parquet is wide: one row per pass action, with player-id columns holding max `player_cum_prob`; non-candidate players can be missing/NaN. Rows also include `pass_distance`, the observed passer-to-intended-receiver distance in meters.
+This legacy mode is for training-time physical-xPass checkpoints and remains independent from inference-time blending. Training-time sidecars are stored under:
 
-The current source is `accessible_space_max_player_cum_prob_as_defaults`. Old sidecars from the previous target-location source (`accessible_space_player_cum_prob`) are incompatible and must be regenerated:
+- `data/features/runs/<feature_run_id>/physical_xpass/metadata.json`
+- `data/features/runs/<feature_run_id>/physical_xpass/matches/<match_id>.parquet`
 
-```powershell
-python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite
-```
-
-By default, `--consider-teammates` includes all finite non-goal players in the AS-default max simulation. Use `--ignore-teammates` to compute each candidate with only the passer, the target teammate, and all defenders; in that reduced mode, the passer is present only so `accessible-space` can exclude it from interception competition. These two policies produce different sidecar semantics and are not interchangeable.
-
-Speed aggregation has two modes:
-
-- `--speed-aggregation package_max` is the default and fastest path. It passes the full AS/DAS speed grid, `3..30 m/s` with 15 speeds, into `accessible-space` in one call per compatible batch using `v0_prob_aggregation_mode="max"`.
-- `--speed-aggregation exact_separate_speed` preserves the older exact semantics by simulating each speed separately, then taking the max over speeds, angles, and on-pitch ray distances.
-- `--max-speed` / `--max_speed` keeps the existing AS/DAS speed grid but ignores grid values greater than the integer cap. For example, `--max-speed 20` uses only the default grid speeds `<= 20 m/s`; it does not create a new grid ending exactly at `20`.
-
-Before a full regeneration, compare the modes on a sample:
-
-```powershell
-python scripts/compare_physical_xpass_speed_modes.py --feature-run-id <feature_run_id> --limit 200 --num-workers auto
-```
-
-The report is written under `data/features/runs/<feature_run_id>/physical_xpass/comparisons/` and includes runtime, speedup, absolute-difference quantiles, correlations, and top-option agreement. If `package_max` differs too much for your use case, regenerate with `--speed-aggregation exact_separate_speed`.
-
-`--num-workers auto` resolves to 6 workers on a 16-logical-core machine. `--worker-thread-limit 1` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` per worker to avoid oversubscription. `--limit` is only allowed with `--num-workers 1`, so limited smoke tests stay deterministic.
-
-`--reuse-cache-dir` can copy compatible rows from an existing physical xPass cache and compute only missing or hash-mismatched actions. Reuse requires the same source, teammate policy, speed aggregation, AS-default parameters, and `physical_eps`. New rows include `physical_state_hash`; rows from compatible caches without a hash are reused under a trust-metadata policy and counted in metadata. Old target-location caches cannot be reused. In default runtime mode, Sportec cache generation can reuse compatible feature-run sidecars and fill missing `pass_distance`.
-
-At inference, `--use-physical-xpass` is an independent opt-in blend for `pass_success`. It keeps the model prediction, then applies:
-
-```text
-pass_success = (1 - w) * physical_xpass + w * pass_success_model
-w = min(pass_distance / 100, 1.0)
-```
-
-This inference blend works with normal pass-success checkpoints and can also be combined with old physical-xpass-trained checkpoints, although that double-counts physical xPass. Sportec inference uses `data/runtime_physical_xpass/sportec` by default, while Benchmark, HawkEye, and SkillCorner keep their source-specific runtime cache directories. Inference reads physical xPass caches only; it does not compute or prewarm missing rows. If cache metadata, match rows, state hashes, or required `pass_distance` values are missing/unusable, the affected pass rows are skipped and reported.
-
-Train pass success with the recommended default:
+Train pass success with training-time physical xPass only if you explicitly want the legacy physical-xPass model architecture:
 
 ```powershell
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type disc_0.5_skip1 --intended-receiver-mode angle_only --use_physical_xpass
 ```
 
-Only the `pass_success` low-level command receives physical xPass flags. Other models trained in the same wrapper run ignore them. If sidecars are missing during training or normal Sportec feature-run inference, the run fails loudly and tells you to run `scripts/generate_physical_xpass.py`.
+Only the `pass_success` low-level training command receives physical xPass flags. Other models trained in the same wrapper run ignore them. You can still combine such a checkpoint with inference-time `--use-physical-xpass`, but that double-counts physical xPass and is mainly useful for compatibility checks.
 
-Benchmark, HawkEye, and SkillCorner runtime states do not use the Sportec feature-run sidecars above. Generate their caches with `scripts/generate_physical_xpass.py` before inference. Old physical pass-success checkpoints keep using the legacy target-location source (`accessible_space_player_cum_prob`); new inference-time blending uses the AS-default max source (`accessible_space_max_player_cum_prob_as_defaults`). Cache metadata must match the expected source and speed aggregation.
+### Inference script xPass flags
 
-Physical xPass cache controls for inference scripts:
-
-- `--physical-cache-dir <path>`: override the runtime physical xPass cache directory.
-- `--no-physical-cache`: disable setting a runtime cache override. If physical xPass is still required, the model's default cache resolution applies.
-- `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
-- `--physical-num-workers <N|auto>`, `--physical-worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for compatibility; cache generation uses these controls.
+- `--use-physical-xpass`: enable inference-time pass-success blending from the runtime cache.
+- `--max-xpass`: use the max-xPass comparison columns instead of the default noise-kernel columns.
+- `--top10mean-xpass` / `--top10mean_xpass`: use the top-10%-mean comparison columns.
+- `--physical-cache-dir <path>`: override the runtime physical xPass cache directory; default is `data/runtime_physical_xpass/<dataset>`.
+- `--no-physical-cache`: disable the runtime cache override. Do not use this with inference-time blending unless you intentionally want cache lookup disabled.
+- `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
+- `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: retained for CLI compatibility/metadata, but inference no longer computes xPass rows.
 
 The main model variant is a prior-like logit offset:
 
@@ -991,9 +1021,9 @@ logit_final = beta0 + beta1 * logit(physical_xpass) + delta_gat
 
 `beta0` starts at `0.0`, `beta1` starts at `1.0`, and `delta_gat` is the residual correction learned by the GAT. This is not fully Bayesian updating, but it gives the physical model privileged baseline status: the GAT learns when observed data systematically correct that physical baseline.
 
-Physical flags:
+Training-time physical flags:
 
-- `--use_physical_xpass`: enable sidecar loading and physical pass-success integration.
+- `--use_physical_xpass`: enable legacy feature-run sidecar loading and training-time physical pass-success integration.
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the architecture. `gat_baseline` is unchanged; `gat_plus_phys_feature` concatenates `logit(physical_xpass)` as an ablation; `gat_phys_logit_offset` is the recommended offset model; `gat_phys_logit_offset_regularized` is the offset model with optional residual safeguards.
 - `--physical-cache-dir`: override the physical sidecar directory. By default it uses `<feature_run_root>/physical_xpass`.
 - `--physical-eps 1e-4`: clamp probabilities to `[eps, 1-eps]` before taking logits.
@@ -1042,13 +1072,7 @@ Tuning L2/clipping as ablations means training otherwise comparable runs where o
 
 `include_out=True` is not supported initially because `player_cum_prob` is player-indexed and has no natural out-of-play node. IPW remains active when configured: the final observed-target BCE is still weighted by `batch_ipw`.
 
-For visualization:
-
-```powershell
-python scripts/visualize_action_components.py --bundle-id <bundle_id> --match-id <match_id> --action-id <action_id> --show-physical-xpass
-```
-
-This renders `max_player_cum_prob.png` next to the other component plots. Use `--physical-cache-dir <path>` if the physical sidecars live outside the selected feature run.
+For visualization, use the runtime-cache `--show-physical-xpass` workflow described above. Visualization does not read legacy feature-run training sidecars by default.
 
 ## EPV Workflow
 
@@ -1138,8 +1162,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--overwrite`: legacy feature-run mode only. Runtime caches are updated in place.
 - `--reuse-cache-dir <path>`: reuse compatible Sportec rows from another `physical_xpass` directory and compute only misses. Reuse requires matching source, teammate policy, AS-default parameters, and `physical_eps`.
 - `--return-type <return_type>` and `--intended-receiver-mode <mode>`: optional reference label directory selectors. Defaults are inferred from the feature run.
-- `--physical-eps <eps>`: clamp stored max `player_cum_prob`. Default: `1e-4`.
+- `--physical-eps <eps>`: clamp stored physical xPass metric probabilities. Default: `1e-4`.
 - `--ignore-teammates` / `--consider-teammates`: choose reduced target-plus-defenders simulation or all-player simulation. Default: `--consider-teammates`.
+- `--max-speed <m/s>` / `--max_speed <m/s>`: upper speed-grid value. Default: `22`.
+- `--speed-step <m/s>`: speed-grid step from `3` to `--max-speed`. Default: `1`.
+- `--coarse-n-angles <N>`, `--refine-top-k-angles <N>`, `--refine-angle-radius <deg>`, `--angle-step <deg>`: adaptive angle search controls. Defaults: `36`, `2`, `10`, and `2.5`.
+- `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
 - `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 
 ### `scripts/generate_relevant_features.py`
@@ -1211,6 +1239,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs/sportec`.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean xPass columns for the blend. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
+- `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
+- `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
 
 ### `scripts/run_hawkeye.py`
 
@@ -1229,12 +1264,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/component_runs/hawkeye`.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean xPass columns for the blend. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
-- `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
-- `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
-- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
-- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
-- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
+- `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
+- `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
 
 ### `scripts/run_benchmark.py`
 
@@ -1250,12 +1286,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/component_runs/benchmark`.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean xPass columns for the blend. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
-- `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
-- `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
-- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
-- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
-- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
+- `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
+- `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
 
 ### `scripts/run_skillcorner.py`
 
@@ -1272,12 +1309,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/component_runs/skillcorner`.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean xPass columns for the blend. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
-- `--no-physical-cache`: disable setting the runtime physical xPass cache override. Default: off.
-- `--refresh-physical-cache`: deprecated for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches. Default: off.
-- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`: retained for compatibility; cache generation uses worker controls. Default: `auto`.
-- `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`: per-worker OMP/MKL/NUMEXPR thread limit. Default: `1`.
-- `--physical-batch-size <N>`: accessible-space batch size per worker. Default: `16`.
+- `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
+- `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
+- `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
 
 ### `scripts/visualize_action_components.py`
 
@@ -1292,8 +1330,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--show-physical-xpass`: render `max_player_cum_prob.png` from physical xPass sidecars. Default: off.
-- `--physical-cache-dir <path>`: physical xPass sidecar directory override for visualization.
+- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for both blending and xPass rendering. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean columns for both blending and xPass rendering. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override for inference/visualization. Default: `data/runtime_physical_xpass/sportec`.
+- `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; visualization does not compute xPass rows.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for intended-recipient overlays.
@@ -1316,6 +1358,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
+- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
+- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: render cached top-10%-mean xPass columns. Default: off.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_benchmark.py`
@@ -1328,6 +1374,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <visualization_run_id>`: pin the created benchmark visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/benchmark`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
+- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: render cached top-10%-mean xPass columns. Default: off.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/run_and_visualize_hawkeye.py`
@@ -1350,6 +1400,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id override. Default: none.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
+- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for both blending and xPass rendering. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: use cached top-10%-mean xPass columns for both blending and xPass rendering. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
+- `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; this script does not compute xPass rows.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/visualize_skillcorner.py`
@@ -1365,6 +1421,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--only-first`: in PNG mode, render only the first addressable possession frame. Default: off.
 - `--only-last`: in PNG mode, render only the last addressable possession frame. Default: off.
+- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
+- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: render cached top-10%-mean xPass columns. Default: off.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ## Script I/O Reference
