@@ -22,14 +22,7 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 from physical_pass_model import (
-    AS_DEFAULT_ANGLE_STEP_DEG,
-    AS_DEFAULT_COARSE_N_ANGLES,
-    AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
-    AS_DEFAULT_REFINE_TOP_K_ANGLES,
-    AS_DEFAULT_SPEED_STEP,
-    AS_DEFAULT_V0_MAX,
-    PHYSICAL_XPASS_DEFAULT_METRIC,
-    PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
     PHYSICAL_XPASS_PROB_ATTR,
@@ -41,11 +34,10 @@ from physical_pass_model import (
     inference_uses_physical_xpass,
     load_physical_xpass_match,
     model_uses_physical_xpass,
-    physical_state_hash,
     physical_xpass_floor,
+    physical_xpass_inference_lookup_config,
     physical_xpass_metric,
     physical_xpass_metric_column,
-    runtime_physical_xpass_speed_aggregation,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
@@ -218,12 +210,6 @@ def attach_physical_xpass_for_inference(
     labels: torch.Tensor,
     model: GNN,
 ) -> list[Data]:
-    source = physical_xpass_source(model.args)
-    speed_aggregation = (
-        runtime_physical_xpass_speed_aggregation(model.args)
-        if inference_uses_physical_xpass(model.args)
-        else physical_xpass_speed_aggregation(model.args)
-    )
     eps = float(model.args.get("physical_eps", 1e-4))
     floor = physical_xpass_floor(model.args)
     feature_root = _runtime_feature_root(match)
@@ -242,18 +228,22 @@ def attach_physical_xpass_for_inference(
         else:
             physical_cache_dir = str(get_physical_xpass_dir(feature_root))
 
+    use_inference_blend = inference_uses_physical_xpass(model.args)
+    lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=physical_cache_dir)
+    source = lookup_config["source"] if use_inference_blend else physical_xpass_source(model.args)
+    speed_aggregation = lookup_config["speed_aggregation"] if use_inference_blend else physical_xpass_speed_aggregation(model.args)
     validate_physical_xpass_cache_metadata(
         physical_cache_dir,
         expected_source=source,
         expected_speed_aggregation=speed_aggregation,
-        expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION if inference_uses_physical_xpass(model.args) else None,
-        expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC if inference_uses_physical_xpass(model.args) else None,
-        expected_max_speed=AS_DEFAULT_V0_MAX if inference_uses_physical_xpass(model.args) else None,
-        expected_speed_step=AS_DEFAULT_SPEED_STEP if inference_uses_physical_xpass(model.args) else None,
-        expected_coarse_n_angles=AS_DEFAULT_COARSE_N_ANGLES if inference_uses_physical_xpass(model.args) else None,
-        expected_refine_top_k_angles=AS_DEFAULT_REFINE_TOP_K_ANGLES if inference_uses_physical_xpass(model.args) else None,
-        expected_refine_angle_radius=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG if inference_uses_physical_xpass(model.args) else None,
-        expected_angle_step=AS_DEFAULT_ANGLE_STEP_DEG if inference_uses_physical_xpass(model.args) else None,
+        expected_metric_schema_version=lookup_config["metric_schema_version"] if use_inference_blend else None,
+        expected_default_metric=lookup_config["default_metric"] if use_inference_blend else None,
+        expected_max_speed=lookup_config["max_speed"] if use_inference_blend else None,
+        expected_speed_step=lookup_config["speed_step"] if use_inference_blend else None,
+        expected_coarse_n_angles=lookup_config["coarse_n_angles"] if use_inference_blend else None,
+        expected_refine_top_k_angles=lookup_config["refine_top_k_angles"] if use_inference_blend else None,
+        expected_refine_angle_radius=lookup_config["refine_angle_radius"] if use_inference_blend else None,
+        expected_angle_step=lookup_config["angle_step"] if use_inference_blend else None,
     )
     return attach_physical_xpass_read_only_to_graphs(
         graphs,
@@ -263,7 +253,8 @@ def attach_physical_xpass_for_inference(
         eps=eps,
         floor=floor,
         require_observed_target=False,
-        metric=physical_xpass_metric(model.args),
+        metric=lookup_config["metric"] if use_inference_blend else physical_xpass_metric(model.args),
+        missing_player_value=None if use_inference_blend else 0.5,
     )
 
 
@@ -325,12 +316,6 @@ def _physical_xpass_row_skip_reason(
     require_pass_distance: bool,
     metric: str | None = None,
 ) -> str | None:
-    cached_hash = row.get("physical_state_hash", None)
-    if pd.isna(cached_hash):
-        return "missing_physical_state_hash"
-    state_hash = physical_state_hash(graph)
-    if str(cached_hash) != state_hash:
-        return "physical_state_hash_mismatch"
     if require_pass_distance:
         if PHYSICAL_XPASS_PASS_DISTANCE_COLUMN not in row.index:
             return "missing_pass_distance"
@@ -343,8 +328,21 @@ def _physical_xpass_row_skip_reason(
     if metric is not None:
         node_ids = [str(node_id) for node_id in getattr(graph, "node_ids", [])]
         candidate_columns = [physical_xpass_metric_column(node_id, metric) for node_id in node_ids]
-        if not any(column in row.index and pd.notna(row.get(column)) for column in candidate_columns):
+        has_metric_column = any(column in row.index for column in candidate_columns)
+        if not has_metric_column:
             return f"missing_{metric}_columns"
+        has_finite_metric_value = False
+        for column in candidate_columns:
+            if column not in row.index:
+                continue
+            try:
+                if np.isfinite(float(row.get(column))):
+                    has_finite_metric_value = True
+                    break
+            except (TypeError, ValueError):
+                continue
+        if not has_finite_metric_value:
+            return f"no_finite_{metric}_values"
     return None
 
 
@@ -358,10 +356,12 @@ def filter_missing_physical_xpass_rows_for_inference(
         return graphs, labels
 
     use_inference_blend = inference_uses_physical_xpass(model.args)
-    metric = physical_xpass_metric(model.args) if use_inference_blend else None
-    source = physical_xpass_source(model.args)
-    speed_aggregation = runtime_physical_xpass_speed_aggregation(model.args) if use_inference_blend else physical_xpass_speed_aggregation(model.args)
     cache_dir = _physical_xpass_cache_dir_for_inference(match, model)
+    lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=cache_dir)
+    metric = lookup_config["metric"] if use_inference_blend else None
+    source = lookup_config["source"] if use_inference_blend else physical_xpass_source(model.args)
+    speed_aggregation = lookup_config["speed_aggregation"] if use_inference_blend else physical_xpass_speed_aggregation(model.args)
+    setattr(match, "physical_xpass_hash_policy", PHYSICAL_XPASS_INFERENCE_HASH_POLICY)
     match_id = resolve_match_id(match)
     all_action_indexes = [int(label[config.LABEL_INDEX["action_index"]].item()) for label in labels]
     try:
@@ -369,14 +369,14 @@ def filter_missing_physical_xpass_rows_for_inference(
             cache_dir,
             expected_source=source,
             expected_speed_aggregation=speed_aggregation,
-            expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION if use_inference_blend else None,
-            expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC if use_inference_blend else None,
-            expected_max_speed=AS_DEFAULT_V0_MAX if use_inference_blend else None,
-            expected_speed_step=AS_DEFAULT_SPEED_STEP if use_inference_blend else None,
-            expected_coarse_n_angles=AS_DEFAULT_COARSE_N_ANGLES if use_inference_blend else None,
-            expected_refine_top_k_angles=AS_DEFAULT_REFINE_TOP_K_ANGLES if use_inference_blend else None,
-            expected_refine_angle_radius=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG if use_inference_blend else None,
-            expected_angle_step=AS_DEFAULT_ANGLE_STEP_DEG if use_inference_blend else None,
+            expected_metric_schema_version=lookup_config["metric_schema_version"] if use_inference_blend else None,
+            expected_default_metric=lookup_config["default_metric"] if use_inference_blend else None,
+            expected_max_speed=lookup_config["max_speed"] if use_inference_blend else None,
+            expected_speed_step=lookup_config["speed_step"] if use_inference_blend else None,
+            expected_coarse_n_angles=lookup_config["coarse_n_angles"] if use_inference_blend else None,
+            expected_refine_top_k_angles=lookup_config["refine_top_k_angles"] if use_inference_blend else None,
+            expected_refine_angle_radius=lookup_config["refine_angle_radius"] if use_inference_blend else None,
+            expected_angle_step=lookup_config["angle_step"] if use_inference_blend else None,
         )
         physical_rows = load_physical_xpass_match(cache_dir, match_id)
     except (FileNotFoundError, ValueError) as exc:
@@ -676,6 +676,7 @@ def inference_gnn(
                         f"probs={probs_i.shape}, xpass={xpass_i.shape}, pass_distance={distance_i.shape}."
                     )
                 finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
+                missing_physical_mask = ~finite_mask
                 blended_i = np.asarray(
                     blend_physical_xpass_predictions(
                         pass_success_model=probs_i[finite_mask],
@@ -685,6 +686,7 @@ def inference_gnn(
                     dtype=float,
                 )
                 probs_i[finite_mask] = blended_i
+                probs_i[missing_physical_mask] = np.nan
 
         if model.args["task"] in two_case_tasks:
             probs_i0 = dict(zip(player_indices_i, probs_i[:, 0].tolist()))

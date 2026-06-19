@@ -24,11 +24,14 @@ from datatools.hawkeye import (
 from inference import inference_gnn
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     load_runtime_physical_xpass_visualization_table,
     model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
     physical_xpass_metric,
+    physical_xpass_source,
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
@@ -341,6 +344,7 @@ def render_situation(
         "selected_frames": selected_frames,
         "output_paths": output_paths,
     }
+    render_info["physical_xpass_skipped_actions"] = getattr(situation, "physical_xpass_skipped_actions", {})
     return output_dir, getattr(situation, "physical_xpass_runtime_stats", {}), render_info
 
 
@@ -416,6 +420,7 @@ def main() -> None:
     output_dirs: list[Path] = []
     rendered_situations: list[dict[str, object]] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
     for situation_id in situation_ids:
         output_dir, runtime_physical_stats, render_info = render_situation(
@@ -431,6 +436,9 @@ def main() -> None:
         )
         if runtime_physical_stats:
             physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
+        physical_skip_stats = render_info.get("physical_xpass_skipped_actions")
+        if physical_skip_stats:
+            physical_xpass_skipped_actions[str(situation_id)] = physical_skip_stats
         output_dirs.append(output_dir)
         rendered_situations.append(
             {
@@ -470,7 +478,11 @@ def main() -> None:
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
         "rendered_situations": rendered_situations,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
@@ -495,6 +507,7 @@ def main() -> None:
         refresh_requested=refresh_physical_cache,
         cache_dir=None if no_physical_cache else physical_cache_dir,
         runtime_stats=physical_xpass_runtime_stats,
+        skipped_stats=physical_xpass_skipped_actions,
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     metadata_path = write_run_metadata(output_root, metadata)

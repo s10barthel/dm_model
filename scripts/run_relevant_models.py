@@ -26,9 +26,12 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
+    physical_xpass_source,
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
@@ -589,6 +592,9 @@ def main() -> None:
         "skipped_matches": [],
         "physical_xpass_skipped_actions": {},
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": physical_xpass_source(model_specs["pass_success"].args),
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(model_specs["pass_success"].args, cache_dir=physical_cache_dir)["source"],
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
@@ -728,6 +734,7 @@ def main() -> None:
         refresh_requested=refresh_physical_cache,
         cache_dir=None if no_physical_cache else physical_cache_dir,
         runtime_stats=metadata["physical_xpass_runtime_stats"],
+        skipped_stats=metadata["physical_xpass_skipped_actions"],
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     write_run_metadata(output_dir, metadata)

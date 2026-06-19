@@ -26,9 +26,11 @@ from datatools.hawkeye import (
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
     physical_xpass_source,
     physical_xpass_speed_aggregation,
     physical_xpass_teammate_policy,
@@ -116,14 +118,15 @@ def _prewarm_hawkeye_physical_xpass(
     items = prepare_runtime_physical_xpass_prewarm_items([situation], model)
     if not items:
         return None
-    source = physical_xpass_source(model.args)
+    lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=cache_dir)
+    source = lookup_config["source"] if inference_uses_physical_xpass(model.args) else physical_xpass_source(model.args)
     return prewarm_physical_xpass_runtime_cache(
         items,
         cache_dir=cache_dir,
         source=source,
         eps=float(model.args.get("physical_eps", 1e-4)),
         teammate_policy=physical_xpass_teammate_policy(model.args, source=source),
-        speed_aggregation=physical_xpass_speed_aggregation(model.args),
+        speed_aggregation=lookup_config["speed_aggregation"] if inference_uses_physical_xpass(model.args) else physical_xpass_speed_aggregation(model.args),
         refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
         num_workers=num_workers,
         worker_thread_limit=int(worker_thread_limit),
@@ -200,6 +203,7 @@ def main() -> None:
     stats_by_situation: dict[str, dict[str, int]] = {}
     processed_situation_ids: list[str] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
     skipped_situations: list[dict[str, str]] = []
 
@@ -219,6 +223,9 @@ def main() -> None:
             runtime_physical_stats = getattr(situation, "physical_xpass_runtime_stats", None)
             if runtime_physical_stats:
                 physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
+            physical_skip_stats = getattr(situation, "physical_xpass_skipped_actions", None)
+            if physical_skip_stats:
+                physical_xpass_skipped_actions[str(situation_id)] = physical_skip_stats
             processed_situation_ids.append(str(situation_id))
         except Exception as exc:
             error_summary = summarize_exception(exc)
@@ -237,6 +244,7 @@ def main() -> None:
         cache_dir=None if no_physical_cache else physical_cache_dir,
         prewarm_stats=physical_xpass_prewarm_stats,
         runtime_stats=physical_xpass_runtime_stats,
+        skipped_stats=physical_xpass_skipped_actions,
     )
     metadata = {
         "run_id": component_run_id,
@@ -253,6 +261,9 @@ def main() -> None:
         "source_target_families": shared_context.get("source_target_families", {}),
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "physical_num_workers": physical_num_workers,
@@ -262,6 +273,7 @@ def main() -> None:
         "limit": args.limit,
         "processed_situation_ids": processed_situation_ids,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
         "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
         "physical_xpass_cache_summary": physical_xpass_cache_summary,
         "skipped_situations": skipped_situations,

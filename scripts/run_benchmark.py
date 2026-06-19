@@ -25,9 +25,11 @@ from datatools.benchmark import (
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
     physical_xpass_source,
     physical_xpass_speed_aggregation,
     physical_xpass_teammate_policy,
@@ -128,14 +130,15 @@ def _prewarm_benchmark_physical_xpass(
     items = prepare_runtime_physical_xpass_prewarm_items(states, model)
     if not items:
         return None
-    source = physical_xpass_source(model.args)
+    lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=cache_dir)
+    source = lookup_config["source"] if inference_uses_physical_xpass(model.args) else physical_xpass_source(model.args)
     return prewarm_physical_xpass_runtime_cache(
         items,
         cache_dir=cache_dir,
         source=source,
         eps=float(model.args.get("physical_eps", 1e-4)),
         teammate_policy=physical_xpass_teammate_policy(model.args, source=source),
-        speed_aggregation=physical_xpass_speed_aggregation(model.args),
+        speed_aggregation=lookup_config["speed_aggregation"] if inference_uses_physical_xpass(model.args) else physical_xpass_speed_aggregation(model.args),
         refresh=bool(model.args.get("physical_runtime_cache_refresh", False)),
         num_workers=num_workers,
         worker_thread_limit=int(worker_thread_limit),
@@ -276,6 +279,7 @@ def main() -> None:
     processed_modifications: list[int] = []
     processed_states: list[dict[str, object]] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
     skipped_state_errors: list[dict[str, str | int]] = []
     skipped_modification_errors: list[dict[str, str | int]] = []
@@ -338,6 +342,10 @@ def main() -> None:
                 if runtime_physical_stats:
                     physical_xpass_runtime_stats[state_key] = runtime_physical_stats
                     state_record["physical_xpass_runtime_stats"] = runtime_physical_stats
+                physical_skip_stats = getattr(state, "physical_xpass_skipped_actions", None)
+                if physical_skip_stats:
+                    physical_xpass_skipped_actions[state_key] = physical_skip_stats
+                    state_record["physical_xpass_skipped_actions"] = physical_skip_stats
                 processed_states.append(state_record)
                 processed_state_counts[int(modification_id)] = processed_state_counts.get(int(modification_id), 0) + 1
             except Exception as exc:
@@ -377,6 +385,7 @@ def main() -> None:
         cache_dir=None if no_physical_cache else physical_cache_dir,
         prewarm_stats=physical_xpass_prewarm_stats,
         runtime_stats=physical_xpass_runtime_stats,
+        skipped_stats=physical_xpass_skipped_actions,
     )
     metadata = {
         "run_id": component_run_id,
@@ -393,6 +402,9 @@ def main() -> None:
         "source_return_types": shared_context.get("source_return_types", {}),
         "source_target_families": shared_context.get("source_target_families", {}),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "physical_num_workers": physical_num_workers,
@@ -404,6 +416,7 @@ def main() -> None:
         "processed_modifications": processed_modifications,
         "processed_states": processed_states,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
         "physical_xpass_prewarm_stats": physical_xpass_prewarm_stats,
         "physical_xpass_cache_summary": physical_xpass_cache_summary,
         "skipped_modifications": _compact_skips(skipped_modifications),

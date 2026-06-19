@@ -24,6 +24,8 @@ from datatools.benchmark import (
 from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image
 from datatools.viz_snapshot import SnapshotVisualizer
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+    PHYSICAL_XPASS_SOURCE,
     load_runtime_physical_xpass_visualization_table,
     physical_xpass_metric,
 )
@@ -290,6 +292,9 @@ def main() -> None:
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": None,
+        "physical_xpass_runtime_source": PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],

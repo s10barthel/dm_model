@@ -62,6 +62,7 @@ PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_TOP10MEAN,
 ]
 PHYSICAL_XPASS_METRIC_SCHEMA_VERSION = 2
+PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
@@ -340,6 +341,12 @@ def physical_xpass_source(args: Any) -> str:
     return source
 
 
+def runtime_physical_xpass_source(args: Any) -> str:
+    if inference_uses_physical_xpass(args):
+        return PHYSICAL_XPASS_SOURCE
+    return physical_xpass_source(args)
+
+
 def physical_xpass_teammate_policy(args: Any, *, source: str | None = None) -> str:
     policy = _get_arg(args, "physical_xpass_teammate_policy", None)
     if policy is None:
@@ -366,13 +373,13 @@ def physical_xpass_speed_aggregation(args: Any) -> str:
 
 
 def runtime_physical_xpass_speed_aggregation(args: Any) -> str:
+    if inference_uses_physical_xpass(args):
+        return PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION
     value = _get_arg(args, "physical_xpass_speed_aggregation", None)
     if value is None:
         value = _get_arg(args, "speed_aggregation", None)
     if value is not None:
         return normalize_physical_xpass_speed_aggregation(value)
-    if inference_uses_physical_xpass(args) and not model_uses_physical_xpass(args):
-        return PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION
     return normalize_physical_xpass_speed_aggregation(None)
 
 
@@ -382,6 +389,24 @@ def physical_xpass_metric(args: Any) -> str:
     if bool(_get_arg(args, "top10mean_xpass", False)) or bool(_get_arg(args, "use_top10mean_xpass", False)):
         return PHYSICAL_XPASS_METRIC_TOP10MEAN
     return normalize_physical_xpass_metric(_get_arg(args, "physical_xpass_metric", None))
+
+
+def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
+    return {
+        "use_physical_xpass": bool(inference_uses_physical_xpass(args)),
+        "physical_cache_dir": None if cache_dir is None else str(cache_dir),
+        "metric": physical_xpass_metric(args),
+        "source": PHYSICAL_XPASS_SOURCE,
+        "speed_aggregation": PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+        "metric_schema_version": PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
+        "default_metric": PHYSICAL_XPASS_DEFAULT_METRIC,
+        "max_speed": AS_DEFAULT_V0_MAX,
+        "speed_step": AS_DEFAULT_SPEED_STEP,
+        "coarse_n_angles": AS_DEFAULT_COARSE_N_ANGLES,
+        "refine_top_k_angles": AS_DEFAULT_REFINE_TOP_K_ANGLES,
+        "refine_angle_radius": AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
+        "angle_step": AS_DEFAULT_ANGLE_STEP_DEG,
+    }
 
 
 def model_uses_physical_xpass(args: Any) -> bool:
@@ -2507,6 +2532,25 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
     return totals
 
 
+def _aggregate_physical_xpass_skip_tree(stats: dict[str, object] | None) -> int:
+    if not isinstance(stats, dict):
+        return 0
+    total = 0
+
+    def visit(value: object) -> None:
+        nonlocal total
+        if not isinstance(value, dict):
+            return
+        if "skipped_count" in value:
+            total += int(value.get("skipped_count", 0) or 0)
+            return
+        for child in value.values():
+            visit(child)
+
+    visit(stats)
+    return total
+
+
 def summarize_physical_xpass_cache_usage(
     *,
     physical_xpass_required: bool,
@@ -2515,9 +2559,11 @@ def summarize_physical_xpass_cache_usage(
     cache_dir: str | Path | None,
     prewarm_stats: dict[str, object] | None = None,
     runtime_stats: dict[str, object] | None = None,
+    skipped_stats: dict[str, object] | None = None,
 ) -> dict[str, object]:
     prewarm_totals = _aggregate_physical_xpass_stat_tree(prewarm_stats)
     runtime_totals = _aggregate_physical_xpass_stat_tree(runtime_stats)
+    skipped_rows = _aggregate_physical_xpass_skip_tree(skipped_stats)
     has_prewarm_work = any(prewarm_totals.values())
     totals = prewarm_totals if has_prewarm_work else runtime_totals
 
@@ -2542,6 +2588,8 @@ def summarize_physical_xpass_cache_usage(
         reason = "missing_or_cold_cache_rows"
     elif cache_hits > 0:
         reason = "cache_hit"
+    elif skipped_rows > 0:
+        reason = "read_only_cache_rows_skipped"
     else:
         reason = "no_runtime_physical_xpass_work"
 
@@ -2559,6 +2607,7 @@ def summarize_physical_xpass_cache_usage(
         "hash_mismatch_recomputed": hash_mismatch_recomputed,
         "online_graphs": online_graphs,
         "requested_rows": requested_rows,
+        "skipped_rows": skipped_rows,
         "reason": reason,
     }
 
@@ -2589,6 +2638,9 @@ def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
             f"hits={hits} misses={misses} written={written} copied={copied} "
             f"pass_distance_filled={distance_filled}."
         )
+    if reason == "read_only_cache_rows_skipped":
+        skipped_rows = int(summary.get("skipped_rows", 0) or 0)
+        return f"Physical xPass cache: skipped {skipped_rows} read-only inference rows; see physical_xpass_skipped_actions."
     return f"Physical xPass cache: no runtime physical xPass work; reason={reason}."
 
 
@@ -3077,6 +3129,7 @@ def attach_physical_xpass_to_graph(
     floor: float | None = None,
     require_observed_target: bool = True,
     metric: str | None = None,
+    missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
 ) -> Data:
     if physical_rows is None:
         raise ValueError("physical_rows must be provided when attaching physical xPass.")
@@ -3090,7 +3143,11 @@ def attach_physical_xpass_to_graph(
     row = physical_rows.loc[action_index]
     node_ids = _node_ids(graph)
     selected_metric = normalize_physical_xpass_metric(metric)
-    probs = torch.full((len(node_ids),), PHYSICAL_XPASS_NEUTRAL_PROB, dtype=torch.float32)
+    if missing_player_value is None:
+        fill_value = float("nan")
+    else:
+        fill_value = float(missing_player_value)
+    probs = torch.full((len(node_ids),), fill_value, dtype=torch.float32)
     missing_columns = []
     for node_index, node_id in enumerate(node_ids):
         value_column = physical_xpass_metric_column(str(node_id), selected_metric)
@@ -3110,11 +3167,15 @@ def attach_physical_xpass_to_graph(
                 f"observed target player column {node_ids[target_index]!r}."
             )
 
+    finite_mask = torch.isfinite(probs)
     lower_bound = _physical_xpass_lower_bound(eps, floor)
-    probs = torch.clamp(probs, lower_bound, 1.0 - float(eps))
-    logits = probability_to_logit(probs, eps=eps)
+    if finite_mask.any():
+        probs[finite_mask] = torch.clamp(probs[finite_mask], lower_bound, 1.0 - float(eps))
+    logits = torch.zeros_like(probs)
+    if finite_mask.any():
+        logits[finite_mask] = probability_to_logit(probs[finite_mask], eps=eps)
     pass_distances = graph_pass_distances(graph)
-    if not torch.isfinite(probs).all() or not torch.isfinite(logits).all():
+    if torch.isinf(probs).any() or torch.isinf(logits).any():
         raise ValueError(f"Physical xPass values are non-finite after clipping for match {match_id}, action_index={action_index}.")
 
     if require_observed_target:
@@ -3173,6 +3234,7 @@ def attach_physical_xpass_read_only_to_graphs(
     floor: float | None = None,
     require_observed_target: bool = True,
     metric: str | None = None,
+    missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
 ) -> list[Data]:
     rows = load_physical_xpass_match(cache_dir, match_id)
     attached: list[Data] = []
@@ -3184,18 +3246,6 @@ def attach_physical_xpass_read_only_to_graphs(
                 "Runtime prewarm should have written this row before inference."
             )
         row = rows.loc[action_index]
-        cached_hash = row.get("physical_state_hash", None)
-        if pd.isna(cached_hash):
-            raise ValueError(
-                f"Physical xPass runtime cache for match {match_id}, action_index={action_index} "
-                "is missing physical_state_hash."
-            )
-        state_hash = physical_state_hash(graph)
-        if str(cached_hash) != state_hash:
-            raise ValueError(
-                f"Physical xPass runtime cache hash mismatch for match {match_id}, action_index={action_index}; "
-                "runtime prewarm and inference graph filtering are not aligned."
-            )
         attached.append(
             attach_physical_xpass_to_graph(
                 graph,
@@ -3206,6 +3256,7 @@ def attach_physical_xpass_read_only_to_graphs(
                 floor=floor,
                 require_observed_target=require_observed_target,
                 metric=metric,
+                missing_player_value=missing_player_value,
             )
         )
     return attached

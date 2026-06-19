@@ -31,11 +31,14 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from physical_pass_model import (
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
     load_runtime_physical_xpass_visualization_component,
     model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
     physical_xpass_metric,
+    physical_xpass_source,
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
@@ -791,6 +794,7 @@ def main() -> None:
     rendered_actions: list[dict[str, object]] = []
     skipped_actions: list[dict[str, object]] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     for action_index, display_action_id in selected_actions:
         output_dir = output_root / args.match_id / display_action_id
         try:
@@ -823,6 +827,9 @@ def main() -> None:
         runtime_physical_stats = getattr(match, "physical_xpass_runtime_stats", None)
         if runtime_physical_stats:
             physical_xpass_runtime_stats[str(action_index)] = runtime_physical_stats
+        physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
+        if physical_skip_stats:
+            physical_xpass_skipped_actions[str(action_index)] = physical_skip_stats
         rendered_actions.append(
             {
                 "match_id": args.match_id,
@@ -871,9 +878,13 @@ def main() -> None:
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
+        "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
     }
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
@@ -885,6 +896,7 @@ def main() -> None:
         refresh_requested=refresh_physical_cache,
         cache_dir=None if no_physical_cache else physical_cache_dir,
         runtime_stats=physical_xpass_runtime_stats,
+        skipped_stats=physical_xpass_skipped_actions,
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
     metadata_path = write_run_metadata(output_root, metadata)

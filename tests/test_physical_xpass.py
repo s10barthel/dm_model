@@ -73,13 +73,16 @@ from physical_pass_model import (
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
+    physical_xpass_inference_lookup_config,
     physical_xpass_kernel_sigmas,
     physical_xpass_metric,
     physical_xpass_metric_column,
+    physical_xpass_source,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
     refined_angle_grid_from_coarse_angles,
     resolve_physical_num_workers,
+    runtime_physical_xpass_source,
     runtime_physical_xpass_speed_aggregation,
     summarize_physical_xpass_cache_usage,
     validate_physical_xpass_cache_metadata,
@@ -1754,7 +1757,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.64)
 
-    def test_runtime_read_only_attach_rejects_hash_mismatch(self) -> None:
+    def test_runtime_read_only_attach_ignores_hash_mismatch_for_inference_lookup(self) -> None:
         graph = make_graph()
         labels = torch.stack([make_label(action_index=5)])
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1771,13 +1774,14 @@ class PhysicalXPassTests(unittest.TestCase):
                 ]
             ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
 
-            with self.assertRaisesRegex(ValueError, "hash mismatch"):
-                attach_physical_xpass_read_only_to_graphs(
-                    [graph],
-                    labels,
-                    cache_dir=cache_dir,
-                    match_id="runtime_match",
-                )
+            attached = attach_physical_xpass_read_only_to_graphs(
+                [graph],
+                labels,
+                cache_dir=cache_dir,
+                match_id="runtime_match",
+            )
+
+        self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.64)
 
     def test_runtime_physical_xpass_cache_rejects_incompatible_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2060,6 +2064,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 "use_physical_xpass": False,
                 "inference_use_physical_xpass": True,
                 "model_variant": "gat_baseline",
+                "physical_xpass_source": PHYSICAL_XPASS_LEGACY_SOURCE,
                 "physical_cache_dir": "missing_cache",
                 "physical_eps": 1e-4,
             }
@@ -2075,21 +2080,73 @@ class PhysicalXPassTests(unittest.TestCase):
         read_only.assert_called_once()
         cached_attach.assert_not_called()
         self.assertEqual(
+            validate.call_args.kwargs["expected_source"],
+            PHYSICAL_XPASS_SOURCE,
+        )
+        self.assertEqual(
             validate.call_args.kwargs["expected_speed_aggregation"],
             PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
         )
+        self.assertEqual(runtime_physical_xpass_source(model.args), PHYSICAL_XPASS_SOURCE)
         self.assertEqual(runtime_physical_xpass_speed_aggregation(model.args), PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
 
-    def test_legacy_physical_checkpoint_preserves_saved_speed_aggregation(self) -> None:
+    def test_runtime_physical_xpass_source_decouples_inference_blend_from_checkpoint_source(self) -> None:
+        inference_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            physical_xpass_source=PHYSICAL_XPASS_LEGACY_SOURCE,
+        )
+        legacy_model_input_args = make_pass_success_args(
+            use_physical_xpass=True,
+            inference_use_physical_xpass=False,
+            model_variant="gat_phys_logit_offset",
+            physical_xpass_source=PHYSICAL_XPASS_LEGACY_SOURCE,
+        )
+
+        self.assertEqual(physical_xpass_source(inference_args), PHYSICAL_XPASS_LEGACY_SOURCE)
+        self.assertEqual(runtime_physical_xpass_source(inference_args), PHYSICAL_XPASS_SOURCE)
+        self.assertEqual(runtime_physical_xpass_source(legacy_model_input_args), PHYSICAL_XPASS_LEGACY_SOURCE)
+
+    def test_inference_lookup_config_ignores_checkpoint_physical_metadata(self) -> None:
         args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            physical_xpass_source=PHYSICAL_XPASS_LEGACY_SOURCE,
+            physical_xpass_speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            top10mean_xpass=True,
+        )
+
+        config = physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")
+
+        self.assertTrue(config["use_physical_xpass"])
+        self.assertEqual(config["physical_cache_dir"], "runtime_cache")
+        self.assertEqual(config["source"], PHYSICAL_XPASS_SOURCE)
+        self.assertEqual(config["speed_aggregation"], PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
+        self.assertEqual(config["metric"], PHYSICAL_XPASS_METRIC_TOP10MEAN)
+        self.assertEqual(config["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
+
+    def test_runtime_physical_xpass_speed_aggregation_uses_runtime_defaults_for_blending(self) -> None:
+        inference_args = make_pass_success_args(
             use_physical_xpass=True,
             model_variant="gat_phys_logit_offset",
             physical_xpass_speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
             inference_use_physical_xpass=True,
         )
+        legacy_model_input_args = make_pass_success_args(
+            use_physical_xpass=True,
+            model_variant="gat_phys_logit_offset",
+            physical_xpass_speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+            inference_use_physical_xpass=False,
+        )
 
         self.assertEqual(
-            runtime_physical_xpass_speed_aggregation(args),
+            runtime_physical_xpass_speed_aggregation(inference_args),
+            PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+        )
+        self.assertEqual(
+            runtime_physical_xpass_speed_aggregation(legacy_model_input_args),
             PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
         )
 
@@ -2129,7 +2186,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 json.dumps(
                     physical_xpass_as_default_metadata(
                         PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
                     )
                 ),
                 encoding="utf-8",
@@ -2139,7 +2196,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     {
                         "match_id": "match_1",
                         "action_index": 0,
-                        "physical_state_hash": physical_state_hash(graph),
+                        "physical_state_hash": "stale_after_model_feature_filtering",
                         PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
                         "home_1": 0.2,
                         "home_2": 0.5,
@@ -2155,6 +2212,40 @@ class PhysicalXPassTests(unittest.TestCase):
         compute.assert_not_called()
         self.assertTrue(inference_uses_physical_xpass(model.args))
         self.assertAlmostEqual(float(probs.loc[0, "home_2"]), 0.58, places=5)
+
+    def test_inference_physical_xpass_missing_player_value_outputs_nan_not_model_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            match = make_physical_inference_match([0], [1])
+            (cache_dir / "matches").mkdir(parents=True)
+            (cache_dir / "metadata.json").write_text(
+                json.dumps(
+                    physical_xpass_as_default_metadata(
+                        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 0,
+                        "physical_state_hash": "stale",
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        "home_1": 0.2,
+                        "home_2": np.nan,
+                        "away_3": np.nan,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+            model = DummyBaselineInferenceModel(cache_dir)
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertTrue(np.isnan(float(probs.loc[0, "home_2"])))
+        self.assertAlmostEqual(float(probs.loc[0, "home_1"]), 0.2, places=5)
 
     def test_inference_missing_synthetic_sidecar_stays_read_only_when_cache_disabled(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
@@ -3054,6 +3145,10 @@ class PhysicalXPassTests(unittest.TestCase):
         model = SimpleNamespace(
             args={
                 **make_pass_success_args(
+                    use_physical_xpass=False,
+                    inference_use_physical_xpass=True,
+                    model_variant="gat_baseline",
+                    physical_xpass_source=PHYSICAL_XPASS_LEGACY_SOURCE,
                     physical_xpass_speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
                 ),
                 "physical_runtime_cache_refresh": True,
@@ -3105,6 +3200,10 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(hawkeye_prewarm.call_args.kwargs["worker_thread_limit"], 3)
         self.assertEqual(hawkeye_prewarm.call_args.kwargs["physical_batch_size"], 4)
         self.assertTrue(hawkeye_prewarm.call_args.kwargs["refresh"])
+        self.assertEqual(hawkeye_prewarm.call_args.kwargs["source"], PHYSICAL_XPASS_SOURCE)
+        self.assertEqual(benchmark_prewarm.call_args.kwargs["source"], PHYSICAL_XPASS_SOURCE)
+        self.assertEqual(skillcorner_prewarm.call_args.kwargs["source"], PHYSICAL_XPASS_SOURCE)
+        self.assertEqual(hawkeye_prewarm.call_args.kwargs["speed_aggregation"], PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
         self.assertEqual([item["match_id"] for item in benchmark_prewarm.call_args.args[0]], ["benchmark_1", "benchmark_2"])
         self.assertEqual([item["match_id"] for item in skillcorner_prewarm.call_args.args[0]], ["skillcorner_1", "skillcorner_1"])
 
@@ -3135,6 +3234,9 @@ class PhysicalXPassTests(unittest.TestCase):
                 run_id="benchmark_component_test",
                 output_dir=str(output_parent),
                 physical_cache_dir="cache",
+                use_physical_xpass=True,
+                max_xpass=False,
+                top10mean_xpass=False,
                 no_physical_cache=False,
                 refresh_physical_cache=True,
                 physical_num_workers="auto",
@@ -3146,7 +3248,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     "task": "pass_success",
                     "use_physical_xpass": True,
                     "model_variant": "gat_phys_logit_offset",
-                    "physical_xpass_source": PHYSICAL_XPASS_SOURCE,
+                    "physical_xpass_source": PHYSICAL_XPASS_LEGACY_SOURCE,
                     "physical_xpass_teammate_policy": PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
                     "physical_xpass_speed_aggregation": PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
                 }
@@ -3256,6 +3358,8 @@ class PhysicalXPassTests(unittest.TestCase):
             prewarm.assert_not_called()
             self.assertFalse(pass_success_model.args["physical_runtime_cache_refresh"])
             self.assertTrue(pass_success_model.args["physical_runtime_cache_read_only"])
+            self.assertEqual(written_metadata["physical_xpass_checkpoint_source"], PHYSICAL_XPASS_LEGACY_SOURCE)
+            self.assertEqual(written_metadata["physical_xpass_runtime_source"], PHYSICAL_XPASS_SOURCE)
             self.assertEqual(written_metadata["physical_xpass_prewarm_stats"], {})
             self.assertEqual(written_metadata["physical_xpass_cache_summary"]["reason"], "refresh_requested")
             self.assertEqual(written_metadata["physical_xpass_cache_summary"]["cache_misses"], 0)
