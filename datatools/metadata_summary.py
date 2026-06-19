@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -189,14 +190,22 @@ def _csv_value(value: Any) -> str:
     return str(value)
 
 
-def _write_rows(parent_dir: Path, rows: list[dict[str, Any]]) -> Path:
+def _write_rows(parent_dir: Path, rows: list[dict[str, Any]]) -> Path | None:
     summary_path = parent_dir / SUMMARY_FILENAME
     parent_dir.mkdir(parents=True, exist_ok=True)
-    with summary_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({column: _csv_value(row.get(column)) for column in SUMMARY_COLUMNS})
+    try:
+        with summary_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.DictWriter(file, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({column: _csv_value(row.get(column)) for column in SUMMARY_COLUMNS})
+    except PermissionError as exc:
+        warnings.warn(
+            f"Skipping metadata summary refresh for {summary_path}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
     return summary_path
 
 

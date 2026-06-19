@@ -4,6 +4,8 @@ import csv
 import json
 from pathlib import Path
 
+import pytest
+
 import project_config
 from datatools import metadata_summary
 
@@ -197,6 +199,50 @@ def test_write_run_metadata_refreshes_only_matching_parent_summary(tmp_path, mon
 
     assert (saved / "action_intent" / metadata_summary.SUMMARY_FILENAME).exists()
     assert not (saved / "pass_success" / metadata_summary.SUMMARY_FILENAME).exists()
+
+
+def test_refresh_summary_warns_and_skips_locked_summary_csv(tmp_path, monkeypatch) -> None:
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    run_root = saved / "pass_success" / "pass_success_1"
+    write_json(run_root / "metadata.json", model_metadata())
+    original_open = Path.open
+
+    def raise_for_summary_csv(path: Path, *args: object, **kwargs: object):
+        if path.name == metadata_summary.SUMMARY_FILENAME:
+            raise PermissionError("file is locked")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", raise_for_summary_csv)
+
+    with pytest.warns(RuntimeWarning, match="metadata_summary\\.csv"):
+        summary_path = metadata_summary.refresh_summary_for_parent(saved / "pass_success")
+
+    assert summary_path is None
+
+
+def test_write_run_metadata_keeps_metadata_when_summary_csv_is_locked(tmp_path, monkeypatch) -> None:
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    run_root = saved / "action_intent" / "action_intent_1"
+    original_open = Path.open
+
+    def raise_for_summary_csv(path: Path, *args: object, **kwargs: object):
+        if path.name == metadata_summary.SUMMARY_FILENAME:
+            raise PermissionError("file is locked")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", raise_for_summary_csv)
+
+    with pytest.warns(RuntimeWarning, match="Skipping metadata summary refresh"):
+        metadata_path = project_config.write_run_metadata(
+            run_root,
+            model_metadata(
+                model_id="action_intent/action_intent_1",
+                task="action_intent",
+                run_id="action_intent_1",
+            ),
+        )
+
+    assert json.loads(metadata_path.read_text(encoding="utf-8"))["run_id"] == "action_intent_1"
 
 
 def test_backfill_rebuilds_deterministically_and_skips_malformed_metadata(tmp_path, monkeypatch) -> None:
