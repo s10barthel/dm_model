@@ -453,6 +453,7 @@ def main() -> None:
         "source_target_families": shared_context.get("source_target_families", {}),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
         "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "physical_cache_disabled": no_physical_cache,

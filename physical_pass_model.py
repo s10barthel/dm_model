@@ -2211,19 +2211,14 @@ def load_physical_xpass_component(
 
 
 def validate_runtime_physical_xpass_visualization_cache(cache_dir: str | Path) -> dict[str, Any]:
-    return validate_physical_xpass_cache_metadata(
-        cache_dir,
-        expected_source=PHYSICAL_XPASS_SOURCE,
-        expected_speed_aggregation=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
-        expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
-        expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC,
-        expected_max_speed=AS_DEFAULT_V0_MAX,
-        expected_speed_step=AS_DEFAULT_SPEED_STEP,
-        expected_coarse_n_angles=AS_DEFAULT_COARSE_N_ANGLES,
-        expected_refine_top_k_angles=AS_DEFAULT_REFINE_TOP_K_ANGLES,
-        expected_refine_angle_radius=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
-        expected_angle_step=AS_DEFAULT_ANGLE_STEP_DEG,
-    )
+    metadata_path = Path(cache_dir) / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+    with metadata_path.open("r", encoding="utf-8") as fh:
+        metadata = json.load(fh)
+    if not isinstance(metadata, dict):
+        return {}
+    return metadata
 
 
 def load_runtime_physical_xpass_visualization_component(
@@ -2234,7 +2229,6 @@ def load_runtime_physical_xpass_visualization_component(
     metric: str | None = None,
 ) -> pd.Series:
     selected_metric = normalize_physical_xpass_metric(metric)
-    validate_runtime_physical_xpass_visualization_cache(cache_dir)
     try:
         series = load_physical_xpass_component(cache_dir, match_id, action_index, metric=selected_metric)
     except (FileNotFoundError, KeyError, ValueError) as exc:

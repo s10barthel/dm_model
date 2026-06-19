@@ -376,6 +376,7 @@ def main() -> None:
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
         "physical_xpass_runtime_source": PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,

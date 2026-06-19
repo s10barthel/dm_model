@@ -665,6 +665,27 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(max_row["home_2"]), 0.9)
         self.assertAlmostEqual(float(top10["home_2"]), 0.6)
 
+    def test_runtime_visualization_xpass_loader_allows_cache_setting_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            write_runtime_visualization_xpass_cache(cache_dir, action_indexes=[3])
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                max_speed=30,
+                speed_step=1,
+            )
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            max_row = load_runtime_physical_xpass_visualization_component(
+                cache_dir,
+                "match_1",
+                3,
+                metric=PHYSICAL_XPASS_METRIC_MAX,
+            )
+
+        self.assertAlmostEqual(float(max_row["home_2"]), 0.9)
+
     def test_runtime_visualization_xpass_loader_rejects_missing_metric_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
@@ -2051,7 +2072,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
         cached_attach.assert_not_called()
 
-    def test_inference_only_physical_xpass_uses_generator_defaults(self) -> None:
+    def test_inference_only_physical_xpass_lookup_skips_metadata_validation(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
         match = RuntimeState()
         match.match_id = "modification_50_game_state_2"
@@ -2076,17 +2097,12 @@ class PhysicalXPassTests(unittest.TestCase):
                     result = inference.attach_physical_xpass_for_inference(match, graphs, labels, model)
 
         self.assertIs(result, graphs)
-        validate.assert_called_once()
+        validate.assert_not_called()
         read_only.assert_called_once()
         cached_attach.assert_not_called()
-        self.assertEqual(
-            validate.call_args.kwargs["expected_source"],
-            PHYSICAL_XPASS_SOURCE,
-        )
-        self.assertEqual(
-            validate.call_args.kwargs["expected_speed_aggregation"],
-            PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
-        )
+        self.assertEqual(read_only.call_args.kwargs["metric"], PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
+        self.assertIsNone(read_only.call_args.kwargs["missing_player_value"])
+        self.assertEqual(getattr(model, "physical_xpass_lookup_policy"), "dataset_event_frame_player_only")
         self.assertEqual(runtime_physical_xpass_source(model.args), PHYSICAL_XPASS_SOURCE)
         self.assertEqual(runtime_physical_xpass_speed_aggregation(model.args), PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
 
@@ -2187,6 +2203,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     physical_xpass_as_default_metadata(
                         PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
                         speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                        max_speed=30,
                     )
                 ),
                 encoding="utf-8",
@@ -2197,7 +2214,6 @@ class PhysicalXPassTests(unittest.TestCase):
                         "match_id": "match_1",
                         "action_index": 0,
                         "physical_state_hash": "stale_after_model_feature_filtering",
-                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
                         "home_1": 0.2,
                         "home_2": 0.5,
                         "away_3": 0.1,
