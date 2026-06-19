@@ -45,7 +45,11 @@ from physical_pass_model import (
     AS_DEFAULT_V0_MAX,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
+    PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_SOURCE,
+    PHYSICAL_XPASS_DEFAULT_TOP_N,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     PHYSICAL_XPASS_SPEED_AGGREGATIONS,
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
@@ -157,6 +161,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--refine-top-k-angles", "--refine_top_k_angles", dest="refine_top_k_angles", type=int, default=AS_DEFAULT_REFINE_TOP_K_ANGLES)
     parser.add_argument("--refine-angle-radius", "--refine_angle_radius", dest="refine_angle_radius", type=float, default=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG)
     parser.add_argument("--angle-step", "--angle_step", dest="angle_step", type=float, default=AS_DEFAULT_ANGLE_STEP_DEG)
+    parser.add_argument("--sigma-angle", "--sigma_angle", dest="sigma_angle", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR)
+    parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
+    parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
+    parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
     parser.add_argument("--num-workers", default="auto")
     parser.add_argument("--max-auto-workers", type=int, default=PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
     parser.add_argument("--physical-batch-size", type=int, default=16)
@@ -195,6 +203,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--refine-angle-radius must be non-negative.")
     if args.angle_step <= 0:
         parser.error("--angle-step must be positive.")
+    if args.sigma_angle <= 0:
+        parser.error("--sigma-angle must be positive.")
+    if args.sigma_speed <= 0:
+        parser.error("--sigma-speed must be positive.")
+    if args.sigma_distance <= 0:
+        parser.error("--sigma-distance must be positive.")
+    if args.top_n < 1:
+        parser.error("--top-n must be positive.")
     try:
         resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
     except ValueError as exc:
@@ -261,6 +277,10 @@ def validate_reuse_cache_dir(
     physical_eps: float,
     max_speed: int | None = None,
     speed_step: float | None = None,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
 ) -> Path:
     cache_path = Path(cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_path)
@@ -269,6 +289,10 @@ def validate_reuse_cache_dir(
         speed_aggregation=speed_aggregation,
         max_speed=max_speed,
         speed_step=speed_step,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
+        top_n=top_n,
     )
     mismatches: list[str] = []
     for key, expected_value in expected_metadata.items():
@@ -315,6 +339,10 @@ def resolve_runtime_sportec_reuse_cache(
                 speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
                 max_speed=args.max_speed,
                 speed_step=args.speed_step,
+                sigma_angle=args.sigma_angle,
+                sigma_speed=args.sigma_speed,
+                sigma_distance=args.sigma_distance,
+                top_n=int(args.top_n),
                 physical_eps=float(args.physical_eps),
             ),
             None,
@@ -663,6 +691,10 @@ def prewarm_runtime_items(
         refine_top_k_angles=int(args.refine_top_k_angles),
         refine_angle_radius=float(args.refine_angle_radius),
         angle_step=float(args.angle_step),
+        sigma_angle=float(args.sigma_angle),
+        sigma_speed=float(args.sigma_speed),
+        sigma_distance=float(args.sigma_distance),
+        top_n=int(args.top_n),
         dry_run=bool(args.dry_run),
         show_progress=not bool(args.dry_run),
         progress_desc=progress_desc,
@@ -692,6 +724,10 @@ def write_runtime_dataset_metadata(
             refine_top_k_angles=args.refine_top_k_angles,
             refine_angle_radius=args.refine_angle_radius,
             angle_step=args.angle_step,
+            sigma_angle=args.sigma_angle,
+            sigma_speed=args.sigma_speed,
+            sigma_distance=args.sigma_distance,
+            top_n=int(args.top_n),
         ),
         "created_for": "runtime_physical_xpass_cache",
         "dataset": dataset,
@@ -733,6 +769,10 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             speed_aggregation=speed_aggregation,
             max_speed=args.max_speed,
             speed_step=args.speed_step,
+            sigma_angle=args.sigma_angle,
+            sigma_speed=args.sigma_speed,
+            sigma_distance=args.sigma_distance,
+            top_n=int(args.top_n),
             physical_eps=float(args.physical_eps),
         )
         if args.reuse_cache_dir
@@ -816,6 +856,10 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             speed_aggregation=speed_aggregation,
             max_speed=args.max_speed,
             speed_step=args.speed_step,
+            sigma_angle=args.sigma_angle,
+            sigma_speed=args.sigma_speed,
+            sigma_distance=args.sigma_distance,
+            top_n=int(args.top_n),
             default_metric="max_xpass",
             available_metrics=["max_xpass"],
             metric_schema_version=1,

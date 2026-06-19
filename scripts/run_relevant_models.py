@@ -71,7 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for inference blending.")
-    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Use top-10%-mean physical xPass columns for inference blending.")
+    parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for inference blending.")
+    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
     parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
@@ -536,6 +537,8 @@ def main() -> None:
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
         pass_success_model.args["max_xpass"] = bool(getattr(args, "max_xpass", False))
+        use_topmean_xpass = bool(getattr(args, "topmean_xpass", False) or getattr(args, "top10mean_xpass", False))
+        pass_success_model.args["topmean_xpass"] = use_topmean_xpass
         pass_success_model.args["top10mean_xpass"] = bool(getattr(args, "top10mean_xpass", False))
     if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
         pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache

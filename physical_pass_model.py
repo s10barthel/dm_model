@@ -54,19 +54,31 @@ PHYSICAL_XPASS_VARIANTS = {
 PHYSICAL_XPASS_PASS_DISTANCE_COLUMN = "pass_distance"
 PHYSICAL_XPASS_METRIC_NOISE_KERNEL = "noise_kernel_xpass"
 PHYSICAL_XPASS_METRIC_MAX = "max_xpass"
-PHYSICAL_XPASS_METRIC_TOP10MEAN = "top10mean_xpass"
+PHYSICAL_XPASS_METRIC_TOPMEAN = "topmean_xpass"
+PHYSICAL_XPASS_METRIC_TOP10MEAN = PHYSICAL_XPASS_METRIC_TOPMEAN
+PHYSICAL_XPASS_LEGACY_METRIC_TOP10MEAN = "top10mean_xpass"
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_MAX,
-    PHYSICAL_XPASS_METRIC_TOP10MEAN,
+    PHYSICAL_XPASS_METRIC_TOPMEAN,
 ]
 PHYSICAL_XPASS_METRIC_SCHEMA_VERSION = 2
+PHYSICAL_XPASS_NOISE_KERNEL_ALGORITHM = "angle_conditioned_v2"
+PHYSICAL_XPASS_TOPMEAN_DEFINITION = "top_n_values"
+PHYSICAL_XPASS_TOP10MEAN_DEFINITION = PHYSICAL_XPASS_TOPMEAN_DEFINITION
+PHYSICAL_XPASS_DEFAULT_TOP_N = 10
+PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR = 0.1
+PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR = 0.05
+PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR = 0.05
 PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
-    PHYSICAL_XPASS_METRIC_TOP10MEAN: "__top10mean_xpass",
+    PHYSICAL_XPASS_METRIC_TOPMEAN: "__topmean_xpass",
+}
+PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES = {
+    PHYSICAL_XPASS_METRIC_TOPMEAN: "__top10mean_xpass",
 }
 PHYSICAL_XPASS_ID_COLUMNS = {
     "match_id",
@@ -120,6 +132,10 @@ def physical_xpass_as_default_metadata(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     metric_schema_version: int = PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
     default_metric: str = PHYSICAL_XPASS_DEFAULT_METRIC,
     available_metrics: list[str] | tuple[str, ...] | None = None,
@@ -144,6 +160,12 @@ def physical_xpass_as_default_metadata(
         "metric_schema_version": metric_schema_version,
         "default_metric": default_metric,
         "available_metrics": available_metrics,
+        "noise_kernel_algorithm": PHYSICAL_XPASS_NOISE_KERNEL_ALGORITHM,
+        "topmean_definition": PHYSICAL_XPASS_TOPMEAN_DEFINITION,
+        "top_n": int(top_n),
+        "sigma_angle_factor": float(sigma_angle),
+        "sigma_speed_factor": float(sigma_speed),
+        "sigma_distance_factor": float(sigma_distance),
         "max_speed": float(v0_values[-1]),
         "speed_step": float(speed_step if speed_step is not None else AS_DEFAULT_SPEED_STEP),
         "coordinate_system": "centered_pitch",
@@ -202,8 +224,8 @@ def as_default_v0_values(
 
 def normalize_physical_xpass_metric(value: str | None) -> str:
     metric = PHYSICAL_XPASS_DEFAULT_METRIC if value is None else str(value).replace("-", "_")
-    if metric == "top10mean":
-        metric = PHYSICAL_XPASS_METRIC_TOP10MEAN
+    if metric in {"top10mean", "top10mean_xpass", "topmean"}:
+        metric = PHYSICAL_XPASS_METRIC_TOPMEAN
     if metric not in PHYSICAL_XPASS_AVAILABLE_METRICS:
         raise ValueError(
             f"Unsupported physical_xpass_metric={value!r}. "
@@ -215,6 +237,15 @@ def normalize_physical_xpass_metric(value: str | None) -> str:
 def physical_xpass_metric_column(player_id: str, metric: str | None = None) -> str:
     metric = normalize_physical_xpass_metric(metric)
     return f"{player_id}{PHYSICAL_XPASS_METRIC_SUFFIXES[metric]}"
+
+
+def physical_xpass_metric_columns(player_id: str, metric: str | None = None) -> list[str]:
+    metric = normalize_physical_xpass_metric(metric)
+    columns = [physical_xpass_metric_column(player_id, metric)]
+    legacy_suffix = PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES.get(metric)
+    if legacy_suffix:
+        columns.append(f"{player_id}{legacy_suffix}")
+    return columns
 
 
 def normalize_physical_xpass_speed_aggregation(value: str | None) -> str:
@@ -242,6 +273,13 @@ def validate_physical_xpass_cache_metadata(
     expected_refine_top_k_angles: int | None = None,
     expected_refine_angle_radius: float | None = None,
     expected_angle_step: float | None = None,
+    expected_noise_kernel_algorithm: str | None = None,
+    expected_topmean_definition: str | None = None,
+    expected_top10mean_definition: str | None = None,
+    expected_top_n: int | None = None,
+    expected_sigma_angle: float | None = None,
+    expected_sigma_speed: float | None = None,
+    expected_sigma_distance: float | None = None,
 ) -> dict[str, Any]:
     metadata_path = Path(cache_dir) / "metadata.json"
     expected_source = expected_source or PHYSICAL_XPASS_SOURCE
@@ -284,6 +322,19 @@ def validate_physical_xpass_cache_metadata(
                 f"Physical xPass sidecars at {cache_dir} use incompatible default_metric "
                 f"{actual_metric!r}; expected {expected_metric!r}. {rerun_message}"
             )
+    expected_strings = {
+        "noise_kernel_algorithm": expected_noise_kernel_algorithm,
+        "topmean_definition": expected_topmean_definition or expected_top10mean_definition,
+    }
+    for key, expected_value in expected_strings.items():
+        if expected_value is None or source != PHYSICAL_XPASS_SOURCE:
+            continue
+        actual_value = metadata.get(key)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"Physical xPass sidecars at {cache_dir} use incompatible {key} "
+                f"{actual_value!r}; expected {expected_value!r}. {rerun_message}"
+            )
     expected_numeric = {
         "max_speed": expected_max_speed,
         "speed_step": expected_speed_step,
@@ -291,6 +342,10 @@ def validate_physical_xpass_cache_metadata(
         "refine_top_k_angles": expected_refine_top_k_angles,
         "refine_angle_radius_deg": expected_refine_angle_radius,
         "angle_step_deg": expected_angle_step,
+        "sigma_angle_factor": expected_sigma_angle,
+        "sigma_speed_factor": expected_sigma_speed,
+        "sigma_distance_factor": expected_sigma_distance,
+        "top_n": expected_top_n,
     }
     for key, expected_value in expected_numeric.items():
         if expected_value is None or source != PHYSICAL_XPASS_SOURCE:
@@ -386,8 +441,13 @@ def runtime_physical_xpass_speed_aggregation(args: Any) -> str:
 def physical_xpass_metric(args: Any) -> str:
     if bool(_get_arg(args, "max_xpass", False)) or bool(_get_arg(args, "use_max_xpass", False)):
         return PHYSICAL_XPASS_METRIC_MAX
-    if bool(_get_arg(args, "top10mean_xpass", False)) or bool(_get_arg(args, "use_top10mean_xpass", False)):
-        return PHYSICAL_XPASS_METRIC_TOP10MEAN
+    if (
+        bool(_get_arg(args, "topmean_xpass", False))
+        or bool(_get_arg(args, "use_topmean_xpass", False))
+        or bool(_get_arg(args, "top10mean_xpass", False))
+        or bool(_get_arg(args, "use_top10mean_xpass", False))
+    ):
+        return PHYSICAL_XPASS_METRIC_TOPMEAN
     return normalize_physical_xpass_metric(_get_arg(args, "physical_xpass_metric", None))
 
 
@@ -406,6 +466,10 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "refine_top_k_angles": AS_DEFAULT_REFINE_TOP_K_ANGLES,
         "refine_angle_radius": AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
         "angle_step": AS_DEFAULT_ANGLE_STEP_DEG,
+        "sigma_angle": PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+        "sigma_speed": PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+        "sigma_distance": PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+        "top_n": PHYSICAL_XPASS_DEFAULT_TOP_N,
     }
 
 
@@ -1177,13 +1241,17 @@ def refined_angle_grid_from_coarse_angles(
     return np.asarray(sorted(rounded.values()), dtype=float)
 
 
-def physical_xpass_kernel_sigmas(speed: float, distance: float) -> tuple[float, float, float]:
+def physical_xpass_kernel_sigmas(
+    speed: float,
+    distance: float,
+    *,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+) -> tuple[float, float, float]:
     speed = float(speed)
     distance = float(distance)
-    sigma_angle = math.radians((5.0 + max(0.0, speed - 15.0)) / 2.0)
-    sigma_speed = 0.1 * speed
-    sigma_distance = 0.1 * distance
-    return sigma_angle, sigma_speed, sigma_distance
+    return math.radians(float(sigma_angle) * speed), float(sigma_speed) * speed, float(sigma_distance) * distance
 
 
 def _simulation_player_cum_prob(simulation_result: Any, *, frame_count: int, player_count: int, n_angles: int) -> np.ndarray:
@@ -1306,46 +1374,82 @@ def _top_angle_indices_from_values(values: np.ndarray, refine_top_k_angles: int)
     return [int(index) for index in finite_indices[np.argsort(per_angle[finite_indices])[-top_count:]].tolist()]
 
 
-def _robust_xpass_metrics_from_values(values: np.ndarray, speeds: np.ndarray, angles: np.ndarray, distances: np.ndarray) -> dict[str, float]:
+def _robust_xpass_metrics_from_values(
+    values: np.ndarray,
+    speeds: np.ndarray,
+    angles: np.ndarray,
+    distances: np.ndarray,
+    *,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+) -> dict[str, float]:
     finite = np.isfinite(values)
     if not finite.any():
         return {
             PHYSICAL_XPASS_METRIC_NOISE_KERNEL: float("nan"),
             PHYSICAL_XPASS_METRIC_MAX: float("nan"),
-            PHYSICAL_XPASS_METRIC_TOP10MEAN: float("nan"),
+            PHYSICAL_XPASS_METRIC_TOPMEAN: float("nan"),
         }
 
     max_flat_index = int(np.nanargmax(np.where(finite, values, np.nan)))
     speed_index, angle_index, distance_index = np.unravel_index(max_flat_index, values.shape)
     best_value = float(values[speed_index, angle_index, distance_index])
     finite_values = values[finite]
-    top_count = max(1, int(math.ceil(float(finite_values.size) * 0.10)))
+    top_count = min(max(1, int(top_n)), int(finite_values.size))
     top_values = np.partition(finite_values, finite_values.size - top_count)[finite_values.size - top_count :]
-    top10_value = float(np.mean(top_values))
+    topmean_value = float(np.mean(top_values))
 
     best_speed = float(speeds[speed_index])
     best_angle = float(angles[angle_index])
     best_distance = float(distances[distance_index])
-    sigma_angle, sigma_speed, sigma_distance = physical_xpass_kernel_sigmas(best_speed, best_distance)
-    sigma_angle = max(float(sigma_angle), 1e-12)
-    sigma_speed = max(float(sigma_speed), 1e-12)
-    sigma_distance = max(float(sigma_distance), 1e-12)
-
-    speed_error = speeds[:, np.newaxis, np.newaxis] - best_speed
-    angle_error = _circular_angle_error(angles[np.newaxis, :, np.newaxis], best_angle)
-    distance_error = distances[np.newaxis, np.newaxis, :] - best_distance
-    weights = (
-        np.exp(-0.5 * (angle_error / sigma_angle) ** 2)
-        * np.exp(-0.5 * (speed_error / sigma_speed) ** 2)
-        * np.exp(-0.5 * (distance_error / sigma_distance) ** 2)
+    angle_sigma, _speed_sigma, _distance_sigma = physical_xpass_kernel_sigmas(
+        best_speed,
+        best_distance,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
     )
-    weights = np.where(finite, weights, 0.0)
+    angle_sigma = max(float(angle_sigma), 1e-12)
+
+    weights = np.zeros_like(values, dtype=float)
+    for current_angle_index, current_angle in enumerate(angles):
+        angle_values = values[:, current_angle_index, :]
+        angle_finite = np.isfinite(angle_values)
+        if not angle_finite.any():
+            continue
+        angle_best_flat_index = int(np.nanargmax(np.where(angle_finite, angle_values, np.nan)))
+        angle_speed_index, angle_distance_index = np.unravel_index(angle_best_flat_index, angle_values.shape)
+        angle_best_speed = float(speeds[angle_speed_index])
+        angle_best_distance = float(distances[angle_distance_index])
+        _angle_sigma, speed_sigma, distance_sigma = physical_xpass_kernel_sigmas(
+            angle_best_speed,
+            angle_best_distance,
+            sigma_angle=sigma_angle,
+            sigma_speed=sigma_speed,
+            sigma_distance=sigma_distance,
+        )
+        speed_sigma = max(float(speed_sigma), 1e-12)
+        distance_sigma = max(float(distance_sigma), 1e-12)
+
+        angle_error = float(_circular_angle_error(float(current_angle), best_angle))
+        angle_weight = math.exp(-0.5 * (angle_error / angle_sigma) ** 2)
+        speed_error = speeds[:, np.newaxis] - angle_best_speed
+        distance_error = distances[np.newaxis, :] - angle_best_distance
+        angle_weights = (
+            angle_weight
+            * np.exp(-0.5 * (speed_error / speed_sigma) ** 2)
+            * np.exp(-0.5 * (distance_error / distance_sigma) ** 2)
+        )
+        weights[:, current_angle_index, :] = np.where(angle_finite, angle_weights, 0.0)
+
     weight_sum = float(weights.sum())
     noise_value = best_value if weight_sum <= 0.0 else float(np.sum(weights * np.where(finite, values, 0.0)) / weight_sum)
     return {
         PHYSICAL_XPASS_METRIC_NOISE_KERNEL: noise_value,
         PHYSICAL_XPASS_METRIC_MAX: best_value,
-        PHYSICAL_XPASS_METRIC_TOP10MEAN: top10_value,
+        PHYSICAL_XPASS_METRIC_TOPMEAN: topmean_value,
     }
 
 
@@ -1371,6 +1475,10 @@ def _compute_as_default_robust_metrics_from_simulation_inputs(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
 ) -> pd.Series:
     frame_count = int(player_pos.shape[0])
     PLAYER_POS = np.asarray(player_pos, dtype=float)
@@ -1440,7 +1548,7 @@ def _compute_as_default_robust_metrics_from_simulation_inputs(
     for node_id in node_ids:
         result_columns.append(str(node_id))
         result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_MAX))
-        result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOP10MEAN))
+        result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOPMEAN))
     result = pd.Series(np.nan, index=result_columns, dtype=float)
     for graph_target_index in candidate_indices:
         frame_index, target_sim_index = target_index_lookup[graph_target_index]
@@ -1453,7 +1561,16 @@ def _compute_as_default_robust_metrics_from_simulation_inputs(
             frame_count=frame_count,
             player_count=len(players),
         )
-        metrics = _robust_xpass_metrics_from_values(values, speeds, refined_angles, distances)
+        metrics = _robust_xpass_metrics_from_values(
+            values,
+            speeds,
+            refined_angles,
+            distances,
+            sigma_angle=sigma_angle,
+            sigma_speed=sigma_speed,
+            sigma_distance=sigma_distance,
+            top_n=top_n,
+        )
         node_id = str(node_ids[graph_target_index])
         for metric, value in metrics.items():
             if math.isfinite(value):
@@ -1532,6 +1649,10 @@ def compute_graph_physical_xpass_metrics_as_defaults(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -1542,7 +1663,7 @@ def compute_graph_physical_xpass_metrics_as_defaults(
     for node_id in node_ids:
         result_columns.append(str(node_id))
         result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_MAX))
-        result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOP10MEAN))
+        result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOPMEAN))
     result = pd.Series(np.nan, index=result_columns, dtype=float)
     if not candidate_indices:
         return result
@@ -1589,6 +1710,10 @@ def compute_graph_physical_xpass_metrics_as_defaults(
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
+        top_n=top_n,
     )
 
 
@@ -1603,6 +1728,10 @@ def compute_graphs_physical_xpass_metrics_as_defaults(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     simulate_passes_fn: Callable[..., Any] | None = None,
     use_progress_bar: bool = False,
     chunk_size: int = 150,
@@ -1619,7 +1748,7 @@ def compute_graphs_physical_xpass_metrics_as_defaults(
         for node_id in node_ids:
             result_columns.append(str(node_id))
             result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_MAX))
-            result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOP10MEAN))
+            result_columns.append(physical_xpass_metric_column(str(node_id), PHYSICAL_XPASS_METRIC_TOPMEAN))
         result = pd.Series(np.nan, index=result_columns, dtype=float)
         results[graph_index] = result
         if not candidate_indices:
@@ -1805,6 +1934,10 @@ def compute_graphs_physical_xpass_metrics_as_defaults(
                     speeds,
                     item_refined_angles,
                     distances,
+                    sigma_angle=sigma_angle,
+                    sigma_speed=sigma_speed,
+                    sigma_distance=sigma_distance,
+                    top_n=top_n,
                 )
                 node_id = str(batch[item_index]["node_ids"][graph_target_index])
                 result = results[graph_index]
@@ -2192,6 +2325,12 @@ def load_physical_xpass_component(
     row = frame.loc[int(action_index)]
     selected_metric = normalize_physical_xpass_metric(metric)
     suffix = PHYSICAL_XPASS_METRIC_SUFFIXES[selected_metric]
+    suffixes = [suffix]
+    legacy_suffix = PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES.get(selected_metric)
+    if legacy_suffix:
+        has_primary = any(str(column).endswith(suffix) for column in row.index)
+        if not has_primary:
+            suffixes.append(legacy_suffix)
     player_columns = []
     output_index = []
     for column in row.index:
@@ -2200,10 +2339,14 @@ def load_physical_xpass_component(
         column = str(column)
         if "__" in column and not suffix:
             continue
-        if suffix and not column.endswith(suffix):
-            continue
+        selected_suffix = suffix
+        if suffix:
+            matching_suffixes = [candidate for candidate in suffixes if column.endswith(candidate)]
+            if not matching_suffixes:
+                continue
+            selected_suffix = matching_suffixes[0]
         player_columns.append(column)
-        output_index.append(column[: -len(suffix)] if suffix else column)
+        output_index.append(column[: -len(selected_suffix)] if selected_suffix else column)
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
     series.index = output_index
     series.name = selected_metric
@@ -2304,6 +2447,10 @@ def _runtime_cache_metadata(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
 ) -> dict[str, Any]:
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -2315,6 +2462,10 @@ def _runtime_cache_metadata(
             refine_top_k_angles=refine_top_k_angles,
             refine_angle_radius=refine_angle_radius,
             angle_step=angle_step,
+            sigma_angle=sigma_angle,
+            sigma_speed=sigma_speed,
+            sigma_distance=sigma_distance,
+            top_n=top_n,
         )
     if source == PHYSICAL_XPASS_LEGACY_SOURCE:
         return {
@@ -2339,6 +2490,10 @@ def _ensure_runtime_physical_xpass_cache(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -2353,25 +2508,59 @@ def _ensure_runtime_physical_xpass_cache(
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
+        top_n=top_n,
     )
     if metadata_path.exists():
-        metadata = validate_physical_xpass_cache_metadata(
-            cache_root,
-            expected_source=source,
-            expected_speed_aggregation=speed_aggregation,
-            expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION if source == PHYSICAL_XPASS_SOURCE else None,
-            expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC if source == PHYSICAL_XPASS_SOURCE else None,
-            expected_max_speed=float(as_default_v0_values(max_speed=max_speed, speed_step=speed_step)[-1])
-            if source == PHYSICAL_XPASS_SOURCE
-            else None,
-            expected_speed_step=float(speed_step if speed_step is not None else AS_DEFAULT_SPEED_STEP)
-            if source == PHYSICAL_XPASS_SOURCE
-            else None,
-            expected_coarse_n_angles=int(coarse_n_angles) if source == PHYSICAL_XPASS_SOURCE else None,
-            expected_refine_top_k_angles=int(refine_top_k_angles) if source == PHYSICAL_XPASS_SOURCE else None,
-            expected_refine_angle_radius=float(refine_angle_radius) if source == PHYSICAL_XPASS_SOURCE else None,
-            expected_angle_step=float(angle_step) if source == PHYSICAL_XPASS_SOURCE else None,
-        )
+        try:
+            metadata = validate_physical_xpass_cache_metadata(
+                cache_root,
+                expected_source=source,
+                expected_speed_aggregation=speed_aggregation,
+                expected_metric_schema_version=PHYSICAL_XPASS_METRIC_SCHEMA_VERSION if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_default_metric=PHYSICAL_XPASS_DEFAULT_METRIC if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_noise_kernel_algorithm=PHYSICAL_XPASS_NOISE_KERNEL_ALGORITHM if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_topmean_definition=PHYSICAL_XPASS_TOPMEAN_DEFINITION if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_top_n=int(top_n) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_max_speed=float(as_default_v0_values(max_speed=max_speed, speed_step=speed_step)[-1])
+                if source == PHYSICAL_XPASS_SOURCE
+                else None,
+                expected_speed_step=float(speed_step if speed_step is not None else AS_DEFAULT_SPEED_STEP)
+                if source == PHYSICAL_XPASS_SOURCE
+                else None,
+                expected_coarse_n_angles=int(coarse_n_angles) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_refine_top_k_angles=int(refine_top_k_angles) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_refine_angle_radius=float(refine_angle_radius) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_angle_step=float(angle_step) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_sigma_angle=float(sigma_angle) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_sigma_speed=float(sigma_speed) if source == PHYSICAL_XPASS_SOURCE else None,
+                expected_sigma_distance=float(sigma_distance) if source == PHYSICAL_XPASS_SOURCE else None,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            stale_metric_definition = source == PHYSICAL_XPASS_SOURCE and (
+                "noise_kernel_algorithm" in message
+                or "topmean_definition" in message
+                or "top10mean_definition" in message
+                or "top_n" in message
+                or "sigma_angle_factor" in message
+                or "sigma_speed_factor" in message
+                or "sigma_distance_factor" in message
+            )
+            if not stale_metric_definition or not create_if_missing:
+                raise
+            metadata = {
+                **expected_metadata,
+                "created_for": "runtime_physical_xpass_cache",
+                "storage": "wide_parquet_one_row_per_action_player_id_columns",
+                "replaced_incompatible_metadata_reason": message,
+                "_force_refresh_runtime_rows": True,
+            }
+            metadata_to_write = {key: value for key, value in metadata.items() if not key.startswith("_")}
+            (cache_root / "matches").mkdir(parents=True, exist_ok=True)
+            metadata_path.write_text(json.dumps(metadata_to_write, indent=2, sort_keys=True), encoding="utf-8")
         actual_policy = metadata.get("teammate_policy")
         if actual_policy is not None and actual_policy != teammate_policy:
             raise ValueError(
@@ -2680,6 +2869,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     refine_top_k_angles = int(task.get("refine_top_k_angles", AS_DEFAULT_REFINE_TOP_K_ANGLES))
     refine_angle_radius = float(task.get("refine_angle_radius", AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG))
     angle_step = float(task.get("angle_step", AS_DEFAULT_ANGLE_STEP_DEG))
+    sigma_angle = float(task.get("sigma_angle", PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR))
+    sigma_speed = float(task.get("sigma_speed", PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR))
+    sigma_distance = float(task.get("sigma_distance", PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR))
+    top_n = int(task.get("top_n", PHYSICAL_XPASS_DEFAULT_TOP_N))
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -2692,6 +2885,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             refine_top_k_angles=refine_top_k_angles,
             refine_angle_radius=refine_angle_radius,
             angle_step=angle_step,
+            sigma_angle=sigma_angle,
+            sigma_speed=sigma_speed,
+            sigma_distance=sigma_distance,
+            top_n=top_n,
             batch_size=physical_batch_size,
         )
     else:
@@ -2776,6 +2973,10 @@ def prewarm_physical_xpass_runtime_cache(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
@@ -2793,7 +2994,7 @@ def prewarm_physical_xpass_runtime_cache(
         raise ValueError("--physical-batch-size must be positive.")
 
     resolved_workers = resolve_physical_num_workers(num_workers, max_auto_workers=max_auto_workers)
-    _ensure_runtime_physical_xpass_cache(
+    cache_metadata = _ensure_runtime_physical_xpass_cache(
         cache_dir,
         source=source,
         teammate_policy=teammate_policy,
@@ -2804,8 +3005,13 @@ def prewarm_physical_xpass_runtime_cache(
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
+        top_n=top_n,
         create_if_missing=not bool(dry_run),
     )
+    refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
@@ -2971,6 +3177,10 @@ def prewarm_physical_xpass_runtime_cache(
             "refine_top_k_angles": int(refine_top_k_angles),
             "refine_angle_radius": float(refine_angle_radius),
             "angle_step": float(angle_step),
+            "sigma_angle": float(sigma_angle),
+            "sigma_speed": float(sigma_speed),
+            "sigma_distance": float(sigma_distance),
+            "top_n": int(top_n),
         }
         progress = tqdm(
             total=len(misses),
@@ -3068,6 +3278,10 @@ def attach_physical_xpass_cached_online_to_graphs(
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
+    sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     metric: str | None = None,
 ) -> tuple[list[Data], dict[str, object]]:
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
@@ -3094,6 +3308,10 @@ def attach_physical_xpass_cached_online_to_graphs(
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        sigma_angle=sigma_angle,
+        sigma_speed=sigma_speed,
+        sigma_distance=sigma_distance,
+        top_n=top_n,
     )
     physical_rows = load_physical_xpass_match(cache_dir, match_id)
     attached: list[Data] = []
@@ -3144,8 +3362,9 @@ def attach_physical_xpass_to_graph(
     probs = torch.full((len(node_ids),), fill_value, dtype=torch.float32)
     missing_columns = []
     for node_index, node_id in enumerate(node_ids):
-        value_column = physical_xpass_metric_column(str(node_id), selected_metric)
-        if value_column not in row.index:
+        value_columns = physical_xpass_metric_columns(str(node_id), selected_metric)
+        value_column = next((column for column in value_columns if column in row.index), None)
+        if value_column is None:
             missing_columns.append(node_id)
             continue
         value = row[value_column]
@@ -3175,8 +3394,9 @@ def attach_physical_xpass_to_graph(
     if require_observed_target:
         target_index = int(labels[LABEL_INDEX["intent_index"]].item())
         if 0 <= target_index < len(node_ids):
-            target_column = physical_xpass_metric_column(str(node_ids[target_index]), selected_metric)
-            target_value = row[target_column] if target_column in row.index else np.nan
+            target_columns = physical_xpass_metric_columns(str(node_ids[target_index]), selected_metric)
+            target_column = next((column for column in target_columns if column in row.index), None)
+            target_value = row[target_column] if target_column is not None else np.nan
             if pd.isna(target_value):
                 raise ValueError(
                     f"Physical xPass sidecar has no finite probability for observed target {node_ids[target_index]!r} "

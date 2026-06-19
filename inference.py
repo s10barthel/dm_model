@@ -36,7 +36,7 @@ from physical_pass_model import (
     physical_xpass_floor,
     physical_xpass_inference_lookup_config,
     physical_xpass_metric,
-    physical_xpass_metric_column,
+    physical_xpass_metric_columns,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
@@ -309,7 +309,7 @@ def _physical_xpass_row_skip_reason(
 ) -> str | None:
     if metric is not None:
         node_ids = [str(node_id) for node_id in getattr(graph, "node_ids", [])]
-        candidate_columns = [physical_xpass_metric_column(node_id, metric) for node_id in node_ids]
+        candidate_columns = [column for node_id in node_ids for column in physical_xpass_metric_columns(node_id, metric)]
         has_metric_column = any(column in row.index for column in candidate_columns)
         if not has_metric_column:
             return f"missing_{metric}_columns"
