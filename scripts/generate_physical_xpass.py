@@ -101,6 +101,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split", choices=["train", "test", "all"], default="all", help="Sportec split subset.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
     parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
+    parser.add_argument(
+        "--skillcorner-runtime-row-window",
+        type=int,
+        default=None,
+        help="Number of SkillCorner runtime pass rows to buffer before prewarming physical xPass. Defaults to physical_batch_size * num_workers * 2.",
+    )
+    parser.add_argument(
+        "--benchmark-runtime-row-window",
+        type=int,
+        default=None,
+        help="Number of benchmark runtime pass rows to buffer before prewarming physical xPass. Defaults to physical_batch_size * num_workers * 2.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Deprecated outside legacy --feature-run-id mode.")
     parser.add_argument(
         "--runtime-sportec-cache",
@@ -199,6 +211,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
     if args.sportec_runtime_match_window < 1:
         parser.error("--sportec-runtime-match-window must be positive.")
+    if args.skillcorner_runtime_row_window is not None and int(args.skillcorner_runtime_row_window) < 1:
+        parser.error("--skillcorner-runtime-row-window must be positive.")
+    if args.benchmark_runtime_row_window is not None and int(args.benchmark_runtime_row_window) < 1:
+        parser.error("--benchmark-runtime-row-window must be positive.")
     if not (0.0 < args.physical_eps < 0.5):
         parser.error("--physical-eps must be between 0 and 0.5.")
     if args.physical_batch_size < 1:
@@ -746,6 +762,94 @@ def prewarm_runtime_items(
     )
 
 
+def resolve_runtime_row_window(args: argparse.Namespace, attr_name: str) -> int:
+    explicit_value = getattr(args, attr_name, None)
+    if explicit_value is not None:
+        return int(explicit_value)
+    batch_size = int(args.physical_batch_size)
+    workers = resolve_num_workers(args.num_workers, max_auto_workers=int(args.max_auto_workers))
+    return max(batch_size, batch_size * workers * 2)
+
+
+def runtime_items_row_count(items: list[dict[str, Any]]) -> int:
+    total = 0
+    for item in items:
+        labels = item.get("labels")
+        if isinstance(labels, torch.Tensor) and labels.ndim >= 1:
+            total += int(labels.shape[0])
+        else:
+            total += len(item.get("graphs") or [])
+    return int(total)
+
+
+def make_runtime_buffer_unit(
+    *,
+    display_key: str,
+    skip_keys: list[str] | tuple[str, ...],
+    items: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    row_count = runtime_items_row_count(items)
+    if row_count <= 0:
+        return None
+    return {
+        "display_key": str(display_key),
+        "skip_keys": [str(skip_key) for skip_key in skip_keys],
+        "items": list(items),
+        "row_count": int(row_count),
+    }
+
+
+def flush_runtime_buffer(
+    buffer: list[dict[str, Any]],
+    *,
+    cache_dir: Path,
+    args: argparse.Namespace,
+    stats: dict[str, Any],
+    skipped: dict[str, Any],
+    progress_desc: str,
+) -> int:
+    if not buffer:
+        return 0
+
+    units = list(buffer)
+    buffer.clear()
+    items = [item for unit in units for item in unit["items"]]
+    failed_units = 0
+    try:
+        unit_stats = prewarm_runtime_items(
+            items,
+            cache_dir=cache_dir,
+            args=args,
+            progress_desc=progress_desc,
+        )
+        merge_stats(stats, unit_stats)
+        if unit_stats and _runtime_stats_has_work(unit_stats):
+            tqdm.write(_format_runtime_stats_line(progress_desc, unit_stats))
+        return 0
+    except Exception as batch_exc:
+        tqdm.write(f"{progress_desc}: batch retry per unit after {type(batch_exc).__name__}: {batch_exc}")
+
+    for unit in units:
+        display_key = str(unit["display_key"])
+        try:
+            unit_stats = prewarm_runtime_items(
+                list(unit["items"]),
+                cache_dir=cache_dir,
+                args=args,
+                progress_desc=display_key,
+            )
+            merge_stats(stats, unit_stats)
+            if unit_stats and _runtime_stats_has_work(unit_stats):
+                tqdm.write(_format_runtime_stats_line(display_key, unit_stats))
+        except Exception as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            for skip_key in unit["skip_keys"]:
+                skipped[str(skip_key)] = reason
+            failed_units += 1
+            tqdm.write(f"{display_key}: skipped={_skip_reason_label(reason)}")
+    return failed_units
+
+
 def write_runtime_dataset_metadata(
     dataset: str,
     cache_dir: Path,
@@ -1019,6 +1123,35 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     cache_dir = get_runtime_physical_xpass_dir("benchmark")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
+    row_window = resolve_runtime_row_window(args, "benchmark_runtime_row_window")
+    pending_units: list[dict[str, Any]] = []
+    pending_rows = 0
+    pending_modifications: list[str] = []
+
+    def flush_pending_window() -> None:
+        nonlocal pending_rows, pending_modifications
+        if not pending_units:
+            pending_rows = 0
+            pending_modifications = []
+            return
+        first_modification = pending_modifications[0]
+        last_modification = pending_modifications[-1]
+        progress_desc = (
+            f"benchmark modification {first_modification}"
+            if first_modification == last_modification
+            else f"benchmark modifications {first_modification}..{last_modification}"
+        )
+        flush_runtime_buffer(
+            pending_units,
+            cache_dir=cache_dir,
+            args=args,
+            stats=stats,
+            skipped=skipped,
+            progress_desc=progress_desc,
+        )
+        pending_rows = 0
+        pending_modifications = []
+
     selected, skipped_discovery = discover_benchmark_modifications(
         args.benchmark_input_dir,
         requested_modifications=args.benchmark_modification,
@@ -1034,23 +1167,21 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             items: list[dict[str, Any]] = []
             for state in states:
                 items.extend(runtime_cache_items_from_graphs(str(state.match_id), state.graph_features_0, state.labels))
-            unit_stats = prewarm_runtime_items(
-                items,
-                cache_dir=cache_dir,
-                args=args,
-                progress_desc=f"benchmark modification {modification_id}",
+            unit = make_runtime_buffer_unit(
+                display_key=f"benchmark modification {modification_id}",
+                skip_keys=[str(modification_id)],
+                items=items,
             )
-            merge_stats(stats, unit_stats)
-            if unit_stats:
-                tqdm.write(
-                    _format_runtime_stats_line(
-                        f"benchmark modification {modification_id}",
-                        unit_stats,
-                    )
-                )
+            if unit is not None:
+                pending_units.append(unit)
+                pending_rows += int(unit["row_count"])
+                pending_modifications.append(str(modification_id))
+            if pending_rows >= row_window:
+                flush_pending_window()
         except Exception as exc:
             skipped[str(modification_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"benchmark modification {modification_id}: skipped={_skip_reason_label(skipped[str(modification_id)])}")
+    flush_pending_window()
     write_runtime_dataset_metadata(
         "benchmark",
         cache_dir,
@@ -1106,6 +1237,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
     cache_dir = get_runtime_physical_xpass_dir("skillcorner")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
+    row_window = resolve_runtime_row_window(args, "skillcorner_runtime_row_window")
     selected, skipped_discovery = discover_skillcorner_matches(
         args.skillcorner_input_dir,
         requested_match_ids=args.skillcorner_match_id,
@@ -1118,6 +1250,34 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
             match_before = dict(stats)
             event_ids = events["index"].astype(int).tolist()
             event_skipped = 0
+            pending_units: list[dict[str, Any]] = []
+            pending_rows = 0
+            pending_event_ids: list[int] = []
+
+            def flush_pending_window() -> None:
+                nonlocal event_skipped, pending_rows, pending_event_ids
+                if not pending_units:
+                    pending_rows = 0
+                    pending_event_ids = []
+                    return
+                first_event = pending_event_ids[0]
+                last_event = pending_event_ids[-1]
+                progress_desc = (
+                    f"skillcorner {match_id}:{first_event}"
+                    if first_event == last_event
+                    else f"skillcorner {match_id}:{first_event}..{last_event}"
+                )
+                event_skipped += flush_runtime_buffer(
+                    pending_units,
+                    cache_dir=cache_dir,
+                    args=args,
+                    stats=stats,
+                    skipped=skipped,
+                    progress_desc=progress_desc,
+                )
+                pending_rows = 0
+                pending_event_ids = []
+
             for event_index in tqdm(event_ids, desc=f"skillcorner {match_id} events", unit="events", leave=False):
                 try:
                     possession, _stats = build_skillcorner_possession(
@@ -1125,19 +1285,26 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         int(event_index),
                         frames_mode=args.skillcorner_frames_mode,
                     )
-                    unit_stats = prewarm_runtime_items(
-                        runtime_cache_items_from_graphs(str(possession.match_id), possession.graph_features_0, possession.labels),
-                        cache_dir=cache_dir,
-                        args=args,
-                        progress_desc=f"skillcorner {match_id}:{event_index}",
+                    unit = make_runtime_buffer_unit(
+                        display_key=f"skillcorner {match_id}:{event_index}",
+                        skip_keys=[f"{match_id}:{event_index}"],
+                        items=runtime_cache_items_from_graphs(
+                            str(possession.match_id),
+                            possession.graph_features_0,
+                            possession.labels,
+                        ),
                     )
-                    merge_stats(stats, unit_stats)
-                    if unit_stats and _runtime_stats_has_work(unit_stats):
-                        tqdm.write(_format_runtime_stats_line(f"skillcorner {match_id}:{event_index}", unit_stats))
+                    if unit is not None:
+                        pending_units.append(unit)
+                        pending_rows += int(unit["row_count"])
+                        pending_event_ids.append(int(event_index))
+                    if pending_rows >= row_window:
+                        flush_pending_window()
                 except Exception as exc:
                     skipped[f"{match_id}:{event_index}"] = f"{type(exc).__name__}: {exc}"
                     event_skipped += 1
                     tqdm.write(f"skillcorner {match_id}:{event_index}: skipped={_skip_reason_label(skipped[f'{match_id}:{event_index}'])}")
+            flush_pending_window()
             match_delta = {
                 key: int(stats.get(key, 0) or 0) - int(match_before.get(key, 0) or 0)
                 for key in [

@@ -168,6 +168,26 @@ def make_pass_success_args(**overrides: object) -> dict[str, object]:
     return args
 
 
+def make_runtime_prewarm_stats(rows: int) -> dict[str, object]:
+    return {
+        "rows_scanned": int(rows),
+        "pass_rows": int(rows),
+        "cache_hits": 0,
+        "cache_misses": int(rows),
+        "cache_written": int(rows),
+        "copied_from_reuse": 0,
+        "pass_distance_filled": 0,
+        "hash_mismatch_recomputed": 0,
+        "online_graphs": int(rows),
+        "compute_chunks": 1 if rows else 0,
+        "skipped_all_nan": 0,
+        "cache_scan_seconds": 0.0,
+        "compute_seconds": 0.0,
+        "write_seconds": 0.0,
+        "matches": {},
+    }
+
+
 class FakeSimulationResult:
     def __init__(
         self,
@@ -3495,9 +3515,30 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.num_workers, "auto")
         self.assertEqual(args.max_auto_workers, PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
         self.assertEqual(args.sportec_runtime_match_window, 4)
+        self.assertIsNone(args.skillcorner_runtime_row_window)
+        self.assertIsNone(args.benchmark_runtime_row_window)
         self.assertEqual(args.physical_batch_size, 16)
         self.assertEqual(args.worker_thread_limit, 1)
         self.assertFalse(args.dry_run)
+
+    def test_generate_physical_xpass_cli_accepts_runtime_row_windows(self) -> None:
+        args = generate_physical_xpass.parse_args(
+            [
+                "--skillcorner-runtime-row-window",
+                "32",
+                "--benchmark-runtime-row-window",
+                "12",
+            ]
+        )
+
+        self.assertEqual(args.skillcorner_runtime_row_window, 32)
+        self.assertEqual(args.benchmark_runtime_row_window, 12)
+
+    def test_generate_physical_xpass_cli_rejects_non_positive_runtime_row_windows(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "0"])
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "0"])
 
     def test_generate_physical_xpass_cli_accepts_dry_run(self) -> None:
         args = generate_physical_xpass.parse_args(["--dry-run", "--no-skillcorner"])
@@ -3543,6 +3584,164 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn("empty_or_no_pass_rows=1", summary)
         self.assertIn("incompatible_cache=1", summary)
         self.assertIn("missing_input=1", summary)
+
+    def test_generate_physical_xpass_skillcorner_batches_runtime_prewarm_by_rows(self) -> None:
+        args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "3"])
+        context = {"events": pd.DataFrame({"index": [1, 2, 3]})}
+
+        def fake_possession(_context, event_index: int, **_kwargs):
+            return (
+                SimpleNamespace(
+                    match_id="m1",
+                    graph_features_0=[object()],
+                    labels=torch.stack([make_label(action_index=int(event_index))]),
+                ),
+                {},
+            )
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "discover_skillcorner_matches", return_value=(["m1"], {})):
+                with patch.object(generate_physical_xpass, "build_skillcorner_match_context", return_value=context):
+                    with patch.object(generate_physical_xpass, "build_skillcorner_possession", side_effect=fake_possession):
+                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "prewarm_runtime_items",
+                                    side_effect=lambda items, **_kwargs: make_runtime_prewarm_stats(len(items)),
+                                ) as prewarm:
+                                    result = generate_physical_xpass.run_runtime_skillcorner(args)
+
+        prewarm.assert_called_once()
+        self.assertEqual(len(prewarm.call_args.args[0]), 3)
+        self.assertEqual(result["stats"]["cache_misses"], 3)
+        self.assertEqual(result["skipped"], {})
+
+    def test_generate_physical_xpass_skillcorner_batch_failure_retries_per_event(self) -> None:
+        args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "2"])
+        context = {"events": pd.DataFrame({"index": [1, 2]})}
+        call_sizes: list[int] = []
+
+        def fake_possession(_context, event_index: int, **_kwargs):
+            return (
+                SimpleNamespace(
+                    match_id="m1",
+                    graph_features_0=[object()],
+                    labels=torch.stack([make_label(action_index=int(event_index))]),
+                ),
+                {},
+            )
+
+        def fake_prewarm(items, **_kwargs):
+            call_sizes.append(len(items))
+            if len(call_sizes) == 1:
+                raise RuntimeError("batch failed")
+            if len(call_sizes) == 3:
+                raise ValueError("event failed")
+            return make_runtime_prewarm_stats(len(items))
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "discover_skillcorner_matches", return_value=(["m1"], {})):
+                with patch.object(generate_physical_xpass, "build_skillcorner_match_context", return_value=context):
+                    with patch.object(generate_physical_xpass, "build_skillcorner_possession", side_effect=fake_possession):
+                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "prewarm_runtime_items",
+                                    side_effect=fake_prewarm,
+                                ):
+                                    result = generate_physical_xpass.run_runtime_skillcorner(args)
+
+        self.assertEqual(call_sizes, [2, 1, 1])
+        self.assertIn("m1:2", result["skipped"])
+        self.assertIn("ValueError", result["skipped"]["m1:2"])
+        self.assertEqual(result["stats"]["cache_misses"], 1)
+
+    def test_generate_physical_xpass_benchmark_batches_runtime_prewarm_by_rows(self) -> None:
+        args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
+        call_sizes: list[int] = []
+
+        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int):
+            return (
+                SimpleNamespace(
+                    match_id=f"modification_{int(modification_id)}_game_state_{int(game_state_id)}",
+                    graph_features_0=[object()],
+                    labels=torch.stack([make_label(action_index=0)]),
+                ),
+                pd.DataFrame(),
+                {},
+            )
+
+        def fake_prewarm(items, **_kwargs):
+            call_sizes.append(len(items))
+            return make_runtime_prewarm_stats(len(items))
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "discover_benchmark_modifications", return_value=([1, 2, 3], {})):
+                with patch.object(
+                    generate_physical_xpass,
+                    "load_benchmark_modification_data",
+                    return_value={"game_state_1": pd.DataFrame(), "game_state_2": pd.DataFrame(), "higher_state_id": 9},
+                ):
+                    with patch.object(generate_physical_xpass, "build_benchmark_state", side_effect=fake_build_state):
+                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "prewarm_runtime_items",
+                                    side_effect=fake_prewarm,
+                                ):
+                                    result = generate_physical_xpass.run_runtime_benchmark(args)
+
+        self.assertEqual(call_sizes, [4, 2])
+        self.assertEqual(result["stats"]["cache_misses"], 6)
+        self.assertEqual(result["skipped"], {})
+
+    def test_generate_physical_xpass_benchmark_batch_failure_retries_per_modification(self) -> None:
+        args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
+        call_sizes: list[int] = []
+
+        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int):
+            return (
+                SimpleNamespace(
+                    match_id=f"modification_{int(modification_id)}_game_state_{int(game_state_id)}",
+                    graph_features_0=[object()],
+                    labels=torch.stack([make_label(action_index=0)]),
+                ),
+                pd.DataFrame(),
+                {},
+            )
+
+        def fake_prewarm(items, **_kwargs):
+            call_sizes.append(len(items))
+            if len(call_sizes) == 1:
+                raise RuntimeError("batch failed")
+            if len(call_sizes) == 3:
+                raise ValueError("modification failed")
+            return make_runtime_prewarm_stats(len(items))
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "discover_benchmark_modifications", return_value=([1, 2], {})):
+                with patch.object(
+                    generate_physical_xpass,
+                    "load_benchmark_modification_data",
+                    return_value={"game_state_1": pd.DataFrame(), "game_state_2": pd.DataFrame(), "higher_state_id": 9},
+                ):
+                    with patch.object(generate_physical_xpass, "build_benchmark_state", side_effect=fake_build_state):
+                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "prewarm_runtime_items",
+                                    side_effect=fake_prewarm,
+                                ):
+                                    result = generate_physical_xpass.run_runtime_benchmark(args)
+
+        self.assertEqual(call_sizes, [4, 2, 2])
+        self.assertIn("2", result["skipped"])
+        self.assertIn("ValueError", result["skipped"]["2"])
+        self.assertEqual(result["stats"]["cache_misses"], 2)
 
     def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
         args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])
