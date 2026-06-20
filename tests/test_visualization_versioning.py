@@ -893,6 +893,7 @@ class VisualizationVersioningTests(unittest.TestCase):
     def test_direct_hawkeye_visualization_records_model_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            tracking = pd.DataFrame({"id": ["sit1"]})
             args = SimpleNamespace(
                 situation_id=["sit1"],
                 action_id=None,
@@ -949,7 +950,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
                 patch.object(run_and_visualize_hawkeye.torch.cuda, "is_available", return_value=False),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
-                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=tracking),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(
@@ -984,9 +985,201 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["rendered_situation_ids"], ["sit1"])
             self.assertEqual(metadata["output"], "png")
 
+    def test_direct_hawkeye_visualization_without_ids_renders_all_tracking_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tracking = pd.DataFrame({"id": ["sit2", "sit1", "sit2", None]})
+            args = SimpleNamespace(
+                situation_id=None,
+                action_id=None,
+                tracking_csv=str(root / "tracking.csv"),
+                ball_csv=str(root / "ball.csv"),
+                freeze_ballreceipt=True,
+                device="cpu",
+                show_trajectories=False,
+                output="png",
+                time_norm=[0.0],
+                bundle_id=None,
+                action_intent_model_id="action_intent/1",
+                pass_intent_model_id="pass_intent/1",
+                pass_success_model_id="pass_success/1",
+                outcome_scoring_model_id="outcome_scoring/1",
+                outcome_conceding_model_id="outcome_conceding/1",
+                show_physical_xpass=False,
+                use_physical_xpass=False,
+                max_xpass=False,
+                topmean_xpass=False,
+                top10mean_xpass=False,
+                physical_cache_dir=None,
+                no_physical_cache=False,
+                refresh_physical_cache=False,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
+                run_id="hawkeye_visualization_all",
+                output_dir=str(root),
+            )
+            rendered_ids: list[str] = []
+
+            def fake_render_situation(
+                situation_id: str,
+                tracking: pd.DataFrame,
+                ball: pd.DataFrame,
+                model_specs: dict[str, object],
+                graph_schema: dict[str, object],
+                args: SimpleNamespace,
+                device: str,
+                output_root: Path,
+                rendered_components: list[str],
+            ) -> tuple[Path, dict[str, object], dict[str, object]]:
+                del tracking, ball, model_specs, graph_schema, args, device, rendered_components
+                rendered_ids.append(situation_id)
+                output_dir = output_root / situation_id
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = output_dir / "pass_score_time_norm_0.png"
+                output_path.write_text("image", encoding="utf-8")
+                return output_dir, {}, {
+                    "frame_ids": [0],
+                    "selected_frames": [{"label": "time_norm_0", "frame_id": 0}],
+                    "output_paths": [str(output_path.resolve())],
+                }
+
+            with (
+                patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
+                patch.object(run_and_visualize_hawkeye.torch.cuda, "is_available", return_value=False),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=tracking),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "resolve_model_selection",
+                    return_value=(
+                        {
+                            "action_intent": "action_intent/1",
+                            "pass_intent": "pass_intent/1",
+                            "pass_success": "pass_success/1",
+                            "outcome_scoring": "outcome_scoring/1",
+                            "outcome_conceding": "outcome_conceding/1",
+                        },
+                        {},
+                        None,
+                    ),
+                ),
+                patch.object(run_and_visualize_hawkeye, "load_model", return_value=SimpleNamespace(args={})),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": False},
+                ),
+                patch.object(run_and_visualize_hawkeye, "render_situation", side_effect=fake_render_situation),
+            ):
+                run_and_visualize_hawkeye.main()
+
+            metadata = json.loads((root / "hawkeye_visualization_all" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(rendered_ids, ["sit1", "sit2"])
+            self.assertEqual(metadata["requested_situation_ids"], [])
+            self.assertEqual(metadata["requested_action_ids"], [])
+            self.assertEqual(metadata["rendered_situation_ids"], ["sit1", "sit2"])
+
+    def test_direct_hawkeye_visualization_accepts_action_id_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tracking = pd.DataFrame({"id": ["sit1", "sit2"]})
+            args = SimpleNamespace(
+                situation_id=None,
+                action_id=["sit2"],
+                tracking_csv=str(root / "tracking.csv"),
+                ball_csv=str(root / "ball.csv"),
+                freeze_ballreceipt=True,
+                device="cpu",
+                show_trajectories=False,
+                output="png",
+                time_norm=[0.0],
+                bundle_id=None,
+                action_intent_model_id="action_intent/1",
+                pass_intent_model_id="pass_intent/1",
+                pass_success_model_id="pass_success/1",
+                outcome_scoring_model_id="outcome_scoring/1",
+                outcome_conceding_model_id="outcome_conceding/1",
+                show_physical_xpass=False,
+                use_physical_xpass=False,
+                max_xpass=False,
+                topmean_xpass=False,
+                top10mean_xpass=False,
+                physical_cache_dir=None,
+                no_physical_cache=False,
+                refresh_physical_cache=False,
+                physical_num_workers="auto",
+                physical_worker_thread_limit=1,
+                physical_batch_size=16,
+                run_id="hawkeye_visualization_action_alias",
+                output_dir=str(root),
+            )
+
+            def fake_render_situation(
+                situation_id: str,
+                tracking: pd.DataFrame,
+                ball: pd.DataFrame,
+                model_specs: dict[str, object],
+                graph_schema: dict[str, object],
+                args: SimpleNamespace,
+                device: str,
+                output_root: Path,
+                rendered_components: list[str],
+            ) -> tuple[Path, dict[str, object], dict[str, object]]:
+                del tracking, ball, model_specs, graph_schema, args, device, rendered_components
+                output_dir = output_root / situation_id
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = output_dir / "pass_score_time_norm_0.png"
+                output_path.write_text("image", encoding="utf-8")
+                return output_dir, {}, {
+                    "frame_ids": [0],
+                    "selected_frames": [{"label": "time_norm_0", "frame_id": 0}],
+                    "output_paths": [str(output_path.resolve())],
+                }
+
+            with (
+                patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
+                patch.object(run_and_visualize_hawkeye.torch.cuda, "is_available", return_value=False),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=tracking),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "resolve_model_selection",
+                    return_value=(
+                        {
+                            "action_intent": "action_intent/1",
+                            "pass_intent": "pass_intent/1",
+                            "pass_success": "pass_success/1",
+                            "outcome_scoring": "outcome_scoring/1",
+                            "outcome_conceding": "outcome_conceding/1",
+                        },
+                        {},
+                        None,
+                    ),
+                ),
+                patch.object(run_and_visualize_hawkeye, "load_model", return_value=SimpleNamespace(args={})),
+                patch.object(
+                    run_and_visualize_hawkeye,
+                    "validate_model_graph_schemas",
+                    return_value={"add_v_edge_features": False},
+                ),
+                patch.object(run_and_visualize_hawkeye, "render_situation", side_effect=fake_render_situation),
+            ):
+                run_and_visualize_hawkeye.main()
+
+            metadata = json.loads((root / "hawkeye_visualization_action_alias" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["requested_situation_ids"], [])
+            self.assertEqual(metadata["requested_action_ids"], ["sit2"])
+            self.assertEqual(metadata["rendered_situation_ids"], ["sit2"])
+
     def test_direct_hawkeye_only_outcome_scoring_loads_only_selected_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            tracking = pd.DataFrame({"id": ["sit1"]})
             args = SimpleNamespace(
                 situation_id=["sit1"],
                 action_id=None,
@@ -1055,7 +1248,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
                 patch.object(run_and_visualize_hawkeye.torch.cuda, "is_available", return_value=False),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
-                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=tracking),
                 patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
                 patch.object(

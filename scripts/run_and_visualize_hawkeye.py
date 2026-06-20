@@ -20,6 +20,7 @@ from datatools.hawkeye import (
     clean_hawkeye_tracking,
     load_hawkeye_ball,
     load_hawkeye_tracking,
+    resolve_situation_ids as resolve_hawkeye_situation_ids,
 )
 from inference import inference_gnn
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
@@ -117,22 +118,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.physical_batch_size < 1:
         parser.error("--physical-batch-size must be positive.")
     return args
-
-
-def resolve_situation_ids(args: argparse.Namespace) -> list[str]:
-    situation_ids = [str(value) for value in (args.situation_id or [])]
-    situation_ids.extend(str(value) for value in (args.action_id or []))
-    if not situation_ids:
-        raise ValueError("Please provide --situation-id (or --action-id) for Hawkeye visualization.")
-
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for situation_id in situation_ids:
-        if situation_id in seen:
-            continue
-        seen.add(situation_id)
-        deduped.append(situation_id)
-    return deduped
 
 
 def render_frame_image(
@@ -352,7 +337,6 @@ def render_situation(
 def main() -> None:
     args = parse_args()
     component_selection = resolve_component_selection(args)
-    situation_ids = resolve_situation_ids(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
@@ -361,6 +345,12 @@ def main() -> None:
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    requested_situation_ids = [str(value) for value in (args.situation_id or [])]
+    requested_action_ids = [str(value) for value in (args.action_id or [])]
+    situation_ids = resolve_hawkeye_situation_ids(
+        tracking,
+        requested_ids=requested_situation_ids + requested_action_ids,
+    )
     explicit_model_ids = {
         "action_intent": args.action_intent_model_id,
         "pass_intent": args.pass_intent_model_id,
@@ -476,8 +466,8 @@ def main() -> None:
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "disabled_components": component_selection.disabled_components,
-        "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
-        "requested_action_ids": [str(value) for value in (args.action_id or [])],
+        "requested_situation_ids": requested_situation_ids,
+        "requested_action_ids": requested_action_ids,
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
         "rendered_situations": rendered_situations,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
