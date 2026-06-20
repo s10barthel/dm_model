@@ -44,11 +44,37 @@ def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
     x[:, 7] = 7
     x[:, 8] = 8
     x[:, 9] = 9
+    x[:, 10] = 10
+    x[:, 11] = 11
+    x[:, 12] = 12
+    x[:, 14] = 14
+    x[:, 15] = 15
+    x[:, 16] = 16
     x[:, 17] = 17
     x[:, 18] = 18
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
     edge_attr = torch.ones((edge_index.shape[1], edge_dim), dtype=torch.float32)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+
+
+def make_goal_node_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
+    x = torch.zeros((3, node_dim), dtype=torch.float32)
+    x[:, 0] = 1
+    x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
+    x[2, config.NODE_FEATURE_IS_GOAL] = 1
+    x[:, config.NODE_FEATURE_X] = torch.tensor([0.0, 10.0, 105.0])
+    x[:, config.NODE_FEATURE_Y] = torch.tensor([34.0, 30.0, 34.0])
+    edge_index = torch.tensor(
+        [
+            [0, 0, 1, 1, 2, 2],
+            [1, 2, 0, 2, 0, 1],
+        ],
+        dtype=torch.long,
+    )
+    edge_attr = torch.ones((edge_index.shape[1], edge_dim), dtype=torch.float32)
+    graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    graph.node_ids = ["possessor", "target", "goal"]
+    return graph
 
 
 def make_velocity_edge_graph(node_dim: int = 25) -> Data:
@@ -590,6 +616,27 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertFalse(args.offside_aware)
 
+    def test_wrapper_parse_args_accepts_feature_ablation_flags(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            args = train_wrapper.parse_args(
+                [
+                    "--feature-run-id",
+                    "feature_run",
+                    "--success-intent-only",
+                    "--no-poss-geometry",
+                    "--no-goal-features",
+                    "--no-goal-nodes",
+                ]
+            )
+
+        self.assertFalse(args.poss_geometry_aware)
+        self.assertFalse(args.goal_features_aware)
+        self.assertFalse(args.goal_nodes_aware)
+
     def test_wrapper_parse_args_accepts_possessor_masked_velocity_edges(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
@@ -766,6 +813,102 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["poss_rel_vel_aware"])
         self.assertIn("--poss_vel_aware", commands[0])
         self.assertNotIn("--poss_rel_vel_aware", commands[0])
+
+    def test_build_training_commands_default_feature_ablation_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                poss_geometry_aware=None,
+                goal_features_aware=None,
+                goal_nodes_aware=None,
+                accel_aware=None,
+                offside_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertTrue(feature_flags["poss_geometry_aware"])
+        self.assertTrue(feature_flags["goal_features_aware"])
+        self.assertTrue(feature_flags["goal_nodes_aware"])
+        self.assertNotIn("--no-poss-geometry", commands[0])
+        self.assertNotIn("--no-goal-features", commands[0])
+        self.assertNotIn("--no-goal-nodes", commands[0])
+
+    def test_build_training_commands_emit_feature_ablation_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                poss_geometry_aware=False,
+                goal_features_aware=False,
+                goal_nodes_aware=False,
+                accel_aware=None,
+                offside_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertFalse(feature_flags["poss_geometry_aware"])
+        self.assertFalse(feature_flags["goal_features_aware"])
+        self.assertFalse(feature_flags["goal_nodes_aware"])
+        self.assertIn("--no-poss-geometry", commands[0])
+        self.assertIn("--no-goal-features", commands[0])
+        self.assertIn("--no-goal-nodes", commands[0])
 
     def test_build_training_commands_forward_split_velocity_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1616,6 +1759,21 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(all_signature["add_v_edge_features"])
         self.assertNotEqual(all_signature["v_edge_feature_mode"], no_poss_signature["v_edge_feature_mode"])
 
+    def test_feature_signature_records_feature_ablation_flags(self) -> None:
+        signature = model_utils.extract_model_feature_signature(
+            {
+                "node_in_dim": 25,
+                "edge_in_dim": 4,
+                "poss_geometry_aware": False,
+                "goal_features_aware": False,
+                "goal_nodes_aware": False,
+            }
+        )
+
+        self.assertFalse(signature["poss_geometry_aware"])
+        self.assertFalse(signature["goal_features_aware"])
+        self.assertFalse(signature["goal_nodes_aware"])
+
     def test_no_poss_velocity_edge_mode_requires_four_edge_features(self) -> None:
         with self.assertRaises(ValueError):
             model_utils.infer_training_edge_schema(
@@ -2016,6 +2174,76 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
 
+    def test_action_dataset_zeroes_poss_geometry_but_preserves_possessor_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                poss_geometry_aware=False,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[:, 13], torch.tensor([1.0, 0.0])))
+        self.assertTrue(torch.equal(graph.x[:, 14:17], torch.zeros_like(graph.x[:, 14:17])))
+
+    def test_action_dataset_zeroes_goal_features_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                goal_features_aware=False,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertTrue(torch.equal(graph.x[:, 8], torch.full_like(graph.x[:, 8], 8)))
+        self.assertTrue(torch.equal(graph.x[:, 9:12], torch.zeros_like(graph.x[:, 9:12])))
+        self.assertTrue(torch.equal(graph.x[:, 12], torch.full_like(graph.x[:, 12], 12)))
+
+    def test_action_dataset_no_goal_nodes_removes_goal_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            torch.save([make_goal_node_graph()], feature_dir / "match_1.pt")
+            torch.save(make_labels(), label_dir / "match_1.pt")
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="action_intent",
+                goal_nodes_aware=False,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, labels, _ = dataset[0]
+        self.assertEqual(graph.x.shape[0], 2)
+        self.assertEqual(graph.edge_index.shape[1], 2)
+        self.assertEqual(graph.node_ids, ["possessor", "target"])
+        self.assertTrue(torch.equal(graph.x[:, config.NODE_FEATURE_IS_GOAL], torch.zeros(2)))
+        self.assertEqual(float(labels[LABEL_INDEX["n_players"]]), 2.0)
+
     def test_action_dataset_preserves_offside_tail_without_extended_features(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_dir = Path(tmpdir) / "features"
@@ -2163,6 +2391,64 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         graph, _, _ = dataset[0]
         self.assertTrue(torch.equal(graph.x[0, 5:9], torch.zeros(4)))
         self.assertTrue(torch.equal(graph.x[:, 17:19], torch.zeros_like(graph.x[:, 17:19])))
+
+    def test_filter_features_and_labels_supports_feature_ablation_flags(self) -> None:
+        labels = make_labels()
+        args = {
+            "task": "action_intent",
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "poss_rel_vel_aware": True,
+            "poss_geometry_aware": False,
+            "goal_features_aware": False,
+            "goal_nodes_aware": True,
+            "accel_aware": True,
+            "offside_aware": True,
+            "extend_features": True,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+        }
+
+        filtered_graphs, _ = filter_features_and_labels([make_graph()], labels, args)
+        graph = filtered_graphs[0]
+
+        self.assertTrue(torch.equal(graph.x[:, 13], torch.tensor([1.0, 0.0])))
+        self.assertTrue(torch.equal(graph.x[:, 14:17], torch.zeros_like(graph.x[:, 14:17])))
+        self.assertTrue(torch.equal(graph.x[:, 9:12], torch.zeros_like(graph.x[:, 9:12])))
+        self.assertTrue(torch.equal(graph.x[:, 12], torch.full_like(graph.x[:, 12], 12)))
+
+    def test_filter_features_and_labels_no_goal_nodes_removes_goal_edges(self) -> None:
+        labels = make_labels()
+        args = {
+            "task": "action_intent",
+            "xy_only": False,
+            "possessor_aware": True,
+            "keeper_aware": True,
+            "ball_z_aware": True,
+            "poss_vel_aware": True,
+            "poss_rel_vel_aware": True,
+            "poss_geometry_aware": True,
+            "goal_features_aware": True,
+            "goal_nodes_aware": False,
+            "accel_aware": True,
+            "offside_aware": True,
+            "extend_features": True,
+            "sparsify": "none",
+            "max_edge_dist": 10,
+            "edge_in_dim": 2,
+        }
+
+        filtered_graphs, filtered_labels = filter_features_and_labels([make_goal_node_graph()], labels, args)
+        graph = filtered_graphs[0]
+
+        self.assertEqual(graph.x.shape[0], 2)
+        self.assertEqual(graph.edge_index.shape[1], 2)
+        self.assertEqual(graph.node_ids, ["possessor", "target"])
+        self.assertEqual(float(filtered_labels[0, LABEL_INDEX["n_players"]]), 2.0)
 
     def test_filter_features_and_labels_masks_only_possessor_velocity_edges(self) -> None:
         labels = make_labels()

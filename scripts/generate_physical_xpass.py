@@ -50,6 +50,9 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
+    PHYSICAL_XPASS_METRIC_MAX,
+    PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
+    PHYSICAL_XPASS_METRIC_TOPMEAN,
     PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED,
     PHYSICAL_XPASS_SPEED_AGGREGATIONS,
     PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
@@ -60,6 +63,8 @@ from physical_pass_model import (
     configure_physical_worker_thread_limit,
     load_physical_xpass_match,
     normalize_physical_xpass_speed_aggregation,
+    normalize_physical_xpass_metrics,
+    disabled_physical_xpass_metrics,
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
@@ -165,6 +170,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
     parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
+    parser.add_argument("--no-noise-kernel", "--no_noise_kernel", dest="export_noise_kernel", action="store_false", help="Skip unsuffixed noise-kernel xPass output columns.")
+    parser.add_argument("--no-max", "--no_max", dest="export_max", action="store_false", help="Skip __max_xpass output columns.")
+    parser.add_argument("--no-topmean", "--no_topmean", dest="export_topmean", action="store_false", help="Skip __topmean_xpass output columns.")
     parser.add_argument("--num-workers", default="auto")
     parser.add_argument("--max-auto-workers", type=int, default=PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
     parser.add_argument("--physical-batch-size", type=int, default=16)
@@ -174,7 +182,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     teammate_policy_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
     teammate_policy_group.add_argument("--consider-teammates", dest="consider_teammates", action="store_true")
     parser.add_argument("--no-normalize", dest="normalize", action="store_false", help="Deprecated compatibility flag; ignored.")
-    parser.set_defaults(normalize=True, consider_teammates=True, freeze_ballreceipt=True)
+    parser.set_defaults(
+        normalize=True,
+        consider_teammates=True,
+        freeze_ballreceipt=True,
+        export_noise_kernel=True,
+        export_max=True,
+        export_topmean=True,
+    )
 
     args = parser.parse_args(argv)
     for name in ["limit", "skillcorner_limit", "benchmark_limit", "hawkeye_limit"]:
@@ -211,11 +226,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--sigma-distance must be positive.")
     if args.top_n < 1:
         parser.error("--top-n must be positive.")
+    if not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
+        parser.error("At least one physical xPass metric must be exported.")
     try:
         resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
     except ValueError as exc:
         parser.error(str(exc))
     return args
+
+
+def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[str]:
+    metrics: list[str] = []
+    if bool(getattr(args, "export_noise_kernel", True)):
+        metrics.append(PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
+    if bool(getattr(args, "export_max", True)):
+        metrics.append(PHYSICAL_XPASS_METRIC_MAX)
+    if bool(getattr(args, "export_topmean", True)):
+        metrics.append(PHYSICAL_XPASS_METRIC_TOPMEAN)
+    return normalize_physical_xpass_metrics(metrics)
 
 
 def resolve_reference_label_dir(feature_run_id: str, feature_root: Path, args: argparse.Namespace) -> Path:
@@ -281,6 +309,7 @@ def validate_reuse_cache_dir(
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> Path:
     cache_path = Path(cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_path)
@@ -293,6 +322,7 @@ def validate_reuse_cache_dir(
         sigma_speed=sigma_speed,
         sigma_distance=sigma_distance,
         top_n=top_n,
+        available_metrics=available_metrics,
     )
     mismatches: list[str] = []
     for key, expected_value in expected_metadata.items():
@@ -343,6 +373,7 @@ def resolve_runtime_sportec_reuse_cache(
                 sigma_speed=args.sigma_speed,
                 sigma_distance=args.sigma_distance,
                 top_n=int(args.top_n),
+                available_metrics=enabled_physical_xpass_metrics_from_args(args),
                 physical_eps=float(args.physical_eps),
             ),
             None,
@@ -695,6 +726,7 @@ def prewarm_runtime_items(
         sigma_speed=float(args.sigma_speed),
         sigma_distance=float(args.sigma_distance),
         top_n=int(args.top_n),
+        available_metrics=enabled_physical_xpass_metrics_from_args(args),
         dry_run=bool(args.dry_run),
         show_progress=not bool(args.dry_run),
         progress_desc=progress_desc,
@@ -728,6 +760,7 @@ def write_runtime_dataset_metadata(
             sigma_speed=args.sigma_speed,
             sigma_distance=args.sigma_distance,
             top_n=int(args.top_n),
+            available_metrics=enabled_physical_xpass_metrics_from_args(args),
         ),
         "created_for": "runtime_physical_xpass_cache",
         "dataset": dataset,
@@ -773,6 +806,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             sigma_speed=args.sigma_speed,
             sigma_distance=args.sigma_distance,
             top_n=int(args.top_n),
+            available_metrics=[PHYSICAL_XPASS_METRIC_MAX],
             physical_eps=float(args.physical_eps),
         )
         if args.reuse_cache_dir

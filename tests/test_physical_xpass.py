@@ -655,6 +655,48 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(len(calls), 8)
         self.assertEqual(calls[0]["PLAYER_POS"].shape[0], 16)
 
+    def test_robust_physical_xpass_outputs_only_enabled_metrics(self) -> None:
+        values = np.arange(1, 19, dtype=float).reshape(2, 3, 3)
+        metrics = _robust_xpass_metrics_from_values(
+            values,
+            speeds=np.asarray([10.0, 20.0], dtype=float),
+            angles=np.deg2rad([0.0, 2.5, 5.0]),
+            distances=np.asarray([10.0, 20.0, 30.0], dtype=float),
+            enabled_metrics=[PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
+        )
+
+        self.assertEqual(set(metrics), {PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN})
+        self.assertNotIn(PHYSICAL_XPASS_METRIC_NOISE_KERNEL, metrics)
+
+    def test_batched_robust_physical_xpass_omits_disabled_metric_columns(self) -> None:
+        def fake_simulate_passes(**kwargs):
+            frame_count = int(kwargs["PLAYER_POS"].shape[0])
+            players = kwargs["players"].tolist()
+            target_player_index = players.index("home_2")
+            angle_count = int(kwargs["phi_grid"].shape[1])
+            updates = []
+            for frame_index in range(frame_count):
+                for angle_index in range(angle_count):
+                    updates.append((frame_index, target_player_index, angle_index, 1, 0.5))
+            return FakeSimulationResult((frame_count, len(players), angle_count, 3), updates)
+
+        rows = compute_graphs_physical_xpass_metrics_as_defaults(
+            [make_graph()],
+            max_speed=4,
+            speed_step=1,
+            coarse_n_angles=4,
+            refine_top_k_angles=1,
+            refine_angle_radius=5,
+            angle_step=5,
+            simulate_passes_fn=fake_simulate_passes,
+            batch_size=16,
+            enabled_metrics=[PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
+        )
+
+        self.assertNotIn("home_2", rows[0].index)
+        self.assertIn("home_2__max_xpass", rows[0].index)
+        self.assertIn("home_2__topmean_xpass", rows[0].index)
+
     def test_robust_physical_xpass_filters_speed_grid_by_max_speed(self) -> None:
         calls = []
 
@@ -703,6 +745,7 @@ class PhysicalXPassTests(unittest.TestCase):
             metadata["available_metrics"],
             [PHYSICAL_XPASS_METRIC_NOISE_KERNEL, PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
         )
+        self.assertEqual(metadata["disabled_metrics"], [])
         self.assertEqual(metadata["max_speed"], 22.0)
         self.assertEqual(metadata["speed_step"], 1.0)
         self.assertEqual(metadata["coarse_n_angles"], 36)
@@ -1876,6 +1919,55 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.92)
         self.assertEqual(updated_metadata["sigma_angle_factor"], PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR)
 
+    def test_runtime_physical_xpass_cache_recomputes_different_available_metric_rows(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                available_metrics=[PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
+            )
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "runtime_match",
+                        "action_index": 5,
+                        "physical_state_hash": physical_state_hash(graph),
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        "home_2__max_xpass": 0.12,
+                        "home_2__topmean_xpass": 0.13,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
+
+            with patch(
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
+                return_value=[pd.Series({"home_2": 0.91, "home_2__max_xpass": 0.92, "home_2__topmean_xpass": 0.93}, dtype=float)],
+            ) as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+            updated_metadata = json.loads((cache_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        compute.assert_called_once()
+        self.assertEqual(stats["cache_hits"], 0)
+        self.assertEqual(stats["cache_misses"], 1)
+        self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.91)
+        self.assertEqual(
+            updated_metadata["available_metrics"],
+            [PHYSICAL_XPASS_METRIC_NOISE_KERNEL, PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
+        )
+
     def test_runtime_physical_xpass_cache_copies_reuse_row_and_fills_pass_distance(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         graph = make_graph()
@@ -2684,6 +2776,31 @@ class PhysicalXPassTests(unittest.TestCase):
                     physical_eps=1e-4,
                 )
 
+    def test_generate_physical_xpass_reuse_cache_validation_rejects_available_metric_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            cache_dir.mkdir()
+            metadata = physical_xpass_as_default_metadata(
+                PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                available_metrics=[PHYSICAL_XPASS_METRIC_MAX, PHYSICAL_XPASS_METRIC_TOPMEAN],
+            )
+            metadata["physical_eps"] = 1e-4
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "available_metrics"):
+                generate_physical_xpass.validate_reuse_cache_dir(
+                    cache_dir,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    available_metrics=[
+                        PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
+                        PHYSICAL_XPASS_METRIC_MAX,
+                        PHYSICAL_XPASS_METRIC_TOPMEAN,
+                    ],
+                    physical_eps=1e-4,
+                )
+
     def test_physical_xpass_metadata_records_max_speed_effective_grid(self) -> None:
         metadata = physical_xpass_as_default_metadata(
             PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
@@ -3401,6 +3518,18 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertEqual(default_args.top_n, PHYSICAL_XPASS_DEFAULT_TOP_N)
         self.assertEqual(custom_args.top_n, 3)
+
+    def test_generate_physical_xpass_cli_accepts_metric_output_skip_flags(self) -> None:
+        args = generate_physical_xpass.parse_args(["--no-noise-kernel", "--no-max"])
+
+        self.assertFalse(args.export_noise_kernel)
+        self.assertFalse(args.export_max)
+        self.assertTrue(args.export_topmean)
+        self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_TOPMEAN])
+
+    def test_generate_physical_xpass_cli_rejects_disabling_all_metric_outputs(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--no-noise-kernel", "--no-max", "--no-topmean"])
 
     def test_generate_physical_xpass_cli_rejects_non_positive_top_n(self) -> None:
         with self.assertRaises(SystemExit):

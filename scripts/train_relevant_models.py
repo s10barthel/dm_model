@@ -57,6 +57,9 @@ WRAPPER_FEATURE_DEFAULTS = {
     "ball_z_aware": True,
     "poss_vel_aware": True,
     "poss_rel_vel_aware": False,
+    "poss_geometry_aware": True,
+    "goal_features_aware": True,
+    "goal_nodes_aware": True,
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
@@ -70,6 +73,12 @@ LOW_LEVEL_FEATURE_FLAGS = {
     "poss_vel_aware": "--poss_vel_aware",
     "poss_rel_vel_aware": "--poss_rel_vel_aware",
     "extend_features": "--extend_features",
+}
+
+LOW_LEVEL_FALSE_FLAGS = {
+    "poss_geometry_aware": "--no-poss-geometry",
+    "goal_features_aware": "--no-goal-features",
+    "goal_nodes_aware": "--no-goal-nodes",
 }
 
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
@@ -186,6 +195,9 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     command = list(command)
     for name, cli_flag in LOW_LEVEL_FEATURE_FLAGS.items():
         if feature_flags[name]:
+            command.append(cli_flag)
+    for name, cli_flag in LOW_LEVEL_FALSE_FLAGS.items():
+        if not feature_flags[name]:
             command.append(cli_flag)
     for name, (enabled_flag, disabled_flag) in LOW_LEVEL_BOOL_OVERRIDE_FLAGS.items():
         command.append(enabled_flag if feature_flags[name] else disabled_flag)
@@ -805,6 +817,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "poss_rel_vel_aware",
         "Include player velocity relative to the ball possessor's velocity during training.",
         "Disable player velocity relative to the ball possessor's velocity during training.",
+    )
+    parser.add_argument(
+        "--no-poss-geometry",
+        dest="poss_geometry_aware",
+        action="store_false",
+        default=None,
+        help="Disable possessor-relative geometry features while keeping is_possessor.",
+    )
+    parser.add_argument(
+        "--no-goal-features",
+        dest="goal_features_aware",
+        action="store_false",
+        default=None,
+        help="Disable goal-relative geometry node features.",
+    )
+    parser.add_argument(
+        "--no-goal-nodes",
+        dest="goal_nodes_aware",
+        action="store_false",
+        default=None,
+        help="Remove goal nodes and their incident edges regardless of task defaults.",
     )
     add_bool_override(
         parser,

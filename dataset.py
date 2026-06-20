@@ -128,6 +128,9 @@ class ActionDataset(Dataset):
         ball_z_aware=True,
         poss_vel_aware=True,
         poss_rel_vel_aware=False,
+        poss_geometry_aware=True,
+        goal_features_aware=True,
+        goal_nodes_aware=True,
         accel_aware=True,
         offside_aware=True,
         extend_features=True,
@@ -344,11 +347,17 @@ class ActionDataset(Dataset):
             if not poss_rel_vel_aware:  # Ignore player velocity relative to the ball possessor's velocity
                 graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
 
+            if not poss_geometry_aware:  # Ignore player geometry relative to the ball possessor
+                graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
+
             if not keeper_aware:  # Do not distinguish between goalkeepers and outfield players
                 graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
 
             if not ball_z_aware:  # Set the ball height for every action as 0
                 graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
+
+            if not goal_features_aware:  # Ignore player geometry relative to the attacking goal
+                graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
 
             if not accel_aware:  # Ignore player-acceleration features without changing graph width
                 graph.x[:, config.NODE_FEATURE_ACCEL] = 0
@@ -359,7 +368,7 @@ class ActionDataset(Dataset):
             if not offside_aware:
                 _zero_offside_node_feature(graph)
 
-            if not TASK_CONFIG.at[task, "include_goals"]:
+            if not goal_nodes_aware or not TASK_CONFIG.at[task, "include_goals"]:
                 graph, graph_labels = drop_goal_nodes(graph, graph_labels)
 
             if task.endswith("oppo_agn"):

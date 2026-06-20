@@ -87,6 +87,27 @@ parser.add_argument(
     default=False,
     help="consider player velocity relative to the possessor's velocity",
 )
+parser.add_argument(
+    "--no-poss-geometry",
+    dest="poss_geometry_aware",
+    action="store_false",
+    help="Ignore possessor-relative geometry node features while keeping is_possessor.",
+)
+parser.set_defaults(poss_geometry_aware=True)
+parser.add_argument(
+    "--no-goal-features",
+    dest="goal_features_aware",
+    action="store_false",
+    help="Ignore goal-relative geometry node features.",
+)
+parser.set_defaults(goal_features_aware=True)
+parser.add_argument(
+    "--no-goal-nodes",
+    dest="goal_nodes_aware",
+    action="store_false",
+    help="Remove goal nodes and their incident edges regardless of task defaults.",
+)
+parser.set_defaults(goal_nodes_aware=True)
 accel_group = parser.add_mutually_exclusive_group()
 accel_group.add_argument(
     "--accel",
@@ -736,6 +757,9 @@ if __name__ == "__main__":
         "ball_z_aware": args.ball_z_aware,
         "poss_vel_aware": args.poss_vel_aware,
         "poss_rel_vel_aware": args.poss_rel_vel_aware,
+        "poss_geometry_aware": args.poss_geometry_aware,
+        "goal_features_aware": args.goal_features_aware,
+        "goal_nodes_aware": args.goal_nodes_aware,
         "accel_aware": args.accel_aware,
         "offside_aware": args.offside_aware,
         "extend_features": args.extend_features,

@@ -1170,6 +1170,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--speed-step <m/s>`: speed-grid step from `3` to `--max-speed`. Default: `1`.
 - `--coarse-n-angles <N>`, `--refine-top-k-angles <N>`, `--refine-angle-radius <deg>`, `--angle-step <deg>`: adaptive angle search controls. Defaults: `36`, `2`, `10`, and `2.5`.
 - `--top-n <N>`: number of highest finite xPass grid values averaged for the `topmean_xpass` comparison metric. Default: `10`.
+- `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For topmean-only inference caches, use `--no-noise-kernel --no-max` and pass `--topmean-xpass` during inference/visualization.
 - `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
 - `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 

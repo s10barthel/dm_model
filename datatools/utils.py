@@ -1315,11 +1315,17 @@ def filter_features_and_labels(
         if not args.get("poss_rel_vel_aware", False):
             graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
 
+        if not args.get("poss_geometry_aware", True):
+            graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
+
         if not args["keeper_aware"]:
             graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
 
         if not args["ball_z_aware"]:
             graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
+
+        if not args.get("goal_features_aware", True):
+            graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
 
         if not args.get("accel_aware", True):
             graph.x[:, config.NODE_FEATURE_ACCEL] = 0
@@ -1330,7 +1336,7 @@ def filter_features_and_labels(
         if not args.get("offside_aware", True):
             zero_offside_node_feature(graph)
 
-        if not config.TASK_CONFIG.at[args["task"], "include_goals"]:
+        if not args.get("goal_nodes_aware", True) or not config.TASK_CONFIG.at[args["task"], "include_goals"]:
             graph, graph_labels = drop_goal_nodes(graph, graph_labels)
 
         if args["task"].endswith("oppo_agn"):
