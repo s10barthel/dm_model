@@ -41,6 +41,8 @@ from physical_pass_model import (
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_LEGACY_SOURCE,
     PHYSICAL_XPASS_LOGIT_ATTR,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX,
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
     PHYSICAL_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_SOURCE,
@@ -78,6 +80,7 @@ from physical_pass_model import (
     load_physical_xpass_match,
     load_physical_xpass_component,
     load_runtime_physical_xpass_visualization_component,
+    graph_nearest_opponent_distances,
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
@@ -85,6 +88,9 @@ from physical_pass_model import (
     physical_xpass_kernel_sigmas,
     physical_xpass_metric,
     physical_xpass_metric_column,
+    physical_xpass_nearest_opponent_distance_column,
+    physical_xpass_weight_version,
+    physical_xpass_blend_weight_v2,
     physical_xpass_source,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
@@ -462,6 +468,41 @@ class PhysicalXPassTests(unittest.TestCase):
             0.9,
         )
 
+    def test_inference_physical_xpass_blend_formula_v2(self) -> None:
+        weight = physical_xpass_blend_weight_v2(50.0, 20.0)
+
+        self.assertAlmostEqual(float(weight), 0.7)
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=50.0,
+                    distance_to_nearest_opponent=20.0,
+                    weight_version="v2",
+                )
+            ),
+            0.78,
+        )
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(150.0, 20.0)), 0.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(50.0, 100.0)), 1.0)
+
+    def test_inference_physical_xpass_blend_formula_v2_requires_nearest_opponent_distance(self) -> None:
+        with self.assertRaisesRegex(ValueError, "distance_to_nearest_opponent"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9,
+                xpass=0.5,
+                pass_distance=50.0,
+                weight_version="v2",
+            )
+
+    def test_graph_nearest_opponent_distances(self) -> None:
+        distances = graph_nearest_opponent_distances(make_graph())
+
+        self.assertAlmostEqual(float(distances[0]), 40.0)
+        self.assertAlmostEqual(float(distances[1]), 20.0)
+        self.assertAlmostEqual(float(distances[2]), 20.0)
+
     def test_physical_xpass_robust_defaults_and_kernel_sigmas(self) -> None:
         speeds = as_default_v0_values()
         self.assertEqual(speeds.tolist(), [float(value) for value in range(3, 23)])
@@ -763,6 +804,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     "home_2": 0.4,
                     physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX): 0.9,
                     physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_TOPMEAN): 0.7,
+                    physical_xpass_nearest_opponent_distance_column("home_2"): 20.0,
                 }
             ]
         ).set_index("action_index", drop=False)
@@ -788,6 +830,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(default_graph.physical_xpass[1]), 0.4)
         self.assertAlmostEqual(float(max_graph.physical_xpass[1]), 0.9)
         self.assertAlmostEqual(float(topmean_graph.physical_xpass[1]), 0.7)
+        self.assertAlmostEqual(float(default_graph.physical_xpass_nearest_opponent_distance[1]), 20.0)
 
     def test_physical_xpass_metric_flags_select_inference_metric(self) -> None:
         self.assertEqual(physical_xpass_metric({"task": "pass_success"}), PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
@@ -2016,6 +2059,50 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.77)
         self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_PASS_DISTANCE_COLUMN]), 20.0)
 
+    def test_runtime_physical_xpass_cache_fills_nearest_opponent_distance_without_recomputing_xpass(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            (cache_dir / "metadata.json").write_text(
+                json.dumps(
+                    physical_xpass_as_default_metadata(
+                        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "runtime_match",
+                        "action_index": 5,
+                        "physical_state_hash": physical_state_hash(graph),
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        "home_2": 0.77,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
+
+            with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        compute.assert_not_called()
+        self.assertEqual(stats["cache_misses"], 0)
+        self.assertEqual(stats["copied_from_reuse"], 1)
+        self.assertEqual(stats["nearest_opponent_distance_filled"], 1)
+        self.assertAlmostEqual(float(rows.loc[5, physical_xpass_nearest_opponent_distance_column("home_2")]), 20.0)
+
     def test_runtime_physical_xpass_cache_hash_mismatch_recomputes_and_replaces(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2467,6 +2554,18 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(config["speed_aggregation"], PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX)
         self.assertEqual(config["metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
         self.assertEqual(config["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
+        self.assertEqual(config["weight_version"], "v1")
+
+    def test_inference_lookup_config_selects_xpass_weight_v2(self) -> None:
+        args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            xpass_weight_v2=True,
+        )
+
+        self.assertEqual(physical_xpass_weight_version(args), "v2")
+        self.assertEqual(physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")["weight_version"], "v2")
 
     def test_runtime_physical_xpass_speed_aggregation_uses_runtime_defaults_for_blending(self) -> None:
         inference_args = make_pass_success_args(
@@ -3544,6 +3643,13 @@ class PhysicalXPassTests(unittest.TestCase):
     def test_generate_physical_xpass_cli_rejects_max_speed_below_grid_min(self) -> None:
         with self.assertRaises(SystemExit):
             generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--max-speed", "2"])
+
+    def test_run_hawkeye_cli_accepts_xpass_weight_v2(self) -> None:
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight-v2"]):
+            args = run_hawkeye.parse_args()
+
+        self.assertTrue(args.use_physical_xpass)
+        self.assertTrue(args.xpass_weight_v2)
 
     def test_runtime_physical_xpass_cache_cli_flags(self) -> None:
         with patch.object(

@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for inference blending.")
     parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for inference blending.")
     parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
+    parser.add_argument("--xpass-weight-v2", "--xpass_weight_v2", dest="xpass_weight_v2", action="store_true", help="Use nearest-opponent-aware physical xPass blend weighting.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
     parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
@@ -540,6 +541,7 @@ def main() -> None:
         use_topmean_xpass = bool(getattr(args, "topmean_xpass", False) or getattr(args, "top10mean_xpass", False))
         pass_success_model.args["topmean_xpass"] = use_topmean_xpass
         pass_success_model.args["top10mean_xpass"] = bool(getattr(args, "top10mean_xpass", False))
+        pass_success_model.args["xpass_weight_v2"] = bool(getattr(args, "xpass_weight_v2", False))
     if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
         pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
         pass_success_model.args["physical_runtime_cache_refresh"] = False
@@ -599,6 +601,7 @@ def main() -> None:
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": physical_xpass_source(model_specs["pass_success"].args),
         "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(model_specs["pass_success"].args, cache_dir=physical_cache_dir)["source"],
+        "physical_xpass_weight_version": physical_xpass_inference_lookup_config(model_specs["pass_success"].args, cache_dir=physical_cache_dir)["weight_version"],
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,

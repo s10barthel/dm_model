@@ -24,6 +24,7 @@ from models.gnn import GNN
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
@@ -37,6 +38,7 @@ from physical_pass_model import (
     physical_xpass_inference_lookup_config,
     physical_xpass_metric,
     physical_xpass_metric_columns,
+    physical_xpass_weight_version,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
@@ -561,6 +563,7 @@ def inference_gnn(
             offside_out_mask = offside_node_mask
             physical_xpass_out = getattr(graphs, PHYSICAL_XPASS_PROB_ATTR, None)
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
+            physical_nearest_opponent_out = getattr(graphs, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
 
             if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
@@ -572,6 +575,8 @@ def inference_gnn(
                     physical_xpass_out = physical_xpass_out[teammate_mask]
                 if physical_distance_out is not None:
                     physical_distance_out = physical_distance_out[teammate_mask]
+                if physical_nearest_opponent_out is not None:
+                    physical_nearest_opponent_out = physical_nearest_opponent_out[teammate_mask]
 
             if "receiver" in model.args["task"] and model.args["include_out"]:
                 batch = torch.cat([batch, torch.unique(graphs.batch)])
@@ -593,6 +598,18 @@ def inference_gnn(
                         [
                             physical_distance_out,
                             torch.full((graphs.num_graphs,), np.nan, dtype=physical_distance_out.dtype, device=physical_distance_out.device),
+                        ]
+                    )
+                if physical_nearest_opponent_out is not None:
+                    physical_nearest_opponent_out = torch.cat(
+                        [
+                            physical_nearest_opponent_out,
+                            torch.full(
+                                (graphs.num_graphs,),
+                                np.nan,
+                                dtype=physical_nearest_opponent_out.dtype,
+                                device=physical_nearest_opponent_out.device,
+                            ),
                         ]
                     )
 
@@ -642,24 +659,51 @@ def inference_gnn(
             if inference_uses_physical_xpass(model.args):
                 if physical_xpass_out is None or physical_distance_out is None:
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
+                weight_version = physical_xpass_weight_version(model.args)
+                if weight_version == "v2" and physical_nearest_opponent_out is None:
+                    raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
                 xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
                 distance_i = physical_distance_out[batch == i].cpu().detach().numpy().astype(float)
+                nearest_i = (
+                    physical_nearest_opponent_out[batch == i].cpu().detach().numpy().astype(float)
+                    if physical_nearest_opponent_out is not None
+                    else None
+                )
                 if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
                     raise ValueError(
                         "Physical xPass blend tensors do not match pass-success probabilities: "
                         f"probs={probs_i.shape}, xpass={xpass_i.shape}, pass_distance={distance_i.shape}."
                     )
-                finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
+                if weight_version == "v2":
+                    if nearest_i is None or nearest_i.shape[0] != probs_i.shape[0]:
+                        raise ValueError(
+                            "Physical xPass weight v2 tensors do not match pass-success probabilities: "
+                            f"probs={probs_i.shape}, distance_to_nearest_opponent={None if nearest_i is None else nearest_i.shape}."
+                        )
+                    missing_nearest_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & ~np.isfinite(nearest_i)
+                    if bool(missing_nearest_mask.any()):
+                        raise ValueError(
+                            "Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player."
+                        )
+                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(nearest_i)
+                else:
+                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
                 missing_physical_mask = ~finite_mask
-                blended_i = np.asarray(
-                    blend_physical_xpass_predictions(
-                        pass_success_model=probs_i[finite_mask],
-                        xpass=xpass_i[finite_mask],
-                        pass_distance=distance_i[finite_mask],
-                    ),
-                    dtype=float,
-                )
-                probs_i[finite_mask] = blended_i
+                if finite_mask.any():
+                    blend_kwargs = {}
+                    if weight_version == "v2":
+                        blend_kwargs["distance_to_nearest_opponent"] = nearest_i[finite_mask]
+                    blended_i = np.asarray(
+                        blend_physical_xpass_predictions(
+                            pass_success_model=probs_i[finite_mask],
+                            xpass=xpass_i[finite_mask],
+                            pass_distance=distance_i[finite_mask],
+                            weight_version=weight_version,
+                            **blend_kwargs,
+                        ),
+                        dtype=float,
+                    )
+                    probs_i[finite_mask] = blended_i
                 probs_i[missing_physical_mask] = np.nan
 
         if model.args["task"] in two_case_tasks:

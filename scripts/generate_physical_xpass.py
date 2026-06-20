@@ -61,6 +61,7 @@ from physical_pass_model import (
     compute_graph_max_player_cum_prob_as_defaults,
     compute_graphs_max_player_cum_prob_as_defaults,
     configure_physical_worker_thread_limit,
+    graph_nearest_opponent_distance_row_values,
     load_physical_xpass_match,
     normalize_physical_xpass_speed_aggregation,
     normalize_physical_xpass_metrics,
@@ -451,6 +452,16 @@ def compute_match_rows(
                 if pd.isna(row.get("pass_distance", None)):
                     row["pass_distance"] = observed_pass_distance(graph, label)
                     reuse_stats["pass_distance_filled"] = reuse_stats.get("pass_distance_filled", 0) + 1
+                nearest_opponent_values = graph_nearest_opponent_distance_row_values(graph)
+                filled_nearest = False
+                for column, value in nearest_opponent_values.items():
+                    if pd.isna(row.get(column, None)):
+                        row[column] = value
+                        filled_nearest = True
+                if filled_nearest:
+                    reuse_stats["nearest_opponent_distance_filled"] = (
+                        reuse_stats.get("nearest_opponent_distance_filled", 0) + 1
+                    )
                 rows.append(row)
                 reuse_stats["reused_actions"] = reuse_stats.get("reused_actions", 0) + 1
                 continue
@@ -487,7 +498,7 @@ def compute_match_rows(
             ]
         if len(probs_list) != len(pending):
             raise ValueError(f"Physical xPass batch compute returned {len(probs_list)} rows for {len(pending)} graphs.")
-        for (_, action_index, _graph, current_hash, pass_distance), probs in zip(pending, probs_list):
+        for (_, action_index, graph, current_hash, pass_distance), probs in zip(pending, probs_list):
             row = {
                 "match_id": str(match_id),
                 "action_index": action_index,
@@ -495,6 +506,7 @@ def compute_match_rows(
                 "pass_distance": pass_distance,
             }
             row.update({str(player_id): float(value) for player_id, value in probs.items()})
+            row.update(graph_nearest_opponent_distance_row_values(graph))
             rows.append(row)
 
     return pd.DataFrame(rows), computed

@@ -29,6 +29,7 @@ PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
 PHYSICAL_XPASS_DISTANCE_ATTR = "physical_xpass_pass_distance"
+PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "physical_xpass_nearest_opponent_distance"
 DEFAULT_RESIDUAL_DISTANCE_THRESHOLD = 30.0
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
@@ -52,6 +53,8 @@ PHYSICAL_XPASS_VARIANTS = {
     "gat_phys_logit_offset_regularized",
 }
 PHYSICAL_XPASS_PASS_DISTANCE_COLUMN = "pass_distance"
+PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX = "__distance_to_nearest_opponent"
+PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_COLUMN = "distance_to_nearest_opponent"
 PHYSICAL_XPASS_METRIC_NOISE_KERNEL = "noise_kernel_xpass"
 PHYSICAL_XPASS_METRIC_MAX = "max_xpass"
 PHYSICAL_XPASS_METRIC_TOPMEAN = "topmean_xpass"
@@ -86,6 +89,7 @@ PHYSICAL_XPASS_ID_COLUMNS = {
     "action_id",
     "physical_state_hash",
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_COLUMN,
 }
 DEFAULT_V0_MIN = 8.886015553615485
 DEFAULT_V0_MAX = 42.18118275402132
@@ -269,6 +273,14 @@ def physical_xpass_output_columns(player_ids: list[str] | tuple[str, ...], enabl
         for metric in metrics:
             columns.append(physical_xpass_metric_column(str(player_id), metric))
     return columns
+
+
+def physical_xpass_nearest_opponent_distance_column(player_id: str) -> str:
+    return f"{player_id}{PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX}"
+
+
+def physical_xpass_nearest_opponent_distance_columns(player_ids: list[str] | tuple[str, ...]) -> list[str]:
+    return [physical_xpass_nearest_opponent_distance_column(str(player_id)) for player_id in player_ids]
 
 
 def normalize_physical_xpass_speed_aggregation(value: str | None) -> str:
@@ -483,11 +495,16 @@ def physical_xpass_metric(args: Any) -> str:
     return normalize_physical_xpass_metric(_get_arg(args, "physical_xpass_metric", None))
 
 
+def physical_xpass_weight_version(args: Any) -> str:
+    return "v2" if bool(_get_arg(args, "xpass_weight_v2", False)) or bool(_get_arg(args, "use_xpass_weight_v2", False)) else "v1"
+
+
 def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
     return {
         "use_physical_xpass": bool(inference_uses_physical_xpass(args)),
         "physical_cache_dir": None if cache_dir is None else str(cache_dir),
         "metric": physical_xpass_metric(args),
+        "weight_version": physical_xpass_weight_version(args),
         "source": PHYSICAL_XPASS_SOURCE,
         "speed_aggregation": PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
         "metric_schema_version": PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
@@ -611,24 +628,64 @@ def physical_xpass_blend_weight(pass_distance: np.ndarray | torch.Tensor | float
     return weights
 
 
+def physical_xpass_blend_weight_v2(
+    pass_distance: np.ndarray | torch.Tensor | float,
+    distance_to_nearest_opponent: np.ndarray | torch.Tensor | float,
+) -> np.ndarray | torch.Tensor | float:
+    if isinstance(pass_distance, torch.Tensor) or isinstance(distance_to_nearest_opponent, torch.Tensor):
+        distance_tensor = torch.as_tensor(pass_distance, dtype=torch.float32)
+        opponent_tensor = torch.as_tensor(distance_to_nearest_opponent, dtype=torch.float32, device=distance_tensor.device)
+        x = torch.clamp(distance_tensor / 100.0, 0.0, 1.0)
+        y = opponent_tensor / 100.0
+        weight = 0.5 * torch.sin(torch.pi * x).pow(3) * (1.0 + y * 2.0)
+        return torch.clamp(weight, 0.0, 1.0)
+    distance_values = np.asarray(pass_distance, dtype=float)
+    opponent_values = np.asarray(distance_to_nearest_opponent, dtype=float)
+    x = np.clip(distance_values / 100.0, 0.0, 1.0)
+    y = opponent_values / 100.0
+    weights = np.clip(0.5 * np.sin(np.pi * x) ** 3 * (1.0 + y * 2.0), 0.0, 1.0)
+    if np.isscalar(pass_distance) and np.isscalar(distance_to_nearest_opponent):
+        return float(weights)
+    return weights
+
+
 def blend_physical_xpass_predictions(
     *,
     pass_success_model: np.ndarray | torch.Tensor | float,
     xpass: np.ndarray | torch.Tensor | float,
     pass_distance: np.ndarray | torch.Tensor | float,
+    distance_to_nearest_opponent: np.ndarray | torch.Tensor | float | None = None,
+    weight_version: str = "v1",
 ) -> np.ndarray | torch.Tensor | float:
+    weight_version = str(weight_version or "v1").lower()
+    if weight_version not in {"v1", "v2"}:
+        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1' or 'v2'.")
+    if weight_version == "v2" and distance_to_nearest_opponent is None:
+        raise ValueError("weight_version='v2' requires distance_to_nearest_opponent.")
     if isinstance(pass_success_model, torch.Tensor) or isinstance(xpass, torch.Tensor) or isinstance(pass_distance, torch.Tensor):
         model_tensor = torch.as_tensor(pass_success_model, dtype=torch.float32)
         xpass_tensor = torch.as_tensor(xpass, dtype=torch.float32, device=model_tensor.device)
         distance_tensor = torch.as_tensor(pass_distance, dtype=torch.float32, device=model_tensor.device)
-        weight = physical_xpass_blend_weight(distance_tensor)
+        if weight_version == "v2":
+            nearest_tensor = torch.as_tensor(distance_to_nearest_opponent, dtype=torch.float32, device=model_tensor.device)
+            weight = physical_xpass_blend_weight_v2(distance_tensor, nearest_tensor)
+        else:
+            weight = physical_xpass_blend_weight(distance_tensor)
         return torch.clamp((1.0 - weight) * xpass_tensor + weight * model_tensor, 0.0, 1.0)
     model_values = np.asarray(pass_success_model, dtype=float)
     xpass_values = np.asarray(xpass, dtype=float)
     distance_values = np.asarray(pass_distance, dtype=float)
-    weight = physical_xpass_blend_weight(distance_values)
+    if weight_version == "v2":
+        weight = physical_xpass_blend_weight_v2(distance_values, np.asarray(distance_to_nearest_opponent, dtype=float))
+    else:
+        weight = physical_xpass_blend_weight(distance_values)
     blended = np.clip((1.0 - weight) * xpass_values + weight * model_values, 0.0, 1.0)
-    if np.isscalar(pass_success_model) and np.isscalar(xpass) and np.isscalar(pass_distance):
+    if (
+        np.isscalar(pass_success_model)
+        and np.isscalar(xpass)
+        and np.isscalar(pass_distance)
+        and (weight_version == "v1" or np.isscalar(distance_to_nearest_opponent))
+    ):
         return float(blended)
     return blended
 
@@ -706,12 +763,43 @@ def graph_pass_distances(graph: Data) -> torch.Tensor:
     return distances
 
 
+def graph_nearest_opponent_distances(graph: Data) -> torch.Tensor:
+    x = graph.x.detach().cpu().to(torch.float32)
+    if x.shape[1] <= config.NODE_FEATURE_Y:
+        raise ValueError("Graph node features do not include x/y coordinates for nearest-opponent distance calculation.")
+    xy = x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]
+    finite_xy = torch.isfinite(xy).all(dim=1)
+    non_goal = (
+        x[:, config.NODE_FEATURE_IS_GOAL] == 0
+        if x.shape[1] > config.NODE_FEATURE_IS_GOAL
+        else torch.ones(x.shape[0], dtype=torch.bool)
+    )
+    player_node = x[:, config.NODE_FEATURE_IS_TEAMMATE] != -1
+    valid_player = finite_xy & non_goal & player_node
+    teammate = x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+    pairwise_distances = torch.cdist(xy, xy)
+    opponent_mask = teammate[:, None] != teammate[None, :]
+    valid_pair = opponent_mask & valid_player[:, None] & valid_player[None, :]
+    masked_distances = torch.where(valid_pair, pairwise_distances, torch.full_like(pairwise_distances, float("inf")))
+    nearest = masked_distances.min(dim=1).values
+    return torch.where(torch.isfinite(nearest), nearest, torch.full_like(nearest, float("nan")))
+
+
 def observed_pass_distance(graph: Data, labels: torch.Tensor) -> float:
     target_index = int(labels[LABEL_INDEX["intent_index"]].item())
     distances = graph_pass_distances(graph)
     if target_index < 0 or target_index >= int(distances.shape[0]):
         return float("nan")
     return float(distances[target_index].item())
+
+
+def graph_nearest_opponent_distance_row_values(graph: Data) -> dict[str, float]:
+    node_ids = _node_ids(graph)
+    distances = graph_nearest_opponent_distances(graph)
+    return {
+        physical_xpass_nearest_opponent_distance_column(node_id): float(distances[node_index].item())
+        for node_index, node_id in enumerate(node_ids)
+    }
 
 
 def prepare_runtime_physical_xpass_prewarm_items(
@@ -2659,6 +2747,7 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
         "cache_written": 0,
         "copied_from_reuse": 0,
         "pass_distance_filled": 0,
+        "nearest_opponent_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -2687,6 +2776,7 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
         "cache_written",
         "copied_from_reuse",
         "pass_distance_filled",
+        "nearest_opponent_distance_filled",
         "hash_mismatch_recomputed",
         "online_graphs",
         "compute_chunks",
@@ -2732,6 +2822,7 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
         "cache_written": 0,
         "copied_from_reuse": 0,
         "pass_distance_filled": 0,
+        "nearest_opponent_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -2797,6 +2888,7 @@ def summarize_physical_xpass_cache_usage(
     cache_written = int(totals["cache_written"])
     copied_from_reuse = int(totals["copied_from_reuse"])
     pass_distance_filled = int(totals["pass_distance_filled"])
+    nearest_opponent_distance_filled = int(totals["nearest_opponent_distance_filled"])
     hash_mismatch_recomputed = int(totals["hash_mismatch_recomputed"])
     online_graphs = int(totals["online_graphs"])
     requested_rows = cache_hits + cache_misses
@@ -2829,6 +2921,7 @@ def summarize_physical_xpass_cache_usage(
         "cache_written": cache_written,
         "copied_from_reuse": copied_from_reuse,
         "pass_distance_filled": pass_distance_filled,
+        "nearest_opponent_distance_filled": nearest_opponent_distance_filled,
         "hash_mismatch_recomputed": hash_mismatch_recomputed,
         "online_graphs": online_graphs,
         "requested_rows": requested_rows,
@@ -2845,6 +2938,7 @@ def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
     written = int(summary.get("cache_written", 0) or 0)
     copied = int(summary.get("copied_from_reuse", 0) or 0)
     distance_filled = int(summary.get("pass_distance_filled", 0) or 0)
+    nearest_filled = int(summary.get("nearest_opponent_distance_filled", 0) or 0)
     requested = int(summary.get("requested_rows", hits + misses) or 0)
     online_graphs = int(summary.get("online_graphs", 0) or 0)
 
@@ -2855,13 +2949,14 @@ def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
     if reason == "cache_hit":
         return (
             f"Physical xPass cache: reused {hits}/{requested} rows from {cache_dir}; "
-            f"copied={copied} pass_distance_filled={distance_filled}."
+            f"copied={copied} pass_distance_filled={distance_filled} "
+            f"nearest_opponent_distance_filled={nearest_filled}."
         )
     if reason in {"hash_mismatch", "missing_or_cold_cache_rows", "refresh_requested"}:
         return (
             f"Physical xPass cache: recomputed {written} rows; reason={reason}; "
             f"hits={hits} misses={misses} written={written} copied={copied} "
-            f"pass_distance_filled={distance_filled}."
+            f"pass_distance_filled={distance_filled} nearest_opponent_distance_filled={nearest_filled}."
         )
     if reason == "read_only_cache_rows_skipped":
         skipped_rows = int(summary.get("skipped_rows", 0) or 0)
@@ -2890,7 +2985,7 @@ def _physical_xpass_row_has_finite_metric(row: dict[str, Any], enabled_metrics: 
     metadata_columns = {"match_id", "action_index", "physical_state_hash", PHYSICAL_XPASS_PASS_DISTANCE_COLUMN}
     for key, value in row.items():
         key = str(key)
-        if key in metadata_columns:
+        if key in metadata_columns or key.endswith(PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX):
             continue
         if not any((suffix == "" and "__" not in key) or (suffix and key.endswith(suffix)) for suffix in suffixes):
             continue
@@ -2964,6 +3059,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: float(item.get(PHYSICAL_XPASS_PASS_DISTANCE_COLUMN, float("nan"))),
         }
         row.update({str(player_id): float(value) for player_id, value in probs.items()})
+        row.update(graph_nearest_opponent_distance_row_values(item["graph"]))
         rows.append(row)
     skipped_all_nan = sum(1 for row in rows if not _physical_xpass_row_has_finite_metric(row, enabled_metrics))
     return {"rows": rows, "computed": len(rows), "skipped_all_nan": int(skipped_all_nan)}
@@ -2977,6 +3073,18 @@ def _has_finite_pass_distance(row: pd.Series) -> bool:
         return bool(math.isfinite(float(value)))
     except (TypeError, ValueError):
         return False
+
+
+def _has_finite_nearest_opponent_distances(row: pd.Series, graph: Data) -> bool:
+    for column in physical_xpass_nearest_opponent_distance_columns(_node_ids(graph)):
+        if column not in row.index:
+            return False
+        try:
+            if not math.isfinite(float(row.get(column))):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def _physical_row_hash_matches_or_missing(row: pd.Series, state_hash: str) -> tuple[bool, bool]:
@@ -2995,6 +3103,7 @@ def _runtime_match_stats_template() -> dict[str, int]:
         "cache_written": 0,
         "copied_from_reuse": 0,
         "pass_distance_filled": 0,
+        "nearest_opponent_distance_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -3119,6 +3228,7 @@ def prewarm_physical_xpass_runtime_cache(
             action_index = int(label[LABEL_INDEX["action_index"]].item())
             state_hash = physical_state_hash(graph)
             pass_distance = observed_pass_distance(graph, label)
+            nearest_opponent_values = graph_nearest_opponent_distance_row_values(graph)
             if not refresh and cached_rows is not None and action_index in cached_rows.index:
                 cached_row = cached_rows.loc[action_index]
                 hash_matches, missing_hash = _physical_row_hash_matches_or_missing(cached_row, state_hash)
@@ -3126,6 +3236,7 @@ def prewarm_physical_xpass_runtime_cache(
                     hash_matches
                     and not missing_hash
                     and _has_finite_pass_distance(cached_row)
+                    and _has_finite_nearest_opponent_distances(cached_row, graph)
                     and _physical_xpass_row_has_finite_metric(cached_row.to_dict(), available_metrics)
                 ):
                     stats["cache_hits"] = int(stats["cache_hits"]) + 1
@@ -3140,13 +3251,20 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row["action_index"] = action_index
                     copied_row["physical_state_hash"] = state_hash
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
+                    copied_row.update(nearest_opponent_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
                         not _has_finite_pass_distance(cached_row)
                     )
+                    stats["nearest_opponent_distance_filled"] = int(stats["nearest_opponent_distance_filled"]) + int(
+                        not _has_finite_nearest_opponent_distances(cached_row, graph)
+                    )
                     match_stats["copied_from_reuse"] += 1
                     match_stats["pass_distance_filled"] += int(not _has_finite_pass_distance(cached_row))
+                    match_stats["nearest_opponent_distance_filled"] += int(
+                        not _has_finite_nearest_opponent_distances(cached_row, graph)
+                    )
                     continue
 
             if not refresh and reuse_rows is not None and action_index in reuse_rows.index:
@@ -3158,13 +3276,20 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row["action_index"] = action_index
                     copied_row["physical_state_hash"] = state_hash
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
+                    copied_row.update(nearest_opponent_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
                         not _has_finite_pass_distance(reuse_row)
                     )
+                    stats["nearest_opponent_distance_filled"] = int(stats["nearest_opponent_distance_filled"]) + int(
+                        not _has_finite_nearest_opponent_distances(reuse_row, graph)
+                    )
                     match_stats["copied_from_reuse"] += 1
                     match_stats["pass_distance_filled"] += int(not _has_finite_pass_distance(reuse_row))
+                    match_stats["nearest_opponent_distance_filled"] += int(
+                        not _has_finite_nearest_opponent_distances(reuse_row, graph)
+                    )
                     continue
                 stats["hash_mismatch_recomputed"] = int(stats["hash_mismatch_recomputed"]) + 1
                 match_stats["hash_mismatch_recomputed"] += 1
@@ -3422,6 +3547,7 @@ def attach_physical_xpass_to_graph(
     else:
         fill_value = float(missing_player_value)
     probs = torch.full((len(node_ids),), fill_value, dtype=torch.float32)
+    nearest_opponent_distances = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
     missing_columns = []
     for node_index, node_id in enumerate(node_ids):
         value_columns = physical_xpass_metric_columns(str(node_id), selected_metric)
@@ -3433,6 +3559,9 @@ def attach_physical_xpass_to_graph(
         if pd.isna(value):
             continue
         probs[node_index] = float(value)
+        nearest_column = physical_xpass_nearest_opponent_distance_column(str(node_id))
+        if nearest_column in row.index and not pd.isna(row[nearest_column]):
+            nearest_opponent_distances[node_index] = float(row[nearest_column])
 
     if missing_columns and require_observed_target:
         target_index = int(labels[LABEL_INDEX["intent_index"]].item())
@@ -3468,6 +3597,7 @@ def attach_physical_xpass_to_graph(
     setattr(graph, PHYSICAL_XPASS_PROB_ATTR, probs)
     setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, logits)
     setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, pass_distances)
+    setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
     return graph
 
 
@@ -3569,6 +3699,7 @@ def attach_physical_xpass_online_to_graphs(
         row = {"action_index": action_index}
         row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = observed_pass_distance(graph, label)
         row.update({str(player_id): float(value) for player_id, value in probs.items()})
+        row.update(graph_nearest_opponent_distance_row_values(graph))
         physical_rows = pd.DataFrame([row]).set_index("action_index", drop=False)
         attached.append(
             attach_physical_xpass_to_graph(
