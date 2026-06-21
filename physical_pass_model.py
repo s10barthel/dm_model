@@ -637,13 +637,13 @@ def physical_xpass_blend_weight_v2(
         opponent_tensor = torch.as_tensor(distance_to_nearest_opponent, dtype=torch.float32, device=distance_tensor.device)
         x = torch.clamp(distance_tensor / 100.0, 0.0, 1.0)
         y = opponent_tensor / 100.0
-        weight = 0.5 * torch.sin(torch.pi * x).pow(3) * (1.0 + y * 2.0)
+        weight = 0.5 * torch.sin((torch.pi / 0.8) * x).pow(3) * (1.0 + y * 2.0)
         return torch.clamp(weight, 0.0, 1.0)
     distance_values = np.asarray(pass_distance, dtype=float)
     opponent_values = np.asarray(distance_to_nearest_opponent, dtype=float)
     x = np.clip(distance_values / 100.0, 0.0, 1.0)
     y = opponent_values / 100.0
-    weights = np.clip(0.5 * np.sin(np.pi * x) ** 3 * (1.0 + y * 2.0), 0.0, 1.0)
+    weights = np.clip(0.5 * np.sin((np.pi / 0.8) * x) ** 3 * (1.0 + y * 2.0), 0.0, 1.0)
     if np.isscalar(pass_distance) and np.isscalar(distance_to_nearest_opponent):
         return float(weights)
     return weights

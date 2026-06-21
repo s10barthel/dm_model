@@ -489,23 +489,27 @@ class PhysicalXPassTests(unittest.TestCase):
         )
 
     def test_inference_physical_xpass_blend_formula_v2(self) -> None:
-        weight = physical_xpass_blend_weight_v2(50.0, 20.0)
+        peak_weight = physical_xpass_blend_weight_v2(40.0, 20.0)
+        weight_50m = physical_xpass_blend_weight_v2(50.0, 20.0)
+        expected_50m_weight = 0.5 * np.sin((np.pi / 0.8) * 0.5) ** 3 * 1.4
 
-        self.assertAlmostEqual(float(weight), 0.7)
+        self.assertAlmostEqual(float(peak_weight), 0.7)
+        self.assertAlmostEqual(float(weight_50m), expected_50m_weight)
         self.assertAlmostEqual(
             float(
                 blend_physical_xpass_predictions(
                     pass_success_model=0.9,
                     xpass=0.5,
-                    pass_distance=50.0,
+                    pass_distance=40.0,
                     distance_to_nearest_opponent=20.0,
                     weight_version="v2",
                 )
             ),
             0.78,
         )
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(80.0, 20.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(150.0, 20.0)), 0.0)
-        self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(50.0, 100.0)), 1.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v2(40.0, 100.0)), 1.0)
 
     def test_inference_physical_xpass_blend_formula_v2_requires_nearest_opponent_distance(self) -> None:
         with self.assertRaisesRegex(ValueError, "distance_to_nearest_opponent"):

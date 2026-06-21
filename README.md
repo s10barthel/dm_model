@@ -955,7 +955,7 @@ The default weighting is distance-only: short passes stay closer to physical xPa
 ```text
 x = clip(pass_distance / 100, 0, 1)
 y = distance_to_nearest_opponent / 100
-w = clip(0.5 * sin(pi * x)^3 * (1 + y * 2), 0, 1)
+w = clip(0.5 * sin((pi / 0.8) * x)^3 * (1 + y * 2), 0, 1)
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
