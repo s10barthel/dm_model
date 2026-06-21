@@ -12,7 +12,8 @@ SAVED_DIR = PROJECT_ROOT / "saved"
 COMPONENT_RUNS_DIR = PROJECT_ROOT / "data" / "component_runs"
 VISUALIZATION_DIR = PROJECT_ROOT / "data" / "visualizations"
 
-SUMMARY_FILENAME = "metadata_summary.csv"
+LEGACY_SUMMARY_FILENAME = "metadata_summary.csv"
+SUMMARY_FILENAME = LEGACY_SUMMARY_FILENAME
 SUMMARY_COLUMNS = [
     "summary_scope",
     "parent_group",
@@ -31,6 +32,9 @@ SUMMARY_COLUMNS = [
     "ball_z_aware",
     "poss_vel_aware",
     "poss_rel_vel_aware",
+    "poss_geometry_aware",
+    "goal_features_aware",
+    "goal_nodes_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",
@@ -51,6 +55,9 @@ FEATURE_COLUMNS = [
     "ball_z_aware",
     "poss_vel_aware",
     "poss_rel_vel_aware",
+    "poss_geometry_aware",
+    "goal_features_aware",
+    "goal_nodes_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",
@@ -190,8 +197,31 @@ def _csv_value(value: Any) -> str:
     return str(value)
 
 
+def summary_filename_for_parent(parent_dir: Path) -> str:
+    return f"{Path(parent_dir).name}_metadata_summary.csv"
+
+
+def summary_path_for_parent(parent_dir: Path) -> Path:
+    parent_dir = Path(parent_dir)
+    return parent_dir / summary_filename_for_parent(parent_dir)
+
+
+def _remove_legacy_summary(parent_dir: Path, summary_path: Path) -> None:
+    legacy_path = Path(parent_dir) / LEGACY_SUMMARY_FILENAME
+    if legacy_path == summary_path or not legacy_path.exists():
+        return
+    try:
+        legacy_path.unlink()
+    except PermissionError as exc:
+        warnings.warn(
+            f"Could not remove legacy metadata summary {legacy_path}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
 def _write_rows(parent_dir: Path, rows: list[dict[str, Any]]) -> Path | None:
-    summary_path = parent_dir / SUMMARY_FILENAME
+    summary_path = summary_path_for_parent(parent_dir)
     parent_dir.mkdir(parents=True, exist_ok=True)
     try:
         with summary_path.open("w", newline="", encoding="utf-8") as file:
@@ -206,6 +236,7 @@ def _write_rows(parent_dir: Path, rows: list[dict[str, Any]]) -> Path | None:
             stacklevel=2,
         )
         return None
+    _remove_legacy_summary(parent_dir, summary_path)
     return summary_path
 
 

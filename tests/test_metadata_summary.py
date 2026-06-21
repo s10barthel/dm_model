@@ -20,6 +20,10 @@ def read_summary(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(file))
 
 
+def summary_path(parent_dir: Path) -> Path:
+    return parent_dir / metadata_summary.summary_filename_for_parent(parent_dir)
+
+
 def patch_summary_roots(monkeypatch, tmp_path: Path) -> tuple[Path, Path, Path]:
     saved = tmp_path / "saved"
     component_runs = tmp_path / "data" / "component_runs"
@@ -47,6 +51,9 @@ def model_metadata(**overrides: object) -> dict[str, object]:
             "ball_z_aware": True,
             "poss_vel_aware": False,
             "poss_rel_vel_aware": False,
+            "poss_geometry_aware": True,
+            "goal_features_aware": False,
+            "goal_nodes_aware": True,
             "accel_aware": True,
             "offside_aware": True,
             "extend_features": False,
@@ -73,6 +80,7 @@ def test_saved_model_summary_includes_training_metrics_and_feature_flags(tmp_pat
 
     summary_path = metadata_summary.refresh_summary_for_parent(saved / "pass_success")
 
+    assert summary_path == saved / "pass_success" / "pass_success_metadata_summary.csv"
     rows = read_summary(summary_path)
     assert len(rows) == 1
     row = rows[0]
@@ -81,6 +89,9 @@ def test_saved_model_summary_includes_training_metrics_and_feature_flags(tmp_pat
     assert row["model_role"] == "pass_success"
     assert row["feature_run_id"] == "feature_1"
     assert row["possessor_aware"] == "true"
+    assert row["poss_geometry_aware"] == "true"
+    assert row["goal_features_aware"] == "false"
+    assert row["goal_nodes_aware"] == "true"
     assert row["v_edge_feature_mode"] == "all"
     assert row["model_name"] == "gat"
     assert row["ipw_model_id"] == "pass_intent/pass_intent_1"
@@ -135,7 +146,13 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
                 "pass_success": {
                     "model_id": "pass_success/pass_success_1",
                     "feature_run_id": "feature_from_record",
-                    "feature_signature": {"accel_aware": False, "v_edge_feature_mode": "no_poss"},
+                    "feature_signature": {
+                        "accel_aware": False,
+                        "poss_geometry_aware": False,
+                        "goal_features_aware": True,
+                        "goal_nodes_aware": False,
+                        "v_edge_feature_mode": "no_poss",
+                    },
                     "status": "running",
                 }
             },
@@ -152,6 +169,9 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
     assert row["created_at"] == "2026-06-02T10:00:00"
     assert row["feature_run_id"] == "feature_from_record"
     assert row["accel_aware"] == "false"
+    assert row["poss_geometry_aware"] == "false"
+    assert row["goal_features_aware"] == "true"
+    assert row["goal_nodes_aware"] == "false"
     assert row["v_edge_feature_mode"] == "no_poss"
     assert row["status"] == "running"
 
@@ -197,8 +217,47 @@ def test_write_run_metadata_refreshes_only_matching_parent_summary(tmp_path, mon
         ),
     )
 
-    assert (saved / "action_intent" / metadata_summary.SUMMARY_FILENAME).exists()
-    assert not (saved / "pass_success" / metadata_summary.SUMMARY_FILENAME).exists()
+    assert summary_path(saved / "action_intent").exists()
+    assert not summary_path(saved / "pass_success").exists()
+
+
+def test_refresh_summary_removes_legacy_metadata_summary_csv(tmp_path, monkeypatch) -> None:
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    parent_dir = saved / "pass_success"
+    run_root = parent_dir / "pass_success_1"
+    write_json(run_root / "metadata.json", model_metadata())
+    legacy_path = parent_dir / metadata_summary.LEGACY_SUMMARY_FILENAME
+    legacy_path.write_text("stale", encoding="utf-8")
+
+    new_path = metadata_summary.refresh_summary_for_parent(parent_dir)
+
+    assert new_path == summary_path(parent_dir)
+    assert new_path.exists()
+    assert not legacy_path.exists()
+
+
+def test_refresh_summary_warns_but_writes_when_legacy_summary_csv_is_locked(tmp_path, monkeypatch) -> None:
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    parent_dir = saved / "pass_success"
+    run_root = parent_dir / "pass_success_1"
+    write_json(run_root / "metadata.json", model_metadata())
+    legacy_path = parent_dir / metadata_summary.LEGACY_SUMMARY_FILENAME
+    legacy_path.write_text("stale", encoding="utf-8")
+    original_unlink = Path.unlink
+
+    def raise_for_legacy_csv(path: Path, *args: object, **kwargs: object):
+        if path == legacy_path:
+            raise PermissionError("file is locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", raise_for_legacy_csv)
+
+    with pytest.warns(RuntimeWarning, match="legacy metadata summary"):
+        new_path = metadata_summary.refresh_summary_for_parent(parent_dir)
+
+    assert new_path == summary_path(parent_dir)
+    assert new_path.exists()
+    assert legacy_path.exists()
 
 
 def test_refresh_summary_warns_and_skips_locked_summary_csv(tmp_path, monkeypatch) -> None:
@@ -208,13 +267,13 @@ def test_refresh_summary_warns_and_skips_locked_summary_csv(tmp_path, monkeypatc
     original_open = Path.open
 
     def raise_for_summary_csv(path: Path, *args: object, **kwargs: object):
-        if path.name == metadata_summary.SUMMARY_FILENAME:
+        if path.name == metadata_summary.summary_filename_for_parent(saved / "pass_success"):
             raise PermissionError("file is locked")
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", raise_for_summary_csv)
 
-    with pytest.warns(RuntimeWarning, match="metadata_summary\\.csv"):
+    with pytest.warns(RuntimeWarning, match="pass_success_metadata_summary\\.csv"):
         summary_path = metadata_summary.refresh_summary_for_parent(saved / "pass_success")
 
     assert summary_path is None
@@ -226,7 +285,7 @@ def test_write_run_metadata_keeps_metadata_when_summary_csv_is_locked(tmp_path, 
     original_open = Path.open
 
     def raise_for_summary_csv(path: Path, *args: object, **kwargs: object):
-        if path.name == metadata_summary.SUMMARY_FILENAME:
+        if path.name == metadata_summary.summary_filename_for_parent(saved / "action_intent"):
             raise PermissionError("file is locked")
         return original_open(path, *args, **kwargs)
 
@@ -257,9 +316,9 @@ def test_backfill_rebuilds_deterministically_and_skips_malformed_metadata(tmp_pa
     paths = metadata_summary.refresh_all_summaries()
 
     assert paths == [
-        saved / "pass_success" / metadata_summary.SUMMARY_FILENAME,
-        component_runs / "hawkeye" / metadata_summary.SUMMARY_FILENAME,
-        visualizations / "hawkeye" / metadata_summary.SUMMARY_FILENAME,
+        summary_path(saved / "pass_success"),
+        summary_path(component_runs / "hawkeye"),
+        summary_path(visualizations / "hawkeye"),
     ]
-    rows = read_summary(saved / "pass_success" / metadata_summary.SUMMARY_FILENAME)
+    rows = read_summary(summary_path(saved / "pass_success"))
     assert [row["run_id"] for row in rows] == ["pass_success_1"]
