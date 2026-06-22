@@ -48,6 +48,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
+    PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
     PHYSICAL_XPASS_METRIC_MAX,
@@ -61,6 +62,7 @@ from physical_pass_model import (
     compute_graph_max_player_cum_prob_as_defaults,
     compute_graphs_max_player_cum_prob_as_defaults,
     configure_physical_worker_thread_limit,
+    graph_ball_z,
     graph_nearest_opponent_distance_row_values,
     load_physical_xpass_match,
     normalize_physical_xpass_speed_aggregation,
@@ -468,6 +470,9 @@ def compute_match_rows(
                 if pd.isna(row.get("pass_distance", None)):
                     row["pass_distance"] = observed_pass_distance(graph, label)
                     reuse_stats["pass_distance_filled"] = reuse_stats.get("pass_distance_filled", 0) + 1
+                if pd.isna(row.get(PHYSICAL_XPASS_BALL_Z_COLUMN, None)):
+                    row[PHYSICAL_XPASS_BALL_Z_COLUMN] = graph_ball_z(graph)
+                    reuse_stats["ball_z_filled"] = reuse_stats.get("ball_z_filled", 0) + 1
                 nearest_opponent_values = graph_nearest_opponent_distance_row_values(graph)
                 filled_nearest = False
                 for column, value in nearest_opponent_values.items():
@@ -520,6 +525,7 @@ def compute_match_rows(
                 "action_index": action_index,
                 "physical_state_hash": current_hash,
                 "pass_distance": pass_distance,
+                PHYSICAL_XPASS_BALL_Z_COLUMN: graph_ball_z(graph),
             }
             row.update({str(player_id): float(value) for player_id, value in probs.items()})
             row.update(graph_nearest_opponent_distance_row_values(graph))
@@ -586,6 +592,8 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
         "cache_written",
         "copied_from_reuse",
         "pass_distance_filled",
+        "nearest_opponent_distance_filled",
+        "ball_z_filled",
         "hash_mismatch_recomputed",
         "online_graphs",
         "compute_chunks",
@@ -630,6 +638,8 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "cache_written": 0,
         "copied_from_reuse": 0,
         "pass_distance_filled": 0,
+        "nearest_opponent_distance_filled": 0,
+        "ball_z_filled": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -658,6 +668,8 @@ def _format_runtime_stats_line(prefix: str, stats: dict[str, Any]) -> str:
         f"written={int(stats.get('cache_written', 0) or 0)} "
         f"copied={int(stats.get('copied_from_reuse', 0) or 0)} "
         f"pass_distance_filled={int(stats.get('pass_distance_filled', 0) or 0)} "
+        f"nearest_opponent_distance_filled={int(stats.get('nearest_opponent_distance_filled', 0) or 0)} "
+        f"ball_z_filled={int(stats.get('ball_z_filled', 0) or 0)} "
         f"skipped_all_nan={int(stats.get('skipped_all_nan', 0) or 0)}"
     )
 
@@ -673,6 +685,8 @@ def _runtime_stats_has_work(stats: dict[str, Any]) -> bool:
             "cache_written",
             "copied_from_reuse",
             "pass_distance_filled",
+            "nearest_opponent_distance_filled",
+            "ball_z_filled",
             "skipped_all_nan",
         ]
     )
@@ -1315,6 +1329,8 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                     "cache_written",
                     "copied_from_reuse",
                     "pass_distance_filled",
+                    "nearest_opponent_distance_filled",
+                    "ball_z_filled",
                     "skipped_all_nan",
                 ]
             }
@@ -1374,6 +1390,7 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
             f"  {summary['dataset']}: {summary['cache_dir']} | "
             f"hits={int(stats.get('cache_hits', 0))}, misses={int(stats.get('cache_misses', 0))}, "
             f"written={int(stats.get('cache_written', 0))}, filled_distance={int(stats.get('pass_distance_filled', 0))}, "
+            f"filled_ball_z={int(stats.get('ball_z_filled', 0))}, "
             f"skipped={len(_flatten_skip_reasons(summary.get('skipped') or {}))}, "
             f"skip_reasons={summarize_skip_reasons(summary.get('skipped') or {})}"
         )

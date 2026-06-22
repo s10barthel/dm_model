@@ -22,6 +22,8 @@ from datatools.utils import (
 )
 from models.gnn import GNN
 from physical_pass_model import (
+    PHYSICAL_XPASS_BALL_Z_ATTR,
+    PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_DISTANCE_ATTR,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
@@ -35,6 +37,7 @@ from physical_pass_model import (
     load_physical_xpass_match,
     model_uses_physical_xpass,
     physical_xpass_floor,
+    physical_xpass_ball_z_limit,
     physical_xpass_inference_lookup_config,
     physical_xpass_metric,
     physical_xpass_metric_columns,
@@ -249,6 +252,7 @@ def attach_physical_xpass_for_inference(
         require_observed_target=False,
         metric=lookup_config["metric"] if use_inference_blend else physical_xpass_metric(model.args),
         missing_player_value=None if use_inference_blend else 0.5,
+        require_ball_z=use_inference_blend and physical_xpass_ball_z_limit(model.args) is not None,
     )
 
 
@@ -308,7 +312,16 @@ def _physical_xpass_row_skip_reason(
     match_id: str,
     action_index: int,
     metric: str | None = None,
+    require_ball_z: bool = False,
 ) -> str | None:
+    if require_ball_z:
+        if PHYSICAL_XPASS_BALL_Z_COLUMN not in row.index:
+            return "missing_ball_z"
+        try:
+            if not np.isfinite(float(row.get(PHYSICAL_XPASS_BALL_Z_COLUMN))):
+                return "non_finite_ball_z"
+        except (TypeError, ValueError):
+            return "non_finite_ball_z"
     if metric is not None:
         node_ids = [str(node_id) for node_id in getattr(graph, "node_ids", [])]
         candidate_columns = [column for node_id in node_ids for column in physical_xpass_metric_columns(node_id, metric)]
@@ -343,6 +356,7 @@ def filter_missing_physical_xpass_rows_for_inference(
     cache_dir = _physical_xpass_cache_dir_for_inference(match, model)
     lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=cache_dir)
     metric = lookup_config["metric"] if use_inference_blend else None
+    require_ball_z = bool(use_inference_blend and physical_xpass_ball_z_limit(model.args) is not None)
     setattr(match, "physical_xpass_hash_policy", PHYSICAL_XPASS_INFERENCE_HASH_POLICY)
     if use_inference_blend:
         setattr(match, "physical_xpass_lookup_policy", "dataset_event_frame_player_only")
@@ -387,6 +401,7 @@ def filter_missing_physical_xpass_rows_for_inference(
             match_id=match_id,
             action_index=action_index,
             metric=metric,
+            require_ball_z=require_ball_z,
         )
         if reason is not None:
             skipped_action_indexes.append(action_index)
@@ -564,6 +579,7 @@ def inference_gnn(
             physical_xpass_out = getattr(graphs, PHYSICAL_XPASS_PROB_ATTR, None)
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
             physical_nearest_opponent_out = getattr(graphs, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
+            physical_ball_z_out = getattr(graphs, PHYSICAL_XPASS_BALL_Z_ATTR, None)
 
             if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
@@ -577,6 +593,8 @@ def inference_gnn(
                     physical_distance_out = physical_distance_out[teammate_mask]
                 if physical_nearest_opponent_out is not None:
                     physical_nearest_opponent_out = physical_nearest_opponent_out[teammate_mask]
+                if physical_ball_z_out is not None:
+                    physical_ball_z_out = physical_ball_z_out[teammate_mask]
 
             if "receiver" in model.args["task"] and model.args["include_out"]:
                 batch = torch.cat([batch, torch.unique(graphs.batch)])
@@ -609,6 +627,18 @@ def inference_gnn(
                                 np.nan,
                                 dtype=physical_nearest_opponent_out.dtype,
                                 device=physical_nearest_opponent_out.device,
+                            ),
+                        ]
+                    )
+                if physical_ball_z_out is not None:
+                    physical_ball_z_out = torch.cat(
+                        [
+                            physical_ball_z_out,
+                            torch.full(
+                                (graphs.num_graphs,),
+                                np.nan,
+                                dtype=physical_ball_z_out.dtype,
+                                device=physical_ball_z_out.device,
                             ),
                         ]
                     )
@@ -660,13 +690,21 @@ def inference_gnn(
                 if physical_xpass_out is None or physical_distance_out is None:
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                 weight_version = physical_xpass_weight_version(model.args)
+                ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
                     raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
+                if ball_z_limit is not None and physical_ball_z_out is None:
+                    raise ValueError("Inference physical xPass ball_z_limit requires attached cached ball_z tensors.")
                 xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
                 distance_i = physical_distance_out[batch == i].cpu().detach().numpy().astype(float)
                 nearest_i = (
                     physical_nearest_opponent_out[batch == i].cpu().detach().numpy().astype(float)
                     if physical_nearest_opponent_out is not None
+                    else None
+                )
+                ball_z_i = (
+                    physical_ball_z_out[batch == i].cpu().detach().numpy().astype(float)
+                    if physical_ball_z_out is not None
                     else None
                 )
                 if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
@@ -688,11 +726,24 @@ def inference_gnn(
                     finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(nearest_i)
                 else:
                     finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
+                if ball_z_limit is not None:
+                    if ball_z_i is None or ball_z_i.shape[0] != probs_i.shape[0]:
+                        raise ValueError(
+                            "Physical xPass ball_z_limit tensors do not match pass-success probabilities: "
+                            f"probs={probs_i.shape}, ball_z={None if ball_z_i is None else ball_z_i.shape}."
+                        )
+                    missing_ball_z_mask = finite_mask & ~np.isfinite(ball_z_i)
+                    if bool(missing_ball_z_mask.any()):
+                        raise ValueError("Physical xPass ball_z_limit requires finite cached ball_z for every blended player.")
+                    finite_mask = finite_mask & np.isfinite(ball_z_i)
                 missing_physical_mask = ~finite_mask
                 if finite_mask.any():
                     blend_kwargs = {}
                     if weight_version == "v2":
                         blend_kwargs["distance_to_nearest_opponent"] = nearest_i[finite_mask]
+                    if ball_z_limit is not None:
+                        blend_kwargs["ball_z"] = ball_z_i[finite_mask]
+                        blend_kwargs["ball_z_limit"] = ball_z_limit
                     blended_i = np.asarray(
                         blend_physical_xpass_predictions(
                             pass_success_model=probs_i[finite_mask],

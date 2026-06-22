@@ -69,6 +69,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for pass-success blending.")
     parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
     parser.add_argument("--xpass-weight-v2", "--xpass_weight_v2", dest="xpass_weight_v2", action="store_true", help="Use nearest-opponent-aware physical xPass blend weighting.")
+    parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     return parser.parse_args(argv)
 
@@ -128,6 +129,7 @@ def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str
         pass_success_model.args["topmean_xpass"] = use_topmean_xpass
         pass_success_model.args["top10mean_xpass"] = bool(getattr(args, "top10mean_xpass", False))
         pass_success_model.args["xpass_weight_v2"] = bool(getattr(args, "xpass_weight_v2", False))
+        pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
     ):
@@ -168,6 +170,7 @@ def epv_physical_xpass_metadata(
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
         "physical_xpass_metric": lookup_config.get("metric"),
         "physical_xpass_weight_version": lookup_config.get("weight_version"),
+        "physical_xpass_ball_z_limit": lookup_config.get("ball_z_limit"),
         "physical_cache_dir": physical_cache_dir,
         "physical_xpass_runtime_stats": runtime_stats,
         "physical_xpass_skipped_actions": skipped_actions,

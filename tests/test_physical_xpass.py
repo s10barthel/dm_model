@@ -51,6 +51,8 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
+    PHYSICAL_XPASS_BALL_Z_ATTR,
+    PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
@@ -76,6 +78,7 @@ from physical_pass_model import (
     compute_graph_physical_xpass_metrics_as_defaults,
     compute_graph_player_cum_prob,
     format_physical_xpass_cache_summary,
+    graph_ball_z,
     inference_uses_physical_xpass,
     load_physical_xpass_match,
     load_physical_xpass_component,
@@ -89,6 +92,7 @@ from physical_pass_model import (
     physical_xpass_metric,
     physical_xpass_metric_column,
     physical_xpass_nearest_opponent_distance_column,
+    physical_xpass_ball_z_limit,
     physical_xpass_weight_version,
     physical_xpass_blend_weight_v2,
     physical_xpass_source,
@@ -535,12 +539,53 @@ class PhysicalXPassTests(unittest.TestCase):
                 weight_version="v2",
             )
 
+    def test_inference_physical_xpass_ball_z_limit_forces_model_weight(self) -> None:
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=10.0,
+                    ball_z=1.2,
+                    ball_z_limit=1.0,
+                )
+            ),
+            0.9,
+        )
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=10.0,
+                    ball_z=0.8,
+                    ball_z_limit=1.0,
+                )
+            ),
+            0.54,
+        )
+
+    def test_inference_physical_xpass_ball_z_limit_requires_ball_z(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ball_z"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9,
+                xpass=0.5,
+                pass_distance=10.0,
+                ball_z_limit=1.0,
+            )
+
     def test_graph_nearest_opponent_distances(self) -> None:
         distances = graph_nearest_opponent_distances(make_graph())
 
         self.assertAlmostEqual(float(distances[0]), 40.0)
         self.assertAlmostEqual(float(distances[1]), 20.0)
         self.assertAlmostEqual(float(distances[2]), 20.0)
+
+    def test_graph_ball_z_uses_cached_graph_feature(self) -> None:
+        graph = make_graph()
+        graph.x[:, config.NODE_FEATURE_BALL_Z] = 1.25
+
+        self.assertAlmostEqual(graph_ball_z(graph), 1.25)
 
     def test_physical_xpass_robust_defaults_and_kernel_sigmas(self) -> None:
         speeds = as_default_v0_values()
@@ -840,6 +885,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 {
                     "match_id": "m1",
                     "action_index": 5,
+                    PHYSICAL_XPASS_BALL_Z_COLUMN: 1.3,
                     "home_2": 0.4,
                     physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX): 0.9,
                     physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_TOPMEAN): 0.7,
@@ -870,6 +916,24 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(max_graph.physical_xpass[1]), 0.9)
         self.assertAlmostEqual(float(topmean_graph.physical_xpass[1]), 0.7)
         self.assertAlmostEqual(float(default_graph.physical_xpass_nearest_opponent_distance[1]), 20.0)
+        self.assertAlmostEqual(float(getattr(default_graph, PHYSICAL_XPASS_BALL_Z_ATTR)[1]), 1.3)
+
+    def test_physical_xpass_attach_requires_cached_ball_z_when_requested(self) -> None:
+        labels = make_label(action_index=5)
+        rows = pd.DataFrame([{"match_id": "m1", "action_index": 5, "home_2": 0.4}]).set_index(
+            "action_index",
+            drop=False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "ball_z"):
+            attach_physical_xpass_to_graph(
+                make_graph(),
+                labels,
+                rows,
+                match_id="m1",
+                require_observed_target=False,
+                require_ball_z=True,
+            )
 
     def test_physical_xpass_metric_flags_select_inference_metric(self) -> None:
         self.assertEqual(physical_xpass_metric({"task": "pass_success"}), PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
@@ -2094,9 +2158,11 @@ class PhysicalXPassTests(unittest.TestCase):
         compute.assert_not_called()
         self.assertEqual(stats["copied_from_reuse"], 1)
         self.assertEqual(stats["pass_distance_filled"], 1)
+        self.assertEqual(stats["ball_z_filled"], 1)
         self.assertEqual(stats["cache_written"], 1)
         self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.77)
         self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_PASS_DISTANCE_COLUMN]), 20.0)
+        self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_BALL_Z_COLUMN]), 0.0)
 
     def test_runtime_physical_xpass_cache_fills_nearest_opponent_distance_without_recomputing_xpass(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
@@ -2140,7 +2206,9 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(stats["cache_misses"], 0)
         self.assertEqual(stats["copied_from_reuse"], 1)
         self.assertEqual(stats["nearest_opponent_distance_filled"], 1)
+        self.assertEqual(stats["ball_z_filled"], 1)
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_nearest_opponent_distance_column("home_2")]), 20.0)
+        self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_BALL_Z_COLUMN]), 0.0)
 
     def test_runtime_physical_xpass_cache_hash_mismatch_recomputes_and_replaces(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
@@ -2605,6 +2673,24 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertEqual(physical_xpass_weight_version(args), "v2")
         self.assertEqual(physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")["weight_version"], "v2")
+
+    def test_inference_lookup_config_parses_ball_z_limit(self) -> None:
+        disabled_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            ball_z_limit="none",
+        )
+        enabled_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            ball_z_limit="1.25",
+        )
+
+        self.assertIsNone(physical_xpass_ball_z_limit(disabled_args))
+        self.assertAlmostEqual(physical_xpass_ball_z_limit(enabled_args), 1.25)
+        self.assertAlmostEqual(physical_xpass_inference_lookup_config(enabled_args, cache_dir="runtime_cache")["ball_z_limit"], 1.25)
 
     def test_runtime_physical_xpass_speed_aggregation_uses_runtime_defaults_for_blending(self) -> None:
         inference_args = make_pass_success_args(
@@ -3863,11 +3949,16 @@ class PhysicalXPassTests(unittest.TestCase):
             generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", "--max-speed", "2"])
 
     def test_run_hawkeye_cli_accepts_xpass_weight_v2(self) -> None:
-        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight-v2"]):
+        with patch.object(
+            sys,
+            "argv",
+            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight-v2", "--ball-z-limit", "1.0"],
+        ):
             args = run_hawkeye.parse_args()
 
         self.assertTrue(args.use_physical_xpass)
         self.assertTrue(args.xpass_weight_v2)
+        self.assertEqual(args.ball_z_limit, "1.0")
 
     def test_generate_epv_cli_accepts_physical_xpass_flags(self) -> None:
         args = generate_epv.parse_args(
@@ -3875,6 +3966,8 @@ class PhysicalXPassTests(unittest.TestCase):
                 "--use-physical-xpass",
                 "--topmean-xpass",
                 "--xpass-weight-v2",
+                "--ball-z-limit",
+                "1.0",
                 "--physical-cache-dir",
                 "runtime_cache",
             ]
@@ -3883,6 +3976,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(args.use_physical_xpass)
         self.assertTrue(args.topmean_xpass)
         self.assertTrue(args.xpass_weight_v2)
+        self.assertEqual(args.ball_z_limit, "1.0")
         self.assertEqual(args.physical_cache_dir, "runtime_cache")
 
     def test_generate_epv_configures_only_pass_success_physical_xpass(self) -> None:
@@ -3891,6 +3985,8 @@ class PhysicalXPassTests(unittest.TestCase):
                 "--use-physical-xpass",
                 "--topmean-xpass",
                 "--xpass-weight-v2",
+                "--ball-z-limit",
+                "1.0",
                 "--physical-cache-dir",
                 "runtime_cache",
             ]
@@ -3903,6 +3999,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(model_specs["pass_success"].args["inference_use_physical_xpass"])
         self.assertTrue(model_specs["pass_success"].args["topmean_xpass"])
         self.assertTrue(model_specs["pass_success"].args["xpass_weight_v2"])
+        self.assertEqual(model_specs["pass_success"].args["ball_z_limit"], "1.0")
         self.assertTrue(model_specs["pass_success"].args["physical_runtime_cache_read_only"])
         self.assertFalse(model_specs["pass_success"].args["physical_runtime_cache_refresh"])
         self.assertEqual(model_specs["pass_success"].args["physical_cache_dir"], "runtime_cache")
@@ -3916,6 +4013,8 @@ class PhysicalXPassTests(unittest.TestCase):
                 "--use-physical-xpass",
                 "--topmean-xpass",
                 "--xpass-weight-v2",
+                "--ball-z-limit",
+                "1.0",
                 "--physical-cache-dir",
                 "runtime_cache",
             ]
@@ -3934,6 +4033,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(metadata["physical_xpass_requested"])
         self.assertEqual(metadata["physical_xpass_metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
         self.assertEqual(metadata["physical_xpass_weight_version"], "v2")
+        self.assertEqual(metadata["physical_xpass_ball_z_limit"], 1.0)
         self.assertEqual(metadata["physical_cache_dir"], "runtime_cache")
         self.assertEqual(metadata["physical_xpass_skipped_actions"], {"match_1": {"pass_success": {"reason": "missing_cache_row"}}})
         self.assertTrue(metadata["physical_xpass_cache_summary"]["physical_xpass_required"])

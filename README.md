@@ -952,6 +952,7 @@ The cached row contains `pass_distance`, per-player nearest-opponent distances f
 - `<player_id>__max_xpass`: original max-over-grid xPass
 - `<player_id>__topmean_xpass`: mean of the top `N` finite grid values; `N` is controlled by `scripts/generate_physical_xpass.py --top-n` and defaults to `10`
 - `<player_id>__distance_to_nearest_opponent`: distance in meters from that player to the nearest finite opponent node; this is filled from graph geometry and is not an xPass probability column
+- `ball_z`: row-level cached ball height. Existing xPass metric rows are reused and updated in place when only `ball_z` is missing.
 
 Current runtime defaults are `--consider-teammates`, `--speed-aggregation package_max`, speeds `3..22 m/s` in `1 m/s` steps, coarse angle search plus adaptive `2.5` degree local refinement, `--top-n 10`, `--num-workers auto`, `--physical-batch-size 16`, and `--worker-thread-limit 1`. Runtime caches are updated in place and compatible existing rows are reused; old max-only runtime caches are incompatible and should be deleted or moved before regeneration.
 
@@ -974,6 +975,8 @@ pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
 `--xpass-weight-v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
+
+Add `--ball-z-limit <float>` to ignore physical xPass for high-ball passes. When cached `ball_z` is greater than the limit, the blend weight is forced to `1.0`, so the final pass-success value is the pass-success model output. The default is `--ball-z-limit none`, which ignores `ball_z` and keeps existing behavior. Cached `ball_z` is required only when a numeric limit is set; rerun `scripts/generate_physical_xpass.py` to backfill it without recomputing existing xPass metrics.
 
 Examples:
 
@@ -1042,6 +1045,7 @@ Only the `pass_success` low-level training command receives physical xPass flags
 - `--topmean-xpass` / `--topmean_xpass`: use the top-N-mean comparison columns.
 - `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`.
 - `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware blend weighting. Requires cached `<player_id>__distance_to_nearest_opponent` values.
+- `--ball-z-limit <float|none>`: with a numeric limit, use 100% pass-success model weight when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: override the runtime physical xPass cache directory; default is `data/runtime_physical_xpass/<dataset>`.
 - `--no-physical-cache`: disable the runtime cache override. Do not use this with inference-time blending unless you intentionally want cache lookup disabled.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1193,6 +1197,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the pass-success blend. Default: off.
 - `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
 - `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--ball-z-limit <float|none>`: with a numeric limit, use the pass-success model only when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: Sportec runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 
 ### `scripts/generate_physical_xpass.py`
