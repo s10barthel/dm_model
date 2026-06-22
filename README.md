@@ -98,6 +98,10 @@ After preprocessing, the project writes DEFCON-style files under `data`:
 - `goal_distance/goal_distance.csv`
 - `epv/epv.csv`
 - `xT/xT_grid.csv`
+- `xT/xT_source_grid.csv`
+- `xT/xT_xy_surface.csv`
+- `xT/xT_glm_fit_sample.csv`
+- `xT/xT_xy_surface_3d.png`
 - `xT/fit_metadata.json`
 - `xT/matches/*.csv`
 - `goal_distance/matches/*.csv`
@@ -357,6 +361,10 @@ Outputs:
 - for xT:
   - `data/xT/xT.csv`
   - `data/xT/xT_grid.csv`
+  - `data/xT/xT_source_grid.csv`
+  - `data/xT/xT_xy_surface.csv`
+  - `data/xT/xT_glm_fit_sample.csv`
+  - `data/xT/xT_xy_surface_3d.png`
   - `data/xT/fit_metadata.json`
   - `data/xT/matches/*.csv`
 - for goal-distance:
@@ -373,9 +381,15 @@ Useful options:
 
 - `--match-id DFL-MAT-...` to export only selected matches
 - `--limit N` to restrict export generation to the first `N` available synced matches
+- `--source-grid-l N` and `--source-grid-w N` to fit the socceraction source xT grid at custom dimensions; defaults are `12` and `8`
+- `--reuse-source-grid` to load `data/xT/xT_source_grid.csv` and skip socceraction source-grid fitting
+- `--use-interaction` to add the x-depth by centrality interaction to the x/y logit GLM
+- `--use-nonlinear x` and `--use-nonlinear y` to add constrained squared and cubic GLM terms; repeat the flag to use both axes
+- `--fit-only` to write only model artifacts for testing, without updating `data/xT/xT.csv` or `data/xT/matches/*.csv`
 - `--overwrite` to rebuild existing outputs
 
 This is a separate post-preprocessing step. It reads canonical synced event CSVs, fits or exports the sidecar targets, and writes per-match artifacts used later during feature generation.
+xT generation fits an upstream socceraction grid on training actions, writes it to `xT_source_grid.csv`, then distills that source grid into a smooth x/y logit GLM surface. `normalized_x` is `start_x / 105`; `normalized_centrality` is the smooth symmetric feature `sin(pi * start_y / 68)`. Optional interaction and constrained squared/cubic terms can make this surface more flexible. Monotonicity toward goal and toward the pitch center is enforced during fitting and checked again before outputs are written; if the final guardrail detects a tiny violation, generation records the warning in metadata and still writes the outputs for inspection. Event-level `xT` values come from the GLM surface with shot values floored by `xG`; `xT_grid.csv` is retained as a compatibility projection of that surface onto the legacy 12x8 cell centers. Use `--fit-only` when comparing model variants without changing event-level sidecars. For one-time migration from an old xT run, rename the old socceraction `data/xT/xT_grid.csv` to `data/xT/xT_source_grid.csv`, then run `python scripts/generate_xt.py --reuse-source-grid --overwrite`.
 
 EPV computes `sum(pass_intent * pass_score)` across players, where `pass_score` combines pass success with the scoring and conceding outcome models. Shot actions use `max(epv, xG)`, matching the xT shot-value convention.
 
@@ -1151,6 +1165,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 - `--match-id <id>`: export xT sidecars only for one or more specific match ids. Default: all available synced matches.
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
+- `--source-grid-l <N>`: socceraction source-grid length bins. Default: `12`.
+- `--source-grid-w <N>`: socceraction source-grid width bins. Default: `8`.
+- `--reuse-source-grid`: load `data/xT/xT_source_grid.csv` and skip socceraction source-grid fitting. Default: off.
+- `--use-interaction`: include `normalized_x * normalized_centrality` in the x/y logit GLM. Default: off.
+- `--use-nonlinear {x,y}`: include constrained squared and cubic GLM terms for the selected axis. Repeat to include both axes. Default: off.
+- `--fit-only`: write only model-level xT artifacts and skip `xT.csv` plus per-match sidecars. `--match-id` and `--limit` are ignored in this mode. Default: off.
 - `--overwrite`: overwrite existing xT outputs. Default: off.
 
 ### `scripts/generate_goal_distance.py`
@@ -1168,6 +1188,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--overwrite`: overwrite existing EPV outputs. Default: off.
+- `--use-physical-xpass` / `--use_physical_xpass`: blend only the `pass_success` inference used inside EPV calculation with cached runtime physical xPass. Default: off.
+- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the pass-success blend. Default: off.
+- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the pass-success blend. Default: off.
+- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
+- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--physical-cache-dir <path>`: Sportec runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 
 ### `scripts/generate_physical_xpass.py`
 
@@ -1504,6 +1530,10 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - `data/xT/xT.csv`
   - `data/xT/xT_grid.csv`
+  - `data/xT/xT_source_grid.csv`
+  - `data/xT/xT_xy_surface.csv`
+  - `data/xT/xT_glm_fit_sample.csv`
+  - `data/xT/xT_xy_surface_3d.png`
   - `data/xT/fit_metadata.json`
   - `data/xT/matches/*.csv`
 

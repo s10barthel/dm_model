@@ -23,12 +23,20 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
+from physical_pass_model import (
+    format_physical_xpass_cache_summary,
+    inference_uses_physical_xpass,
+    model_uses_physical_xpass,
+    physical_xpass_inference_lookup_config,
+    summarize_physical_xpass_cache_usage,
+)
 from project_config import (
     EPV_DIR,
     EPV_MATCH_DIR,
     EVENT_SYNCED_DIR,
     INTENDED_RECEIVER_MODES,
     ensure_project_dirs,
+    get_runtime_physical_xpass_dir,
     resolve_feature_root,
 )
 from scripts.run_relevant_models import load_match
@@ -42,7 +50,7 @@ REQUIRED_EPV_MODEL_TASKS = [
 ]
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-id")
     parser.add_argument("--pass-intent-model-id")
@@ -56,7 +64,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing EPV outputs.")
-    return parser.parse_args()
+    parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with cached runtime physical xPass.")
+    parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for pass-success blending.")
+    parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for pass-success blending.")
+    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
+    parser.add_argument("--xpass-weight-v2", "--xpass_weight_v2", dest="xpass_weight_v2", action="store_true", help="Use nearest-opponent-aware physical xPass blend weighting.")
+    parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
+    return parser.parse_args(argv)
 
 
 def summarize_exception(exc: Exception) -> str:
@@ -104,6 +118,63 @@ def load_epv_models(resolved_model_ids: dict[str, str], device: str) -> dict[str
     return model_specs
 
 
+def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str, object]) -> str:
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("sportec"))
+    pass_success_model = model_specs.get("pass_success")
+    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
+        pass_success_model.args["inference_use_physical_xpass"] = True
+        pass_success_model.args["max_xpass"] = bool(getattr(args, "max_xpass", False))
+        use_topmean_xpass = bool(getattr(args, "topmean_xpass", False) or getattr(args, "top10mean_xpass", False))
+        pass_success_model.args["topmean_xpass"] = use_topmean_xpass
+        pass_success_model.args["top10mean_xpass"] = bool(getattr(args, "top10mean_xpass", False))
+        pass_success_model.args["xpass_weight_v2"] = bool(getattr(args, "xpass_weight_v2", False))
+    if pass_success_model is not None and (
+        model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
+    ):
+        pass_success_model.args["physical_runtime_cache_disabled"] = False
+        pass_success_model.args["physical_runtime_cache_refresh"] = False
+        pass_success_model.args["physical_runtime_cache_read_only"] = True
+        pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    return physical_cache_dir
+
+
+def epv_physical_xpass_metadata(
+    args: argparse.Namespace,
+    model_specs: dict[str, object],
+    *,
+    physical_cache_dir: str,
+    runtime_stats: dict[str, dict[str, object]],
+    skipped_actions: dict[str, dict[str, object]],
+) -> dict[str, object]:
+    pass_success_model = model_specs.get("pass_success")
+    physical_xpass_required = bool(
+        pass_success_model is not None
+        and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args))
+    )
+    physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
+        physical_xpass_required=physical_xpass_required,
+        cache_disabled=False,
+        refresh_requested=False,
+        cache_dir=physical_cache_dir,
+        runtime_stats=runtime_stats,
+        skipped_stats=skipped_actions,
+    )
+    lookup_config = (
+        physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)
+        if physical_xpass_required and pass_success_model is not None
+        else {}
+    )
+    return {
+        "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
+        "physical_xpass_metric": lookup_config.get("metric"),
+        "physical_xpass_weight_version": lookup_config.get("weight_version"),
+        "physical_cache_dir": physical_cache_dir,
+        "physical_xpass_runtime_stats": runtime_stats,
+        "physical_xpass_skipped_actions": skipped_actions,
+        "physical_xpass_cache_summary": physical_xpass_cache_summary,
+    }
+
+
 def infer_match_epv(match, model_specs: dict[str, object], device: str) -> pd.DataFrame:
     pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
     pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
@@ -142,10 +213,12 @@ def save_export_outputs(
     device: str,
     output_dir: Path,
     match_dir: Path,
-) -> tuple[list[str], list[dict[str, str]], list[pd.DataFrame]]:
+) -> tuple[list[str], list[dict[str, str]], list[pd.DataFrame], dict[str, dict[str, object]], dict[str, dict[str, object]]]:
     processed_match_ids: list[str] = []
     skipped_matches: list[dict[str, str]] = []
     exported_actions: list[pd.DataFrame] = []
+    physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
+    physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
 
     output_dir.mkdir(parents=True, exist_ok=True)
     match_dir.mkdir(parents=True, exist_ok=True)
@@ -176,6 +249,12 @@ def save_export_outputs(
             sidecar.to_csv(match_dir / f"{resolved_match_id}.csv", index=False)
             exported_actions.append(exported_epv)
             processed_match_ids.append(resolved_match_id)
+            runtime_physical_stats = getattr(match, "physical_xpass_runtime_stats", None)
+            if runtime_physical_stats:
+                physical_xpass_runtime_stats[resolved_match_id] = runtime_physical_stats
+            physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
+            if physical_skip_stats:
+                physical_xpass_skipped_actions[resolved_match_id] = physical_skip_stats
         except Exception as exc:
             skipped_matches.append({"match_id": match_id, "error": summarize_exception(exc)})
             print(f"  SKIP {match_id}: {summarize_exception(exc)}")
@@ -191,7 +270,7 @@ def save_export_outputs(
             index=False,
         )
 
-    return processed_match_ids, skipped_matches, exported_actions
+    return processed_match_ids, skipped_matches, exported_actions, physical_xpass_runtime_stats, physical_xpass_skipped_actions
 
 
 def main() -> None:
@@ -207,6 +286,7 @@ def main() -> None:
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
     model_specs = load_epv_models(resolved_model_ids, device)
+    physical_cache_dir = configure_epv_physical_xpass(args, model_specs)
     graph_schema = validate_model_graph_schemas(model_specs)
     runtime_feature_context = resolve_runtime_feature_run_context(
         args.feature_run_id,
@@ -229,7 +309,13 @@ def main() -> None:
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     match_ids = resolve_match_ids(args.match_id, args.limit)
-    processed_export_ids, skipped_export_matches, _ = save_export_outputs(
+    (
+        processed_export_ids,
+        skipped_export_matches,
+        _,
+        physical_xpass_runtime_stats,
+        physical_xpass_skipped_actions,
+    ) = save_export_outputs(
         match_ids,
         model_specs,
         shared_context,
@@ -237,6 +323,13 @@ def main() -> None:
         device,
         EPV_DIR,
         EPV_MATCH_DIR,
+    )
+    physical_xpass_metadata = epv_physical_xpass_metadata(
+        args,
+        model_specs,
+        physical_cache_dir=physical_cache_dir,
+        runtime_stats=physical_xpass_runtime_stats,
+        skipped_actions=physical_xpass_skipped_actions,
     )
 
     metadata = {
@@ -269,10 +362,12 @@ def main() -> None:
         "feature_schema": feature_schema,
         "skipped_export_matches": skipped_export_matches,
     }
+    metadata.update(physical_xpass_metadata)
     (EPV_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     if skipped_export_matches:
         print(f"Skipped {len(skipped_export_matches)} export matches while generating EPV outputs.")
+    print(format_physical_xpass_cache_summary(physical_xpass_metadata["physical_xpass_cache_summary"]))
     print(f"Saved EPV outputs to {EPV_DIR}")
 
 

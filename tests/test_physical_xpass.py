@@ -102,6 +102,7 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
 )
 from scripts import compare_physical_xpass_speed_modes
+from scripts import generate_epv
 from scripts import generate_physical_xpass
 from scripts import run_and_visualize_hawkeye
 from scripts import run_benchmark
@@ -109,6 +110,20 @@ from scripts import run_hawkeye
 from scripts import run_skillcorner
 from scripts import train_relevant_models as train_wrapper
 from scripts import visualize_action_components
+
+
+class DummyEpvModel:
+    def __init__(self, *, task: str) -> None:
+        self.args = {"task": task, "model_variant": "gat_baseline"}
+
+
+def make_epv_model_specs() -> dict[str, DummyEpvModel]:
+    return {
+        "pass_intent": DummyEpvModel(task="pass_intent"),
+        "pass_success": DummyEpvModel(task="pass_success"),
+        "outcome_scoring": DummyEpvModel(task="outcome_scoring"),
+        "outcome_conceding": DummyEpvModel(task="outcome_conceding"),
+    }
 
 
 def make_graph(node_ids: list[str] | None = None) -> Data:
@@ -3853,6 +3868,102 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertTrue(args.use_physical_xpass)
         self.assertTrue(args.xpass_weight_v2)
+
+    def test_generate_epv_cli_accepts_physical_xpass_flags(self) -> None:
+        args = generate_epv.parse_args(
+            [
+                "--use-physical-xpass",
+                "--topmean-xpass",
+                "--xpass-weight-v2",
+                "--physical-cache-dir",
+                "runtime_cache",
+            ]
+        )
+
+        self.assertTrue(args.use_physical_xpass)
+        self.assertTrue(args.topmean_xpass)
+        self.assertTrue(args.xpass_weight_v2)
+        self.assertEqual(args.physical_cache_dir, "runtime_cache")
+
+    def test_generate_epv_configures_only_pass_success_physical_xpass(self) -> None:
+        args = generate_epv.parse_args(
+            [
+                "--use-physical-xpass",
+                "--topmean-xpass",
+                "--xpass-weight-v2",
+                "--physical-cache-dir",
+                "runtime_cache",
+            ]
+        )
+        model_specs = make_epv_model_specs()
+
+        physical_cache_dir = generate_epv.configure_epv_physical_xpass(args, model_specs)
+
+        self.assertEqual(physical_cache_dir, "runtime_cache")
+        self.assertTrue(model_specs["pass_success"].args["inference_use_physical_xpass"])
+        self.assertTrue(model_specs["pass_success"].args["topmean_xpass"])
+        self.assertTrue(model_specs["pass_success"].args["xpass_weight_v2"])
+        self.assertTrue(model_specs["pass_success"].args["physical_runtime_cache_read_only"])
+        self.assertFalse(model_specs["pass_success"].args["physical_runtime_cache_refresh"])
+        self.assertEqual(model_specs["pass_success"].args["physical_cache_dir"], "runtime_cache")
+        for task in ("pass_intent", "outcome_scoring", "outcome_conceding"):
+            self.assertNotIn("inference_use_physical_xpass", model_specs[task].args)
+            self.assertNotIn("physical_cache_dir", model_specs[task].args)
+
+    def test_generate_epv_physical_xpass_metadata_records_topmean_v2(self) -> None:
+        args = generate_epv.parse_args(
+            [
+                "--use-physical-xpass",
+                "--topmean-xpass",
+                "--xpass-weight-v2",
+                "--physical-cache-dir",
+                "runtime_cache",
+            ]
+        )
+        model_specs = make_epv_model_specs()
+        generate_epv.configure_epv_physical_xpass(args, model_specs)
+
+        metadata = generate_epv.epv_physical_xpass_metadata(
+            args,
+            model_specs,
+            physical_cache_dir="runtime_cache",
+            runtime_stats={},
+            skipped_actions={"match_1": {"pass_success": {"reason": "missing_cache_row"}}},
+        )
+
+        self.assertTrue(metadata["physical_xpass_requested"])
+        self.assertEqual(metadata["physical_xpass_metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
+        self.assertEqual(metadata["physical_xpass_weight_version"], "v2")
+        self.assertEqual(metadata["physical_cache_dir"], "runtime_cache")
+        self.assertEqual(metadata["physical_xpass_skipped_actions"], {"match_1": {"pass_success": {"reason": "missing_cache_row"}}})
+        self.assertTrue(metadata["physical_xpass_cache_summary"]["physical_xpass_required"])
+
+    def test_generate_epv_without_physical_xpass_leaves_model_args_unchanged(self) -> None:
+        args = SimpleNamespace(
+            use_physical_xpass=False,
+            max_xpass=False,
+            topmean_xpass=False,
+            top10mean_xpass=False,
+            xpass_weight_v2=False,
+            physical_cache_dir="runtime_cache",
+        )
+        model_specs = make_epv_model_specs()
+
+        generate_epv.configure_epv_physical_xpass(args, model_specs)
+        metadata = generate_epv.epv_physical_xpass_metadata(
+            args,
+            model_specs,
+            physical_cache_dir="runtime_cache",
+            runtime_stats={},
+            skipped_actions={},
+        )
+
+        self.assertNotIn("inference_use_physical_xpass", model_specs["pass_success"].args)
+        self.assertNotIn("physical_cache_dir", model_specs["pass_success"].args)
+        self.assertFalse(metadata["physical_xpass_requested"])
+        self.assertIsNone(metadata["physical_xpass_metric"])
+        self.assertIsNone(metadata["physical_xpass_weight_version"])
+        self.assertFalse(metadata["physical_xpass_cache_summary"]["physical_xpass_required"])
 
     def test_runtime_physical_xpass_cache_cli_flags(self) -> None:
         with patch.object(
