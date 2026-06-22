@@ -46,6 +46,8 @@ SUMMARY_COLUMNS = [
     "best_loss",
     "best_acc",
     "batch_size",
+    "xpass_metric",
+    "xpass_weight",
 ]
 
 FEATURE_COLUMNS = [
@@ -139,6 +141,55 @@ def _batch_size(metadata: dict[str, Any], record: dict[str, Any] | None = None) 
         return record.get("batch_size")
     args = _metadata_args(metadata)
     return _first_value(metadata.get("batch_size"), args.get("batch_size"))
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _physical_xpass_used(metadata: dict[str, Any]) -> bool:
+    if "physical_xpass_requested" in metadata:
+        return _truthy(metadata.get("physical_xpass_requested"))
+    summary = metadata.get("physical_xpass_cache_summary")
+    if isinstance(summary, dict) and "physical_xpass_required" in summary:
+        return _truthy(summary.get("physical_xpass_required"))
+    if metadata.get("physical_xpass_metric") is not None:
+        return True
+    if metadata.get("physical_xpass_weight_version") is not None:
+        return True
+    return False
+
+
+def _summary_xpass_metric(metadata: dict[str, Any]) -> str:
+    if not _physical_xpass_used(metadata):
+        return "None"
+    metric = str(metadata.get("physical_xpass_metric") or "").strip().lower()
+    if metric in {"", "noise_kernel", "noise_kernel_xpass"}:
+        return "noise_kernel"
+    if metric in {"max", "max_xpass"}:
+        return "max_xpass"
+    if metric in {"topmean", "topmean_xpass", "top10mean", "top10mean_xpass"}:
+        return "topmean_xpass"
+    return metric
+
+
+def _summary_xpass_weight(metadata: dict[str, Any]) -> str:
+    if _summary_xpass_metric(metadata) == "None":
+        return ""
+    weight_version = str(metadata.get("physical_xpass_weight_version") or "").strip().lower()
+    if weight_version == "v2":
+        return "v2"
+    return "original"
+
+
+def _fill_xpass_summary_fields(row: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    row["xpass_metric"] = _summary_xpass_metric(metadata)
+    row["xpass_weight"] = _summary_xpass_weight(metadata)
+    return row
 
 
 def _fill_model_fields(
@@ -312,6 +363,7 @@ def extract_component_rows(run_root: Path, metadata: dict[str, Any], parent_grou
             record=record,
             prefer_run_created_at=metadata.get("created_at"),
         )
+        _fill_xpass_summary_fields(row, metadata)
         rows.append(row)
     return rows
 
@@ -341,6 +393,7 @@ def extract_visualization_rows(run_root: Path, metadata: dict[str, Any], parent_
             model_role=str(role),
             prefer_run_created_at=metadata.get("created_at"),
         )
+        _fill_xpass_summary_fields(row, metadata)
         rows.append(row)
     return rows
 

@@ -174,6 +174,74 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
     assert row["goal_nodes_aware"] == "false"
     assert row["v_edge_feature_mode"] == "no_poss"
     assert row["status"] == "running"
+    assert row["xpass_metric"] == "None"
+    assert row["xpass_weight"] == ""
+
+
+def test_component_summary_records_default_physical_xpass_original_weight(tmp_path, monkeypatch) -> None:
+    saved, component_runs, _ = patch_summary_roots(monkeypatch, tmp_path)
+    write_json(saved / "pass_success" / "pass_success_1" / "metadata.json", model_metadata())
+    run_root = component_runs / "hawkeye" / "hawkeye_component_1"
+    write_json(
+        run_root / "metadata.json",
+        {
+            "run_id": "hawkeye_component_1",
+            "created_at": "2026-06-02T10:00:00",
+            "physical_xpass_requested": True,
+            "physical_xpass_metric": "noise_kernel_xpass",
+            "physical_xpass_weight_version": "v1",
+            "model_records": {"pass_success": {"model_id": "pass_success/pass_success_1"}},
+        },
+    )
+
+    summary_path = metadata_summary.refresh_summary_for_parent(component_runs / "hawkeye")
+
+    row = read_summary(summary_path)[0]
+    assert row["xpass_metric"] == "noise_kernel"
+    assert row["xpass_weight"] == "original"
+
+
+def test_component_summary_records_topmean_physical_xpass_v2_weight(tmp_path, monkeypatch) -> None:
+    saved, component_runs, _ = patch_summary_roots(monkeypatch, tmp_path)
+    write_json(saved / "pass_success" / "pass_success_1" / "metadata.json", model_metadata())
+    run_root = component_runs / "benchmark" / "benchmark_component_1"
+    write_json(
+        run_root / "metadata.json",
+        {
+            "run_id": "benchmark_component_1",
+            "physical_xpass_requested": True,
+            "physical_xpass_metric": "topmean_xpass",
+            "physical_xpass_weight_version": "v2",
+            "models": {"pass_success": "pass_success/pass_success_1"},
+        },
+    )
+
+    summary_path = metadata_summary.refresh_summary_for_parent(component_runs / "benchmark")
+
+    row = read_summary(summary_path)[0]
+    assert row["xpass_metric"] == "topmean_xpass"
+    assert row["xpass_weight"] == "v2"
+
+
+def test_component_summary_records_max_physical_xpass_from_cache_summary(tmp_path, monkeypatch) -> None:
+    saved, component_runs, _ = patch_summary_roots(monkeypatch, tmp_path)
+    write_json(saved / "pass_success" / "pass_success_1" / "metadata.json", model_metadata())
+    run_root = component_runs / "sportec" / "component_1"
+    write_json(
+        run_root / "metadata.json",
+        {
+            "run_id": "component_1",
+            "physical_xpass_cache_summary": {"physical_xpass_required": True},
+            "physical_xpass_metric": "max_xpass",
+            "models": {"pass_success": "pass_success/pass_success_1"},
+        },
+    )
+
+    summary_path = metadata_summary.refresh_summary_for_parent(component_runs / "sportec")
+
+    row = read_summary(summary_path)[0]
+    assert row["xpass_metric"] == "max_xpass"
+    assert row["xpass_weight"] == "original"
 
 
 def test_visualization_summary_prefers_selected_model_ids_and_falls_back_to_source_models(tmp_path, monkeypatch) -> None:
@@ -202,6 +270,33 @@ def test_visualization_summary_prefers_selected_model_ids_and_falls_back_to_sour
     rows = read_summary(summary_path)
     assert [row["model_id"] for row in rows] == ["pass_success/fallback", "pass_success/selected"]
     assert {row["summary_scope"] for row in rows} == {"visualization"}
+    assert {row["xpass_metric"] for row in rows} == {"None"}
+    assert {row["xpass_weight"] for row in rows} == {""}
+
+
+def test_visualization_summary_records_topmean_physical_xpass_v2_weight(tmp_path, monkeypatch) -> None:
+    saved, _, visualizations = patch_summary_roots(monkeypatch, tmp_path)
+    write_json(saved / "pass_success" / "pass_success_1" / "metadata.json", model_metadata())
+    write_json(
+        visualizations / "hawkeye" / "viz_1" / "metadata.json",
+        {
+            "run_id": "viz_1",
+            "source_models": {"pass_success": "pass_success/pass_success_1"},
+            "physical_xpass_requested": True,
+            "physical_xpass_metric": "topmean_xpass",
+            "physical_xpass_weight_version": "v2",
+            "show_physical_xpass": True,
+            "physical_cache_dir": "ignored",
+        },
+    )
+
+    summary_path = metadata_summary.refresh_summary_for_parent(visualizations / "hawkeye")
+
+    row = read_summary(summary_path)[0]
+    assert row["xpass_metric"] == "topmean_xpass"
+    assert row["xpass_weight"] == "v2"
+    assert "show_physical_xpass" not in row
+    assert "physical_cache_dir" not in row
 
 
 def test_write_run_metadata_refreshes_only_matching_parent_summary(tmp_path, monkeypatch) -> None:
