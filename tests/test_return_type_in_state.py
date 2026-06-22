@@ -21,9 +21,10 @@ from datatools.goal_distance import (
     goal_distance_from_xy,
 )
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
-from datatools import utils
+from datatools import utils, xt
 from models.utils import calc_binary_metrics, get_outcome_diagnostic_targets, get_outcome_targets
 from scripts.generate_goal_distance import GOAL_DISTANCE_TARGET_RANGE
+from scripts import generate_xt
 from scripts import main as main_script
 from scripts import train_relevant_models as train_wrapper
 
@@ -516,6 +517,344 @@ class WrapperValidationTests(unittest.TestCase):
         with patch.object(sys, "argv", argv):
             with self.assertRaises(SystemExit):
                 main_script.parse_args()
+
+
+def _source_xt_grid(invert_x: bool = False) -> np.ndarray:
+    grid = np.zeros((xt.XT_GRID_W, xt.XT_GRID_L), dtype=float)
+    for row_index in range(xt.XT_GRID_W):
+        y_index = xt.XT_GRID_W - 1 - row_index
+        y = (y_index + 0.5) * (68.0 / xt.XT_GRID_W)
+        centrality = math.sin(math.pi * y / 68.0)
+        for x_index in range(xt.XT_GRID_L):
+            x = (x_index + 0.5) * (105.0 / xt.XT_GRID_L)
+            normalized_x = x / 105.0
+            x_term = (1.0 - normalized_x) if invert_x else normalized_x
+            grid[row_index, x_index] = 0.01 + 0.08 * x_term + 0.04 * centrality
+    return grid
+
+
+def _xt_calibration_actions() -> pd.DataFrame:
+    rows = []
+    action_id = 0
+    for x in np.linspace(4.0, 101.0, 16):
+        for y in np.linspace(4.0, 64.0, 12):
+            rows.append(
+                {
+                    "game_id": "match_1",
+                    "original_event_id": action_id,
+                    "action_id": action_id,
+                    "period_id": 1,
+                    "seconds": float(action_id),
+                    "team_id": "home_team",
+                    "player_id": "player_1",
+                    "start_x": float(x),
+                    "start_y": float(y),
+                    "end_x": float(min(x + 1.0, 105.0)),
+                    "end_y": float(y),
+                    "type_id": 0,
+                    "result_id": 1,
+                    "bodypart_id": 0,
+                    "spadl_type": "pass",
+                    "success": True,
+                    "offside": False,
+                    "xG": np.nan,
+                }
+            )
+            action_id += 1
+    return pd.DataFrame(rows)
+
+
+def _xt_annotation_events() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "game_id": "match_1",
+                "stats_perform_match_id": "match_1",
+                "original_event_id": 1,
+                "action_id": 1,
+                "period_id": 1,
+                "seconds": 1.0,
+                "team_id": "home_team",
+                "player_id": "player_1",
+                "object_id": "home_1",
+                "start_x": 100.0,
+                "start_y": 34.0,
+                "end_x": 105.0,
+                "end_y": 34.0,
+                "spadl_type": "shot",
+                "success": False,
+                "offside": False,
+                "expected_goal": 0.95,
+            },
+            {
+                "game_id": "match_1",
+                "stats_perform_match_id": "match_1",
+                "original_event_id": 2,
+                "action_id": 2,
+                "period_id": 1,
+                "seconds": 2.0,
+                "team_id": "home_team",
+                "player_id": "player_1",
+                "object_id": "home_1",
+                "start_x": 40.0,
+                "start_y": 20.0,
+                "end_x": 50.0,
+                "end_y": 22.0,
+                "spadl_type": "pass",
+                "success": True,
+                "offside": False,
+                "expected_goal": np.nan,
+            },
+        ]
+    )
+
+
+class XTXYGLMTests(unittest.TestCase):
+    def test_normalized_xt_xy_features_are_directional_and_symmetric(self) -> None:
+        normalized_x, centrality = xt.normalized_xt_xy_features(
+            np.array([0.0, 105.0, 52.5, 52.5, 52.5, 52.5]),
+            np.array([34.0, 34.0, 20.0, 48.0, 0.0, 68.0]),
+        )
+
+        self.assertGreater(normalized_x[1], normalized_x[0])
+        self.assertAlmostEqual(float(centrality[0]), 1.0)
+        self.assertAlmostEqual(float(centrality[2]), float(centrality[3]))
+        self.assertLess(centrality[2], centrality[0])
+        self.assertAlmostEqual(float(centrality[4]), 0.0)
+        self.assertAlmostEqual(float(centrality[5]), 0.0)
+
+    def test_spatial_bin_weights_balance_populated_bins(self) -> None:
+        normalized_x = np.array([0.1, 0.1, 0.1, 0.9])
+        centrality = np.array([0.2, 0.2, 0.2, 0.8])
+        weights = xt.compute_spatial_bin_weights(normalized_x, centrality, x_bins=2, centrality_bins=2)
+
+        self.assertAlmostEqual(float(weights[:3].sum()), float(weights[3]))
+        self.assertAlmostEqual(float(weights.mean()), 1.0)
+
+    def test_fit_xt_xy_glm_predicts_finite_monotonic_surface(self) -> None:
+        fit = xt.fit_xt_xy_glm(_xt_calibration_actions(), _source_xt_grid())
+
+        self.assertGreater(fit.model.coefficients["normalized_x"], 0)
+        self.assertGreater(fit.model.coefficients["normalized_centrality"], 0)
+        self.assertEqual(fit.model.terms, ("normalized_x", "normalized_centrality"))
+        self.assertTrue(fit.diagnostics["monotonicity_check"]["passed"])
+        self.assertTrue(fit.diagnostics["optimizer"]["success"])
+        self.assertTrue(np.isfinite(fit.projection_grid).all())
+        self.assertTrue(((fit.projection_grid >= 0.0) & (fit.projection_grid <= 1.0)).all())
+
+        low = fit.model.predict_xy(np.array([20.0]), np.array([34.0]))[0]
+        high = fit.model.predict_xy(np.array([90.0]), np.array([34.0]))[0]
+        wide = fit.model.predict_xy(np.array([90.0]), np.array([2.0]))[0]
+        self.assertGreater(high, low)
+        self.assertGreater(high, wide)
+
+    def test_zone_value_from_grid_uses_dynamic_source_grid_shape(self) -> None:
+        grid = np.arange(24, dtype=float).reshape(4, 6)
+        values = xt.zone_value_from_grid(pd.Series([1.0, 104.0]), pd.Series([67.0, 1.0]), grid)
+
+        self.assertEqual(float(values[0]), float(grid[0, 0]))
+        self.assertEqual(float(values[1]), float(grid[3, 5]))
+
+    def test_fit_xt_xy_glm_enforces_monotonicity_for_inverted_source_grid(self) -> None:
+        fit = xt.fit_xt_xy_glm(_xt_calibration_actions(), _source_xt_grid(invert_x=True))
+
+        self.assertTrue(fit.diagnostics["optimizer"]["success"])
+        self.assertTrue(fit.diagnostics["monotonicity_check"]["passed"])
+
+    def test_xt_glm_nonlinear_terms_use_quadratic_cubic_features(self) -> None:
+        terms = xt.resolve_xt_glm_terms(nonlinear_axes=["x", "y"])
+        features = xt.build_xt_glm_design_frame(
+            np.array([0.2, 0.5, 1.0]),
+            np.array([0.2, 0.5, 1.0]),
+            terms=terms,
+        )
+
+        self.assertEqual(
+            terms,
+            (
+                "normalized_x",
+                "normalized_centrality",
+                "normalized_x_squared",
+                "normalized_x_cubed",
+                "normalized_centrality_squared",
+                "normalized_centrality_cubed",
+            ),
+        )
+        self.assertAlmostEqual(float(features.loc[1, "normalized_x_squared"]), 0.25)
+        self.assertAlmostEqual(float(features.loc[1, "normalized_x_cubed"]), 0.125)
+        self.assertAlmostEqual(float(features.loc[1, "normalized_centrality_squared"]), 0.25)
+        self.assertAlmostEqual(float(features.loc[1, "normalized_centrality_cubed"]), 0.125)
+
+    def test_fit_xt_xy_glm_supports_interaction_and_nonlinear_terms(self) -> None:
+        fit = xt.fit_xt_xy_glm(
+            _xt_calibration_actions(),
+            _source_xt_grid(),
+            use_interaction=True,
+            nonlinear_axes=["x", "y"],
+        )
+
+        self.assertEqual(
+            fit.model.terms,
+            (
+                "normalized_x",
+                "normalized_centrality",
+                "normalized_x_centrality",
+                "normalized_x_squared",
+                "normalized_x_cubed",
+                "normalized_centrality_squared",
+                "normalized_centrality_cubed",
+            ),
+        )
+        for term in fit.model.terms:
+            self.assertIn(term, fit.fit_sample.columns)
+            self.assertIn(term, fit.model.coefficients)
+        self.assertIn("monotonicity_check", fit.diagnostics)
+
+    def test_fit_xt_xy_glm_interaction_with_nonlinear_y_records_monotonicity_violation(self) -> None:
+        fit = xt.fit_xt_xy_glm(
+            _xt_calibration_actions(),
+            _source_xt_grid(),
+            use_interaction=True,
+            nonlinear_axes=["y"],
+        )
+
+        self.assertIn("monotonicity_check", fit.diagnostics)
+        self.assertIn("monotonicity_error_raised", fit.diagnostics)
+
+    def test_xt_glm_monotonicity_rejects_nonmonotonic_model(self) -> None:
+        model = xt.XTXYLogitModel(
+            coefficients={"intercept": -2.0, "normalized_x": -1.0, "normalized_centrality": 1.0},
+            terms=("normalized_x", "normalized_centrality"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "violated monotonicity"):
+            xt.validate_xt_glm_monotonicity(model)
+
+    def test_xt_glm_monotonicity_check_can_be_recorded_without_raising(self) -> None:
+        model = xt.XTXYLogitModel(
+            coefficients={"intercept": -2.0, "normalized_x": -1.0, "normalized_centrality": 1.0},
+            terms=("normalized_x", "normalized_centrality"),
+        )
+
+        result = xt.check_xt_glm_monotonicity(model)
+
+        self.assertFalse(result["passed"])
+        self.assertGreater(result["x_violation_count"], 0)
+
+    def test_annotate_match_xt_floors_shots_by_xg(self) -> None:
+        model = xt.XTXYLogitModel(
+            coefficients={"intercept": -6.0, "normalized_x": 1.0, "normalized_centrality": 1.0},
+            terms=("normalized_x", "normalized_centrality"),
+        )
+
+        annotated, exported = xt.annotate_match_xt(_xt_annotation_events(), model)
+
+        shot_row = exported.loc[exported["spadl_type"].eq("shot")].iloc[0]
+        self.assertAlmostEqual(float(shot_row["xG"]), 0.95)
+        self.assertAlmostEqual(float(shot_row["xT"]), 0.95)
+        pass_row = exported.loc[exported["spadl_type"].eq("pass")].iloc[0]
+        expected_pass_xt = model.predict_xy(np.array([40.0]), np.array([20.0]))[0]
+        self.assertAlmostEqual(float(pass_row["xT"]), float(expected_pass_xt))
+        self.assertIn("scores_xT", annotated.columns)
+        self.assertIn("concedes_xT", annotated.columns)
+
+    def test_build_xt_xy_surface_exports_whole_meter_grid(self) -> None:
+        model = xt.XTXYLogitModel(
+            coefficients={"intercept": -6.0, "normalized_x": 1.0, "normalized_centrality": 1.0},
+            terms=("normalized_x", "normalized_centrality"),
+        )
+        surface = xt.build_xt_xy_surface(model)
+
+        self.assertEqual(len(surface), 105 * 68)
+        self.assertTrue({"x", "y", "normalized_x", "normalized_centrality", "xT"}.issubset(surface.columns))
+        self.assertTrue(surface["xT"].between(0.0, 1.0).all())
+
+    def test_generate_xt_load_source_grid_rejects_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(FileNotFoundError):
+                generate_xt.load_source_grid(Path(tmpdir) / "xT_source_grid.csv")
+
+    def test_generate_xt_load_source_grid_infers_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "xT_source_grid.csv"
+            pd.DataFrame(np.arange(15, dtype=float).reshape(3, 5)).to_csv(path, index=False)
+
+            loaded = generate_xt.load_source_grid(path)
+
+        self.assertEqual(loaded.shape, (3, 5))
+        self.assertEqual(loaded.columns.tolist(), ["X0", "X1", "X2", "X3", "X4"])
+
+    def test_generate_xt_parse_args_rejects_grid_size_with_reuse(self) -> None:
+        with patch.object(sys, "argv", ["scripts/generate_xt.py", "--reuse-source-grid", "--source-grid-l", "16"]):
+            with self.assertRaises(SystemExit):
+                generate_xt.parse_args()
+
+    def test_generate_xt_parse_args_accepts_custom_source_grid_size(self) -> None:
+        with patch.object(sys, "argv", ["scripts/generate_xt.py", "--source-grid-l", "16", "--source-grid-w", "12"]):
+            args = generate_xt.parse_args()
+
+        self.assertEqual(args.source_grid_l, 16)
+        self.assertEqual(args.source_grid_w, 12)
+
+    def test_generate_xt_parse_args_accepts_interaction_and_repeated_nonlinear_axes(self) -> None:
+        argv = [
+            "scripts/generate_xt.py",
+            "--use-interaction",
+            "--use-nonlinear",
+            "x",
+            "--use-nonlinear",
+            "y",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = generate_xt.parse_args()
+
+        self.assertTrue(args.use_interaction)
+        self.assertEqual(args.use_nonlinear, ["x", "y"])
+
+    def test_generate_xt_parse_args_accepts_fit_only_with_model_flags(self) -> None:
+        argv = [
+            "scripts/generate_xt.py",
+            "--fit-only",
+            "--source-grid-l",
+            "20",
+            "--source-grid-w",
+            "12",
+            "--use-interaction",
+            "--use-nonlinear",
+            "x",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = generate_xt.parse_args()
+
+        self.assertTrue(args.fit_only)
+        self.assertEqual(args.source_grid_l, 20)
+        self.assertEqual(args.source_grid_w, 12)
+        self.assertTrue(args.use_interaction)
+        self.assertEqual(args.use_nonlinear, ["x"])
+
+    def test_generate_xt_fit_only_model_writer_does_not_write_match_exports(self) -> None:
+        fit = xt.fit_xt_xy_glm(_xt_calibration_actions(), _source_xt_grid())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "xT"
+            match_dir = output_dir / "matches"
+            with patch.object(generate_xt, "save_xt_xy_surface_plot") as save_plot:
+                save_plot.side_effect = lambda surface, output_path: Path(output_path).write_text("plot", encoding="utf-8")
+                generate_xt.save_model_outputs(fit, output_dir)
+
+            self.assertTrue((output_dir / "xT_grid.csv").exists())
+            self.assertTrue((output_dir / "xT_source_grid.csv").exists())
+            self.assertTrue((output_dir / "xT_xy_surface.csv").exists())
+            self.assertTrue((output_dir / "xT_glm_fit_sample.csv").exists())
+            self.assertTrue((output_dir / "xT_xy_surface_3d.png").exists())
+            self.assertFalse((output_dir / "xT.csv").exists())
+            self.assertFalse(match_dir.exists())
+
+    def test_generate_xt_ignored_export_filters_records_fit_only_filters(self) -> None:
+        args = SimpleNamespace(match_id=["match_a", "match_b"], limit=3)
+
+        ignored = generate_xt.ignored_export_filters(args)
+
+        self.assertEqual(ignored, {"match_id": ["match_a", "match_b"], "limit": 3})
 
 
 if __name__ == "__main__":

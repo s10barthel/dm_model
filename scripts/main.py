@@ -289,7 +289,15 @@ def run_command(command: list[str], dry_run: bool) -> None:
 def validate_xt_artifacts(require_match_sidecars: bool) -> None:
     missing_paths = [
         path
-        for path in [XT_DIR / "xT.csv", XT_DIR / "xT_grid.csv", XT_DIR / "fit_metadata.json"]
+        for path in [
+            XT_DIR / "xT.csv",
+            XT_DIR / "xT_grid.csv",
+            XT_DIR / "xT_source_grid.csv",
+            XT_DIR / "xT_xy_surface.csv",
+            XT_DIR / "xT_glm_fit_sample.csv",
+            XT_DIR / "xT_xy_surface_3d.png",
+            XT_DIR / "fit_metadata.json",
+        ]
         if not path.exists()
     ]
     if missing_paths:
