@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-from datatools import config
+from datatools import config, metadata_summary
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from dataset import ActionDataset, pass_success_observed_target_invalid_reason
 import inference
@@ -2662,6 +2662,45 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(config["metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
         self.assertEqual(config["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
         self.assertEqual(config["weight_version"], "v1")
+
+    def test_inference_lookup_config_records_selected_metric_variants(self) -> None:
+        default_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+        )
+        max_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            max_xpass=True,
+        )
+        topmean_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            topmean_xpass=True,
+        )
+
+        self.assertEqual(physical_xpass_inference_lookup_config(default_args, cache_dir="runtime_cache")["metric"], PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
+        self.assertEqual(physical_xpass_inference_lookup_config(max_args, cache_dir="runtime_cache")["metric"], PHYSICAL_XPASS_METRIC_MAX)
+        self.assertEqual(physical_xpass_inference_lookup_config(topmean_args, cache_dir="runtime_cache")["metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
+
+    def test_metadata_summary_maps_recorded_xpass_metrics(self) -> None:
+        base = {"physical_xpass_requested": True}
+
+        self.assertEqual(
+            metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PHYSICAL_XPASS_METRIC_NOISE_KERNEL}),
+            "noise_kernel",
+        )
+        self.assertEqual(
+            metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PHYSICAL_XPASS_METRIC_MAX}),
+            "max_xpass",
+        )
+        self.assertEqual(
+            metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PHYSICAL_XPASS_METRIC_TOPMEAN}),
+            "topmean_xpass",
+        )
 
     def test_inference_lookup_config_selects_xpass_weight_v2(self) -> None:
         args = make_pass_success_args(

@@ -394,6 +394,11 @@ def main() -> None:
         runtime_stats=physical_xpass_runtime_stats,
         skipped_stats=physical_xpass_skipped_actions,
     )
+    physical_lookup_config = (
+        physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)
+        if pass_success_model is not None
+        else {}
+    )
     metadata = {
         "run_id": component_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -412,9 +417,10 @@ def main() -> None:
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,
-        "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
-        "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_model is not None else None,
-        "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
+        "physical_xpass_runtime_source": physical_lookup_config.get("source"),
+        "physical_xpass_metric": physical_lookup_config.get("metric"),
+        "physical_xpass_weight_version": physical_lookup_config.get("weight_version"),
+        "physical_xpass_ball_z_limit": physical_lookup_config.get("ball_z_limit"),
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "physical_num_workers": physical_num_workers,
