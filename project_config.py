@@ -45,6 +45,7 @@ HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
 BENCHMARK_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "benchmark"
 SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
 RUNTIME_PHYSICAL_XPASS_DIR = DATA_ROOT / "runtime_physical_xpass"
+PC_XPASS_DIR = DATA_ROOT / "pc_xpass"
 VISUALIZATION_DIR = DATA_ROOT / "visualizations"
 SPORTEC_VISUALIZATION_DIR = VISUALIZATION_DIR / "sportec"
 HAWKEYE_VISUALIZATION_DIR = VISUALIZATION_DIR / "hawkeye"
@@ -321,6 +322,11 @@ def get_physical_xpass_match_path(match_id: str, root: Path | None = None) -> Pa
 
 def get_runtime_physical_xpass_dir(source: str, root: Path | None = None) -> Path:
     cache_root = Path(root) if root is not None else RUNTIME_PHYSICAL_XPASS_DIR
+    return cache_root / str(source)
+
+
+def get_pc_xpass_dir(source: str, root: Path | None = None) -> Path:
+    cache_root = Path(root) if root is not None else PC_XPASS_DIR
     return cache_root / str(source)
 
 

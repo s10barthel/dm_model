@@ -37,6 +37,13 @@ from physical_pass_model import (
     AS_DEFAULT_SPEED_STEP,
     AS_DEFAULT_V0_MAX,
     AS_DEFAULT_V0_MIN,
+    PC_XPASS_AVAILABLE_METRICS,
+    PC_XPASS_DEFAULT_MAX_SPEED,
+    PC_XPASS_DEFAULT_METRIC,
+    PC_XPASS_DEFAULT_SPEED_STEP,
+    PC_XPASS_METRIC_TOP10,
+    PC_XPASS_METRIC_TOP25,
+    PC_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_LEGACY_SOURCE,
@@ -71,6 +78,7 @@ from physical_pass_model import (
     attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graph,
     blend_physical_xpass_predictions,
+    compute_graph_pc_xpass_metrics,
     compute_graphs_max_player_cum_prob_as_defaults,
     compute_graphs_physical_xpass_metrics_as_defaults,
     compute_graph_physical_xpass_for_source,
@@ -91,6 +99,8 @@ from physical_pass_model import (
     physical_xpass_kernel_sigmas,
     physical_xpass_metric,
     physical_xpass_metric_column,
+    pc_xpass_normalize_if_sum_above_one,
+    pc_xpass_raw_control,
     physical_xpass_nearest_opponent_distance_column,
     physical_xpass_ball_z_limit,
     physical_xpass_weight_version,
@@ -946,6 +956,45 @@ class PhysicalXPassTests(unittest.TestCase):
             physical_xpass_metric({"task": "pass_success", "top10mean_xpass": True}),
             PHYSICAL_XPASS_METRIC_TOPMEAN,
         )
+        self.assertEqual(
+            physical_xpass_metric({"task": "pass_success", "pc_xpass": True}),
+            PC_XPASS_METRIC_TOP25,
+        )
+        self.assertEqual(
+            physical_xpass_metric({"task": "pass_success", "pc_xpass": True, "topmean_xpass": True}),
+            PC_XPASS_METRIC_TOP25,
+        )
+        self.assertEqual(
+            physical_xpass_metric({"task": "pass_success", "pc_xpass": True, "top10_xpass": True}),
+            PC_XPASS_METRIC_TOP10,
+        )
+
+    def test_pc_xpass_raw_control_and_conditional_normalization(self) -> None:
+        raw = pc_xpass_raw_control(np.asarray([-0.3, 0.0, 0.5], dtype=float))
+
+        self.assertAlmostEqual(float(raw[0]), 0.5)
+        self.assertGreater(float(raw[1]), 0.98)
+        self.assertGreater(float(raw[2]), 0.999)
+
+        under_one = np.asarray([0.2, 0.3, 0.4], dtype=float)
+        over_one = np.asarray([0.5, 0.5, 0.5], dtype=float)
+        np.testing.assert_allclose(pc_xpass_normalize_if_sum_above_one(under_one), under_one)
+        np.testing.assert_allclose(pc_xpass_normalize_if_sum_above_one(over_one), np.asarray([1 / 3, 1 / 3, 1 / 3]))
+
+    def test_compute_graph_pc_xpass_exports_default_top25_and_detail_columns(self) -> None:
+        row = compute_graph_pc_xpass_metrics(make_graph(), max_speed=7, speed_step=2, angle_step=90)
+
+        self.assertIn("home_2", row.index)
+        self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10), row.index)
+        self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25), row.index)
+        self.assertIn("home_2__lane_survival", row.index)
+        self.assertIn("home_2__control_prob", row.index)
+        self.assertIn("home_2__target_x", row.index)
+        self.assertAlmostEqual(
+            float(row["home_2"]),
+            float(row[physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25)]),
+        )
+        self.assertTrue(math.isfinite(float(row[physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX)])))
 
     def test_runtime_visualization_xpass_loader_selects_metric_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -969,6 +1018,31 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(default["home_2"]), 0.4)
         self.assertAlmostEqual(float(max_row["home_2"]), 0.9)
         self.assertAlmostEqual(float(topmean["home_2"]), 0.6)
+
+    def test_runtime_visualization_xpass_loader_prefers_pc_default_unsuffixed_top25(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            matches_dir = cache_dir / "matches"
+            matches_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 3,
+                        "home_2": 0.42,
+                        "home_2__top25_xpass": 0.84,
+                    }
+                ]
+            ).to_parquet(matches_dir / "match_1.parquet", index=False)
+
+            top25 = load_runtime_physical_xpass_visualization_component(
+                cache_dir,
+                "match_1",
+                3,
+                metric=PC_XPASS_METRIC_TOP25,
+            )
+
+        self.assertAlmostEqual(float(top25["home_2"]), 0.42)
 
     def test_runtime_visualization_xpass_loader_falls_back_to_legacy_top10_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2686,6 +2760,31 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(physical_xpass_inference_lookup_config(max_args, cache_dir="runtime_cache")["metric"], PHYSICAL_XPASS_METRIC_MAX)
         self.assertEqual(physical_xpass_inference_lookup_config(topmean_args, cache_dir="runtime_cache")["metric"], PHYSICAL_XPASS_METRIC_TOPMEAN)
 
+    def test_inference_lookup_config_selects_pc_xpass_source_and_metrics(self) -> None:
+        default_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            pc_xpass=True,
+        )
+        top10_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            pc_xpass=True,
+            top10_xpass=True,
+        )
+
+        default_config = physical_xpass_inference_lookup_config(default_args, cache_dir="pc_cache")
+        top10_config = physical_xpass_inference_lookup_config(top10_args, cache_dir="pc_cache")
+
+        self.assertEqual(default_config["source"], PC_XPASS_SOURCE)
+        self.assertEqual(default_config["metric"], PC_XPASS_DEFAULT_METRIC)
+        self.assertEqual(default_config["available_metrics"], PC_XPASS_AVAILABLE_METRICS)
+        self.assertEqual(default_config["max_speed"], PC_XPASS_DEFAULT_MAX_SPEED)
+        self.assertEqual(default_config["speed_step"], PC_XPASS_DEFAULT_SPEED_STEP)
+        self.assertEqual(top10_config["metric"], PC_XPASS_METRIC_TOP10)
+
     def test_metadata_summary_maps_recorded_xpass_metrics(self) -> None:
         base = {"physical_xpass_requested": True}
 
@@ -2700,6 +2799,14 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(
             metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PHYSICAL_XPASS_METRIC_TOPMEAN}),
             "topmean_xpass",
+        )
+        self.assertEqual(
+            metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PC_XPASS_METRIC_TOP10}),
+            "top10_xpass",
+        )
+        self.assertEqual(
+            metadata_summary._summary_xpass_metric({**base, "physical_xpass_metric": PC_XPASS_METRIC_TOP25}),
+            "top25_xpass",
         )
 
     def test_inference_lookup_config_selects_xpass_weight_v2(self) -> None:
@@ -3968,6 +4075,18 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertFalse(args.export_max)
         self.assertTrue(args.export_topmean)
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_TOPMEAN])
+
+    def test_generate_physical_xpass_cli_pc_xpass_uses_pc_defaults(self) -> None:
+        args = generate_physical_xpass.parse_args(["--pc-xpass"])
+
+        self.assertTrue(args.pc_xpass)
+        self.assertEqual(args.max_speed, PC_XPASS_DEFAULT_MAX_SPEED)
+        self.assertEqual(args.speed_step, PC_XPASS_DEFAULT_SPEED_STEP)
+        self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), PC_XPASS_AVAILABLE_METRICS)
+
+    def test_generate_physical_xpass_cli_rejects_pc_xpass_legacy_feature_mode(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--pc-xpass", "--feature-run-id", "feature_run"])
 
     def test_generate_physical_xpass_cli_rejects_disabling_all_metric_outputs(self) -> None:
         with self.assertRaises(SystemExit):

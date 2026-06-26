@@ -42,6 +42,7 @@ from project_config import (
     SPORTEC_COMPONENT_RUNS_DIR,
     generate_run_id,
     get_action_graph_dir,
+    get_pc_xpass_dir,
     get_post_action_graph_dir,
     get_resolved_action_path,
     get_runtime_physical_xpass_dir,
@@ -70,7 +71,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
+    parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for physical xPass inference blending.")
     parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for inference blending.")
+    parser.add_argument("--top10-xpass", "--top10_xpass", dest="top10_xpass", action="store_true", help="Use pc-xPass top10 columns for inference blending.")
     parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for inference blending.")
     parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
     parser.add_argument("--xpass-weight-v2", "--xpass_weight_v2", dest="xpass_weight_v2", action="store_true", help="Use nearest-opponent-aware physical xPass blend weighting.")
@@ -531,14 +534,18 @@ def main() -> None:
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(get_runtime_physical_xpass_dir("sportec"))
+    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
+        get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+    )
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
+        pass_success_model.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
         pass_success_model.args["max_xpass"] = bool(getattr(args, "max_xpass", False))
+        pass_success_model.args["top10_xpass"] = bool(getattr(args, "top10_xpass", False))
         use_topmean_xpass = bool(getattr(args, "topmean_xpass", False) or getattr(args, "top10mean_xpass", False))
         pass_success_model.args["topmean_xpass"] = use_topmean_xpass
         pass_success_model.args["top10mean_xpass"] = bool(getattr(args, "top10mean_xpass", False))

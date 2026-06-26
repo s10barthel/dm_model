@@ -46,9 +46,10 @@ from physical_pass_model import (
     physical_xpass_source,
     physical_xpass_teammate_policy,
     requires_physical_xpass_for_inference,
+    pc_xpass_enabled,
     validate_physical_xpass_cache_metadata,
 )
-from project_config import get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
+from project_config import get_pc_xpass_dir, get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
 
@@ -221,7 +222,11 @@ def attach_physical_xpass_for_inference(
     if not physical_cache_dir:
         if inference_uses_physical_xpass(model.args):
             runtime_source_name = _runtime_physical_xpass_source_name(match)
-            physical_cache_dir = str(get_runtime_physical_xpass_dir(runtime_source_name or "sportec"))
+            physical_cache_dir = str(
+                get_pc_xpass_dir(runtime_source_name or "sportec")
+                if pc_xpass_enabled(model.args)
+                else get_runtime_physical_xpass_dir(runtime_source_name or "sportec")
+            )
         elif feature_root is None:
             runtime_source_name = _runtime_physical_xpass_source_name(match)
             if runtime_source_name is not None:
@@ -264,7 +269,11 @@ def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
 
     if inference_uses_physical_xpass(model.args):
         runtime_source_name = _runtime_physical_xpass_source_name(match)
-        return str(get_runtime_physical_xpass_dir(runtime_source_name or "sportec"))
+        return str(
+            get_pc_xpass_dir(runtime_source_name or "sportec")
+            if pc_xpass_enabled(model.args)
+            else get_runtime_physical_xpass_dir(runtime_source_name or "sportec")
+        )
 
     if feature_root is None:
         runtime_source_name = _runtime_physical_xpass_source_name(match)

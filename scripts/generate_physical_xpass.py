@@ -45,6 +45,10 @@ from physical_pass_model import (
     AS_DEFAULT_V0_MAX,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
+    PC_XPASS_AVAILABLE_METRICS,
+    PC_XPASS_DEFAULT_MAX_SPEED,
+    PC_XPASS_DEFAULT_SPEED_STEP,
+    PC_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
@@ -71,6 +75,7 @@ from physical_pass_model import (
     observed_pass_distance,
     physical_state_hash,
     physical_xpass_as_default_metadata,
+    pc_xpass_metadata,
     prewarm_physical_xpass_runtime_cache,
     resolve_physical_num_workers,
     validate_physical_xpass_cache_metadata,
@@ -81,6 +86,7 @@ from project_config import (
     get_action_graph_dir,
     get_action_label_dir,
     get_physical_xpass_dir,
+    get_pc_xpass_dir,
     get_runtime_physical_xpass_dir,
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
@@ -116,6 +122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of benchmark runtime pass rows to buffer before prewarming physical xPass. Defaults to physical_batch_size * num_workers * 2.",
     )
     parser.add_argument("--overwrite", action="store_true", help="Deprecated outside legacy --feature-run-id mode.")
+    parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Generate pitch-control-style pc-xPass caches under data/pc_xpass.")
     parser.add_argument(
         "--runtime-sportec-cache",
         action="store_true",
@@ -175,8 +182,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=sorted(PHYSICAL_XPASS_SPEED_AGGREGATIONS),
         default=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     )
-    parser.add_argument("--max-speed", "--max_speed", dest="max_speed", type=float, default=AS_DEFAULT_V0_MAX)
-    parser.add_argument("--speed-step", "--speed_step", dest="speed_step", type=float, default=AS_DEFAULT_SPEED_STEP)
+    parser.add_argument("--max-speed", "--max_speed", dest="max_speed", type=float, default=None)
+    parser.add_argument("--speed-step", "--speed_step", dest="speed_step", type=float, default=None)
     parser.add_argument("--coarse-n-angles", "--coarse_n_angles", dest="coarse_n_angles", type=int, default=AS_DEFAULT_COARSE_N_ANGLES)
     parser.add_argument("--refine-top-k-angles", "--refine_top_k_angles", dest="refine_top_k_angles", type=int, default=AS_DEFAULT_REFINE_TOP_K_ANGLES)
     parser.add_argument("--refine-angle-radius", "--refine_angle_radius", dest="refine_angle_radius", type=float, default=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG)
@@ -207,6 +214,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+    if args.max_speed is None:
+        args.max_speed = PC_XPASS_DEFAULT_MAX_SPEED if args.pc_xpass else AS_DEFAULT_V0_MAX
+    if args.speed_step is None:
+        args.speed_step = PC_XPASS_DEFAULT_SPEED_STEP if args.pc_xpass else AS_DEFAULT_SPEED_STEP
     for name in ["limit", "skillcorner_limit", "benchmark_limit", "hawkeye_limit"]:
         value = getattr(args, name, None)
         if value is not None and int(value) < 1:
@@ -245,7 +256,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--sigma-distance must be positive.")
     if args.top_n < 1:
         parser.error("--top-n must be positive.")
-    if not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
+    if bool(args.pc_xpass) and args.feature_run_id:
+        parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
+    if not bool(args.pc_xpass) and not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one physical xPass metric must be exported.")
     try:
         resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
@@ -255,6 +268,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[str]:
+    if bool(getattr(args, "pc_xpass", False)):
+        return normalize_physical_xpass_metrics(PC_XPASS_AVAILABLE_METRICS)
     metrics: list[str] = []
     if bool(getattr(args, "export_noise_kernel", True)):
         metrics.append(PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
@@ -375,6 +390,10 @@ def resolve_runtime_sportec_reuse_cache(
     args: argparse.Namespace,
     feature_cache_dir: Path,
 ) -> tuple[Path | None, str | None]:
+    if bool(getattr(args, "pc_xpass", False)):
+        if args.reuse_cache_dir:
+            raise ValueError("--reuse-cache-dir is only supported for physical xPass Sportec runtime generation, not --pc-xpass.")
+        return None, "pc_xpass_uses_separate_runtime_cache"
     explicit_reuse = bool(args.reuse_cache_dir)
     candidate = Path(args.reuse_cache_dir) if explicit_reuse else (feature_cache_dir if feature_cache_dir.exists() else None)
     if candidate is None:
@@ -748,7 +767,7 @@ def prewarm_runtime_items(
     return prewarm_physical_xpass_runtime_cache(
         items,
         cache_dir=cache_dir,
-        source=PHYSICAL_XPASS_SOURCE,
+        source=PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         eps=float(args.physical_eps),
         teammate_policy=teammate_policy_from_args(args),
         speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
@@ -876,8 +895,16 @@ def write_runtime_dataset_metadata(
     if bool(getattr(args, "dry_run", False)):
         print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
         return
-    metadata = {
-        **physical_xpass_as_default_metadata(
+    base_metadata = (
+        pc_xpass_metadata(
+            teammate_policy_from_args(args),
+            max_speed=args.max_speed,
+            speed_step=args.speed_step,
+            angle_step=args.angle_step,
+            available_metrics=enabled_physical_xpass_metrics_from_args(args),
+        )
+        if bool(getattr(args, "pc_xpass", False))
+        else physical_xpass_as_default_metadata(
             teammate_policy_from_args(args),
             speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
             max_speed=args.max_speed,
@@ -891,8 +918,11 @@ def write_runtime_dataset_metadata(
             sigma_distance=args.sigma_distance,
             top_n=int(args.top_n),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
-        ),
-        "created_for": "runtime_physical_xpass_cache",
+        )
+    )
+    metadata = {
+        **base_metadata,
+        "created_for": "pc_xpass_cache" if bool(getattr(args, "pc_xpass", False)) else "runtime_physical_xpass_cache",
         "dataset": dataset,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_inputs": source_inputs,
@@ -1058,7 +1088,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
     feature_root = resolve_feature_root(feature_run_id)
     graph_dir = get_action_graph_dir(feature_root)
     label_dir = resolve_reference_label_dir(str(feature_run_id), feature_root, args)
-    cache_dir = get_runtime_physical_xpass_dir("sportec")
+    cache_dir = get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     feature_cache_dir = get_physical_xpass_dir(feature_root)
     reuse_cache_dir, implicit_reuse_cache_skipped_reason = resolve_runtime_sportec_reuse_cache(args, feature_cache_dir)
 
@@ -1134,7 +1164,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_runtime_physical_xpass_dir("benchmark")
+    cache_dir = get_pc_xpass_dir("benchmark") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     row_window = resolve_runtime_row_window(args, "benchmark_runtime_row_window")
@@ -1208,7 +1238,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_runtime_physical_xpass_dir("hawkeye")
+    cache_dir = get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.hawkeye_tracking_csv))
@@ -1248,7 +1278,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_runtime_physical_xpass_dir("skillcorner")
+    cache_dir = get_pc_xpass_dir("skillcorner") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     row_window = resolve_runtime_row_window(args, "skillcorner_runtime_row_window")
@@ -1380,10 +1410,11 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
         "hawkeye": run_runtime_hawkeye,
     }
     summaries = []
+    cache_label = "pc-xPass" if bool(getattr(args, "pc_xpass", False)) else "physical xPass"
     for dataset in selected_runtime_datasets(args):
-        print(f"Generating runtime physical xPass cache for {dataset}...")
+        print(f"Generating runtime {cache_label} cache for {dataset}...")
         summaries.append(runners[dataset](args))
-    print("Runtime physical xPass cache generation complete.")
+    print(f"Runtime {cache_label} cache generation complete.")
     for summary in summaries:
         stats = summary["stats"]
         print(

@@ -24,7 +24,8 @@ from project_config import get_physical_xpass_match_path
 
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
 PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
-PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE}
+PC_XPASS_SOURCE = "pc_xpass"
+PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE, PC_XPASS_SOURCE}
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
@@ -62,11 +63,26 @@ PHYSICAL_XPASS_METRIC_MAX = "max_xpass"
 PHYSICAL_XPASS_METRIC_TOPMEAN = "topmean_xpass"
 PHYSICAL_XPASS_METRIC_TOP10MEAN = PHYSICAL_XPASS_METRIC_TOPMEAN
 PHYSICAL_XPASS_LEGACY_METRIC_TOP10MEAN = "top10mean_xpass"
+PC_XPASS_METRIC_TOP10 = "top10_xpass"
+PC_XPASS_METRIC_TOP25 = "top25_xpass"
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_TOPMEAN,
+]
+PC_XPASS_DEFAULT_METRIC = PC_XPASS_METRIC_TOP25
+PC_XPASS_AVAILABLE_METRICS = [
+    PHYSICAL_XPASS_METRIC_MAX,
+    PC_XPASS_METRIC_TOP10,
+    PC_XPASS_METRIC_TOP25,
+]
+PHYSICAL_XPASS_SUPPORTED_METRICS = [
+    PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
+    PHYSICAL_XPASS_METRIC_MAX,
+    PHYSICAL_XPASS_METRIC_TOPMEAN,
+    PC_XPASS_METRIC_TOP10,
+    PC_XPASS_METRIC_TOP25,
 ]
 PHYSICAL_XPASS_METRIC_SCHEMA_VERSION = 2
 PHYSICAL_XPASS_NOISE_KERNEL_ALGORITHM = "angle_conditioned_v2"
@@ -77,10 +93,18 @@ PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR = 0.1
 PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR = 0.05
 PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR = 0.05
 PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
+PC_XPASS_DEFAULT_REACTION_TIME = 0.25
+PC_XPASS_DEFAULT_MAX_PLAYER_SPEED = 5.0
+PC_XPASS_SIGMOID_SCALE = 15.0
+PC_XPASS_SIGMOID_OFFSET = 0.3
+PC_XPASS_DEFAULT_MAX_SPEED = 25.0
+PC_XPASS_DEFAULT_SPEED_STEP = 2.0
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
     PHYSICAL_XPASS_METRIC_TOPMEAN: "__topmean_xpass",
+    PC_XPASS_METRIC_TOP10: "__top10_xpass",
+    PC_XPASS_METRIC_TOP25: "__top25_xpass",
 }
 PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_TOPMEAN: "__top10mean_xpass",
@@ -211,6 +235,51 @@ def physical_xpass_as_default_metadata(
     }
 
 
+def pc_xpass_metadata(
+    teammate_policy: str,
+    *,
+    max_speed: float | None = None,
+    speed_step: float | None = None,
+    angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, Any]:
+    if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
+        raise ValueError(
+            f"Unsupported teammate_policy={teammate_policy!r}. "
+            f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
+        )
+    metrics = normalize_physical_xpass_metrics(available_metrics or PC_XPASS_AVAILABLE_METRICS)
+    max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
+    speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
+    v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value)
+    return {
+        "metric": PC_XPASS_DEFAULT_METRIC,
+        "metric_family": PC_XPASS_SOURCE,
+        "source": PC_XPASS_SOURCE,
+        "teammate_policy": teammate_policy,
+        "default_metric": PC_XPASS_DEFAULT_METRIC,
+        "available_metrics": metrics,
+        "disabled_metrics": disabled_physical_xpass_metrics(metrics),
+        "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME,
+        "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+        "arrival_function": "sigmoid_15_offset_0.3",
+        "arrival_sigmoid_scale": PC_XPASS_SIGMOID_SCALE,
+        "arrival_sigmoid_offset": PC_XPASS_SIGMOID_OFFSET,
+        "normalization": "divide_if_sum_gt_1",
+        "lane_survival_policy": (
+            "non_passer_non_receiver_all_players"
+            if teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+            else "non_passer_non_receiver_opponents_only"
+        ),
+        "max_speed": float(v0_values[-1]),
+        "speed_step": speed_step_value,
+        "angle_step": float(angle_step),
+        "radial_gridsize": AS_DEFAULT_RADIAL_GRIDSIZE,
+        "effective_v0_grid": [float(value) for value in v0_values.tolist()],
+        "storage": "wide_parquet_one_row_per_action_player_id_columns",
+    }
+
+
 def as_default_v0_values(
     max_speed: float | None = None,
     *,
@@ -232,10 +301,14 @@ def normalize_physical_xpass_metric(value: str | None) -> str:
     metric = PHYSICAL_XPASS_DEFAULT_METRIC if value is None else str(value).replace("-", "_")
     if metric in {"top10mean", "top10mean_xpass", "topmean"}:
         metric = PHYSICAL_XPASS_METRIC_TOPMEAN
-    if metric not in PHYSICAL_XPASS_AVAILABLE_METRICS:
+    if metric in {"top10", "pc_top10", "pc_top10_xpass"}:
+        metric = PC_XPASS_METRIC_TOP10
+    if metric in {"top25", "pc_top25", "pc_top25_xpass"}:
+        metric = PC_XPASS_METRIC_TOP25
+    if metric not in PHYSICAL_XPASS_SUPPORTED_METRICS:
         raise ValueError(
             f"Unsupported physical_xpass_metric={value!r}. "
-            f"Expected one of {PHYSICAL_XPASS_AVAILABLE_METRICS}."
+            f"Expected one of {PHYSICAL_XPASS_SUPPORTED_METRICS}."
         )
     return metric
 
@@ -244,7 +317,7 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
     if values is None:
         return list(PHYSICAL_XPASS_AVAILABLE_METRICS)
     normalized = {normalize_physical_xpass_metric(value) for value in values}
-    metrics = [metric for metric in PHYSICAL_XPASS_AVAILABLE_METRICS if metric in normalized]
+    metrics = [metric for metric in PHYSICAL_XPASS_SUPPORTED_METRICS if metric in normalized]
     if not metrics:
         raise ValueError("At least one physical xPass metric must be enabled.")
     return metrics
@@ -252,7 +325,12 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
 
 def disabled_physical_xpass_metrics(enabled_metrics: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
     enabled = set(normalize_physical_xpass_metrics(enabled_metrics))
-    return [metric for metric in PHYSICAL_XPASS_AVAILABLE_METRICS if metric not in enabled]
+    available = (
+        PC_XPASS_AVAILABLE_METRICS
+        if any(metric in enabled for metric in {PC_XPASS_METRIC_TOP10, PC_XPASS_METRIC_TOP25})
+        else PHYSICAL_XPASS_AVAILABLE_METRICS
+    )
+    return [metric for metric in available if metric not in enabled]
 
 
 def physical_xpass_metric_column(player_id: str, metric: str | None = None) -> str:
@@ -262,7 +340,10 @@ def physical_xpass_metric_column(player_id: str, metric: str | None = None) -> s
 
 def physical_xpass_metric_columns(player_id: str, metric: str | None = None) -> list[str]:
     metric = normalize_physical_xpass_metric(metric)
-    columns = [physical_xpass_metric_column(player_id, metric)]
+    if metric == PC_XPASS_METRIC_TOP25:
+        columns = [str(player_id), physical_xpass_metric_column(player_id, metric)]
+    else:
+        columns = [physical_xpass_metric_column(player_id, metric)]
     legacy_suffix = PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES.get(metric)
     if legacy_suffix:
         columns.append(f"{player_id}{legacy_suffix}")
@@ -425,6 +506,10 @@ def physical_xpass_enabled(args: Any) -> bool:
     return bool(_get_arg(args, "use_physical_xpass", False))
 
 
+def pc_xpass_enabled(args: Any) -> bool:
+    return bool(_get_arg(args, "pc_xpass", False) or _get_arg(args, "use_pc_xpass", False))
+
+
 def physical_xpass_model_variant(args: Any) -> str:
     variant = str(_get_arg(args, "model_variant", "gat_baseline") or "gat_baseline")
     if variant not in PHYSICAL_MODEL_VARIANTS:
@@ -445,6 +530,8 @@ def physical_xpass_source(args: Any) -> str:
 
 def runtime_physical_xpass_source(args: Any) -> str:
     if inference_uses_physical_xpass(args):
+        if pc_xpass_enabled(args):
+            return PC_XPASS_SOURCE
         return PHYSICAL_XPASS_SOURCE
     return physical_xpass_source(args)
 
@@ -488,13 +575,21 @@ def runtime_physical_xpass_speed_aggregation(args: Any) -> str:
 def physical_xpass_metric(args: Any) -> str:
     if bool(_get_arg(args, "max_xpass", False)) or bool(_get_arg(args, "use_max_xpass", False)):
         return PHYSICAL_XPASS_METRIC_MAX
+    if bool(_get_arg(args, "top10_xpass", False)) or bool(_get_arg(args, "use_top10_xpass", False)):
+        return PC_XPASS_METRIC_TOP10
+    if bool(_get_arg(args, "top25_xpass", False)) or bool(_get_arg(args, "use_top25_xpass", False)):
+        return PC_XPASS_METRIC_TOP25
     if (
         bool(_get_arg(args, "topmean_xpass", False))
         or bool(_get_arg(args, "use_topmean_xpass", False))
         or bool(_get_arg(args, "top10mean_xpass", False))
         or bool(_get_arg(args, "use_top10mean_xpass", False))
     ):
+        if pc_xpass_enabled(args):
+            return PC_XPASS_METRIC_TOP25
         return PHYSICAL_XPASS_METRIC_TOPMEAN
+    if pc_xpass_enabled(args):
+        return PC_XPASS_DEFAULT_METRIC
     return normalize_physical_xpass_metric(_get_arg(args, "physical_xpass_metric", None))
 
 
@@ -518,18 +613,21 @@ def physical_xpass_ball_z_limit(args: Any) -> float | None:
 
 
 def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
+    source = PC_XPASS_SOURCE if pc_xpass_enabled(args) else PHYSICAL_XPASS_SOURCE
     return {
         "use_physical_xpass": bool(inference_uses_physical_xpass(args)),
+        "pc_xpass": bool(pc_xpass_enabled(args)),
         "physical_cache_dir": None if cache_dir is None else str(cache_dir),
         "metric": physical_xpass_metric(args),
         "weight_version": physical_xpass_weight_version(args),
         "ball_z_limit": physical_xpass_ball_z_limit(args),
-        "source": PHYSICAL_XPASS_SOURCE,
+        "source": source,
         "speed_aggregation": PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
         "metric_schema_version": PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
-        "default_metric": PHYSICAL_XPASS_DEFAULT_METRIC,
-        "max_speed": AS_DEFAULT_V0_MAX,
-        "speed_step": AS_DEFAULT_SPEED_STEP,
+        "default_metric": PC_XPASS_DEFAULT_METRIC if source == PC_XPASS_SOURCE else PHYSICAL_XPASS_DEFAULT_METRIC,
+        "available_metrics": list(PC_XPASS_AVAILABLE_METRICS if source == PC_XPASS_SOURCE else PHYSICAL_XPASS_AVAILABLE_METRICS),
+        "max_speed": PC_XPASS_DEFAULT_MAX_SPEED if source == PC_XPASS_SOURCE else AS_DEFAULT_V0_MAX,
+        "speed_step": PC_XPASS_DEFAULT_SPEED_STEP if source == PC_XPASS_SOURCE else AS_DEFAULT_SPEED_STEP,
         "coarse_n_angles": AS_DEFAULT_COARSE_N_ANGLES,
         "refine_top_k_angles": AS_DEFAULT_REFINE_TOP_K_ANGLES,
         "refine_angle_radius": AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
@@ -538,6 +636,8 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "sigma_speed": PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
         "sigma_distance": PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
         "top_n": PHYSICAL_XPASS_DEFAULT_TOP_N,
+        "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME if source == PC_XPASS_SOURCE else None,
+        "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED if source == PC_XPASS_SOURCE else None,
     }
 
 
@@ -1883,6 +1983,209 @@ def compute_graph_physical_xpass_metrics_as_defaults(
     )
 
 
+PC_XPASS_DETAIL_SUFFIXES = [
+    "__lane_survival",
+    "__control_prob",
+    "__speed",
+    "__angle",
+    "__distance",
+    "__target_x",
+    "__target_y",
+]
+
+
+def pc_xpass_output_columns(player_ids: list[str] | tuple[str, ...]) -> list[str]:
+    columns: list[str] = []
+    for player_id in player_ids:
+        player = str(player_id)
+        columns.extend(
+            [
+                player,
+                physical_xpass_metric_column(player, PHYSICAL_XPASS_METRIC_MAX),
+                physical_xpass_metric_column(player, PC_XPASS_METRIC_TOP10),
+                physical_xpass_metric_column(player, PC_XPASS_METRIC_TOP25),
+            ]
+        )
+        columns.extend(f"{player}{suffix}" for suffix in PC_XPASS_DETAIL_SUFFIXES)
+    return columns
+
+
+def pc_xpass_raw_control(ball_minus_player: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(PC_XPASS_SIGMOID_SCALE * (ball_minus_player + PC_XPASS_SIGMOID_OFFSET), -60.0, 60.0)))
+
+
+def pc_xpass_normalize_if_sum_above_one(raw: np.ndarray, axis: int = 0) -> np.ndarray:
+    sums = np.nansum(raw, axis=axis, keepdims=True)
+    normalized = np.divide(raw, sums, out=np.zeros_like(raw), where=sums > 0)
+    return np.where(sums > 1.0, normalized, raw)
+
+
+def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
+    finite = np.asarray(values[np.isfinite(values)], dtype=float)
+    if finite.size == 0:
+        return float("nan")
+    k = min(int(n), int(finite.size))
+    return float(np.mean(np.partition(finite, -k)[-k:]))
+
+
+def _pc_xpass_r_grid(ball_pos: np.ndarray) -> np.ndarray:
+    corners = np.asarray(
+        [
+            [-FIELD_SIZE[0] / 2.0, -FIELD_SIZE[1] / 2.0],
+            [-FIELD_SIZE[0] / 2.0, FIELD_SIZE[1] / 2.0],
+            [FIELD_SIZE[0] / 2.0, -FIELD_SIZE[1] / 2.0],
+            [FIELD_SIZE[0] / 2.0, FIELD_SIZE[1] / 2.0],
+        ],
+        dtype=float,
+    )
+    max_distance = float(np.nanmax(np.linalg.norm(corners - np.asarray(ball_pos, dtype=float)[np.newaxis, :], axis=1)))
+    max_grid = math.ceil(max_distance / AS_DEFAULT_RADIAL_GRIDSIZE) * AS_DEFAULT_RADIAL_GRIDSIZE
+    return np.arange(0.0, max_grid + AS_DEFAULT_RADIAL_GRIDSIZE * 0.5, AS_DEFAULT_RADIAL_GRIDSIZE, dtype=float)
+
+
+def _pc_xpass_arrival_margins(
+    player_pos: np.ndarray,
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    t_ball: np.ndarray,
+    *,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+) -> np.ndarray:
+    positions = np.asarray(player_pos, dtype=float)
+    margins = []
+    for player in positions:
+        x, y, vx, vy = [float(value) for value in player]
+        inertial_x = x + vx * float(reaction_time)
+        inertial_y = y + vy * float(reaction_time)
+        tta = float(reaction_time) + np.hypot(target_x - inertial_x, target_y - inertial_y) / float(max_player_speed)
+        margins.append(t_ball - tta)
+    return np.stack(margins, axis=0)
+
+
+def compute_graph_pc_xpass_metrics(
+    graph: Data,
+    *,
+    eps: float = 1e-4,
+    consider_teammates: bool = True,
+    max_speed: float | None = None,
+    speed_step: float | None = None,
+    angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+) -> pd.Series:
+    node_ids = _node_ids(graph)
+    candidate_indices = _candidate_target_indices(graph)
+    result = pd.Series(np.nan, index=pc_xpass_output_columns(node_ids), dtype=float)
+    if not candidate_indices:
+        return result
+
+    player_pos, player_teams, players, ball_pos, target_index_lookup, possessor_index = _full_as_default_simulation_inputs(
+        graph,
+        candidate_indices=candidate_indices,
+    )
+    possessor_id = str(node_ids[possessor_index])
+    player_ids = [str(player) for player in players.tolist()]
+    passer_sim_index = player_ids.index(possessor_id)
+    speeds = as_default_v0_values(
+        max_speed=PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed,
+        speed_step=PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step,
+    )
+    angles = np.deg2rad(np.arange(0.0, 360.0, float(angle_step), dtype=float))
+    distances = _pc_xpass_r_grid(ball_pos)
+    target_x_base = float(ball_pos[0]) + np.cos(angles)[:, np.newaxis] * distances[np.newaxis, :]
+    target_y_base = float(ball_pos[1]) + np.sin(angles)[:, np.newaxis] * distances[np.newaxis, :]
+    on_pitch = (
+        np.isfinite(target_x_base)
+        & np.isfinite(target_y_base)
+        & (target_x_base >= -FIELD_SIZE[0] / 2.0)
+        & (target_x_base <= FIELD_SIZE[0] / 2.0)
+        & (target_y_base >= -FIELD_SIZE[1] / 2.0)
+        & (target_y_base <= FIELD_SIZE[1] / 2.0)
+    )
+    target_x = np.repeat(target_x_base[np.newaxis, :, :], len(speeds), axis=0)
+    target_y = np.repeat(target_y_base[np.newaxis, :, :], len(speeds), axis=0)
+    t_ball = np.repeat((distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]), len(angles), axis=1)
+    on_pitch_grid = np.repeat(on_pitch[np.newaxis, :, :], len(speeds), axis=0)
+
+    margins = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball)
+    raw = pc_xpass_raw_control(margins)
+    raw[:, :, ~on_pitch] = np.nan
+    attack_mask = player_teams == "attack"
+
+    for graph_target_index in candidate_indices:
+        receiver_sim_index = int(target_index_lookup[graph_target_index])
+        node_id = str(node_ids[graph_target_index])
+
+        endpoint_raw = raw.copy()
+        endpoint_raw[passer_sim_index] = 0.0
+        if not consider_teammates:
+            endpoint_raw[attack_mask] = 0.0
+            endpoint_raw[receiver_sim_index] = raw[receiver_sim_index]
+        endpoint_probs = pc_xpass_normalize_if_sum_above_one(endpoint_raw, axis=0)
+        receiver_control = endpoint_probs[receiver_sim_index]
+
+        lane_raw = raw.copy()
+        lane_raw[passer_sim_index] = 0.0
+        lane_raw[receiver_sim_index] = 0.0
+        if not consider_teammates:
+            lane_raw[attack_mask] = 0.0
+        lane_probs = pc_xpass_normalize_if_sum_above_one(lane_raw, axis=0)
+        other_control = np.nansum(lane_probs, axis=0)
+        per_location_survival = np.clip(1.0 - other_control, 0.0, 1.0)
+        lane_survival = np.ones_like(receiver_control, dtype=float)
+        for distance_i in range(len(distances)):
+            if distance_i == 0:
+                lane_survival[:, :, distance_i] = 1.0
+            else:
+                lane_survival[:, :, distance_i] = np.prod(per_location_survival[:, :, :distance_i], axis=2)
+        lane_survival = np.where(on_pitch_grid, lane_survival, np.nan)
+        score = lane_survival * receiver_control
+        if not np.isfinite(score).any():
+            continue
+
+        flat = int(np.nanargmax(score))
+        speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
+        max_score = float(score[speed_i, angle_i, distance_i])
+        top10 = _pc_xpass_top_mean(score, 10)
+        top25 = _pc_xpass_top_mean(score, 25)
+        result.loc[node_id] = float(np.clip(top25, eps, 1.0 - eps)) if math.isfinite(top25) else np.nan
+        result.loc[physical_xpass_metric_column(node_id, PHYSICAL_XPASS_METRIC_MAX)] = float(np.clip(max_score, eps, 1.0 - eps))
+        if math.isfinite(top10):
+            result.loc[physical_xpass_metric_column(node_id, PC_XPASS_METRIC_TOP10)] = float(np.clip(top10, eps, 1.0 - eps))
+        if math.isfinite(top25):
+            result.loc[physical_xpass_metric_column(node_id, PC_XPASS_METRIC_TOP25)] = float(np.clip(top25, eps, 1.0 - eps))
+        result.loc[f"{node_id}__lane_survival"] = float(lane_survival[speed_i, angle_i, distance_i])
+        result.loc[f"{node_id}__control_prob"] = float(receiver_control[speed_i, angle_i, distance_i])
+        result.loc[f"{node_id}__speed"] = float(speeds[speed_i])
+        result.loc[f"{node_id}__angle"] = math.degrees(float(angles[angle_i])) % 360.0
+        result.loc[f"{node_id}__distance"] = float(distances[distance_i])
+        result.loc[f"{node_id}__target_x"] = float(target_x[speed_i, angle_i, distance_i])
+        result.loc[f"{node_id}__target_y"] = float(target_y[speed_i, angle_i, distance_i])
+    return result
+
+
+def compute_graphs_pc_xpass_metrics(
+    graphs: list[Data] | tuple[Data, ...],
+    *,
+    eps: float = 1e-4,
+    consider_teammates: bool = True,
+    max_speed: float | None = None,
+    speed_step: float | None = None,
+    angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    batch_size: int = 16,
+) -> list[pd.Series]:
+    return [
+        compute_graph_pc_xpass_metrics(
+            graph,
+            eps=eps,
+            consider_teammates=consider_teammates,
+            max_speed=max_speed,
+            speed_step=speed_step,
+            angle_step=angle_step,
+        )
+        for graph in graphs
+    ]
+
+
 def compute_graphs_physical_xpass_metrics_as_defaults(
     graphs: list[Data],
     *,
@@ -2500,10 +2803,16 @@ def load_physical_xpass_component(
             suffixes.append(legacy_suffix)
     player_columns = []
     output_index = []
+    pc_default_players: set[str] = set()
     for column in row.index:
         if column in PHYSICAL_XPASS_ID_COLUMNS:
             continue
         column = str(column)
+        if selected_metric == PC_XPASS_METRIC_TOP25 and "__" not in column:
+            player_columns.append(column)
+            output_index.append(column)
+            pc_default_players.add(column)
+            continue
         if "__" in column and not suffix:
             continue
         selected_suffix = suffix
@@ -2512,8 +2821,11 @@ def load_physical_xpass_component(
             if not matching_suffixes:
                 continue
             selected_suffix = matching_suffixes[0]
+        player_id = column[: -len(selected_suffix)] if selected_suffix else column
+        if selected_metric == PC_XPASS_METRIC_TOP25 and player_id in pc_default_players:
+            continue
         player_columns.append(column)
-        output_index.append(column[: -len(selected_suffix)] if selected_suffix else column)
+        output_index.append(player_id)
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
     series.index = output_index
     series.name = selected_metric
@@ -2620,6 +2932,14 @@ def _runtime_cache_metadata(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
+    if source == PC_XPASS_SOURCE:
+        return pc_xpass_metadata(
+            teammate_policy,
+            max_speed=max_speed,
+            speed_step=speed_step,
+            angle_step=angle_step,
+            available_metrics=available_metrics or PC_XPASS_AVAILABLE_METRICS,
+        )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
             teammate_policy,
@@ -2685,6 +3005,45 @@ def _ensure_runtime_physical_xpass_cache(
         available_metrics=available_metrics,
     )
     if metadata_path.exists():
+        if source == PC_XPASS_SOURCE:
+            with metadata_path.open("r", encoding="utf-8") as fh:
+                metadata = json.load(fh)
+            mismatches = []
+            for key in [
+                "source",
+                "metric_family",
+                "teammate_policy",
+                "default_metric",
+                "arrival_function",
+                "normalization",
+                "lane_survival_policy",
+            ]:
+                if metadata.get(key) != expected_metadata.get(key):
+                    mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            for key in ["reaction_time", "max_player_speed", "arrival_sigmoid_scale", "arrival_sigmoid_offset", "max_speed", "speed_step", "angle_step"]:
+                if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
+                    mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            if normalize_physical_xpass_metrics(metadata.get("available_metrics")) != normalize_physical_xpass_metrics(
+                expected_metadata.get("available_metrics")
+            ):
+                mismatches.append(
+                    f"available_metrics: expected {expected_metadata.get('available_metrics')!r}, "
+                    f"got {metadata.get('available_metrics')!r}"
+                )
+            if mismatches:
+                if not create_if_missing:
+                    raise ValueError(f"pc-xPass cache at {cache_root} is incompatible: {'; '.join(mismatches)}")
+                metadata = {
+                    **expected_metadata,
+                    "created_for": "pc_xpass_cache",
+                    "storage": "wide_parquet_one_row_per_action_player_id_columns",
+                    "replaced_incompatible_metadata_reason": "; ".join(mismatches),
+                    "_force_refresh_runtime_rows": True,
+                }
+                metadata_to_write = {key: value for key, value in metadata.items() if not key.startswith("_")}
+                (cache_root / "matches").mkdir(parents=True, exist_ok=True)
+                metadata_path.write_text(json.dumps(metadata_to_write, indent=2, sort_keys=True), encoding="utf-8")
+            return metadata
         try:
             metadata = validate_physical_xpass_cache_metadata(
                 cache_root,
@@ -2744,7 +3103,7 @@ def _ensure_runtime_physical_xpass_cache(
 
     metadata = {
         **expected_metadata,
-        "created_for": "runtime_physical_xpass_cache",
+        "created_for": "pc_xpass_cache" if source == PC_XPASS_SOURCE else "runtime_physical_xpass_cache",
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
     if create_if_missing:
@@ -3085,6 +3444,16 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             sigma_distance=sigma_distance,
             top_n=top_n,
             enabled_metrics=enabled_metrics,
+            batch_size=physical_batch_size,
+        )
+    elif source == PC_XPASS_SOURCE:
+        computed_probs = compute_graphs_pc_xpass_metrics(
+            [item["graph"] for item in misses],
+            eps=eps,
+            consider_teammates=consider_teammates,
+            max_speed=max_speed,
+            speed_step=speed_step,
+            angle_step=angle_step,
             batch_size=physical_batch_size,
         )
     else:

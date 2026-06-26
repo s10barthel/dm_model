@@ -172,6 +172,10 @@ def _summary_xpass_metric(metadata: dict[str, Any]) -> str:
         return "noise_kernel"
     if metric in {"max", "max_xpass"}:
         return "max_xpass"
+    if metric in {"top10", "top10_xpass"}:
+        return "top10_xpass"
+    if metric in {"top25", "top25_xpass"}:
+        return "top25_xpass"
     if metric in {"topmean", "topmean_xpass", "top10mean", "top10mean_xpass"}:
         return "topmean_xpass"
     return metric

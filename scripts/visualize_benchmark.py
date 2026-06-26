@@ -26,6 +26,7 @@ from datatools.viz_snapshot import SnapshotVisualizer
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_SOURCE,
+    PC_XPASS_SOURCE,
     load_runtime_physical_xpass_visualization_table,
     physical_xpass_metric,
 )
@@ -34,6 +35,7 @@ from project_config import (
     PROJECT_ROOT,
     generate_run_id,
     get_benchmark_component_run_root,
+    get_pc_xpass_dir,
     get_runtime_physical_xpass_dir,
     resolve_named_component_run_id,
     write_run_metadata,
@@ -50,7 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--component-dir", default=None, help="Optional explicit benchmark component-run root override.")
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Render pc-xPass cache values instead of runtime physical xPass.")
     parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for visualization.")
+    parser.add_argument("--top10-xpass", "--top10_xpass", dest="top10_xpass", action="store_true", help="Use pc-xPass top10 columns for visualization.")
     parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for visualization.")
     parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
     add_component_selection_args(parser)
@@ -187,7 +191,9 @@ def main() -> None:
         requested_game_states=args.game_state,
     )
 
-    physical_cache_dir = args.physical_cache_dir or str(get_runtime_physical_xpass_dir("benchmark"))
+    physical_cache_dir = args.physical_cache_dir or str(
+        get_pc_xpass_dir("benchmark") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
+    )
     selected_physical_xpass_metric = physical_xpass_metric(args)
     component_names = list(component_selection.rendered_components)
     if bool(args.show_physical_xpass):
@@ -296,7 +302,7 @@ def main() -> None:
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
-        "physical_xpass_runtime_source": PHYSICAL_XPASS_SOURCE,
+        "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
