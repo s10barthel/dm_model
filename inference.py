@@ -24,8 +24,10 @@ from models.gnn import GNN
 from physical_pass_model import (
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
-    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+    PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+    PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
     attach_physical_xpass_cached_online_to_graphs,
@@ -214,6 +216,8 @@ def attach_physical_xpass_for_inference(
     graphs: list[Data],
     labels: torch.Tensor,
     model: GNN,
+    *,
+    post_action: bool = False,
 ) -> list[Data]:
     eps = float(model.args.get("physical_eps", 1e-4))
     floor = physical_xpass_floor(model.args)
@@ -258,6 +262,7 @@ def attach_physical_xpass_for_inference(
         metric=lookup_config["metric"] if use_inference_blend else physical_xpass_metric(model.args),
         missing_player_value=None if use_inference_blend else 0.5,
         require_ball_z=use_inference_blend and physical_xpass_ball_z_limit(model.args) is not None,
+        frame_scope=_physical_xpass_frame_scope_for_inference(post_action) if use_inference_blend else None,
     )
 
 
@@ -282,6 +287,10 @@ def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
         feature_root = Path(model.args.get("feature_dir", ".")).resolve().parent
 
     return str(get_physical_xpass_dir(feature_root))
+
+
+def _physical_xpass_frame_scope_for_inference(post_action: bool) -> str:
+    return PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE if bool(post_action) else PHYSICAL_XPASS_FRAME_SCOPE_ACTION
 
 
 def _record_physical_xpass_skipped_actions(
@@ -357,6 +366,8 @@ def filter_missing_physical_xpass_rows_for_inference(
     graphs: list[Data],
     labels: torch.Tensor,
     model: GNN,
+    *,
+    post_action: bool = False,
 ) -> tuple[list[Data], torch.Tensor]:
     if not requires_physical_xpass_for_inference(model.args):
         return graphs, labels
@@ -370,6 +381,7 @@ def filter_missing_physical_xpass_rows_for_inference(
     if use_inference_blend:
         setattr(match, "physical_xpass_lookup_policy", "dataset_event_frame_player_only")
     match_id = resolve_match_id(match)
+    frame_scope = _physical_xpass_frame_scope_for_inference(post_action) if use_inference_blend else None
     all_action_indexes = [int(label[config.LABEL_INDEX["action_index"]].item()) for label in labels]
     try:
         if not use_inference_blend:
@@ -378,7 +390,7 @@ def filter_missing_physical_xpass_rows_for_inference(
                 expected_source=physical_xpass_source(model.args),
                 expected_speed_aggregation=physical_xpass_speed_aggregation(model.args),
             )
-        physical_rows = load_physical_xpass_match(cache_dir, match_id)
+        physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
     except (FileNotFoundError, ValueError) as exc:
         _record_physical_xpass_skipped_actions(
             match,
@@ -402,7 +414,8 @@ def filter_missing_physical_xpass_rows_for_inference(
         action_index = int(label[config.LABEL_INDEX["action_index"]].item())
         if action_index not in available_action_indexes:
             skipped_action_indexes.append(action_index)
-            skip_reasons["missing_row"] = skip_reasons.get("missing_row", 0) + 1
+            reason_key = "missing_row" if frame_scope is None else f"missing_row_{frame_scope}"
+            skip_reasons[reason_key] = skip_reasons.get(reason_key, 0) + 1
             continue
         reason = _physical_xpass_row_skip_reason(
             physical_rows.loc[action_index],
@@ -555,9 +568,15 @@ def inference_gnn(
         feature_action_indices=feature_action_indices,
     )
     if requires_physical_xpass_for_inference(model.args):
-        graphs, labels = filter_missing_physical_xpass_rows_for_inference(match, graphs, labels, model)
+        graphs, labels = filter_missing_physical_xpass_rows_for_inference(
+            match,
+            graphs,
+            labels,
+            model,
+            post_action=post_action,
+        )
     if requires_physical_xpass_for_inference(model.args):
-        graphs = attach_physical_xpass_for_inference(match, graphs, labels, model)
+        graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
 
     graphs = Batch.from_data_list(graphs).to(device)
     graphs.x = graphs.x[:, : model.args["node_in_dim"]]

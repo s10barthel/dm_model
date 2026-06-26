@@ -55,6 +55,10 @@ from physical_pass_model import (
     PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
+    PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+    PHYSICAL_XPASS_FRAME_SCOPE_COLUMN,
+    PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+    PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_TOPMEAN,
@@ -87,6 +91,8 @@ from project_config import (
     get_action_label_dir,
     get_physical_xpass_dir,
     get_pc_xpass_dir,
+    get_post_action_graph_dir,
+    get_resolved_action_path,
     get_runtime_physical_xpass_dir,
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
@@ -280,7 +286,7 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
     return normalize_physical_xpass_metrics(metrics)
 
 
-def resolve_reference_label_dir(feature_run_id: str, feature_root: Path, args: argparse.Namespace) -> Path:
+def resolve_reference_label_context(feature_run_id: str, feature_root: Path, args: argparse.Namespace) -> tuple[Path, str, str]:
     return_types = infer_feature_run_return_types(feature_run_id)
     if args.return_type:
         return_type = str(args.return_type)
@@ -304,6 +310,11 @@ def resolve_reference_label_dir(feature_run_id: str, feature_root: Path, args: a
         raise FileNotFoundError(
             f"Reference labels not found at {label_dir}. Provide --return-type/--intended-receiver-mode for an existing label set."
         )
+    return label_dir, return_type, mode
+
+
+def resolve_reference_label_dir(feature_run_id: str, feature_root: Path, args: argparse.Namespace) -> Path:
+    label_dir, _return_type, _mode = resolve_reference_label_context(feature_run_id, feature_root, args)
     return label_dir
 
 
@@ -583,21 +594,40 @@ def process_match_task(task: dict[str, object]) -> dict[str, object]:
     return {"match_id": match_id, "computed": int(computed), "reused": reused, "written": True, "skip_reason": None, "reuse_stats": reuse_stats}
 
 
-def runtime_cache_items_from_graphs(match_id: str, graphs: list[Any], labels: torch.Tensor) -> list[dict[str, Any]]:
+def runtime_cache_items_from_graphs(
+    match_id: str,
+    graphs: list[Any],
+    labels: torch.Tensor,
+    *,
+    frame_scope: str | None = None,
+    state_frame_ids: list[int | None] | tuple[int | None, ...] | None = None,
+) -> list[dict[str, Any]]:
     if labels is None or not isinstance(labels, torch.Tensor) or labels.numel() == 0 or not graphs:
         return []
+    if state_frame_ids is not None and len(state_frame_ids) != len(graphs):
+        raise ValueError(
+            f"Runtime cache item for {match_id} has {len(state_frame_ids)} state_frame_ids and {len(graphs)} graphs."
+        )
     kept_graphs: list[Any] = []
     kept_labels: list[torch.Tensor] = []
-    for graph, label in zip(graphs, labels):
+    kept_state_frame_ids: list[int | None] = []
+    state_values = state_frame_ids if state_frame_ids is not None else [None] * len(graphs)
+    for graph, label, state_frame_id in zip(graphs, labels, state_values):
         if graph is None:
             continue
         if int(label[LABEL_INDEX["is_pass"]].item()) != 1:
             continue
         kept_graphs.append(graph)
         kept_labels.append(label)
+        kept_state_frame_ids.append(None if state_frame_id is None else int(state_frame_id))
     if not kept_labels:
         return []
-    return [{"match_id": str(match_id), "graphs": kept_graphs, "labels": torch.stack(kept_labels, axis=0)}]
+    item = {"match_id": str(match_id), "graphs": kept_graphs, "labels": torch.stack(kept_labels, axis=0)}
+    if frame_scope is not None:
+        item[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = str(frame_scope)
+    if any(value is not None for value in kept_state_frame_ids):
+        item[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = kept_state_frame_ids
+    return [item]
 
 
 def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[str, Any]:
@@ -928,6 +958,7 @@ def write_runtime_dataset_metadata(
         "source_inputs": source_inputs,
         "skipped": skipped,
         "stats": stats,
+        "frame_scopes": source_inputs.get("frame_scopes"),
         "dry_run": bool(getattr(args, "dry_run", False)),
         "physical_eps": float(args.physical_eps),
         "num_workers": args.num_workers,
@@ -1087,7 +1118,8 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
     feature_run_id = resolve_feature_run_id(None, required=True, allow_latest=True)
     feature_root = resolve_feature_root(feature_run_id)
     graph_dir = get_action_graph_dir(feature_root)
-    label_dir = resolve_reference_label_dir(str(feature_run_id), feature_root, args)
+    post_graph_dir = get_post_action_graph_dir(feature_root)
+    label_dir, return_type, intended_receiver_mode = resolve_reference_label_context(str(feature_run_id), feature_root, args)
     cache_dir = get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     feature_cache_dir = get_physical_xpass_dir(feature_root)
     reuse_cache_dir, implicit_reuse_cache_skipped_reason = resolve_runtime_sportec_reuse_cache(args, feature_cache_dir)
@@ -1127,14 +1159,51 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
 
     for match_id in tqdm(resolve_match_ids(args, graph_dir), desc="sportec runtime", unit="matches"):
         graph_path = graph_dir / f"{match_id}.pt"
+        post_graph_path = post_graph_dir / f"{match_id}.pt"
         label_path = label_dir / f"{match_id}.pt"
-        if not graph_path.exists() or not label_path.exists():
+        resolved_action_path = get_resolved_action_path(
+            match_id,
+            intended_receiver_mode=intended_receiver_mode,
+            root=feature_root,
+        )
+        if not graph_path.exists() or not post_graph_path.exists() or not label_path.exists() or not resolved_action_path.exists():
             skipped[str(match_id)] = "missing_graph_or_label"
             continue
         try:
             graphs = torch.load(graph_path, weights_only=False)
+            post_graphs = torch.load(post_graph_path, weights_only=False)
             labels = torch.load(label_path, weights_only=False)
-            items = runtime_cache_items_from_graphs(str(match_id), list(graphs), labels)
+            resolved_actions = pd.read_parquet(resolved_action_path)
+            action_indices = [int(label[LABEL_INDEX["action_index"]].item()) for label in labels]
+
+            def state_frame_ids(column: str) -> list[int | None]:
+                if column not in resolved_actions.columns:
+                    return [None] * len(action_indices)
+                values: list[int | None] = []
+                for action_index in action_indices:
+                    value = resolved_actions.at[action_index, column] if action_index in resolved_actions.index else None
+                    values.append(None if pd.isna(value) else int(value))
+                return values
+
+            items = []
+            items.extend(
+                runtime_cache_items_from_graphs(
+                    str(match_id),
+                    list(graphs),
+                    labels,
+                    frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                    state_frame_ids=state_frame_ids(PHYSICAL_XPASS_FRAME_SCOPE_ACTION),
+                )
+            )
+            items.extend(
+                runtime_cache_items_from_graphs(
+                    str(match_id),
+                    list(post_graphs),
+                    labels,
+                    frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                    state_frame_ids=state_frame_ids(PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE),
+                )
+            )
             if items:
                 pending_items.extend(items)
                 pending_match_ids.append(str(match_id))
@@ -1151,8 +1220,12 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
         source_inputs={
             "feature_run_id": str(feature_run_id),
             "graph_dir": str(graph_dir),
+            "post_graph_dir": str(post_graph_dir),
             "label_dir": str(label_dir),
+            "return_type": return_type,
+            "intended_receiver_mode": intended_receiver_mode,
             "split": args.split,
+            "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION, PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE],
             "match_window": int(args.sportec_runtime_match_window),
             "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
             "implicit_reuse_cache_dir": str(feature_cache_dir) if not args.reuse_cache_dir and feature_cache_dir.exists() else None,

@@ -60,6 +60,10 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_TOP_N,
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
+    PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+    PHYSICAL_XPASS_FRAME_SCOPE_COLUMN,
+    PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+    PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_SCHEMA_VERSION,
@@ -1140,6 +1144,7 @@ class PhysicalXPassTests(unittest.TestCase):
             "match_1",
             5,
             metric=PHYSICAL_XPASS_METRIC_TOPMEAN,
+            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
         )
         render_component.assert_called_once()
         self.assertEqual(render_component.call_args.kwargs["component_name"], "physical_xpass")
@@ -1218,6 +1223,53 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn("home_2", component.index)
         self.assertNotIn(PHYSICAL_XPASS_PASS_DISTANCE_COLUMN, component.index)
 
+    def test_load_physical_xpass_match_filters_duplicate_action_indexes_by_frame_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        "home_2": 0.31,
+                    },
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                        "home_2": 0.72,
+                    },
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+
+            action_rows = load_physical_xpass_match(cache_dir, "match_1", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            receive_rows = load_physical_xpass_match(cache_dir, "match_1", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE)
+            with self.assertRaisesRegex(ValueError, "frame_scope"):
+                load_physical_xpass_match(cache_dir, "match_1")
+
+        self.assertEqual(action_rows.index.tolist(), [5])
+        self.assertEqual(receive_rows.index.tolist(), [5])
+        self.assertAlmostEqual(float(action_rows.loc[5, "home_2"]), 0.31)
+        self.assertAlmostEqual(float(receive_rows.loc[5, "home_2"]), 0.72)
+
+    def test_load_physical_xpass_match_treats_legacy_unscoped_rows_as_action_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            pd.DataFrame([{"match_id": "match_1", "action_index": 5, "home_2": 0.44}]).to_parquet(
+                cache_dir / "matches" / "match_1.parquet",
+                index=False,
+            )
+
+            action_rows = load_physical_xpass_match(cache_dir, "match_1", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            receive_rows = load_physical_xpass_match(cache_dir, "match_1", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE)
+
+        self.assertEqual(action_rows.index.tolist(), [5])
+        self.assertTrue(receive_rows.empty)
+        self.assertAlmostEqual(float(action_rows.loc[5, "home_2"]), 0.44)
+
     def test_observed_pass_distance_uses_passer_and_intended_receiver(self) -> None:
         graph = make_graph()
         label = make_label(intent_index=1)
@@ -1261,6 +1313,71 @@ class PhysicalXPassTests(unittest.TestCase):
                 inference.inference_gnn(match, model, device="cpu", post_action=False)
 
         self.assertEqual(match.physical_xpass_skipped_actions["pass_success"]["skipped_count"], 2)
+
+    def test_pass_success_inference_uses_receive_scope_for_post_action_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        "home_2": 0.11,
+                    },
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                        "home_2": 0.91,
+                    },
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+            match = make_physical_inference_match([5], [1])
+            model = DummyBaselineInferenceModel(cache_dir)
+
+            graphs, labels = inference.filter_missing_physical_xpass_rows_for_inference(
+                match,
+                match.graph_features_0,
+                match.labels,
+                model,
+                post_action=True,
+            )
+            attached = inference.attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=True)
+
+        self.assertEqual(int(labels[0, LABEL_INDEX["action_index"]].item()), 5)
+        self.assertAlmostEqual(float(getattr(attached[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.91)
+
+    def test_pass_success_inference_does_not_use_action_scope_for_post_action_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 5,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        "home_2": 0.11,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+            match = make_physical_inference_match([5], [1])
+            model = DummyBaselineInferenceModel(cache_dir)
+
+            with self.assertRaises(inference.PhysicalXPassNoUsableRowsError):
+                inference.filter_missing_physical_xpass_rows_for_inference(
+                    match,
+                    match.graph_features_0,
+                    match.labels,
+                    model,
+                    post_action=True,
+                )
+
+        skipped = match.physical_xpass_skipped_actions["pass_success"]
+        self.assertEqual(skipped["skipped_count"], 1)
+        self.assertIn("missing_row_receive_frame_id", skipped["reason"])
 
     def test_max_player_cum_prob_default_ignores_other_teammates_and_uses_speed_max(self) -> None:
         calls = []
@@ -2284,6 +2401,105 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_nearest_opponent_distance_column("home_2")]), 20.0)
         self.assertAlmostEqual(float(rows.loc[5, PHYSICAL_XPASS_BALL_Z_COLUMN]), 0.0)
 
+    def test_runtime_physical_xpass_cache_writes_two_sportec_frame_scopes_for_same_action(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
+                return_value=[pd.Series({"home_2": 0.41}, dtype=float), pd.Series({"home_2": 0.82}, dtype=float)],
+            ) as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [
+                        {
+                            "match_id": "runtime_match",
+                            "graphs": [graph],
+                            "labels": labels,
+                            PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                            PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN: [100],
+                        },
+                        {
+                            "match_id": "runtime_match",
+                            "graphs": [graph],
+                            "labels": labels,
+                            PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                            PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN: [140],
+                        },
+                    ],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            action_rows = load_physical_xpass_match(cache_dir, "runtime_match", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            receive_rows = load_physical_xpass_match(cache_dir, "runtime_match", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE)
+
+        compute.assert_called_once()
+        self.assertEqual(stats["cache_written"], 2)
+        self.assertAlmostEqual(float(action_rows.loc[5, "home_2"]), 0.41)
+        self.assertAlmostEqual(float(receive_rows.loc[5, "home_2"]), 0.82)
+        self.assertEqual(int(action_rows.loc[5, PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN]), 100)
+        self.assertEqual(int(receive_rows.loc[5, PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN]), 140)
+
+    def test_runtime_physical_xpass_cache_preserves_legacy_action_row_and_adds_receive_scope(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            (cache_dir / "metadata.json").write_text(
+                json.dumps(
+                    physical_xpass_as_default_metadata(
+                        PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "runtime_match",
+                        "action_index": 5,
+                        "physical_state_hash": physical_state_hash(graph),
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 20.0,
+                        PHYSICAL_XPASS_BALL_Z_COLUMN: 0.0,
+                        physical_xpass_nearest_opponent_distance_column("home_2"): 20.0,
+                        "home_2": 0.33,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
+
+            with patch(
+                "physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults",
+                return_value=[pd.Series({"home_2": 0.88}, dtype=float)],
+            ) as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [
+                        {
+                            "match_id": "runtime_match",
+                            "graphs": [graph],
+                            "labels": labels,
+                            PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                            PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN: [140],
+                        }
+                    ],
+                    cache_dir=cache_dir,
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                )
+            action_rows = load_physical_xpass_match(cache_dir, "runtime_match", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            receive_rows = load_physical_xpass_match(cache_dir, "runtime_match", frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE)
+
+        compute.assert_called_once()
+        self.assertEqual(stats["cache_written"], 1)
+        self.assertAlmostEqual(float(action_rows.loc[5, "home_2"]), 0.33)
+        self.assertAlmostEqual(float(receive_rows.loc[5, "home_2"]), 0.88)
+
     def test_runtime_physical_xpass_cache_hash_mismatch_recomputes_and_replaces(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3285,7 +3501,11 @@ class PhysicalXPassTests(unittest.TestCase):
             with patch.object(generate_physical_xpass, "resolve_feature_run_id", return_value="feature_run"):
                 with patch.object(generate_physical_xpass, "resolve_feature_root", return_value=feature_root):
                     with patch.object(generate_physical_xpass, "get_action_graph_dir", return_value=graph_dir):
-                        with patch.object(generate_physical_xpass, "resolve_reference_label_dir", return_value=label_dir):
+                        with patch.object(
+                            generate_physical_xpass,
+                            "resolve_reference_label_context",
+                            return_value=(label_dir, "disc_0.7", "model"),
+                        ):
                             with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=cache_dir):
                                 with patch.object(generate_physical_xpass, "get_physical_xpass_dir", return_value=feature_cache_dir):
                                     with patch.object(generate_physical_xpass, "resolve_match_ids", return_value=[]):

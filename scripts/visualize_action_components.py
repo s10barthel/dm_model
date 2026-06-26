@@ -31,6 +31,7 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from physical_pass_model import (
+    PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
@@ -577,6 +578,7 @@ def render_action_components(
             resolve_match_id(match),
             action_index,
             metric=physical_xpass_metric_name,
+            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
         )
 
     if "pass_score" in rendered_components:

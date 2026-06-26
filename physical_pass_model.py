@@ -58,6 +58,10 @@ PHYSICAL_XPASS_PASS_DISTANCE_COLUMN = "pass_distance"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX = "__distance_to_nearest_opponent"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_COLUMN = "distance_to_nearest_opponent"
 PHYSICAL_XPASS_BALL_Z_COLUMN = "ball_z"
+PHYSICAL_XPASS_FRAME_SCOPE_COLUMN = "frame_scope"
+PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN = "state_frame_id"
+PHYSICAL_XPASS_FRAME_SCOPE_ACTION = "frame_id"
+PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE = "receive_frame_id"
 PHYSICAL_XPASS_METRIC_NOISE_KERNEL = "noise_kernel_xpass"
 PHYSICAL_XPASS_METRIC_MAX = "max_xpass"
 PHYSICAL_XPASS_METRIC_TOPMEAN = "topmean_xpass"
@@ -114,6 +118,8 @@ PHYSICAL_XPASS_ID_COLUMNS = {
     "action_index",
     "action_id",
     "physical_state_hash",
+    PHYSICAL_XPASS_FRAME_SCOPE_COLUMN,
+    PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN,
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_COLUMN,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
@@ -2762,7 +2768,38 @@ def compute_graph_physical_xpass_for_source(
     )
 
 
-def load_physical_xpass_match(cache_dir: str | Path, match_id: str) -> pd.DataFrame:
+def normalize_physical_xpass_frame_scope(frame_scope: str | None) -> str | None:
+    if frame_scope is None:
+        return None
+    scope = str(frame_scope)
+    if scope not in {PHYSICAL_XPASS_FRAME_SCOPE_ACTION, PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE}:
+        raise ValueError(
+            f"Unsupported physical xPass frame_scope={frame_scope!r}. "
+            f"Expected {PHYSICAL_XPASS_FRAME_SCOPE_ACTION!r} or {PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE!r}."
+        )
+    return scope
+
+
+def _fill_default_frame_scope(frame: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.copy()
+    if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN not in frame.columns:
+        frame[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = PHYSICAL_XPASS_FRAME_SCOPE_ACTION
+    else:
+        frame[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = (
+            frame[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
+            .fillna(PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            .replace("", PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+            .astype(str)
+        )
+    return frame
+
+
+def load_physical_xpass_match(
+    cache_dir: str | Path,
+    match_id: str,
+    *,
+    frame_scope: str | None = None,
+) -> pd.DataFrame:
     cache_root = Path(cache_dir)
     direct_path = cache_root / "matches" / f"{match_id}.parquet"
     path = direct_path if cache_root.name == "physical_xpass" or direct_path.exists() else get_physical_xpass_match_path(str(match_id), root=cache_root)
@@ -2776,9 +2813,20 @@ def load_physical_xpass_match(cache_dir: str | Path, match_id: str) -> pd.DataFr
         raise ValueError(f"Physical xPass sidecar {path} is missing required column 'action_index'.")
     frame = frame.copy()
     frame["action_index"] = frame["action_index"].astype(int)
+    requested_scope = normalize_physical_xpass_frame_scope(frame_scope)
+    if requested_scope is not None:
+        frame = _fill_default_frame_scope(frame)
+        frame = frame.loc[frame[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN].astype(str).eq(requested_scope)].copy()
+    elif PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns:
+        frame = _fill_default_frame_scope(frame)
     if frame["action_index"].duplicated().any():
         duplicates = frame.loc[frame["action_index"].duplicated(), "action_index"].head(5).tolist()
-        raise ValueError(f"Physical xPass sidecar {path} contains duplicate action_index rows, e.g. {duplicates}.")
+        scope_hint = (
+            " Provide frame_scope='frame_id' or frame_scope='receive_frame_id' for scoped Sportec runtime caches."
+            if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
+            else ""
+        )
+        raise ValueError(f"Physical xPass sidecar {path} contains duplicate action_index rows, e.g. {duplicates}.{scope_hint}")
     return frame.set_index("action_index", drop=False)
 
 
@@ -2788,10 +2836,12 @@ def load_physical_xpass_component(
     action_index: int,
     *,
     metric: str | None = None,
+    frame_scope: str | None = None,
 ) -> pd.Series:
-    frame = load_physical_xpass_match(cache_dir, match_id)
+    frame = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
     if int(action_index) not in frame.index:
-        raise KeyError(f"Physical xPass sidecar has no row for match_id={match_id}, action_index={int(action_index)}.")
+        scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
+        raise KeyError(f"Physical xPass sidecar has no row for match_id={match_id}, action_index={int(action_index)}{scope_text}.")
     row = frame.loc[int(action_index)]
     selected_metric = normalize_physical_xpass_metric(metric)
     suffix = PHYSICAL_XPASS_METRIC_SUFFIXES[selected_metric]
@@ -2849,14 +2899,22 @@ def load_runtime_physical_xpass_visualization_component(
     action_index: int,
     *,
     metric: str | None = None,
+    frame_scope: str | None = None,
 ) -> pd.Series:
     selected_metric = normalize_physical_xpass_metric(metric)
     try:
-        series = load_physical_xpass_component(cache_dir, match_id, action_index, metric=selected_metric)
+        series = load_physical_xpass_component(
+            cache_dir,
+            match_id,
+            action_index,
+            metric=selected_metric,
+            frame_scope=frame_scope,
+        )
     except (FileNotFoundError, KeyError, ValueError) as exc:
+        scope_text = "" if frame_scope is None else f", frame_scope={frame_scope!r}"
         raise type(exc)(
             f"Could not load runtime physical xPass visualization row for "
-            f"match_id={match_id}, action_index={int(action_index)}, metric={selected_metric!r} "
+            f"match_id={match_id}, action_index={int(action_index)}{scope_text}, metric={selected_metric!r} "
             f"from {Path(cache_dir)}. Run scripts/generate_physical_xpass.py first. {exc}"
         ) from exc
     if series.empty:
@@ -2874,6 +2932,7 @@ def load_runtime_physical_xpass_visualization_table(
     action_indices: list[int] | tuple[int, ...],
     *,
     metric: str | None = None,
+    frame_scope: str | None = None,
 ) -> pd.DataFrame:
     rows = [
         load_runtime_physical_xpass_visualization_component(
@@ -2881,6 +2940,7 @@ def load_runtime_physical_xpass_visualization_table(
             match_id,
             int(action_index),
             metric=metric,
+            frame_scope=frame_scope,
         )
         for action_index in action_indices
     ]
@@ -3124,15 +3184,42 @@ def _write_runtime_physical_xpass_rows(
     if output_path.exists():
         existing = pd.read_parquet(output_path)
         if "action_index" in existing.columns:
-            rows = pd.concat(
-                [
-                    existing.loc[~existing["action_index"].astype(int).isin(rows["action_index"].astype(int))],
-                    rows,
-                ],
-                ignore_index=True,
-                sort=False,
+            uses_scope = (
+                PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in existing.columns
+                or PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in rows.columns
             )
-    rows = rows.sort_values("action_index").reset_index(drop=True)
+            if uses_scope:
+                existing = _fill_default_frame_scope(existing)
+                rows = _fill_default_frame_scope(rows)
+                existing_keys = set(
+                    zip(
+                        rows["action_index"].astype(int).tolist(),
+                        rows[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN].astype(str).tolist(),
+                    )
+                )
+                keep_mask = [
+                    (int(action_index), str(frame_scope)) not in existing_keys
+                    for action_index, frame_scope in zip(
+                        existing["action_index"].astype(int),
+                        existing[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN].astype(str),
+                    )
+                ]
+                rows = pd.concat([existing.loc[keep_mask], rows], ignore_index=True, sort=False)
+            else:
+                rows = pd.concat(
+                    [
+                        existing.loc[~existing["action_index"].astype(int).isin(rows["action_index"].astype(int))],
+                        rows,
+                    ],
+                    ignore_index=True,
+                    sort=False,
+                )
+    if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in rows.columns:
+        rows = _fill_default_frame_scope(rows)
+        sort_columns = ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
+    else:
+        sort_columns = ["action_index"]
+    rows = rows.sort_values(sort_columns).reset_index(drop=True)
     tmp_path = output_path.with_name(f".{output_path.stem}.tmp.parquet")
     rows.to_parquet(tmp_path, index=False)
     tmp_path.replace(output_path)
@@ -3480,6 +3567,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: float(item.get(PHYSICAL_XPASS_PASS_DISTANCE_COLUMN, float("nan"))),
             PHYSICAL_XPASS_BALL_Z_COLUMN: float(item.get(PHYSICAL_XPASS_BALL_Z_COLUMN, float("nan"))),
         }
+        if item.get(PHYSICAL_XPASS_FRAME_SCOPE_COLUMN) is not None:
+            row[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = str(item[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN])
+        if item.get(PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN) is not None:
+            row[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = item[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN]
         row.update({str(player_id): float(value) for player_id, value in probs.items()})
         row.update(graph_nearest_opponent_distance_row_values(item["graph"]))
         rows.append(row)
@@ -3618,9 +3709,9 @@ def prewarm_physical_xpass_runtime_cache(
     match_stats_by_id: dict[str, dict[str, int]] = {}
     misses: list[dict[str, Any]] = []
     copied_rows: list[dict[str, Any]] = []
-    seen_miss_keys: set[tuple[str, int]] = set()
-    cache_by_match: dict[str, pd.DataFrame | None] = {}
-    reuse_by_match: dict[str, pd.DataFrame | None] = {}
+    seen_miss_keys: set[tuple[str, int, str | None]] = set()
+    cache_by_match_scope: dict[tuple[str, str | None], pd.DataFrame | None] = {}
+    reuse_by_match_scope: dict[tuple[str, str | None], pd.DataFrame | None] = {}
 
     for item in items:
         match_id = str(item["match_id"])
@@ -3632,20 +3723,30 @@ def prewarm_physical_xpass_runtime_cache(
             labels = torch.as_tensor(labels, dtype=torch.float32)
         if len(graphs) != int(labels.shape[0]):
             raise ValueError(f"Runtime physical xPass item for {match_id} has {len(graphs)} graphs and {int(labels.shape[0])} labels.")
+        frame_scope = normalize_physical_xpass_frame_scope(item.get(PHYSICAL_XPASS_FRAME_SCOPE_COLUMN))
+        state_frame_ids = item.get(PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN)
+        if state_frame_ids is None:
+            state_frame_ids = [None] * len(graphs)
+        elif len(state_frame_ids) != len(graphs):
+            raise ValueError(
+                f"Runtime physical xPass item for {match_id} has {len(state_frame_ids)} state frame ids "
+                f"and {len(graphs)} graphs."
+            )
 
         scan_start = time.perf_counter()
-        if match_id not in cache_by_match:
+        cache_key = (match_id, frame_scope)
+        if cache_key not in cache_by_match_scope:
             try:
-                cache_by_match[match_id] = load_physical_xpass_match(cache_dir, match_id)
+                cache_by_match_scope[cache_key] = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
             except FileNotFoundError:
-                cache_by_match[match_id] = None
-        cached_rows = cache_by_match[match_id]
-        if reuse_cache_dir is not None and match_id not in reuse_by_match:
+                cache_by_match_scope[cache_key] = None
+        cached_rows = cache_by_match_scope[cache_key]
+        if reuse_cache_dir is not None and cache_key not in reuse_by_match_scope:
             try:
-                reuse_by_match[match_id] = load_physical_xpass_match(reuse_cache_dir, match_id)
+                reuse_by_match_scope[cache_key] = load_physical_xpass_match(reuse_cache_dir, match_id, frame_scope=frame_scope)
             except FileNotFoundError:
-                reuse_by_match[match_id] = None
-        reuse_rows = reuse_by_match.get(match_id)
+                reuse_by_match_scope[cache_key] = None
+        reuse_rows = reuse_by_match_scope.get(cache_key)
         match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
         row_count = int(labels.shape[0])
         try:
@@ -3657,7 +3758,7 @@ def prewarm_physical_xpass_runtime_cache(
         match_stats["rows_scanned"] += row_count
         match_stats["pass_rows"] += pass_count
 
-        for graph, label in zip(graphs, labels):
+        for graph, label, state_frame_id in zip(graphs, labels, state_frame_ids):
             action_index = int(label[LABEL_INDEX["action_index"]].item())
             state_hash = physical_state_hash(graph)
             pass_distance = observed_pass_distance(graph, label)
@@ -3685,6 +3786,10 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
                     copied_row["physical_state_hash"] = state_hash
+                    if frame_scope is not None:
+                        copied_row[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = frame_scope
+                    if state_frame_id is not None:
+                        copied_row[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = state_frame_id
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
@@ -3713,6 +3818,10 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
                     copied_row["physical_state_hash"] = state_hash
+                    if frame_scope is not None:
+                        copied_row[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = frame_scope
+                    if state_frame_id is not None:
+                        copied_row[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = state_frame_id
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
@@ -3737,20 +3846,23 @@ def prewarm_physical_xpass_runtime_cache(
 
             stats["cache_misses"] = int(stats["cache_misses"]) + 1
             match_stats["cache_misses"] += 1
-            miss_key = (match_id, action_index)
+            miss_key = (match_id, action_index, frame_scope)
             if miss_key in seen_miss_keys:
                 continue
             seen_miss_keys.add(miss_key)
-            misses.append(
-                {
-                    "match_id": match_id,
-                    "action_index": action_index,
-                    "physical_state_hash": state_hash,
-                    PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: pass_distance,
-                    PHYSICAL_XPASS_BALL_Z_COLUMN: ball_z,
-                    "graph": graph,
-                }
-            )
+            miss = {
+                "match_id": match_id,
+                "action_index": action_index,
+                "physical_state_hash": state_hash,
+                PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: pass_distance,
+                PHYSICAL_XPASS_BALL_Z_COLUMN: ball_z,
+                "graph": graph,
+            }
+            if frame_scope is not None:
+                miss[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = frame_scope
+            if state_frame_id is not None:
+                miss[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = state_frame_id
+            misses.append(miss)
         scan_elapsed = time.perf_counter() - scan_start
         stats["cache_scan_seconds"] = float(stats.get("cache_scan_seconds", 0.0) or 0.0) + scan_elapsed
         match_stats["cache_scan_seconds"] = float(match_stats.get("cache_scan_seconds", 0.0) or 0.0) + scan_elapsed
@@ -3777,7 +3889,12 @@ def prewarm_physical_xpass_runtime_cache(
             copied_by_match.setdefault(str(row["match_id"]), []).append(row)
         for match_id, match_rows in copied_by_match.items():
             frame = pd.DataFrame(match_rows)
-            frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+            dedupe_columns = (
+                ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
+                if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
+                else ["action_index"]
+            )
+            frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
             write_start = time.perf_counter()
             _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
             write_elapsed = time.perf_counter() - write_start
@@ -3829,7 +3946,12 @@ def prewarm_physical_xpass_runtime_cache(
                 rows_by_match.setdefault(str(row["match_id"]), []).append(row)
             for match_id, match_rows in rows_by_match.items():
                 frame = pd.DataFrame(match_rows)
-                frame = frame.drop_duplicates(subset=["action_index"], keep="last")
+                dedupe_columns = (
+                    ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
+                    if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
+                    else ["action_index"]
+                )
+                frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
                 write_start = time.perf_counter()
                 _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
                 write_elapsed = time.perf_counter() - write_start
@@ -3972,13 +4094,15 @@ def attach_physical_xpass_to_graph(
     metric: str | None = None,
     missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
     require_ball_z: bool = False,
+    frame_scope: str | None = None,
 ) -> Data:
     if physical_rows is None:
         raise ValueError("physical_rows must be provided when attaching physical xPass.")
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
     if action_index not in physical_rows.index:
+        scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
         raise FileNotFoundError(
-            f"Physical xPass sidecar for match {match_id} has no row for action_index={action_index}. "
+            f"Physical xPass sidecar for match {match_id} has no row for action_index={action_index}{scope_text}. "
             "Run scripts/generate_physical_xpass.py for the full feature run."
         )
 
@@ -4064,8 +4188,9 @@ def attach_physical_xpass_to_graphs(
     require_observed_target: bool = True,
     metric: str | None = None,
     require_ball_z: bool = False,
+    frame_scope: str | None = None,
 ) -> list[Data]:
-    rows = load_physical_xpass_match(cache_dir, match_id)
+    rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
     attached: list[Data] = []
     for graph, label in zip(graphs, labels):
         attached.append(
@@ -4079,6 +4204,7 @@ def attach_physical_xpass_to_graphs(
                 require_observed_target=require_observed_target,
                 metric=metric,
                 require_ball_z=require_ball_z,
+                frame_scope=frame_scope,
             )
         )
     return attached
@@ -4096,14 +4222,16 @@ def attach_physical_xpass_read_only_to_graphs(
     metric: str | None = None,
     missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
     require_ball_z: bool = False,
+    frame_scope: str | None = None,
 ) -> list[Data]:
-    rows = load_physical_xpass_match(cache_dir, match_id)
+    rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
     attached: list[Data] = []
     for graph, label in zip(graphs, labels):
         action_index = int(label[LABEL_INDEX["action_index"]].item())
         if action_index not in rows.index:
+            scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
             raise FileNotFoundError(
-                f"Physical xPass runtime cache for match {match_id} has no row for action_index={action_index}. "
+                f"Physical xPass runtime cache for match {match_id} has no row for action_index={action_index}{scope_text}. "
                 "Runtime prewarm should have written this row before inference."
             )
         row = rows.loc[action_index]
@@ -4119,6 +4247,7 @@ def attach_physical_xpass_read_only_to_graphs(
                 metric=metric,
                 missing_player_value=missing_player_value,
                 require_ball_z=require_ball_z,
+                frame_scope=frame_scope,
             )
         )
     return attached
