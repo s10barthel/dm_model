@@ -36,6 +36,7 @@ COMPONENT_COLUMNS = [
     "action_intent",
     "pass_intent",
     "pass_success",
+    "pass_height",
     "outcome_scoring_success",
     "outcome_scoring_failure",
     "outcome_conceding_success",
@@ -660,6 +661,10 @@ def infer_hawkeye_components(
         pass_success, _ = inference_gnn(situation, model_specs["pass_success"], device=device, post_action=False)
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
+    if "pass_height" in model_specs:
+        pass_height, _ = inference_gnn(situation, model_specs["pass_height"], device=device, post_action=False)
+    else:
+        pass_height = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         situation,
         model_specs["outcome_scoring"],
@@ -676,6 +681,7 @@ def infer_hawkeye_components(
     components["action_intent"] = action_intent
     components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
+    components["pass_height"] = pass_height
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
     components["outcome_conceding_success"] = conceding_success
@@ -929,6 +935,7 @@ def load_hawkeye_models(
     outcome_scoring_model_id: str,
     outcome_conceding_model_id: str,
     device: str,
+    pass_height_model_id: str | None = None,
 ) -> dict[str, Any]:
     from models.utils import load_model
 
@@ -939,6 +946,8 @@ def load_hawkeye_models(
         "outcome_scoring": load_model(outcome_scoring_model_id, device),
         "outcome_conceding": load_model(outcome_conceding_model_id, device),
     }
+    if pass_height_model_id:
+        model_specs["pass_height"] = load_model(pass_height_model_id, device)
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")

@@ -125,6 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--pass-height-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     add_component_selection_args(parser, include_intended_recipient=True)
@@ -537,6 +538,7 @@ def render_action_components(
         "pass_intent",
         "intended_recipient",
         "pass_success",
+        "pass_height",
         "outcome_scoring_success",
         "outcome_scoring_failure",
         "outcome_conceding_success",
@@ -688,11 +690,12 @@ def main() -> None:
         ),
     )
     explicit_model_ids = {
-        "action_intent": args.action_intent_model_id,
-        "pass_intent": args.pass_intent_model_id,
-        "pass_success": args.pass_success_model_id,
-        "outcome_scoring": args.outcome_scoring_model_id,
-        "outcome_conceding": args.outcome_conceding_model_id,
+        "action_intent": getattr(args, "action_intent_model_id", None),
+        "pass_intent": getattr(args, "pass_intent_model_id", None),
+        "pass_success": getattr(args, "pass_success_model_id", None),
+        "pass_height": getattr(args, "pass_height_model_id", None),
+        "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
+        "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
     }
     required_model_tasks = [
         task
@@ -700,6 +703,7 @@ def main() -> None:
             "action_intent",
             "pass_intent",
             "pass_success",
+            "pass_height",
             "outcome_scoring",
             "outcome_conceding",
         ]
@@ -886,6 +890,7 @@ def main() -> None:
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],

@@ -19,6 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--pass-height-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--diagnostic-feature-run-id")
@@ -63,6 +64,11 @@ def main() -> None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
     if success_intent_model_id:
         model_ids.insert(3, str(success_intent_model_id))
+    pass_height_model_id = getattr(args, "pass_height_model_id", None)
+    if not pass_height_model_id and bundle is not None:
+        pass_height_model_id = bundle.get("model_ids", {}).get("pass_height")
+    if pass_height_model_id:
+        model_ids.insert(4 if success_intent_model_id else 3, str(pass_height_model_id))
 
     for model_id in model_ids:
         command = [python, "test.py", "--model_id", model_id, "--device", args.device]

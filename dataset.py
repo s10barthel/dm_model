@@ -29,6 +29,8 @@ OUTCOME_DIAGNOSTIC_TASKS = {
     "dest_conceding",
 }
 DIAGNOSTIC_IDENTITY_COLUMNS = ("action_index", "is_pass", "is_dribble", "is_shot", "success")
+PASS_HEIGHT_LABEL_COLUMNS = ("pass_max_ball_z", "pass_high")
+PRE_PASS_HEIGHT_LABEL_WIDTH = len(LABEL_COLUMNS) - len(PASS_HEIGHT_LABEL_COLUMNS)
 
 
 def _zero_extended_node_features(graph: Data) -> None:
@@ -70,6 +72,12 @@ def _has_label_columns(labels: torch.Tensor, columns: tuple[str, ...]) -> bool:
     return labels.shape[1] > max(LABEL_INDEX[column] for column in columns)
 
 
+def _has_goal_next10_diagnostic_columns(labels: torch.Tensor) -> bool:
+    if labels.shape[1] == PRE_PASS_HEIGHT_LABEL_WIDTH:
+        return False
+    return _has_label_columns(labels, GOAL_NEXT10_DIAGNOSTIC_COLUMNS)
+
+
 def _normalize_label_width(labels: torch.Tensor) -> torch.Tensor:
     expected_width = len(LABEL_COLUMNS)
     if labels.shape[1] == expected_width:
@@ -98,7 +106,7 @@ def _validate_diagnostic_labels(match_id: str, selected_labels: torch.Tensor, di
 
 def _copy_goal_next10_diagnostics(selected_labels: torch.Tensor, diagnostic_labels: torch.Tensor) -> torch.Tensor:
     labels = _normalize_label_width(selected_labels)
-    if _has_label_columns(diagnostic_labels, GOAL_NEXT10_DIAGNOSTIC_COLUMNS):
+    if _has_goal_next10_diagnostic_columns(diagnostic_labels):
         source_score = diagnostic_labels[:, LABEL_INDEX["scores_goal_next10"]]
         source_concede = diagnostic_labels[:, LABEL_INDEX["concedes_goal_next10"]]
     elif _has_label_columns(diagnostic_labels, ("scores", "concedes")):
@@ -206,8 +214,13 @@ class ActionDataset(Dataset):
                     f"feature_label_length_mismatch:{len(match_features)}!={int(match_labels.shape[0])}"
                 )
                 continue
+            if task == "pass_height" and not _has_label_columns(match_labels, PASS_HEIGHT_LABEL_COLUMNS):
+                raise ValueError(
+                    f"Labels for match {match_id} do not contain pass-height columns. "
+                    "Regenerate or backfill this feature run with pass-height labels before training task='pass_height'."
+                )
 
-            has_diagnostics = _has_label_columns(match_labels, GOAL_NEXT10_DIAGNOSTIC_COLUMNS)
+            has_diagnostics = _has_goal_next10_diagnostic_columns(match_labels)
             if not has_diagnostics:
                 if diagnostic_label_root is None:
                     if self.require_goal_next10_diagnostics:
@@ -383,10 +396,17 @@ class ActionDataset(Dataset):
                     config.NODE_FEATURE_IS_POSSESSOR,
                 )
 
-            if task == "pass_success":
+            if task in {"pass_success", "pass_height"}:
                 invalid_reason = pass_success_observed_target_invalid_reason(graph, graph_labels)
                 if invalid_reason is not None:
-                    _increment_count(self.skipped_rows, f"invalid_pass_success_target:{invalid_reason}")
+                    _increment_count(self.skipped_rows, f"invalid_{task}_target:{invalid_reason}")
+                    continue
+
+            if task == "pass_height":
+                pass_high = graph_labels[LABEL_INDEX["pass_high"]]
+                pass_max_ball_z = graph_labels[LABEL_INDEX["pass_max_ball_z"]]
+                if not bool(torch.isfinite(pass_high).item()) or not bool(torch.isfinite(pass_max_ball_z).item()):
+                    _increment_count(self.skipped_rows, "invalid_pass_height_target:nonfinite_height")
                     continue
 
             if sparsify == "distance":

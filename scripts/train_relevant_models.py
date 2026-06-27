@@ -112,6 +112,12 @@ MODEL_TOGGLE_SPECS = (
         "Skip training the pass_success checkpoint.",
     ),
     (
+        "pass_height",
+        "pass-height",
+        "Train the pass_height checkpoint.",
+        "Skip training the pass_height checkpoint.",
+    ),
+    (
         "outcome_scoring",
         "outcome-scoring",
         "Train the outcome_scoring checkpoint.",
@@ -135,6 +141,7 @@ MODEL_TOGGLE_DEFAULTS = {
     "pass_intent": True,
     "success_intent": True,
     "pass_success": True,
+    "pass_height": False,
     "outcome_scoring": True,
     "outcome_conceding": True,
     "failure_receiver": False,
@@ -144,6 +151,7 @@ BATCH_SIZE_DEFAULTS = {
     "pass_intent": 256,
     "success_intent": 256,
     "pass_success": 512,
+    "pass_height": 512,
     "outcome_scoring": 512,
     "outcome_conceding": 512,
     "failure_receiver": 256,
@@ -152,6 +160,7 @@ MODE_DEPENDENT_TASKS = {
     "action_intent",
     "pass_intent",
     "pass_success",
+    "pass_height",
     "outcome_scoring",
     "outcome_conceding",
     "failure_receiver",
@@ -161,6 +170,7 @@ RETAINED_BUNDLE_TASKS = (
     "action_intent",
     "pass_intent",
     "pass_success",
+    "pass_height",
     "outcome_scoring",
     "outcome_conceding",
 )
@@ -377,13 +387,27 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
         for task, option_name, _, _ in MODEL_TOGGLE_SPECS
         if getattr(args, task) is not None
     ]
-    if args.success_intent_only:
-        if args.pass_intent_model_id:
+    if args.success_intent_only or getattr(args, "only_pass_height", False):
+        only_flag = "--success-intent-only" if args.success_intent_only else "--only-pass-height"
+        only_task = "success_intent" if args.success_intent_only else "pass_height"
+        if args.success_intent_only and getattr(args, "pass_intent_model_id", None):
             raise ValueError("--pass-intent-model-id requires --pass-success and cannot be combined with --success-intent-only.")
+        if args.success_intent_only and getattr(args, "pass_height_ipw_model_id", None):
+            raise ValueError("--pass-height-ipw-model-id requires --pass-height and cannot be combined with --success-intent-only.")
         if explicit_toggles:
             toggles = ", ".join(flag for _, flag in explicit_toggles)
-            raise ValueError(f"--success-intent-only cannot be combined with explicit per-model toggles: {toggles}.")
-        return OrderedDict((task, task == "success_intent") for task, _, _, _ in MODEL_TOGGLE_SPECS)
+            raise ValueError(f"{only_flag} cannot be combined with explicit per-model toggles: {toggles}.")
+        if args.success_intent_only and getattr(args, "only_pass_height", False):
+            raise ValueError("--success-intent-only cannot be combined with --only-pass-height.")
+        if getattr(args, "only_pass_height", False):
+            if getattr(args, "pass_intent_model_id", None):
+                raise ValueError("--pass-intent-model-id requires --pass-success and cannot be combined with --only-pass-height.")
+            pass_height_ipw = bool(getattr(args, "pass_height_ipw", False))
+            if getattr(args, "pass_height_ipw_model_id", None) and not pass_height_ipw:
+                raise ValueError("--pass-height-ipw-model-id requires --pass-height-ipw.")
+            if pass_height_ipw and not getattr(args, "pass_height_ipw_model_id", None):
+                raise ValueError("--only-pass-height --pass-height-ipw requires --pass-height-ipw-model-id.")
+        return OrderedDict((task, task == only_task) for task, _, _, _ in MODEL_TOGGLE_SPECS)
 
     enabled_tasks = OrderedDict(
         (task, MODEL_TOGGLE_DEFAULTS[task] if getattr(args, task) is None else bool(getattr(args, task)))
@@ -392,19 +416,37 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
     if not any(enabled_tasks.values()):
         raise ValueError("At least one model must be enabled.")
     pass_success_ipw = bool(getattr(args, "pass_success_ipw", True))
-    if args.pass_intent_model_id and not pass_success_ipw:
+    pass_height_ipw = bool(getattr(args, "pass_height_ipw", False))
+    pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
+    pass_height_ipw_model_id = getattr(args, "pass_height_ipw_model_id", None)
+    if pass_intent_model_id and not pass_success_ipw:
         raise ValueError("--pass-intent-model-id requires --pass-success-ipw.")
-    if args.pass_intent_model_id and not enabled_tasks["pass_success"]:
+    if pass_intent_model_id and not enabled_tasks["pass_success"]:
         raise ValueError("--pass-intent-model-id requires --pass-success.")
-    if args.pass_intent_model_id and enabled_tasks["pass_intent"]:
+    if pass_intent_model_id and enabled_tasks["pass_intent"]:
         raise ValueError("--pass-intent-model-id requires --no-pass-intent.")
     if (
         pass_success_ipw
         and enabled_tasks["pass_success"]
         and not enabled_tasks["pass_intent"]
-        and not args.pass_intent_model_id
+        and not pass_intent_model_id
     ):
         raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
+    if pass_height_ipw_model_id and not pass_height_ipw:
+        raise ValueError("--pass-height-ipw-model-id requires --pass-height-ipw.")
+    if pass_height_ipw_model_id and not enabled_tasks["pass_height"]:
+        raise ValueError("--pass-height-ipw-model-id requires --pass-height.")
+    if pass_height_ipw_model_id and enabled_tasks["pass_intent"]:
+        raise ValueError("--pass-height-ipw-model-id requires --no-pass-intent.")
+    if (
+        pass_height_ipw
+        and enabled_tasks["pass_height"]
+        and not enabled_tasks["pass_intent"]
+        and not pass_height_ipw_model_id
+    ):
+        raise ValueError("--pass-height-ipw requires --pass-intent or --pass-height-ipw-model-id.")
+    if pass_intent_model_id and pass_height_ipw_model_id and str(pass_intent_model_id) != str(pass_height_ipw_model_id):
+        raise ValueError("--pass-intent-model-id and --pass-height-ipw-model-id must reference the same checkpoint.")
     if args.outcome_scoring_trial is not None and not enabled_tasks["outcome_scoring"]:
         raise ValueError("--outcome-scoring-trial requires --outcome-scoring.")
     if args.outcome_conceding_trial is not None and not enabled_tasks["outcome_conceding"]:
@@ -414,7 +456,9 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
 
 def source_model_ids(args: argparse.Namespace) -> dict[str, str]:
     pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
-    return {"pass_intent": str(pass_intent_model_id)} if pass_intent_model_id else {}
+    pass_height_ipw_model_id = getattr(args, "pass_height_ipw_model_id", None)
+    model_id = pass_intent_model_id or pass_height_ipw_model_id
+    return {"pass_intent": str(model_id)} if model_id else {}
 
 
 def resolve_diagnostic_label_dir(
@@ -499,15 +543,19 @@ def validate_external_pass_intent_model_id(
     feature_flags: dict[str, bool],
     resolved_feature_run_id: str,
     runtime_schema: dict[str, int | bool] | None = None,
+    *,
+    model_id_attr: str = "pass_intent_model_id",
+    option_name: str = "--pass-intent-model-id",
+    runtime_context: str = "pass_success",
 ) -> str | None:
     del feature_flags
-    pass_intent_model_id = getattr(args, "pass_intent_model_id", None)
+    pass_intent_model_id = getattr(args, model_id_attr, None)
     if not pass_intent_model_id:
         return None
 
     task, _ = parse_model_id(str(pass_intent_model_id))
     if task != "pass_intent":
-        raise ValueError(f"--pass-intent-model-id must reference a pass_intent checkpoint, got {pass_intent_model_id!r}.")
+        raise ValueError(f"{option_name} must reference a pass_intent checkpoint, got {pass_intent_model_id!r}.")
 
     record = get_model_record(str(pass_intent_model_id))
     mismatches: list[str] = []
@@ -527,10 +575,10 @@ def validate_external_pass_intent_model_id(
         if int(runtime_node_dim) < int(required_node_dim):
             mismatches.append(
                 f"requires node_in_dim={int(required_node_dim)}, "
-                f"but pass_success runtime provides node_in_dim={int(runtime_node_dim)}"
+                f"but {runtime_context} runtime provides node_in_dim={int(runtime_node_dim)}"
             )
     elif required_node_dim is not None:
-        mismatches.append(f"requires node_in_dim={int(required_node_dim)}, but pass_success runtime node schema is unknown")
+        mismatches.append(f"requires node_in_dim={int(required_node_dim)}, but {runtime_context} runtime node schema is unknown")
 
     runtime_edge_dim = int(runtime_schema.get("edge_in_dim", 0) or 0)
     required_edge_dim = int(required_schema.get("edge_in_dim", 0) or 0)
@@ -540,7 +588,7 @@ def validate_external_pass_intent_model_id(
             suggestion = " Use --v-edge-features or a feature run with velocity edge features."
         mismatches.append(
             f"requires edge_in_dim={required_edge_dim}, "
-            f"but pass_success runtime provides edge_in_dim={runtime_edge_dim}.{suggestion}"
+            f"but {runtime_context} runtime provides edge_in_dim={runtime_edge_dim}.{suggestion}"
         )
 
     if mismatches:
@@ -664,6 +712,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Only train the mode-independent success_intent model from observed successful-pass receivers.",
     )
+    parser.add_argument(
+        "--only-pass-height",
+        action="store_true",
+        help="Only train the pass_height checkpoint.",
+    )
     for task, option_name, enable_help, disable_help in MODEL_TOGGLE_SPECS:
         add_bool_override(parser, option_name, task, enable_help, disable_help)
     parser.add_argument(
@@ -687,6 +740,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Existing pass_intent checkpoint to use as the pass_success IPW model when --no-pass-intent is set.",
     )
+    parser.add_argument(
+        "--pass-height-ipw-model-id",
+        default=None,
+        help="Existing pass_intent checkpoint to use as the pass_height IPW model when --no-pass-intent is set.",
+    )
     pass_success_ipw_group = parser.add_mutually_exclusive_group()
     pass_success_ipw_group.add_argument(
         "--pass-success-ipw",
@@ -701,6 +759,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Train pass_success without inverse-propensity weighting.",
     )
     parser.set_defaults(pass_success_ipw=True)
+    pass_height_ipw_group = parser.add_mutually_exclusive_group()
+    pass_height_ipw_group.add_argument(
+        "--pass-height-ipw",
+        dest="pass_height_ipw",
+        action="store_true",
+        help="Use a pass_intent checkpoint for pass_height inverse-propensity weighting.",
+    )
+    pass_height_ipw_group.add_argument(
+        "--no-pass-height-ipw",
+        dest="pass_height_ipw",
+        action="store_false",
+        help="Train pass_height without inverse-propensity weighting.",
+    )
+    parser.set_defaults(pass_height_ipw=False)
     parser.add_argument(
         "--outcome-scoring-trial",
         type=int,
@@ -1000,8 +1072,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     except ValueError as exc:
         parser.error(str(exc))
 
-    requires_mode = any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS)
-    requires_outcome_config = any(args.enabled_tasks[task] for task in OUTCOME_TASKS)
+    requires_mode = any(args.enabled_tasks.get(task, False) for task in MODE_DEPENDENT_TASKS)
+    requires_outcome_config = any(args.enabled_tasks.get(task, False) for task in OUTCOME_TASKS)
 
     if args.success_intent_only:
         if args.intended_receiver_mode:
@@ -1280,8 +1352,8 @@ def build_model_ids(args: argparse.Namespace, enabled_tasks: dict[str, bool]) ->
 def build_training_commands(
     args: argparse.Namespace,
 ) -> tuple[list[list[str]], dict[str, str], str | None, str | None, dict[str, bool]]:
-    mode = args.intended_receiver_mode if any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS) else None
-    target_family = args.target_family if any(args.enabled_tasks[task] for task in OUTCOME_TASKS) else None
+    mode = args.intended_receiver_mode if any(args.enabled_tasks.get(task, False) for task in MODE_DEPENDENT_TASKS) else None
+    target_family = args.target_family if any(args.enabled_tasks.get(task, False) for task in OUTCOME_TASKS) else None
     effective_return_type = args.return_type
     feature_flags = resolve_wrapper_feature_flags(args)
     batch_sizes = resolve_batch_sizes(args, args.enabled_tasks)
@@ -1294,6 +1366,7 @@ def build_training_commands(
     commands = []
     trained_model_ids: dict[str, str] = {}
     pass_success_ipw = bool(getattr(args, "pass_success_ipw", True))
+    pass_height_ipw = bool(getattr(args, "pass_height_ipw", False))
     external_pass_intent_model_id = (
         validate_external_pass_intent_model_id(
             args,
@@ -1303,8 +1376,20 @@ def build_training_commands(
         if pass_success_ipw
         else None
     )
+    external_pass_height_ipw_model_id = (
+        validate_external_pass_intent_model_id(
+            args,
+            feature_flags,
+            resolved_feature_run_id,
+            model_id_attr="pass_height_ipw_model_id",
+            option_name="--pass-height-ipw-model-id",
+            runtime_context="pass_height",
+        )
+        if pass_height_ipw
+        else None
+    )
 
-    if args.enabled_tasks["success_intent"]:
+    if args.enabled_tasks.get("success_intent", False):
         commands.append(
             success_intent_command(
                 "success_intent",
@@ -1319,7 +1404,7 @@ def build_training_commands(
         )
         trained_model_ids["success_intent"] = model_ids["success_intent"]
 
-    if any(args.enabled_tasks[task] for task in MODE_DEPENDENT_TASKS):
+    if any(args.enabled_tasks.get(task, False) for task in MODE_DEPENDENT_TASKS):
         base_feature_dir = str(get_action_graph_dir(feature_root))
         base_label_dir = str(
             get_action_label_dir(
@@ -1335,7 +1420,7 @@ def build_training_commands(
         augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
         augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
 
-        if args.enabled_tasks["pass_intent"]:
+        if args.enabled_tasks.get("pass_intent", False):
             commands.append(
                 intent_command(
                     "pass_intent",
@@ -1353,7 +1438,7 @@ def build_training_commands(
             )
             trained_model_ids["pass_intent"] = model_ids["pass_intent"]
 
-        if args.enabled_tasks["action_intent"]:
+        if args.enabled_tasks.get("action_intent", False):
             commands.append(
                 intent_command(
                     "action_intent",
@@ -1371,9 +1456,9 @@ def build_training_commands(
             )
             trained_model_ids["action_intent"] = model_ids["action_intent"]
 
-        if args.enabled_tasks["pass_success"]:
+        if args.enabled_tasks.get("pass_success", False):
             ipw_model_id = (
-                model_ids["pass_intent"] if args.enabled_tasks["pass_intent"] else external_pass_intent_model_id
+                model_ids["pass_intent"] if args.enabled_tasks.get("pass_intent", False) else external_pass_intent_model_id
             ) if pass_success_ipw else None
             if pass_success_ipw and ipw_model_id is None:
                 raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
@@ -1394,7 +1479,29 @@ def build_training_commands(
             )
             trained_model_ids["pass_success"] = model_ids["pass_success"]
 
-        if args.enabled_tasks["outcome_scoring"]:
+        if args.enabled_tasks.get("pass_height", False):
+            pass_height_ipw_model_id = (
+                model_ids["pass_intent"] if args.enabled_tasks.get("pass_intent", False) else external_pass_height_ipw_model_id
+            ) if pass_height_ipw else None
+            if pass_height_ipw and pass_height_ipw_model_id is None:
+                raise ValueError("--pass-height-ipw requires --pass-intent or --pass-height-ipw-model-id.")
+            commands.append(
+                pass_success_command(
+                    "pass_height",
+                    model_ids["pass_height"],
+                    base_feature_dir,
+                    base_label_dir,
+                    pass_height_ipw_model_id,
+                    mode,
+                    effective_return_type,
+                    batch_sizes["pass_height"],
+                    v_edge_feature_mode,
+                    feature_flags,
+                )
+            )
+            trained_model_ids["pass_height"] = model_ids["pass_height"]
+
+        if args.enabled_tasks.get("outcome_scoring", False):
             commands.append(
                 outcome_command(
                     "outcome_scoring",
@@ -1412,7 +1519,7 @@ def build_training_commands(
             )
             trained_model_ids["outcome_scoring"] = model_ids["outcome_scoring"]
 
-        if args.enabled_tasks["outcome_conceding"]:
+        if args.enabled_tasks.get("outcome_conceding", False):
             commands.append(
                 outcome_command(
                     "outcome_conceding",
@@ -1430,7 +1537,7 @@ def build_training_commands(
             )
             trained_model_ids["outcome_conceding"] = model_ids["outcome_conceding"]
 
-        if args.enabled_tasks["failure_receiver"]:
+        if args.enabled_tasks.get("failure_receiver", False):
             commands.append(
                 failure_receiver_command(
                     "failure_receiver",
@@ -1521,9 +1628,11 @@ def main() -> None:
                 **training_control_settings,
                 "physical_xpass": physical_xpass_settings(cli_args),
                 "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
+                "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
                 "training_feature_flags": feature_flags,
                 "batch_sizes": trained_batch_sizes,
                 "success_intent_only": bool(cli_args.success_intent_only),
+                "only_pass_height": bool(getattr(cli_args, "only_pass_height", False)),
                 "planned_tasks": list(trained_model_ids.keys()),
                 "completed_tasks": list(completed_model_ids.keys()),
                 "completed_model_ids": completed_model_ids,
@@ -1584,6 +1693,7 @@ def main() -> None:
         "batch_sizes": trained_batch_sizes,
         "physical_xpass": physical_xpass_settings(cli_args),
         "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
+        "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
         "device": getattr(cli_args, "device", None),
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,
@@ -1598,6 +1708,7 @@ def main() -> None:
         "v_edge_feature_mode": bundle_shared.get("v_edge_feature_mode", v_edge_feature_mode),
         "graph_schema": dict(bundle_shared.get("graph_schema", {})),
         "success_intent_only": bool(cli_args.success_intent_only),
+        "only_pass_height": bool(getattr(cli_args, "only_pass_height", False)),
         "trained_tasks": list(trained_model_ids.keys()),
         "success_intent_label_source": (
             SUCCESS_INTENT_LABEL_SOURCE

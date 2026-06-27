@@ -1434,13 +1434,14 @@ def run_epoch(
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
             intent = batch_labels[:, 5].clone().long()
 
-            if args.task in ["pass_success", "action_success"]:
+            if args.task in ["pass_success", "pass_height", "action_success"]:
                 pred = []
                 for graph_index in index_range:
                     pred.append(out[batch == graph_index][intent[graph_index]])
                 pred = torch.stack(pred)
 
-                target = get_label_slice(batch_labels, "success")
+                target_name = "pass_high" if args.task == "pass_height" else "success"
+                target = get_label_slice(batch_labels, target_name)
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
                 short_residual_lambda, long_residual_lambda = resolved_residual_regularization_lambdas(args)
                 if (
@@ -1475,7 +1476,7 @@ def run_epoch(
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()
-                threshold = 0.5 if args.task.endswith("success") else 0.1
+                threshold = 0.5 if args.task.endswith("success") or args.task == "pass_height" else 0.1
                 batch_metrics = calc_binary_metrics(y, y_hat, threshold)
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:

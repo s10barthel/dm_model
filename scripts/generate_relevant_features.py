@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools import config
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
@@ -56,6 +57,7 @@ class FeatureExtensionPlan:
     final_intended_receiver_modes: list[str]
     added_intended_receiver_modes: list[str]
     refresh_target_families: list[str]
+    refresh_pass_height_labels: bool
     refreshed_return_types: list[str]
     refreshed_intended_receiver_modes: list[str]
     intended_receiver_model_id: str | None
@@ -102,6 +104,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "With --extend-feature-run-id, rebuild copied label tensors from current sidecar target artifacts "
             "without rebuilding graph tensors. Repeat to record multiple refreshed target families."
+        ),
+    )
+    parser.add_argument(
+        "--pass-height",
+        action="store_true",
+        help=(
+            "With --extend-feature-run-id, rebuild copied label tensors so pass-height labels are present. "
+            f"High passes use ball_z >= {config.PASS_HEIGHT_THRESHOLD_METERS:g}m between pass and receipt."
         ),
     )
     parser.add_argument(
@@ -614,6 +624,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         )
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
     refresh_target_families = args_refresh_target_families(args)
+    refresh_pass_height_labels = bool(getattr(args, "pass_height", False))
 
     base_model_id = base_metadata.get("intended_receiver_model_id")
     if base_model_id is not None:
@@ -657,11 +668,17 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     else:
         final_model_id = base_model_id
 
-    if not added_return_types and not added_modes and not regenerate_model_mode and not refresh_target_families:
+    if (
+        not added_return_types
+        and not added_modes
+        and not regenerate_model_mode
+        and not refresh_target_families
+        and not refresh_pass_height_labels
+    ):
         raise ValueError(
             "Extension would not add any return types, intended-receiver modes, or target-label refreshes. "
             "Use a fresh full run or request a new --return_type / --intended-receiver-model-id / "
-            "--refresh-target-family."
+            "--refresh-target-family / --pass-height."
         )
 
     output_run_id = str(args.run_id) if args.run_id else generate_run_id("feature")
@@ -682,7 +699,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         added_modes=added_modes,
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
-        refresh_existing_labels=bool(refresh_target_families),
+        refresh_existing_labels=bool(refresh_target_families or refresh_pass_height_labels),
         next_action_conditions_enabled=base_next_action_conditions_enabled,
         num_workers=getattr(args, "num_workers", "1"),
         worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)),
@@ -699,8 +716,9 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         final_intended_receiver_modes=final_modes,
         added_intended_receiver_modes=added_modes,
         refresh_target_families=refresh_target_families,
-        refreshed_return_types=final_return_types if refresh_target_families else [],
-        refreshed_intended_receiver_modes=final_modes if refresh_target_families else [],
+        refresh_pass_height_labels=refresh_pass_height_labels,
+        refreshed_return_types=final_return_types if refresh_target_families or refresh_pass_height_labels else [],
+        refreshed_intended_receiver_modes=final_modes if refresh_target_families or refresh_pass_height_labels else [],
         intended_receiver_model_id=final_model_id,
         regenerate_model_mode=regenerate_model_mode,
         replaced_intended_receiver_model_id=replaced_model_id,
@@ -722,6 +740,8 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_added_return_types": plan.added_return_types,
         "extension_added_intended_receiver_modes": plan.added_intended_receiver_modes,
         "extension_refresh_target_families": plan.refresh_target_families,
+        "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
+        "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
         "extension_refreshed_return_types": plan.refreshed_return_types,
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
@@ -818,6 +838,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": EXPECTED_GRAPH_SCHEMA.copy(),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
+        "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "splits": ["train", "test"],

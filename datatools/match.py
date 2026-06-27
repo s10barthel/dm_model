@@ -570,6 +570,24 @@ class Match(ABC):
 
         return actions
 
+    def pass_height_labels(self, frame: float, receive_frame: float) -> tuple[float, float]:
+        if pd.isna(frame) or pd.isna(receive_frame) or "ball_z" not in self.tracking.columns:
+            return np.nan, np.nan
+
+        start_frame = int(frame)
+        end_frame = int(receive_frame)
+        if end_frame < start_frame:
+            start_frame, end_frame = end_frame, start_frame
+
+        ball_z = pd.to_numeric(self.tracking.loc[start_frame:end_frame, "ball_z"], errors="coerce")
+        if ball_z.empty:
+            return np.nan, np.nan
+
+        max_ball_z = float(ball_z.max(skipna=True))
+        if not np.isfinite(max_ball_z):
+            return np.nan, np.nan
+        return max_ball_z, float(max_ball_z >= config.PASS_HEIGHT_THRESHOLD_METERS)
+
     def construct_labels(
         self,
         discount_xg=True,
@@ -652,6 +670,7 @@ class Match(ABC):
             duration = 0.0 if pd.isna(receive_frame) else round((receive_frame - frame) / self.fps, 2)
 
             start_x = start_y = end_x = end_y = intent_x = intent_y = np.nan
+            pass_max_ball_z = pass_high = np.nan
 
             if self.actions.at[i, "action_type"] == "pass" and not self.action_type.startswith("shot"):
                 # For shot feature generation, selected passes are regarded as potentially failed shots
@@ -670,6 +689,7 @@ class Match(ABC):
                 start_y = self.actions.at[i, "start_y"]
                 end_x = self.actions.at[i, "end_x"]
                 end_y = self.actions.at[i, "end_y"]
+                pass_max_ball_z, pass_high = self.pass_height_labels(frame, receive_frame)
                 if not pd.isna(intent_id) and not pd.isna(receive_frame):
                     receive_frame_int = int(receive_frame)
                     intent_x_col = f"{intent_id}_x"
@@ -746,6 +766,8 @@ class Match(ABC):
                     self.actions.at[i, "concedes_epv"],
                     self.actions.at[i, "scores_goal_next10"],
                     self.actions.at[i, "concedes_goal_next10"],
+                    pass_max_ball_z,
+                    pass_high,
                 ]
             )
 

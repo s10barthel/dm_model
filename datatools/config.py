@@ -94,6 +94,7 @@ DEFENSIVE_TOUCH = ["interception", "bad_touch", "shot_block", "keeper_save", "ke
 SET_PIECE_OOP = ["throw_in", "goalkick", "corner_short", "corner_crossed"]
 SET_PIECE_FOUL = ["freekick_short", "freekick_crossed", "shot_freekick", "shot_penalty"]
 SET_PIECE = SET_PIECE_OOP + SET_PIECE_FOUL
+PASS_HEIGHT_THRESHOLD_METERS = 2.0
 
 TASK_CONFIG = pd.DataFrame(
     {
@@ -107,6 +108,7 @@ TASK_CONFIG = pd.DataFrame(
         "pass_intent_oppo_agn": ["node_selection", True, False, False, True, False, None, "teammates", 1],
         "action_success": ["node_binary", True, True, True, True, True, "intent", "teammates", 1],
         "pass_success": ["node_binary", True, True, False, True, False, "intent", "teammates", 1],
+        "pass_height": ["node_binary", True, False, False, True, False, "intent", "teammates", 1],
         "shot_blocking": ["graph_binary", True, False, True, False, True, None, None, 1],
         "intent_return": ["node_binary", True, True, False, True, False, "intent", "teammates", 2],
         "intent_return_oppo_agn": ["node_binary", True, True, False, True, False, "intent", "teammates", 2],
@@ -155,6 +157,8 @@ LABEL_COLUMNS = [
     "concedes_epv",
     "scores_goal_next10",
     "concedes_goal_next10",
+    "pass_max_ball_z",
+    "pass_high",
 ]
 
 LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

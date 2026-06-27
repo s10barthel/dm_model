@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
     parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--pass-height-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--output-dir")
@@ -317,57 +318,81 @@ def save_scoped_component_table(
     table.to_parquet(output_path, index=False)
 
 
+def save_component_table_with_optional_scope(
+    frame_predictions: pd.DataFrame,
+    receive_predictions: pd.DataFrame | None,
+    actions: pd.DataFrame,
+    output_path: Path,
+) -> None:
+    required_scope_columns = [FRAME_ID_SCOPE]
+    if receive_predictions is not None:
+        required_scope_columns.append(RECEIVE_FRAME_ID_SCOPE)
+    if any(column not in actions.columns for column in required_scope_columns):
+        save_component_table(frame_predictions, actions, output_path)
+        return
+    save_scoped_component_table(frame_predictions, receive_predictions, actions, output_path)
+
+
 def save_match_component_tables(
     match_output_dir: Path,
     actions: pd.DataFrame,
     *,
     action_intent: pd.DataFrame,
     pass_intent: pd.DataFrame,
-    pass_intent_receive: pd.DataFrame,
-    pass_success: pd.DataFrame | None,
-    pass_success_receive: pd.DataFrame | None,
-    scoring_success: pd.DataFrame,
-    scoring_success_receive: pd.DataFrame,
-    scoring_failure: pd.DataFrame,
-    scoring_failure_receive: pd.DataFrame,
-    conceding_success: pd.DataFrame,
-    conceding_success_receive: pd.DataFrame,
-    conceding_failure: pd.DataFrame,
-    conceding_failure_receive: pd.DataFrame,
+    pass_intent_receive: pd.DataFrame | None = None,
+    pass_success: pd.DataFrame | None = None,
+    pass_success_receive: pd.DataFrame | None = None,
+    pass_height: pd.DataFrame | None = None,
+    pass_height_receive: pd.DataFrame | None = None,
+    scoring_success: pd.DataFrame | None = None,
+    scoring_success_receive: pd.DataFrame | None = None,
+    scoring_failure: pd.DataFrame | None = None,
+    scoring_failure_receive: pd.DataFrame | None = None,
+    conceding_success: pd.DataFrame | None = None,
+    conceding_success_receive: pd.DataFrame | None = None,
+    conceding_failure: pd.DataFrame | None = None,
+    conceding_failure_receive: pd.DataFrame | None = None,
 ) -> None:
     save_component_table(action_intent, actions, match_output_dir / "action_intent.parquet")
-    save_scoped_component_table(
+    save_component_table_with_optional_scope(
         pass_intent,
         pass_intent_receive,
         actions,
         match_output_dir / "pass_intent.parquet",
     )
     if pass_success is not None:
-        save_scoped_component_table(
+        save_component_table_with_optional_scope(
             pass_success,
             pass_success_receive,
             actions,
             match_output_dir / "pass_success.parquet",
         )
-    save_scoped_component_table(
+    if pass_height is not None:
+        save_component_table_with_optional_scope(
+            pass_height,
+            pass_height_receive,
+            actions,
+            match_output_dir / "pass_height.parquet",
+        )
+    save_component_table_with_optional_scope(
         scoring_success,
         scoring_success_receive,
         actions,
         match_output_dir / "outcome_scoring_success.parquet",
     )
-    save_scoped_component_table(
+    save_component_table_with_optional_scope(
         scoring_failure,
         scoring_failure_receive,
         actions,
         match_output_dir / "outcome_scoring_failure.parquet",
     )
-    save_scoped_component_table(
+    save_component_table_with_optional_scope(
         conceding_success,
         conceding_success_receive,
         actions,
         match_output_dir / "outcome_conceding_success.parquet",
     )
-    save_scoped_component_table(
+    save_component_table_with_optional_scope(
         conceding_failure,
         conceding_failure_receive,
         actions,
@@ -388,6 +413,18 @@ def resolve_optional_success_intent_model_id(
         return None
     success_intent_model_id = bundle_model_ids.get("success_intent")
     return str(success_intent_model_id) if success_intent_model_id else None
+
+
+def resolve_optional_model_id(task: str, explicit_model_id: str | None, bundle: dict[str, object] | None) -> str | None:
+    if explicit_model_id:
+        return str(explicit_model_id)
+    if bundle is None:
+        return None
+    bundle_model_ids = bundle.get("model_ids", {})
+    if not isinstance(bundle_model_ids, dict):
+        return None
+    model_id = bundle_model_ids.get(task)
+    return str(model_id) if model_id else None
 
 
 def load_optional_success_intent_model(
@@ -490,6 +527,9 @@ def main() -> None:
         require_return_type=False,
         require_target_family=False,
     )
+    pass_height_model_id = resolve_optional_model_id("pass_height", getattr(args, "pass_height_model_id", None), bundle)
+    if pass_height_model_id:
+        resolved_model_ids["pass_height"] = pass_height_model_id
     component_run_id = args.run_id or generate_run_id("component")
     output_parent = Path(args.output_dir) if args.output_dir else SPORTEC_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
@@ -504,23 +544,29 @@ def main() -> None:
             device,
         ),
     }
+    if pass_height_model_id:
+        model_specs["pass_height"] = load_model(pass_height_model_id, device)
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
     graph_schema = validate_model_graph_schemas(model_specs)
     runtime_feature_context = resolve_runtime_feature_run_context(
-        args.feature_run_id,
+        getattr(args, "feature_run_id", None),
         shared_context,
         bundle,
-        args.intended_receiver_mode,
+        getattr(args, "intended_receiver_mode", None),
         graph_schema,
         context="Selected component feature artifacts",
     )
     feature_run_id = str(runtime_feature_context["feature_run_id"])
-    intended_receiver_mode = str(runtime_feature_context["intended_receiver_mode"])
-    return_type = resolve_runtime_return_type(shared_context, args.return_type)
+    intended_receiver_mode = str(
+        runtime_feature_context.get("intended_receiver_mode")
+        or shared_context.get("intended_receiver_mode")
+        or DEFAULT_INTENDED_RECEIVER_MODE
+    )
+    return_type = resolve_runtime_return_type(shared_context, getattr(args, "return_type", None))
     feature_root = Path(runtime_feature_context["feature_root"])
-    feature_schema = runtime_feature_context["feature_schema"]
+    feature_schema = runtime_feature_context.get("feature_schema", {})
     shared_context = dict(shared_context)
     shared_context["feature_run_id"] = feature_run_id
     shared_context["runtime_feature_run_id"] = feature_run_id
@@ -528,7 +574,7 @@ def main() -> None:
     shared_context["runtime_intended_receiver_mode"] = intended_receiver_mode
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
-    shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
+    shared_context["runtime_feature_run_selection"] = runtime_feature_context.get("selection")
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
@@ -538,21 +584,23 @@ def main() -> None:
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
     pass_success_model = model_specs.get("pass_success")
-    if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
-        pass_success_model.args["inference_use_physical_xpass"] = True
-        pass_success_model.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
-        pass_success_model.args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
-        pass_success_model.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
-        pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
-    if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
-        pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
-        pass_success_model.args["physical_runtime_cache_refresh"] = False
-        pass_success_model.args["physical_num_workers"] = physical_num_workers
-        pass_success_model.args["physical_worker_thread_limit"] = physical_worker_thread_limit
-        pass_success_model.args["physical_batch_size"] = physical_batch_size
-        pass_success_model.args["physical_runtime_cache_read_only"] = True
+    pass_success_args = getattr(pass_success_model, "args", None)
+    pass_success_has_args = isinstance(pass_success_args, dict)
+    if pass_success_has_args and bool(getattr(args, "use_physical_xpass", False)):
+        pass_success_args["inference_use_physical_xpass"] = True
+        pass_success_args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
+        pass_success_args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
+        pass_success_args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
+        pass_success_args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
+    if pass_success_has_args and (model_uses_physical_xpass(pass_success_args) or inference_uses_physical_xpass(pass_success_args)):
+        pass_success_args["physical_runtime_cache_disabled"] = no_physical_cache
+        pass_success_args["physical_runtime_cache_refresh"] = False
+        pass_success_args["physical_num_workers"] = physical_num_workers
+        pass_success_args["physical_worker_thread_limit"] = physical_worker_thread_limit
+        pass_success_args["physical_batch_size"] = physical_batch_size
+        pass_success_args["physical_runtime_cache_read_only"] = True
         if not no_physical_cache:
-            pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+            pass_success_args["physical_cache_dir"] = physical_cache_dir
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
     success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
     (
@@ -564,9 +612,10 @@ def main() -> None:
 
     match_ids = resolve_match_ids(args.split, args.match_id, get_action_graph_dir(feature_root))
 
-    physical_lookup_config = physical_xpass_inference_lookup_config(
-        model_specs["pass_success"].args,
-        cache_dir=physical_cache_dir,
+    physical_lookup_config = (
+        physical_xpass_inference_lookup_config(pass_success_args, cache_dir=physical_cache_dir)
+        if pass_success_has_args
+        else {}
     )
     metadata = {
         "run_id": component_run_id,
@@ -605,7 +654,7 @@ def main() -> None:
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
-        "physical_xpass_checkpoint_source": physical_xpass_source(model_specs["pass_success"].args),
+        "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_args) if pass_success_has_args else None,
         "physical_xpass_runtime_source": physical_lookup_config.get("source"),
         "physical_xpass_metric": physical_lookup_config.get("metric"),
         "x_pass_version": physical_lookup_config.get("x_pass_version"),
@@ -627,6 +676,8 @@ def main() -> None:
         metadata["success_intent_graph_schema"] = success_intent_graph_schema
         metadata["success_intent_feature_schema"] = success_intent_feature_schema
         metadata["success_intent_skipped_matches"] = []
+    if pass_height_model_id:
+        metadata["models"]["pass_height"] = pass_height_model_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for index, match_id in enumerate(match_ids, start=1):
@@ -651,6 +702,8 @@ def main() -> None:
             )
             pass_success = None
             pass_success_receive = None
+            pass_height = None
+            pass_height_receive = None
             try:
                 pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
             except PhysicalXPassNoUsableRowsError as exc:
@@ -664,6 +717,14 @@ def main() -> None:
                 )
             except PhysicalXPassNoUsableRowsError as exc:
                 print(f"  WARN {match_id}: pass_success receive_frame_id export skipped: {summarize_exception(exc)}")
+            if "pass_height" in model_specs:
+                pass_height, _ = inference_gnn(match, model_specs["pass_height"], device=device, post_action=False)
+                pass_height_receive, _ = inference_gnn(
+                    match,
+                    model_specs["pass_height"],
+                    device=device,
+                    post_action=True,
+                )
             scoring_failure, scoring_success = inference_gnn(
                 match,
                 model_specs["outcome_scoring"],
@@ -699,6 +760,8 @@ def main() -> None:
                 pass_intent_receive=pass_intent_receive,
                 pass_success=pass_success,
                 pass_success_receive=pass_success_receive,
+                pass_height=pass_height,
+                pass_height_receive=pass_height_receive,
                 scoring_success=scoring_success,
                 scoring_success_receive=scoring_success_receive,
                 scoring_failure=scoring_failure,
@@ -741,8 +804,8 @@ def main() -> None:
     if metadata["skipped_matches"]:
         print(f"Skipped {len(metadata['skipped_matches'])} matches during component inference.")
     physical_xpass_required = bool(
-        model_uses_physical_xpass(model_specs["pass_success"].args)
-        or inference_uses_physical_xpass(model_specs["pass_success"].args)
+        pass_success_has_args
+        and (model_uses_physical_xpass(pass_success_args) or inference_uses_physical_xpass(pass_success_args))
     )
     physical_xpass_cache_summary = summarize_physical_xpass_cache_usage(
         physical_xpass_required=physical_xpass_required,

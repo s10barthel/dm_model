@@ -19,6 +19,7 @@ def make_enabled_tasks(**overrides: bool) -> dict[str, bool]:
         "pass_intent": True,
         "success_intent": True,
         "pass_success": True,
+        "pass_height": False,
         "outcome_scoring": True,
         "outcome_conceding": True,
         "failure_receiver": False,

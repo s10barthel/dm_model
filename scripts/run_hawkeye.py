@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--pass-height-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--run-id")
@@ -106,6 +107,18 @@ def _pass_success_uses_physical_xpass(model_specs: dict[str, object]) -> bool:
     return model is not None and (model_uses_physical_xpass(model.args) or inference_uses_physical_xpass(model.args))
 
 
+def resolve_optional_model_id(task: str, explicit_model_id: str | None, bundle: dict[str, object] | None) -> str | None:
+    if explicit_model_id:
+        return str(explicit_model_id)
+    if bundle is None:
+        return None
+    model_ids = bundle.get("model_ids", {})
+    if not isinstance(model_ids, dict):
+        return None
+    model_id = model_ids.get(task)
+    return str(model_id) if model_id else None
+
+
 def _prewarm_hawkeye_physical_xpass(
     situation,
     model_specs: dict[str, object],
@@ -140,7 +153,7 @@ def _prewarm_hawkeye_physical_xpass(
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
-    resolved_model_ids, shared_context, _ = resolve_model_selection(
+    resolved_model_ids, shared_context, bundle = resolve_model_selection(
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -161,6 +174,9 @@ def main() -> None:
         require_return_type=False,
         require_target_family=False,
     )
+    pass_height_model_id = resolve_optional_model_id("pass_height", getattr(args, "pass_height_model_id", None), bundle)
+    if pass_height_model_id:
+        resolved_model_ids["pass_height"] = pass_height_model_id
     intended_receiver_mode = shared_context["intended_receiver_mode"]
     component_run_id = args.run_id or generate_run_id("hawkeye_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_COMPONENT_RUNS_DIR
@@ -175,6 +191,7 @@ def main() -> None:
         action_intent_model_id=resolved_model_ids["action_intent"],
         pass_intent_model_id=resolved_model_ids["pass_intent"],
         pass_success_model_id=resolved_model_ids["pass_success"],
+        pass_height_model_id=resolved_model_ids.get("pass_height"),
         outcome_scoring_model_id=resolved_model_ids["outcome_scoring"],
         outcome_conceding_model_id=resolved_model_ids["outcome_conceding"],
         device=device,

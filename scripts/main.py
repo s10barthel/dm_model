@@ -108,6 +108,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional success_intent checkpoint for evaluation; defaults to --intended-receiver-model-id when present.",
     )
+    parser.add_argument("--pass-height", action="store_true", help="Also train the pass_height model.")
+    parser.add_argument("--only-pass-height", action="store_true", help="Only train the pass_height model.")
+    parser.add_argument(
+        "--pass-height-ipw-model-id",
+        default=None,
+        help="Existing pass_intent checkpoint to use as the pass_height IPW model when pass_intent is not trained.",
+    )
+    pass_height_ipw_group = parser.add_mutually_exclusive_group()
+    pass_height_ipw_group.add_argument(
+        "--pass-height-ipw",
+        dest="pass_height_ipw",
+        action="store_true",
+        default=None,
+        help="Use pass_intent inverse-propensity weighting for pass_height.",
+    )
+    pass_height_ipw_group.add_argument(
+        "--no-pass-height-ipw",
+        dest="pass_height_ipw",
+        action="store_false",
+        help="Train pass_height without inverse-propensity weighting.",
+    )
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
     parser.add_argument("--skip-goal-distance", action="store_true", help="Skip scripts/generate_goal_distance.py.")
@@ -240,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     if needs_training_config:
-        if not args.target_family:
+        if not args.only_pass_height and not args.target_family:
             parser.error("--target-family is required unless --skip-train is set.")
         if not args.return_type:
             parser.error("--return_type is required unless --skip-train is set.")
@@ -540,6 +561,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         train_command = append_return_type_flag(train_command, args)
         train_command = append_edge_feature_flag(train_command, args)
         train_command = append_training_feature_flags(train_command, args)
+        if args.only_pass_height:
+            train_command.append("--only-pass-height")
+        elif args.pass_height:
+            train_command.append("--pass-height")
+        if args.pass_height_ipw is True:
+            train_command.append("--pass-height-ipw")
+        elif args.pass_height_ipw is False:
+            train_command.append("--no-pass-height-ipw")
+        if args.pass_height_ipw_model_id:
+            train_command.extend(["--pass-height-ipw-model-id", args.pass_height_ipw_model_id])
         commands.append(train_command)
 
     if not args.skip_evaluate:

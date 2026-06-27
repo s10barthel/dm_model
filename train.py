@@ -797,9 +797,10 @@ if __name__ == "__main__":
     if len(valid_dataset) == 0:
         raise ValueError("No usable validation samples remained after loading graph and label artifacts.")
 
-    if args.task == "pass_success" and args.weight_bce:
-        n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX["success"]] == 1].shape[0]
-        n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX["success"]] == 0].shape[0]
+    if args.task in {"pass_success", "pass_height"} and args.weight_bce:
+        target_column = "pass_high" if args.task == "pass_height" else "success"
+        n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
+        n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 0].shape[0]
         pos_weight = n_negatives / n_positives
     else:
         pos_weight = 1

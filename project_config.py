@@ -394,7 +394,7 @@ def load_latest_run_id(kind: str) -> str | None:
     latest_path = _latest_path(kind)
     if not latest_path.exists():
         return None
-    payload = json.loads(latest_path.read_text(encoding="utf-8"))
+    payload = json.loads(latest_path.read_text(encoding="utf-8-sig"))
     run_id = payload.get("run_id")
     return str(run_id) if run_id else None
 

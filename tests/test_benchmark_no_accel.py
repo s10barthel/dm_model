@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import argparse
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,7 @@ from dataset import ActionDataset
 from datatools import config
 from datatools.benchmark import build_benchmark_state, load_benchmark_game_state
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
+from datatools.match import Match
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
@@ -33,6 +35,7 @@ import matplotlib.pyplot as plt
 from datatools.viz_helpers import figure_to_rgb_image
 from scripts import visualize_benchmark
 from scripts import visualize_hawkeye
+from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
 def make_graph(node_dim: int = 25, edge_dim: int = 2) -> Data:
@@ -168,6 +171,7 @@ def make_enabled_tasks(**overrides: bool) -> dict[str, bool]:
         "pass_intent": True,
         "success_intent": True,
         "pass_success": True,
+        "pass_height": False,
         "outcome_scoring": True,
         "outcome_conceding": True,
         "failure_receiver": False,
@@ -368,6 +372,27 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 },
             ]
         )
+
+    def test_pass_height_label_uses_inclusive_two_meter_threshold(self) -> None:
+        match = Match.__new__(Match)
+        match.tracking = pd.DataFrame(
+            {"ball_z": [0.0, 1.2, config.PASS_HEIGHT_THRESHOLD_METERS]},
+            index=[10, 11, 12],
+        )
+
+        max_ball_z, pass_high = Match.pass_height_labels(match, 10, 12)
+
+        self.assertEqual(max_ball_z, config.PASS_HEIGHT_THRESHOLD_METERS)
+        self.assertEqual(pass_high, 1.0)
+
+    def test_pass_height_label_below_threshold_is_low(self) -> None:
+        match = Match.__new__(Match)
+        match.tracking = pd.DataFrame({"ball_z": [0.0, 1.99]}, index=[10, 11])
+
+        max_ball_z, pass_high = Match.pass_height_labels(match, 10, 11)
+
+        self.assertAlmostEqual(max_ball_z, 1.99)
+        self.assertEqual(pass_high, 0.0)
 
     def test_benchmark_loader_preserves_players_with_blank_pos_z(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -729,6 +754,70 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["accel_aware"])
         self.assertIn("--no-accel", commands[0])
         self.assertNotIn("--accel", commands[0])
+
+    def test_resolve_enabled_tasks_only_pass_height(self) -> None:
+        args = SimpleNamespace(
+            success_intent_only=False,
+            only_pass_height=True,
+            pass_intent_model_id=None,
+            pass_height_ipw=False,
+            pass_height_ipw_model_id=None,
+            outcome_scoring_trial=None,
+            outcome_conceding_trial=None,
+        )
+        for task, _, _, _ in train_wrapper.MODEL_TOGGLE_SPECS:
+            setattr(args, task, None)
+
+        enabled = train_wrapper.resolve_enabled_tasks(args)
+
+        self.assertEqual([task for task, value in enabled.items() if value], ["pass_height"])
+
+    def test_build_training_commands_emit_pass_height_only_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=False,
+                only_pass_height=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    success_intent=False,
+                    pass_success=False,
+                    pass_height=True,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["pass_height"],
+                intended_receiver_mode="angle_only",
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                pass_height_ipw=False,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                accel_aware=None,
+                offside_aware=None,
+                extend_features=None,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, trained_model_ids, _, _, _ = train_wrapper.build_training_commands(args)
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][commands[0].index("--task") + 1], "pass_height")
+        self.assertIn("pass_height", trained_model_ids)
+        self.assertNotIn("--model-variant", commands[0])
 
     def test_build_training_commands_emit_no_offside_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2647,6 +2736,16 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertIsInstance(image, Image.Image)
         self.assertNotIn("ball_velocity_xy", mock_visualizer.call_args.kwargs)
+
+    def test_visualization_selection_show_pass_height_is_optional(self) -> None:
+        parser = argparse.ArgumentParser()
+        add_component_selection_args(parser)
+
+        default_selection = resolve_component_selection(parser.parse_args([]))
+        pass_height_selection = resolve_component_selection(parser.parse_args(["--show-pass-height"]))
+
+        self.assertNotIn("pass_height", default_selection.rendered_components)
+        self.assertIn("pass_height", pass_height_selection.rendered_components)
 
     def test_hawkeye_render_frame_image_uses_fixed_canvas_export(self) -> None:
         tracking = pd.DataFrame(

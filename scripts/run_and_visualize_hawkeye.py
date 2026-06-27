@@ -89,6 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
+    parser.add_argument("--pass-height-model-id")
     parser.add_argument("--outcome-scoring-model-id")
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
@@ -224,6 +225,13 @@ def render_situation(
                 device=device,
                 post_action=False,
             )
+        if "pass_height" in model_specs:
+            components["pass_height"], _ = inference_gnn(
+                situation,
+                model_specs["pass_height"],
+                device=device,
+                post_action=False,
+            )
         if "outcome_scoring" in model_specs:
             scoring_failure, scoring_success = inference_gnn(
                 situation,
@@ -355,11 +363,12 @@ def main() -> None:
         requested_ids=requested_situation_ids + requested_action_ids,
     )
     explicit_model_ids = {
-        "action_intent": args.action_intent_model_id,
-        "pass_intent": args.pass_intent_model_id,
-        "pass_success": args.pass_success_model_id,
-        "outcome_scoring": args.outcome_scoring_model_id,
-        "outcome_conceding": args.outcome_conceding_model_id,
+        "action_intent": getattr(args, "action_intent_model_id", None),
+        "pass_intent": getattr(args, "pass_intent_model_id", None),
+        "pass_success": getattr(args, "pass_success_model_id", None),
+        "pass_height": getattr(args, "pass_height_model_id", None),
+        "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
+        "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
     }
     required_model_tasks = [
         task
@@ -367,6 +376,7 @@ def main() -> None:
             "action_intent",
             "pass_intent",
             "pass_success",
+            "pass_height",
             "outcome_scoring",
             "outcome_conceding",
         ]
@@ -486,6 +496,7 @@ def main() -> None:
         "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_model is not None else None,
         "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
         "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
+        "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
