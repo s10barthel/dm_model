@@ -198,7 +198,7 @@ def test_component_summary_records_default_physical_xpass_original_weight(tmp_pa
 
     row = read_summary(summary_path)[0]
     assert row["xpass_metric"] == "noise_kernel"
-    assert row["xpass_weight"] == "original"
+    assert row["xpass_weight"] == "v1"
 
 
 def test_component_summary_records_topmean_physical_xpass_v2_weight(tmp_path, monkeypatch) -> None:
@@ -241,7 +241,7 @@ def test_component_summary_records_max_physical_xpass_from_cache_summary(tmp_pat
 
     row = read_summary(summary_path)[0]
     assert row["xpass_metric"] == "max_xpass"
-    assert row["xpass_weight"] == "original"
+    assert row["xpass_weight"] == "v3"
 
 
 def test_visualization_summary_prefers_selected_model_ids_and_falls_back_to_source_models(tmp_path, monkeypatch) -> None:

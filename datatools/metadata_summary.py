@@ -167,6 +167,14 @@ def _physical_xpass_used(metadata: dict[str, Any]) -> bool:
 def _summary_xpass_metric(metadata: dict[str, Any]) -> str:
     if not _physical_xpass_used(metadata):
         return "None"
+    version = str(metadata.get("x_pass_version") or "").strip().lower().replace("_", "-")
+    if version:
+        if version == "noise-kernel":
+            return "noise_kernel"
+        if version == "max":
+            return "max_xpass"
+        if version.startswith("top") and version[3:].isdigit():
+            return version
     metric = str(metadata.get("physical_xpass_metric") or "").strip().lower()
     if metric in {"", "noise_kernel", "noise_kernel_xpass"}:
         return "noise_kernel"
@@ -185,9 +193,13 @@ def _summary_xpass_weight(metadata: dict[str, Any]) -> str:
     if _summary_xpass_metric(metadata) == "None":
         return ""
     weight_version = str(metadata.get("physical_xpass_weight_version") or "").strip().lower()
+    if weight_version in {"v1", "v2", "v3"}:
+        return weight_version
+    if weight_version == "":
+        return "v3"
     if weight_version == "v2":
         return "v2"
-    return "original"
+    return weight_version
 
 
 def _fill_xpass_summary_fields(row: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

@@ -49,6 +49,7 @@ from physical_pass_model import (
     physical_xpass_teammate_policy,
     requires_physical_xpass_for_inference,
     pc_xpass_enabled,
+    validate_x_pass_version_available,
     validate_physical_xpass_cache_metadata,
 )
 from project_config import get_pc_xpass_dir, get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
@@ -245,6 +246,12 @@ def attach_physical_xpass_for_inference(
     lookup_config = physical_xpass_inference_lookup_config(model.args, cache_dir=physical_cache_dir)
     if use_inference_blend:
         setattr(model, "physical_xpass_lookup_policy", "dataset_event_frame_player_only")
+        validate_x_pass_version_available(
+            physical_cache_dir,
+            source=str(lookup_config["source"]),
+            x_pass_version=str(lookup_config["x_pass_version"]),
+            metric=str(lookup_config["metric"]),
+        )
     else:
         validate_physical_xpass_cache_metadata(
             physical_cache_dir,
@@ -389,6 +396,13 @@ def filter_missing_physical_xpass_rows_for_inference(
                 cache_dir,
                 expected_source=physical_xpass_source(model.args),
                 expected_speed_aggregation=physical_xpass_speed_aggregation(model.args),
+            )
+        else:
+            validate_x_pass_version_available(
+                cache_dir,
+                source=str(lookup_config["source"]),
+                x_pass_version=str(lookup_config["x_pass_version"]),
+                metric=str(lookup_config["metric"]),
             )
         physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
     except (FileNotFoundError, ValueError) as exc:

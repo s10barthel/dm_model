@@ -68,10 +68,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Render pc-xPass cache values instead of runtime physical xPass.")
-    parser.add_argument("--max-xpass", "--max_xpass", dest="max_xpass", action="store_true", help="Use max physical xPass columns for visualization.")
-    parser.add_argument("--top10-xpass", "--top10_xpass", dest="top10_xpass", action="store_true", help="Use pc-xPass top10 columns for visualization.")
-    parser.add_argument("--topmean-xpass", "--topmean_xpass", dest="topmean_xpass", action="store_true", help="Use top-N-mean physical xPass columns for visualization.")
-    parser.add_argument("--top10mean-xpass", "--top10mean_xpass", dest="top10mean_xpass", action="store_true", help="Deprecated alias for --topmean-xpass.")
+    parser.add_argument("--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to render: max, noise-kernel, or top<N> such as top10/top25/top50.")
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
     parser.add_argument(
         "--time-norm",
@@ -302,6 +299,7 @@ def main() -> None:
                 str(situation.match_id),
                 physical_frame_ids,
                 metric=selected_physical_xpass_metric,
+                x_pass_version=getattr(args, "x_pass_version", "top10"),
             )
         frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
         output_dir = output_root / str(situation_id)
@@ -387,6 +385,7 @@ def main() -> None:
         "physical_xpass_checkpoint_source": None,
         "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
+        "x_pass_version": getattr(args, "x_pass_version", "top10"),
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,

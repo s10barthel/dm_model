@@ -69,13 +69,17 @@ PHYSICAL_XPASS_METRIC_TOP10MEAN = PHYSICAL_XPASS_METRIC_TOPMEAN
 PHYSICAL_XPASS_LEGACY_METRIC_TOP10MEAN = "top10mean_xpass"
 PC_XPASS_METRIC_TOP10 = "top10_xpass"
 PC_XPASS_METRIC_TOP25 = "top25_xpass"
+X_PASS_VERSION_MAX = "max"
+X_PASS_VERSION_NOISE_KERNEL = "noise-kernel"
+X_PASS_VERSION_DEFAULT = "top10"
+XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3"}
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_TOPMEAN,
 ]
-PC_XPASS_DEFAULT_METRIC = PC_XPASS_METRIC_TOP25
+PC_XPASS_DEFAULT_METRIC = PC_XPASS_METRIC_TOP10
 PC_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_MAX,
     PC_XPASS_METRIC_TOP10,
@@ -186,6 +190,13 @@ def physical_xpass_as_default_metadata(
     metric_schema_version = int(metric_schema_version)
     default_metric = normalize_physical_xpass_metric(default_metric)
     available_metrics = normalize_physical_xpass_metrics(available_metrics)
+    available_versions = []
+    if PHYSICAL_XPASS_METRIC_MAX in available_metrics:
+        available_versions.append(X_PASS_VERSION_MAX)
+    if PHYSICAL_XPASS_METRIC_NOISE_KERNEL in available_metrics:
+        available_versions.append(X_PASS_VERSION_NOISE_KERNEL)
+    if PHYSICAL_XPASS_METRIC_TOPMEAN in available_metrics:
+        available_versions.append(f"top{int(top_n)}")
     v0_values = as_default_v0_values(max_speed=max_speed, speed_step=speed_step)
     return {
         "metric": default_metric if metric_schema_version >= PHYSICAL_XPASS_METRIC_SCHEMA_VERSION else "max_player_cum_prob",
@@ -195,6 +206,8 @@ def physical_xpass_as_default_metadata(
         "metric_schema_version": metric_schema_version,
         "default_metric": default_metric,
         "available_metrics": available_metrics,
+        "default_x_pass_version": f"top{int(top_n)}" if PHYSICAL_XPASS_METRIC_TOPMEAN in available_metrics else available_versions[0],
+        "available_x_pass_versions": available_versions,
         "disabled_metrics": disabled_physical_xpass_metrics(available_metrics),
         "noise_kernel_algorithm": PHYSICAL_XPASS_NOISE_KERNEL_ALGORITHM,
         "topmean_definition": PHYSICAL_XPASS_TOPMEAN_DEFINITION,
@@ -247,6 +260,7 @@ def pc_xpass_metadata(
     max_speed: float | None = None,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
@@ -254,18 +268,27 @@ def pc_xpass_metadata(
             f"Unsupported teammate_policy={teammate_policy!r}. "
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
         )
-    metrics = normalize_physical_xpass_metrics(available_metrics or PC_XPASS_AVAILABLE_METRICS)
+    top_metric = pc_xpass_top_metric(top_n)
+    metrics = normalize_physical_xpass_metrics(available_metrics or [PHYSICAL_XPASS_METRIC_MAX, top_metric])
+    available_versions = []
+    if PHYSICAL_XPASS_METRIC_MAX in metrics:
+        available_versions.append(X_PASS_VERSION_MAX)
+    if top_metric in metrics:
+        available_versions.append(f"top{int(top_n)}")
     max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value)
     return {
-        "metric": PC_XPASS_DEFAULT_METRIC,
+        "metric": top_metric,
         "metric_family": PC_XPASS_SOURCE,
         "source": PC_XPASS_SOURCE,
         "teammate_policy": teammate_policy,
-        "default_metric": PC_XPASS_DEFAULT_METRIC,
+        "default_metric": top_metric,
         "available_metrics": metrics,
+        "default_x_pass_version": f"top{int(top_n)}",
+        "available_x_pass_versions": available_versions,
         "disabled_metrics": disabled_physical_xpass_metrics(metrics),
+        "top_n": int(top_n),
         "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME,
         "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
         "arrival_function": "sigmoid_15_offset_0.3",
@@ -303,6 +326,47 @@ def as_default_v0_values(
     return values
 
 
+def normalize_x_pass_version(value: str | None) -> str:
+    version = X_PASS_VERSION_DEFAULT if value is None else str(value).strip().lower().replace("_", "-")
+    if version in {"noise", "noise-kernel", "noise_kernel", "noise-kernel-xpass", "noise-kernel_xpass"}:
+        return X_PASS_VERSION_NOISE_KERNEL
+    if version in {"max", "max-xpass", "max_xpass"}:
+        return X_PASS_VERSION_MAX
+    if version.startswith("top-"):
+        version = "top" + version[4:]
+    if version.startswith("top") and version[3:].isdigit() and int(version[3:]) >= 1:
+        return f"top{int(version[3:])}"
+    raise ValueError("--x-pass-version must be one of max, noise-kernel, or top<N> such as top10/top25/top50.")
+
+
+def x_pass_version_top_n(version: str | None) -> int | None:
+    resolved = normalize_x_pass_version(version)
+    if not resolved.startswith("top"):
+        return None
+    return int(resolved[3:])
+
+
+def pc_xpass_top_metric(top_n: int) -> str:
+    top_n = int(top_n)
+    if top_n < 1:
+        raise ValueError("top_n must be positive.")
+    return f"top{top_n}_xpass"
+
+
+def physical_xpass_metric_for_version(version: str | None, *, pc_xpass: bool = False) -> str:
+    resolved = normalize_x_pass_version(version)
+    if resolved == X_PASS_VERSION_MAX:
+        return PHYSICAL_XPASS_METRIC_MAX
+    if resolved == X_PASS_VERSION_NOISE_KERNEL:
+        if pc_xpass:
+            raise ValueError("--x-pass-version noise-kernel is not available for pc-xPass caches.")
+        return PHYSICAL_XPASS_METRIC_NOISE_KERNEL
+    top_n = x_pass_version_top_n(resolved)
+    if top_n is None:
+        raise ValueError(f"Unsupported x-pass version {version!r}.")
+    return pc_xpass_top_metric(top_n) if pc_xpass else PHYSICAL_XPASS_METRIC_TOPMEAN
+
+
 def normalize_physical_xpass_metric(value: str | None) -> str:
     metric = PHYSICAL_XPASS_DEFAULT_METRIC if value is None else str(value).replace("-", "_")
     if metric in {"top10mean", "top10mean_xpass", "topmean"}:
@@ -311,10 +375,12 @@ def normalize_physical_xpass_metric(value: str | None) -> str:
         metric = PC_XPASS_METRIC_TOP10
     if metric in {"top25", "pc_top25", "pc_top25_xpass"}:
         metric = PC_XPASS_METRIC_TOP25
+    if metric.startswith("top") and metric.endswith("_xpass") and metric[3:-6].isdigit() and int(metric[3:-6]) >= 1:
+        return f"top{int(metric[3:-6])}_xpass"
     if metric not in PHYSICAL_XPASS_SUPPORTED_METRICS:
         raise ValueError(
-            f"Unsupported physical_xpass_metric={value!r}. "
-            f"Expected one of {PHYSICAL_XPASS_SUPPORTED_METRICS}."
+            f"Unsupported physical_xpass_metric={value!r}. Expected max_xpass, noise_kernel_xpass, "
+            "topmean_xpass, or dynamic pc top<N>_xpass."
         )
     return metric
 
@@ -323,7 +389,12 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
     if values is None:
         return list(PHYSICAL_XPASS_AVAILABLE_METRICS)
     normalized = {normalize_physical_xpass_metric(value) for value in values}
-    metrics = [metric for metric in PHYSICAL_XPASS_SUPPORTED_METRICS if metric in normalized]
+    dynamic_top = sorted(
+        metric
+        for metric in normalized
+        if metric.startswith("top") and metric.endswith("_xpass") and metric not in PHYSICAL_XPASS_SUPPORTED_METRICS
+    )
+    metrics = [metric for metric in PHYSICAL_XPASS_SUPPORTED_METRICS if metric in normalized] + dynamic_top
     if not metrics:
         raise ValueError("At least one physical xPass metric must be enabled.")
     return metrics
@@ -332,8 +403,8 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
 def disabled_physical_xpass_metrics(enabled_metrics: list[str] | tuple[str, ...] | set[str] | None) -> list[str]:
     enabled = set(normalize_physical_xpass_metrics(enabled_metrics))
     available = (
-        PC_XPASS_AVAILABLE_METRICS
-        if any(metric in enabled for metric in {PC_XPASS_METRIC_TOP10, PC_XPASS_METRIC_TOP25})
+        [PHYSICAL_XPASS_METRIC_MAX, *sorted(metric for metric in enabled if metric.startswith("top") and metric.endswith("_xpass") and metric != PHYSICAL_XPASS_METRIC_TOPMEAN)]
+        if any(metric.startswith("top") and metric.endswith("_xpass") and metric != PHYSICAL_XPASS_METRIC_TOPMEAN for metric in enabled)
         else PHYSICAL_XPASS_AVAILABLE_METRICS
     )
     return [metric for metric in available if metric not in enabled]
@@ -341,7 +412,12 @@ def disabled_physical_xpass_metrics(enabled_metrics: list[str] | tuple[str, ...]
 
 def physical_xpass_metric_column(player_id: str, metric: str | None = None) -> str:
     metric = normalize_physical_xpass_metric(metric)
-    return f"{player_id}{PHYSICAL_XPASS_METRIC_SUFFIXES[metric]}"
+    suffix = PHYSICAL_XPASS_METRIC_SUFFIXES.get(metric)
+    if suffix is None and metric.startswith("top") and metric.endswith("_xpass"):
+        suffix = f"__{metric}"
+    if suffix is None:
+        raise ValueError(f"Unsupported physical xPass metric {metric!r}.")
+    return f"{player_id}{suffix}"
 
 
 def physical_xpass_metric_columns(player_id: str, metric: str | None = None) -> list[str]:
@@ -502,6 +578,50 @@ def validate_physical_xpass_cache_metadata(
     return metadata
 
 
+def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | None = None, x_pass_version: str, metric: str) -> dict[str, Any]:
+    metadata_path = Path(cache_dir) / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Physical xPass metadata not found at {metadata_path}.")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    resolved_source = str(source or metadata.get("source") or metadata.get("metric_family") or PHYSICAL_XPASS_SOURCE)
+    cache_source = str(metadata.get("source") or metadata.get("metric_family") or "")
+    if cache_source and cache_source != resolved_source:
+        raise ValueError(f"Requested {resolved_source!r} xPass, but cache at {cache_dir} has source {cache_source!r}.")
+    version = normalize_x_pass_version(x_pass_version)
+    selected_metric = normalize_physical_xpass_metric(metric)
+    available_versions = [normalize_x_pass_version(value) for value in metadata.get("available_x_pass_versions") or []]
+    raw_available_metrics = metadata.get("available_metrics")
+    if raw_available_metrics is None:
+        raw_available_metrics = [metadata.get("default_metric") or selected_metric]
+    available_metrics = normalize_physical_xpass_metrics(raw_available_metrics)
+    if resolved_source == PC_XPASS_SOURCE and version == X_PASS_VERSION_NOISE_KERNEL:
+        raise ValueError("--x-pass-version noise-kernel is not available for pc-xPass caches.")
+    if version.startswith("top"):
+        requested_top_n = int(version[3:])
+        if resolved_source == PHYSICAL_XPASS_SOURCE:
+            actual_top_n = metadata.get("top_n")
+            if actual_top_n is None or int(actual_top_n) != requested_top_n:
+                raise ValueError(
+                    f"Requested --x-pass-version {version}, but cache at {cache_dir} has top_n={actual_top_n!r}. "
+                    f"Regenerate with scripts/generate_physical_xpass.py --top-n {requested_top_n}."
+                )
+            if PHYSICAL_XPASS_METRIC_TOPMEAN not in available_metrics:
+                raise ValueError(f"Requested --x-pass-version {version}, but cache at {cache_dir} has no topmean_xpass metric.")
+        else:
+            expected_metric = pc_xpass_top_metric(requested_top_n)
+            if expected_metric not in available_metrics and version not in available_versions:
+                raise ValueError(f"Requested --x-pass-version {version}, but cache at {cache_dir} has no {expected_metric} metric.")
+    elif version == X_PASS_VERSION_NOISE_KERNEL and PHYSICAL_XPASS_METRIC_NOISE_KERNEL not in available_metrics:
+        raise ValueError(f"Requested --x-pass-version noise-kernel, but cache at {cache_dir} has no noise_kernel_xpass metric.")
+    elif version == X_PASS_VERSION_MAX and PHYSICAL_XPASS_METRIC_MAX not in available_metrics:
+        raise ValueError(f"Requested --x-pass-version max, but cache at {cache_dir} has no max_xpass metric.")
+    if selected_metric not in available_metrics and not (
+        selected_metric.startswith("top") and selected_metric.endswith("_xpass") and version in available_versions
+    ):
+        raise ValueError(f"Requested metric {selected_metric!r}, but cache at {cache_dir} does not advertise it.")
+    return metadata
+
+
 def _get_arg(args: Any, name: str, default: Any = None) -> Any:
     if isinstance(args, dict):
         return args.get(name, default)
@@ -579,28 +699,20 @@ def runtime_physical_xpass_speed_aggregation(args: Any) -> str:
 
 
 def physical_xpass_metric(args: Any) -> str:
-    if bool(_get_arg(args, "max_xpass", False)) or bool(_get_arg(args, "use_max_xpass", False)):
-        return PHYSICAL_XPASS_METRIC_MAX
-    if bool(_get_arg(args, "top10_xpass", False)) or bool(_get_arg(args, "use_top10_xpass", False)):
-        return PC_XPASS_METRIC_TOP10
-    if bool(_get_arg(args, "top25_xpass", False)) or bool(_get_arg(args, "use_top25_xpass", False)):
-        return PC_XPASS_METRIC_TOP25
-    if (
-        bool(_get_arg(args, "topmean_xpass", False))
-        or bool(_get_arg(args, "use_topmean_xpass", False))
-        or bool(_get_arg(args, "top10mean_xpass", False))
-        or bool(_get_arg(args, "use_top10mean_xpass", False))
-    ):
-        if pc_xpass_enabled(args):
-            return PC_XPASS_METRIC_TOP25
-        return PHYSICAL_XPASS_METRIC_TOPMEAN
-    if pc_xpass_enabled(args):
-        return PC_XPASS_DEFAULT_METRIC
-    return normalize_physical_xpass_metric(_get_arg(args, "physical_xpass_metric", None))
+    version = _get_arg(args, "x_pass_version", None)
+    if version is None:
+        version = _get_arg(args, "xpass_version", None)
+    return physical_xpass_metric_for_version(version, pc_xpass=pc_xpass_enabled(args))
 
 
 def physical_xpass_weight_version(args: Any) -> str:
-    return "v2" if bool(_get_arg(args, "xpass_weight_v2", False)) or bool(_get_arg(args, "use_xpass_weight_v2", False)) else "v1"
+    value = _get_arg(args, "xpass_weight", None)
+    if value is None:
+        value = _get_arg(args, "xpass_weight_version", None)
+    version = "v3" if value is None else str(value).strip().lower()
+    if version not in XPASS_WEIGHT_VERSIONS:
+        raise ValueError("--xpass-weight must be one of v1, v2, or v3.")
+    return version
 
 
 def physical_xpass_ball_z_limit(args: Any) -> float | None:
@@ -620,11 +732,15 @@ def physical_xpass_ball_z_limit(args: Any) -> float | None:
 
 def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
     source = PC_XPASS_SOURCE if pc_xpass_enabled(args) else PHYSICAL_XPASS_SOURCE
+    x_pass_version = normalize_x_pass_version(_get_arg(args, "x_pass_version", _get_arg(args, "xpass_version", None)))
+    metric = physical_xpass_metric(args)
+    selected_top_n = x_pass_version_top_n(x_pass_version)
     return {
         "use_physical_xpass": bool(inference_uses_physical_xpass(args)),
         "pc_xpass": bool(pc_xpass_enabled(args)),
         "physical_cache_dir": None if cache_dir is None else str(cache_dir),
-        "metric": physical_xpass_metric(args),
+        "metric": metric,
+        "x_pass_version": x_pass_version,
         "weight_version": physical_xpass_weight_version(args),
         "ball_z_limit": physical_xpass_ball_z_limit(args),
         "source": source,
@@ -641,7 +757,7 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "sigma_angle": PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
         "sigma_speed": PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
         "sigma_distance": PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
-        "top_n": PHYSICAL_XPASS_DEFAULT_TOP_N,
+        "top_n": selected_top_n or PHYSICAL_XPASS_DEFAULT_TOP_N,
         "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME if source == PC_XPASS_SOURCE else None,
         "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED if source == PC_XPASS_SOURCE else None,
     }
@@ -774,6 +890,23 @@ def physical_xpass_blend_weight_v2(
     return weights
 
 
+def physical_xpass_blend_weight_v3(pass_distance: np.ndarray | torch.Tensor | float) -> np.ndarray | torch.Tensor | float:
+    if isinstance(pass_distance, torch.Tensor):
+        x = torch.clamp(pass_distance.to(dtype=torch.float32) / 100.0, 0.0, 1.0)
+        base = x * (1.0 - x) / 0.25
+        raw = torch.where(base > 0.0, 0.75 / (1.0 + torch.pow(base, -8.0)), torch.zeros_like(base))
+        return torch.clamp(raw, 0.0, 1.0)
+    values = np.asarray(pass_distance, dtype=float)
+    x = np.clip(values / 100.0, 0.0, 1.0)
+    base = x * (1.0 - x) / 0.25
+    with np.errstate(divide="ignore", invalid="ignore"):
+        weights = np.where(base > 0.0, 0.75 / (1.0 + np.power(base, -8.0)), 0.0)
+    weights = np.clip(weights, 0.0, 1.0)
+    if np.isscalar(pass_distance):
+        return float(weights)
+    return weights
+
+
 def blend_physical_xpass_predictions(
     *,
     pass_success_model: np.ndarray | torch.Tensor | float,
@@ -784,9 +917,9 @@ def blend_physical_xpass_predictions(
     ball_z_limit: float | None = None,
     weight_version: str = "v1",
 ) -> np.ndarray | torch.Tensor | float:
-    weight_version = str(weight_version or "v1").lower()
-    if weight_version not in {"v1", "v2"}:
-        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1' or 'v2'.")
+    weight_version = str(weight_version or "v3").lower()
+    if weight_version not in XPASS_WEIGHT_VERSIONS:
+        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', or 'v3'.")
     if weight_version == "v2" and distance_to_nearest_opponent is None:
         raise ValueError("weight_version='v2' requires distance_to_nearest_opponent.")
     if isinstance(pass_success_model, torch.Tensor) or isinstance(xpass, torch.Tensor) or isinstance(pass_distance, torch.Tensor):
@@ -796,6 +929,8 @@ def blend_physical_xpass_predictions(
         if weight_version == "v2":
             nearest_tensor = torch.as_tensor(distance_to_nearest_opponent, dtype=torch.float32, device=model_tensor.device)
             weight = physical_xpass_blend_weight_v2(distance_tensor, nearest_tensor)
+        elif weight_version == "v3":
+            weight = physical_xpass_blend_weight_v3(distance_tensor)
         else:
             weight = physical_xpass_blend_weight(distance_tensor)
         if ball_z_limit is not None:
@@ -809,6 +944,8 @@ def blend_physical_xpass_predictions(
     distance_values = np.asarray(pass_distance, dtype=float)
     if weight_version == "v2":
         weight = physical_xpass_blend_weight_v2(distance_values, np.asarray(distance_to_nearest_opponent, dtype=float))
+    elif weight_version == "v3":
+        weight = physical_xpass_blend_weight_v3(distance_values)
     else:
         weight = physical_xpass_blend_weight(distance_values)
     if ball_z_limit is not None:
@@ -2000,18 +2137,21 @@ PC_XPASS_DETAIL_SUFFIXES = [
 ]
 
 
-def pc_xpass_output_columns(player_ids: list[str] | tuple[str, ...]) -> list[str]:
+def pc_xpass_output_columns(
+    player_ids: list[str] | tuple[str, ...],
+    *,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[str]:
+    metrics = normalize_physical_xpass_metrics(enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, pc_xpass_top_metric(top_n)])
     columns: list[str] = []
+    top_metric = pc_xpass_top_metric(top_n)
     for player_id in player_ids:
         player = str(player_id)
-        columns.extend(
-            [
-                player,
-                physical_xpass_metric_column(player, PHYSICAL_XPASS_METRIC_MAX),
-                physical_xpass_metric_column(player, PC_XPASS_METRIC_TOP10),
-                physical_xpass_metric_column(player, PC_XPASS_METRIC_TOP25),
-            ]
-        )
+        if top_metric in metrics:
+            columns.append(player)
+        for metric in metrics:
+            columns.append(physical_xpass_metric_column(player, metric))
         columns.extend(f"{player}{suffix}" for suffix in PC_XPASS_DETAIL_SUFFIXES)
     return columns
 
@@ -2077,10 +2217,14 @@ def compute_graph_pc_xpass_metrics(
     max_speed: float | None = None,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> pd.Series:
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
-    result = pd.Series(np.nan, index=pc_xpass_output_columns(node_ids), dtype=float)
+    top_metric = pc_xpass_top_metric(top_n)
+    enabled_metrics = normalize_physical_xpass_metrics(enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, top_metric])
+    result = pd.Series(np.nan, index=pc_xpass_output_columns(node_ids, top_n=top_n, enabled_metrics=enabled_metrics), dtype=float)
     if not candidate_indices:
         return result
 
@@ -2151,14 +2295,13 @@ def compute_graph_pc_xpass_metrics(
         flat = int(np.nanargmax(score))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
-        top10 = _pc_xpass_top_mean(score, 10)
-        top25 = _pc_xpass_top_mean(score, 25)
-        result.loc[node_id] = float(np.clip(top25, eps, 1.0 - eps)) if math.isfinite(top25) else np.nan
-        result.loc[physical_xpass_metric_column(node_id, PHYSICAL_XPASS_METRIC_MAX)] = float(np.clip(max_score, eps, 1.0 - eps))
-        if math.isfinite(top10):
-            result.loc[physical_xpass_metric_column(node_id, PC_XPASS_METRIC_TOP10)] = float(np.clip(top10, eps, 1.0 - eps))
-        if math.isfinite(top25):
-            result.loc[physical_xpass_metric_column(node_id, PC_XPASS_METRIC_TOP25)] = float(np.clip(top25, eps, 1.0 - eps))
+        top_value = _pc_xpass_top_mean(score, int(top_n))
+        if top_metric in enabled_metrics:
+            result.loc[node_id] = float(np.clip(top_value, eps, 1.0 - eps)) if math.isfinite(top_value) else np.nan
+        if PHYSICAL_XPASS_METRIC_MAX in enabled_metrics:
+            result.loc[physical_xpass_metric_column(node_id, PHYSICAL_XPASS_METRIC_MAX)] = float(np.clip(max_score, eps, 1.0 - eps))
+        if top_metric in enabled_metrics and math.isfinite(top_value):
+            result.loc[physical_xpass_metric_column(node_id, top_metric)] = float(np.clip(top_value, eps, 1.0 - eps))
         result.loc[f"{node_id}__lane_survival"] = float(lane_survival[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__control_prob"] = float(receiver_control[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__speed"] = float(speeds[speed_i])
@@ -2178,6 +2321,8 @@ def compute_graphs_pc_xpass_metrics(
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     batch_size: int = 16,
+    top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -2187,6 +2332,8 @@ def compute_graphs_pc_xpass_metrics(
             max_speed=max_speed,
             speed_step=speed_step,
             angle_step=angle_step,
+            top_n=top_n,
+            enabled_metrics=enabled_metrics,
         )
         for graph in graphs
     ]
@@ -2899,9 +3046,16 @@ def load_runtime_physical_xpass_visualization_component(
     action_index: int,
     *,
     metric: str | None = None,
+    x_pass_version: str | None = None,
     frame_scope: str | None = None,
 ) -> pd.Series:
     selected_metric = normalize_physical_xpass_metric(metric)
+    if x_pass_version is not None:
+        validate_x_pass_version_available(
+            cache_dir,
+            x_pass_version=x_pass_version,
+            metric=selected_metric,
+        )
     try:
         series = load_physical_xpass_component(
             cache_dir,
@@ -2932,6 +3086,7 @@ def load_runtime_physical_xpass_visualization_table(
     action_indices: list[int] | tuple[int, ...],
     *,
     metric: str | None = None,
+    x_pass_version: str | None = None,
     frame_scope: str | None = None,
 ) -> pd.DataFrame:
     rows = [
@@ -2940,6 +3095,7 @@ def load_runtime_physical_xpass_visualization_table(
             match_id,
             int(action_index),
             metric=metric,
+            x_pass_version=x_pass_version,
             frame_scope=frame_scope,
         )
         for action_index in action_indices
@@ -2998,7 +3154,8 @@ def _runtime_cache_metadata(
             max_speed=max_speed,
             speed_step=speed_step,
             angle_step=angle_step,
-            available_metrics=available_metrics or PC_XPASS_AVAILABLE_METRICS,
+            top_n=top_n,
+            available_metrics=available_metrics,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -3479,7 +3636,10 @@ def _chunk_items_by_size(items: list[dict[str, Any]], chunk_size: int) -> list[l
 
 def _physical_xpass_row_has_finite_metric(row: dict[str, Any], enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None) -> bool:
     enabled_metrics = normalize_physical_xpass_metrics(enabled_metrics)
-    suffixes = [PHYSICAL_XPASS_METRIC_SUFFIXES[metric] for metric in enabled_metrics]
+    suffixes = [
+        PHYSICAL_XPASS_METRIC_SUFFIXES.get(metric, f"__{metric}")
+        for metric in enabled_metrics
+    ]
     metadata_columns = set(PHYSICAL_XPASS_ID_COLUMNS)
     for key, value in row.items():
         key = str(key)
@@ -3542,6 +3702,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             speed_step=speed_step,
             angle_step=angle_step,
             batch_size=physical_batch_size,
+            top_n=top_n,
+            enabled_metrics=enabled_metrics,
         )
     else:
         computed_probs = [

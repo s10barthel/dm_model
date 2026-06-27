@@ -264,6 +264,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-n must be positive.")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
+    if bool(args.pc_xpass) and not any([bool(args.export_max), bool(args.export_topmean)]):
+        parser.error("At least one pc-xPass metric must be exported.")
     if not bool(args.pc_xpass) and not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one physical xPass metric must be exported.")
     try:
@@ -275,7 +277,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[str]:
     if bool(getattr(args, "pc_xpass", False)):
-        return normalize_physical_xpass_metrics(PC_XPASS_AVAILABLE_METRICS)
+        metrics: list[str] = []
+        if bool(getattr(args, "export_max", True)):
+            metrics.append(PHYSICAL_XPASS_METRIC_MAX)
+        if bool(getattr(args, "export_topmean", True)):
+            metrics.append(f"top{int(args.top_n)}_xpass")
+        return normalize_physical_xpass_metrics(metrics)
     metrics: list[str] = []
     if bool(getattr(args, "export_noise_kernel", True)):
         metrics.append(PHYSICAL_XPASS_METRIC_NOISE_KERNEL)
@@ -931,6 +938,7 @@ def write_runtime_dataset_metadata(
             max_speed=args.max_speed,
             speed_step=args.speed_step,
             angle_step=args.angle_step,
+            top_n=int(args.top_n),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
         )
         if bool(getattr(args, "pc_xpass", False))

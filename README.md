@@ -588,7 +588,8 @@ Useful options:
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/sportec` first
-- `--max-xpass` or `--topmean-xpass` to use an alternative cached xPass metric for the blend
+- `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
 
 ### 7. Visualize action components
 
@@ -637,7 +638,8 @@ Useful options:
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
 - `--show-physical-xpass` to render the cached physical xPass metric itself
-- `--max-xpass` or `--topmean-xpass` to use an alternative cached xPass metric for both blending and physical xPass rendering
+- `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
+- `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
 - `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
 - `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
@@ -671,7 +673,8 @@ Useful options:
 - `--run-id <component_run_id>` to pin the created HawkEye export run id instead of auto-generating one
 - `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/hawkeye` first
-- `--max-xpass` or `--topmean-xpass` to use an alternative cached xPass metric for the blend
+- `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
 
 To visualize one HawkEye situation as MP4s:
 
@@ -723,7 +726,8 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` selected modifications
 - `--run-id <component_run_id>` to pin the created benchmark export run id instead of auto-generating one
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/benchmark` first
-- `--max-xpass` or `--topmean-xpass` to use an alternative cached xPass metric for the blend
+- `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
 
 To visualize one benchmark state as PNGs:
 
@@ -764,7 +768,8 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` selected matches
 - `--run-id <component_run_id>` to pin the created SkillCorner export run id instead of auto-generating one
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/skillcorner` first
-- `--max-xpass` or `--topmean-xpass` to use an alternative cached xPass metric for the blend
+- `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
 
 To visualize one SkillCorner possession as MP4s:
 
@@ -946,7 +951,7 @@ Default runtime output locations:
 - `data/runtime_physical_xpass/benchmark`
 - `data/runtime_physical_xpass/hawkeye`
 
-The cached row contains `pass_distance`, per-player nearest-opponent distances for optional v2 blending, the default robust physical xPass value in unsuffixed player-id columns, and comparison metrics:
+The cached row contains `pass_distance`, per-player nearest-opponent distances for v2 blending, optional `ball_z` gating, and the selected physical xPass metrics:
 
 - `<player_id>`: default `noise_kernel_xpass`
 - `<player_id>__max_xpass`: original max-over-grid xPass
@@ -956,16 +961,25 @@ The cached row contains `pass_distance`, per-player nearest-opponent distances f
 
 Current runtime defaults are `--consider-teammates`, `--speed-aggregation package_max`, speeds `3..22 m/s` in `1 m/s` steps, coarse angle search plus adaptive `2.5` degree local refinement, `--top-n 10`, `--num-workers auto`, `--physical-batch-size 16`, and `--worker-thread-limit 1`. Runtime caches are updated in place and compatible existing rows are reused; old max-only runtime caches are incompatible and should be deleted or moved before regeneration.
 
+Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; the default generated top version is controlled by `--top-n` and defaults to `top10`.
+
 ### Inference-time blending
 
 Use physical xPass at inference by adding `--use-physical-xpass` to the inference script. The pass-success model still runs normally, then each receiver probability is blended with cached physical xPass:
 
 ```text
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
+```
+
+Select the blend weight with `--xpass-weight {v1,v2,v3}`. The default is `v3`.
+
+`v1` is the original distance-only weight:
+
+```text
 w = min(pass_distance / 100, 1.0)
 ```
 
-The default weighting is distance-only: short passes stay closer to physical xPass, and long passes move closer to the pass-success model. Add `--xpass-weight-v2` to use the nearest-opponent-aware alternative:
+`v2` uses the receiver's nearest-opponent distance:
 
 ```text
 x = clip(pass_distance / 100, 0, 1)
@@ -974,7 +988,15 @@ w = clip(0.5 * sin((pi / 0.8) * x)^3 * (1 + y * 2), 0, 1)
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-`--xpass-weight-v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
+`v3` is the default symmetric distance weight:
+
+```text
+x = clip(pass_distance / 100, 0, 1)
+w = clip(0.75 / (1.0 + (x * (1.0 - x) / 0.25)^(-8)), 0, 1)
+pass_success = (1 - w) * physical_xpass + w * pass_success_model
+```
+
+`--xpass-weight v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
 
 Add `--ball-z-limit <float>` to ignore physical xPass for high-ball passes. When cached `ball_z` is greater than the limit, the blend weight is forced to `1.0`, so the final pass-success value is the pass-success model output. The default is `--ball-z-limit none`, which ignores `ball_z` and keeps existing behavior. Cached `ball_z` is required only when a numeric limit is set; rerun `scripts/generate_physical_xpass.py` to backfill it without recomputing existing xPass metrics.
 
@@ -985,15 +1007,16 @@ python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --use
 python scripts/run_hawkeye.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_benchmark.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_skillcorner.py --bundle-id <bundle_id> --use-physical-xpass
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --topmean-xpass --xpass-weight-v2
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --x-pass-version top10 --xpass-weight v2
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --pc-xpass --x-pass-version top25 --xpass-weight v3
 ```
 
 Metric selection applies only to inference-time physical xPass blending:
 
-- default: use noise-kernel xPass from unsuffixed player columns
-- `--max-xpass`: use `<player_id>__max_xpass`
-- `--topmean-xpass` / `--topmean_xpass`: use `<player_id>__topmean_xpass`
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`; old caches with `<player_id>__top10mean_xpass` can still be read during the transition
+- `--x-pass-version top10`: default. Original physical xPass reads `<player_id>__topmean_xpass` and requires cache metadata `top_n=10`; pc-xPass reads `<player_id>__top10_xpass`.
+- `--x-pass-version top<N>`: dynamic top-N selection, for example `top25` or `top50`. The requested version must be present in the cache.
+- `--x-pass-version max`: use `<player_id>__max_xpass`.
+- `--x-pass-version noise-kernel`: use unsuffixed original physical xPass columns. This is invalid for pc-xPass.
 
 Inference reads physical xPass caches only. It does not compute or prewarm missing rows. If cache rows, selected metric columns, required `pass_distance` values, or v2 nearest-opponent distances are missing/unusable, the affected pass rows are skipped or failed according to the selected weighting mode.
 
@@ -1010,7 +1033,7 @@ python scripts/visualize_benchmark.py --modification 1 --game-state 1 --componen
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --show-physical-xpass
 ```
 
-For scripts that both run inference and visualize (`visualize_action_components.py` and `run_and_visualize_hawkeye.py`), `--max-xpass` and `--topmean-xpass` select the same physical metric for both inference blending and the physical xPass visualization.
+For scripts that both run inference and visualize (`visualize_action_components.py` and `run_and_visualize_hawkeye.py`), `--x-pass-version` selects the same cached xPass metric for both inference blending and the physical xPass visualization.
 
 ### Legacy training sidecars
 
@@ -1041,10 +1064,9 @@ Only the `pass_success` low-level training command receives physical xPass flags
 ### Inference script xPass flags
 
 - `--use-physical-xpass`: enable inference-time pass-success blending from the runtime cache.
-- `--max-xpass`: use the max-xPass comparison columns instead of the default noise-kernel columns.
-- `--topmean-xpass` / `--topmean_xpass`: use the top-N-mean comparison columns.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware blend weighting. Requires cached `<player_id>__distance_to_nearest_opponent` values.
+- `--pc-xpass` / `--pc_xpass`: read `data/pc_xpass/<dataset>` instead of `data/runtime_physical_xpass/<dataset>`.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values.
 - `--ball-z-limit <float|none>`: with a numeric limit, use 100% pass-success model weight when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: override the runtime physical xPass cache directory; default is `data/runtime_physical_xpass/<dataset>`.
 - `--no-physical-cache`: disable the runtime cache override. Do not use this with inference-time blending unless you intentionally want cache lookup disabled.
@@ -1193,10 +1215,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--overwrite`: overwrite existing EPV outputs. Default: off.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend only the `pass_success` inference used inside EPV calculation with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the pass-success blend. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the pass-success blend. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches from `data/pc_xpass/sportec` instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting. Default: `v3`.
 - `--ball-z-limit <float|none>`: with a numeric limit, use the pass-success model only when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: Sportec runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 
@@ -1219,8 +1240,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--max-speed <m/s>` / `--max_speed <m/s>`: upper speed-grid value. Default: `22`.
 - `--speed-step <m/s>`: speed-grid step from `3` to `--max-speed`. Default: `1`.
 - `--coarse-n-angles <N>`, `--refine-top-k-angles <N>`, `--refine-angle-radius <deg>`, `--angle-step <deg>`: adaptive angle search controls. Defaults: `36`, `2`, `10`, and `2.5`.
-- `--top-n <N>`: number of highest finite xPass grid values averaged for the `topmean_xpass` comparison metric. Default: `10`.
-- `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For topmean-only inference caches, use `--no-noise-kernel --no-max` and pass `--topmean-xpass` during inference/visualization.
+- `--top-n <N>`: number of highest finite xPass grid values averaged for top-N metrics. Original physical xPass stores this as `__topmean_xpass` with metadata `top_n=N`; pc-xPass stores it as `__top<N>_xpass`. Default: `10`.
+- `--pc-xpass`: generate pc-xPass caches under `data/pc_xpass/<dataset>` instead of runtime physical xPass caches.
+- `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--x-pass-version top<N>` during inference/visualization.
 - `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
 - `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 
@@ -1297,10 +1319,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs/sportec`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the blend. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1324,10 +1345,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/component_runs/hawkeye`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the blend. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1348,10 +1368,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/component_runs/benchmark`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the blend. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1373,10 +1392,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/component_runs/skillcorner`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for the blend. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for the blend. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1397,10 +1415,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for both blending and xPass rendering. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean columns for both blending and xPass rendering. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override for inference/visualization. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; visualization does not compute xPass rows.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
@@ -1427,9 +1444,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
-- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: render cached top-N-mean xPass columns. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
+- `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_benchmark.py`
@@ -1444,9 +1460,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
-- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: render cached top-N-mean xPass columns. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
+- `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/run_and_visualize_hawkeye.py`
@@ -1471,10 +1486,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
-- `--max-xpass` / `--max_xpass`: use cached max-xPass columns for both blending and xPass rendering. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: use cached top-N-mean xPass columns for both blending and xPass rendering. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
-- `--xpass-weight-v2` / `--xpass_weight_v2`: use nearest-opponent-aware xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: off.
+- `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
+- `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; this script does not compute xPass rows.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
@@ -1494,9 +1508,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--only-last`: in PNG mode, render only the last addressable possession frame. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
-- `--max-xpass` / `--max_xpass`: render cached max-xPass columns. Default: off.
-- `--topmean-xpass` / `--topmean_xpass`: render cached top-N-mean xPass columns. Default: off.
-- `--top10mean-xpass` / `--top10mean_xpass`: deprecated alias for `--topmean-xpass`. Default: off.
+- `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
+- `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ## Script I/O Reference
