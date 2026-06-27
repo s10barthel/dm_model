@@ -209,10 +209,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     teammate_policy_group = parser.add_mutually_exclusive_group()
     teammate_policy_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
     teammate_policy_group.add_argument("--consider-teammates", dest="consider_teammates", action="store_true")
+    parser.add_argument(
+        "--ignore-teammates-lane-survival",
+        "--ignore_teammates_lane_survival",
+        dest="ignore_teammates_lane_survival",
+        action="store_true",
+        help="pc-xPass only: ignore attacking teammates in lane-survival competition.",
+    )
+    parser.add_argument(
+        "--ignore-teammates-control",
+        "--ignore_teammates_control",
+        dest="ignore_teammates_control",
+        action="store_true",
+        help="pc-xPass only: ignore attacking teammates in endpoint-control competition.",
+    )
     parser.add_argument("--no-normalize", dest="normalize", action="store_false", help="Deprecated compatibility flag; ignored.")
     parser.set_defaults(
         normalize=True,
         consider_teammates=True,
+        ignore_teammates_lane_survival=False,
+        ignore_teammates_control=False,
         freeze_ballreceipt=True,
         export_noise_kernel=True,
         export_max=True,
@@ -264,6 +280,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-n must be positive.")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
+    if not bool(args.pc_xpass) and (bool(args.ignore_teammates_lane_survival) or bool(args.ignore_teammates_control)):
+        parser.error("--ignore-teammates-lane-survival and --ignore-teammates-control require --pc-xpass.")
     if bool(args.pc_xpass) and not any([bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one pc-xPass metric must be exported.")
     if not bool(args.pc_xpass) and not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
@@ -339,6 +357,14 @@ def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
 
 def teammate_policy_from_args(args: argparse.Namespace) -> str:
     return PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER if bool(args.consider_teammates) else PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+
+
+def pc_ignore_teammates_lane_survival_from_args(args: argparse.Namespace) -> bool:
+    return (not bool(args.consider_teammates)) or bool(getattr(args, "ignore_teammates_lane_survival", False))
+
+
+def pc_ignore_teammates_control_from_args(args: argparse.Namespace) -> bool:
+    return (not bool(args.consider_teammates)) or bool(getattr(args, "ignore_teammates_control", False))
 
 
 def resolve_num_workers(value: str | int, *, max_auto_workers: int = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
@@ -807,6 +833,12 @@ def prewarm_runtime_items(
         source=PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         eps=float(args.physical_eps),
         teammate_policy=teammate_policy_from_args(args),
+        ignore_teammates_lane_survival=pc_ignore_teammates_lane_survival_from_args(args)
+        if bool(getattr(args, "pc_xpass", False))
+        else None,
+        ignore_teammates_control=pc_ignore_teammates_control_from_args(args)
+        if bool(getattr(args, "pc_xpass", False))
+        else None,
         speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
         refresh=False,
         num_workers=args.num_workers,
@@ -935,6 +967,8 @@ def write_runtime_dataset_metadata(
     base_metadata = (
         pc_xpass_metadata(
             teammate_policy_from_args(args),
+            ignore_teammates_lane_survival=pc_ignore_teammates_lane_survival_from_args(args),
+            ignore_teammates_control=pc_ignore_teammates_control_from_args(args),
             max_speed=args.max_speed,
             speed_step=args.speed_step,
             angle_step=args.angle_step,
@@ -967,6 +1001,12 @@ def write_runtime_dataset_metadata(
         "skipped": skipped,
         "stats": stats,
         "frame_scopes": source_inputs.get("frame_scopes"),
+        "ignore_teammates_lane_survival": pc_ignore_teammates_lane_survival_from_args(args)
+        if bool(getattr(args, "pc_xpass", False))
+        else None,
+        "ignore_teammates_control": pc_ignore_teammates_control_from_args(args)
+        if bool(getattr(args, "pc_xpass", False))
+        else None,
         "dry_run": bool(getattr(args, "dry_run", False)),
         "physical_eps": float(args.physical_eps),
         "num_workers": args.num_workers,
@@ -1123,12 +1163,25 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
 
 
 def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
-    feature_run_id = resolve_feature_run_id(None, required=True, allow_latest=True)
+    cache_dir = get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+    try:
+        feature_run_id = resolve_feature_run_id(None, required=True, allow_latest=True)
+    except (FileNotFoundError, ValueError) as exc:
+        cache_note = (
+            f"Sportec pc-xPass runtime generation writes to {cache_dir}, but it still needs an existing "
+            "feature run as graph/label input."
+            if bool(getattr(args, "pc_xpass", False))
+            else f"Sportec runtime physical xPass generation writes to {cache_dir}, but it still needs an existing feature run as graph/label input."
+        )
+        raise RuntimeError(
+            f"{cache_note} Could not resolve the latest feature run. "
+            "Create or register a feature run first. If a specific input feature run is needed, add a separate "
+            "runtime input selector before using --pc-xpass; --feature-run-id remains reserved for legacy sidecar mode."
+        ) from exc
     feature_root = resolve_feature_root(feature_run_id)
     graph_dir = get_action_graph_dir(feature_root)
     post_graph_dir = get_post_action_graph_dir(feature_root)
     label_dir, return_type, intended_receiver_mode = resolve_reference_label_context(str(feature_run_id), feature_root, args)
-    cache_dir = get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     feature_cache_dir = get_physical_xpass_dir(feature_root)
     reuse_cache_dir, implicit_reuse_cache_skipped_reason = resolve_runtime_sportec_reuse_cache(args, feature_cache_dir)
 

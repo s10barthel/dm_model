@@ -35,6 +35,7 @@ PHYSICAL_XPASS_BALL_Z_ATTR = "physical_xpass_ball_z"
 DEFAULT_RESIDUAL_DISTANCE_THRESHOLD = 30.0
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
+PC_XPASS_TEAMMATE_POLICY_SPLIT = "split_teammate_policy"
 PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX = "package_max"
 PHYSICAL_XPASS_SPEED_AGGREGATION_EXACT_SEPARATE_SPEED = "exact_separate_speed"
 PHYSICAL_XPASS_SPEED_AGGREGATIONS = {
@@ -257,6 +258,8 @@ def physical_xpass_as_default_metadata(
 def pc_xpass_metadata(
     teammate_policy: str,
     *,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
@@ -267,7 +270,19 @@ def pc_xpass_metadata(
         raise ValueError(
             f"Unsupported teammate_policy={teammate_policy!r}. "
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
-        )
+    )
+    legacy_ignore = teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+    ignore_lane = bool(legacy_ignore or bool(ignore_teammates_lane_survival))
+    ignore_control = bool(legacy_ignore or bool(ignore_teammates_control))
+    effective_teammate_policy = (
+        PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+        if ignore_lane and ignore_control
+        else PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+        if not ignore_lane and not ignore_control
+        else PC_XPASS_TEAMMATE_POLICY_SPLIT
+    )
+    lane_survival_policy = _pc_xpass_lane_survival_policy(ignore_lane)
+    control_policy = _pc_xpass_control_policy(ignore_control)
     top_metric = pc_xpass_top_metric(top_n)
     metrics = normalize_physical_xpass_metrics(available_metrics or [PHYSICAL_XPASS_METRIC_MAX, top_metric])
     available_versions = []
@@ -282,7 +297,9 @@ def pc_xpass_metadata(
         "metric": top_metric,
         "metric_family": PC_XPASS_SOURCE,
         "source": PC_XPASS_SOURCE,
-        "teammate_policy": teammate_policy,
+        "teammate_policy": effective_teammate_policy,
+        "ignore_teammates_lane_survival": ignore_lane,
+        "ignore_teammates_control": ignore_control,
         "default_metric": top_metric,
         "available_metrics": metrics,
         "default_x_pass_version": f"top{int(top_n)}",
@@ -295,11 +312,8 @@ def pc_xpass_metadata(
         "arrival_sigmoid_scale": PC_XPASS_SIGMOID_SCALE,
         "arrival_sigmoid_offset": PC_XPASS_SIGMOID_OFFSET,
         "normalization": "divide_if_sum_gt_1",
-        "lane_survival_policy": (
-            "non_passer_non_receiver_all_players"
-            if teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
-            else "non_passer_non_receiver_opponents_only"
-        ),
+        "control_policy": control_policy,
+        "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
         "speed_step": speed_step_value,
         "angle_step": float(angle_step),
@@ -2166,6 +2180,18 @@ def pc_xpass_normalize_if_sum_above_one(raw: np.ndarray, axis: int = 0) -> np.nd
     return np.where(sums > 1.0, normalized, raw)
 
 
+def _resolve_pc_xpass_ignore_teammate_flags(
+    *,
+    consider_teammates: bool = True,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
+) -> tuple[bool, bool]:
+    legacy_ignore = not bool(consider_teammates)
+    ignore_lane = bool(legacy_ignore or bool(ignore_teammates_lane_survival))
+    ignore_control = bool(legacy_ignore or bool(ignore_teammates_control))
+    return ignore_lane, ignore_control
+
+
 def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
     finite = np.asarray(values[np.isfinite(values)], dtype=float)
     if finite.size == 0:
@@ -2214,12 +2240,19 @@ def compute_graph_pc_xpass_metrics(
     *,
     eps: float = 1e-4,
     consider_teammates: bool = True,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> pd.Series:
+    ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
+        consider_teammates=consider_teammates,
+        ignore_teammates_lane_survival=ignore_teammates_lane_survival,
+        ignore_teammates_control=ignore_teammates_control,
+    )
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
     top_metric = pc_xpass_top_metric(top_n)
@@ -2267,7 +2300,7 @@ def compute_graph_pc_xpass_metrics(
 
         endpoint_raw = raw.copy()
         endpoint_raw[passer_sim_index] = 0.0
-        if not consider_teammates:
+        if ignore_control_teammates:
             endpoint_raw[attack_mask] = 0.0
             endpoint_raw[receiver_sim_index] = raw[receiver_sim_index]
         endpoint_probs = pc_xpass_normalize_if_sum_above_one(endpoint_raw, axis=0)
@@ -2276,7 +2309,7 @@ def compute_graph_pc_xpass_metrics(
         lane_raw = raw.copy()
         lane_raw[passer_sim_index] = 0.0
         lane_raw[receiver_sim_index] = 0.0
-        if not consider_teammates:
+        if ignore_lane_teammates:
             lane_raw[attack_mask] = 0.0
         lane_probs = pc_xpass_normalize_if_sum_above_one(lane_raw, axis=0)
         other_control = np.nansum(lane_probs, axis=0)
@@ -2317,6 +2350,8 @@ def compute_graphs_pc_xpass_metrics(
     *,
     eps: float = 1e-4,
     consider_teammates: bool = True,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
@@ -2329,6 +2364,8 @@ def compute_graphs_pc_xpass_metrics(
             graph,
             eps=eps,
             consider_teammates=consider_teammates,
+            ignore_teammates_lane_survival=ignore_teammates_lane_survival,
+            ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
             speed_step=speed_step,
             angle_step=angle_step,
@@ -3136,6 +3173,8 @@ def _runtime_cache_metadata(
     source: str,
     teammate_policy: str,
     speed_aggregation: str,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
@@ -3151,6 +3190,8 @@ def _runtime_cache_metadata(
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
             teammate_policy,
+            ignore_teammates_lane_survival=ignore_teammates_lane_survival,
+            ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
             speed_step=speed_step,
             angle_step=angle_step,
@@ -3184,12 +3225,34 @@ def _runtime_cache_metadata(
     raise ValueError(f"Unsupported physical_xpass_source={source!r}.")
 
 
+def _pc_xpass_metadata_ignore_flags(metadata: dict[str, Any]) -> tuple[bool, bool]:
+    legacy_policy = metadata.get("teammate_policy")
+    legacy_ignore = legacy_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
+    ignore_lane = bool(metadata.get("ignore_teammates_lane_survival", legacy_ignore))
+    ignore_control = bool(metadata.get("ignore_teammates_control", legacy_ignore))
+    return ignore_lane, ignore_control
+
+
+def _pc_xpass_lane_survival_policy(ignore_teammates_lane_survival: bool) -> str:
+    return (
+        "non_passer_non_receiver_opponents_only"
+        if bool(ignore_teammates_lane_survival)
+        else "non_passer_non_receiver_all_players"
+    )
+
+
+def _pc_xpass_control_policy(ignore_teammates_control: bool) -> str:
+    return "opponents_only" if bool(ignore_teammates_control) else "all_players"
+
+
 def _ensure_runtime_physical_xpass_cache(
     cache_dir: str | Path,
     *,
     source: str,
     teammate_policy: str,
     speed_aggregation: str,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
@@ -3209,6 +3272,8 @@ def _ensure_runtime_physical_xpass_cache(
         source=source,
         teammate_policy=teammate_policy,
         speed_aggregation=speed_aggregation,
+        ignore_teammates_lane_survival=ignore_teammates_lane_survival,
+        ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
@@ -3229,14 +3294,32 @@ def _ensure_runtime_physical_xpass_cache(
             for key in [
                 "source",
                 "metric_family",
-                "teammate_policy",
                 "default_metric",
                 "arrival_function",
                 "normalization",
-                "lane_survival_policy",
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            actual_ignore_lane, actual_ignore_control = _pc_xpass_metadata_ignore_flags(metadata)
+            expected_ignore_lane, expected_ignore_control = _pc_xpass_metadata_ignore_flags(expected_metadata)
+            if actual_ignore_lane != expected_ignore_lane:
+                mismatches.append(
+                    "ignore_teammates_lane_survival: "
+                    f"expected {expected_ignore_lane!r}, got {actual_ignore_lane!r}"
+                )
+            if actual_ignore_control != expected_ignore_control:
+                mismatches.append(
+                    "ignore_teammates_control: "
+                    f"expected {expected_ignore_control!r}, got {actual_ignore_control!r}"
+                )
+            actual_lane_policy = metadata.get("lane_survival_policy") or _pc_xpass_lane_survival_policy(actual_ignore_lane)
+            expected_lane_policy = expected_metadata.get("lane_survival_policy")
+            if actual_lane_policy != expected_lane_policy:
+                mismatches.append(f"lane_survival_policy: expected {expected_lane_policy!r}, got {actual_lane_policy!r}")
+            actual_control_policy = metadata.get("control_policy") or _pc_xpass_control_policy(actual_ignore_control)
+            expected_control_policy = expected_metadata.get("control_policy")
+            if actual_control_policy != expected_control_policy:
+                mismatches.append(f"control_policy: expected {expected_control_policy!r}, got {actual_control_policy!r}")
             for key in ["reaction_time", "max_player_speed", "arrival_sigmoid_scale", "arrival_sigmoid_offset", "max_speed", "speed_step", "angle_step"]:
                 if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
@@ -3663,6 +3746,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     speed_aggregation = normalize_physical_xpass_speed_aggregation(task.get("speed_aggregation"))
     physical_batch_size = int(task.get("physical_batch_size", 16))
     consider_teammates = teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    ignore_teammates_lane_survival = task.get("ignore_teammates_lane_survival", None)
+    ignore_teammates_control = task.get("ignore_teammates_control", None)
     max_speed = task.get("max_speed", None)
     speed_step = task.get("speed_step", None)
     coarse_n_angles = int(task.get("coarse_n_angles", AS_DEFAULT_COARSE_N_ANGLES))
@@ -3698,6 +3783,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             [item["graph"] for item in misses],
             eps=eps,
             consider_teammates=consider_teammates,
+            ignore_teammates_lane_survival=None
+            if ignore_teammates_lane_survival is None
+            else bool(ignore_teammates_lane_survival),
+            ignore_teammates_control=None if ignore_teammates_control is None else bool(ignore_teammates_control),
             max_speed=max_speed,
             speed_step=speed_step,
             angle_step=angle_step,
@@ -3804,6 +3893,8 @@ def prewarm_physical_xpass_runtime_cache(
     source: str,
     eps: float = 1e-4,
     teammate_policy: str | None = None,
+    ignore_teammates_lane_survival: bool | None = None,
+    ignore_teammates_control: bool | None = None,
     speed_aggregation: str | None = PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     refresh: bool = False,
     num_workers: str | int = "auto",
@@ -3827,6 +3918,8 @@ def prewarm_physical_xpass_runtime_cache(
     progress_desc: str | None = None,
     verbose_status: bool = False,
 ) -> dict[str, object]:
+    if available_metrics is None and source == PC_XPASS_SOURCE:
+        available_metrics = [PHYSICAL_XPASS_METRIC_MAX, pc_xpass_top_metric(top_n)]
     available_metrics = normalize_physical_xpass_metrics(available_metrics)
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     teammate_policy = teammate_policy or (
@@ -3845,6 +3938,8 @@ def prewarm_physical_xpass_runtime_cache(
         source=source,
         teammate_policy=teammate_policy,
         speed_aggregation=speed_aggregation,
+        ignore_teammates_lane_survival=ignore_teammates_lane_survival,
+        ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
@@ -4074,6 +4169,8 @@ def prewarm_physical_xpass_runtime_cache(
             "source": source,
             "eps": float(eps),
             "teammate_policy": teammate_policy,
+            "ignore_teammates_lane_survival": ignore_teammates_lane_survival,
+            "ignore_teammates_control": ignore_teammates_control,
             "speed_aggregation": speed_aggregation,
             "physical_batch_size": int(physical_batch_size),
             "max_speed": max_speed,

@@ -405,6 +405,7 @@ python scripts/generate_relevant_features.py --return_type disc_0.9 --num-worker
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height
 ```
 
 Inputs:
@@ -431,6 +432,7 @@ Useful options:
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
 - `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
+- `--pass-height` with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
@@ -474,7 +476,7 @@ An `--extend-feature-run-id` run with both new `--return_type` values and `--int
 5. **test split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
 6. **train split with model mode intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
 
-An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars.
+An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars. `--pass-height` uses the same labels-only extension shape to backfill `pass_max_ball_z` and `pass_high` into older feature runs.
 
 This writes, inside the run root:
 
@@ -494,6 +496,7 @@ Every generated action-label tensor also carries canonical outcome diagnostic co
 - `concedes_goal_next10`
 
 These are binary goal labels over `next_10`, generated independently of the selected `--return_type`.
+Action labels also carry pass-height columns. `pass_high` is `1` for passes whose maximum `ball_z` between the pass frame and receive frame is `>= 2.0` meters, and `0` otherwise; `pass_max_ball_z` stores that maximum height.
 
 ### 4. Train the retained models
 
@@ -504,6 +507,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --no-v-edge-features
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --return_type disc_0.9 --intended-receiver-mode model --no-action-intent --no-pass-intent --no-success-intent --no-outcome-scoring --no-outcome-conceding --pass-intent-model-id pass_intent/<model_run_id>
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --intended-receiver-mode angle_only --only-pass-height
 ```
 
 Inputs:
@@ -515,6 +519,7 @@ Outputs:
 - `saved/pass_intent/<model_run_id>/...`
 - `saved/action_intent/<model_run_id>/...`
 - `saved/pass_success/<model_run_id>/...`
+- `saved/pass_height/<model_run_id>/...` when `pass_height` is enabled
 - `saved/outcome_scoring/<model_run_id>/...`
 - `saved/outcome_conceding/<model_run_id>/...`
 - `saved/success_intent/<model_run_id>/...` when `success_intent` is enabled
@@ -523,15 +528,17 @@ Outputs:
 
 Behavior:
 
-- the default wrapper run enables `action_intent`, `pass_intent`, `success_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`; `failure_receiver` is off by default and can be enabled explicitly
-- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, and `--failure-receiver` / `--no-failure-receiver` let you rerun only the subset you need
+- the default wrapper run enables `action_intent`, `pass_intent`, `success_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`; `pass_height` and `failure_receiver` are off by default and can be enabled explicitly
+- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--pass-height` / `--no-pass-height`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, and `--failure-receiver` / `--no-failure-receiver` let you rerun only the subset you need
 - `--target-family` and `--return_type` are required only when `outcome_scoring` or `outcome_conceding` is enabled
-- `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
+- `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
 - `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
 - `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
+- `--only-pass-height` trains only the `pass_height` checkpoint; its target is `pass_high`, defined by `pass_max_ball_z >= 2.0`
 - `pass_success` uses inverse propensity weighting by default via `--pass-success-ipw`; it uses a `pass_intent` checkpoint as its IPW model, either from the same wrapper run or from `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>`
 - `--no-pass-success-ipw` trains `pass_success` without inverse propensity weighting; use `--no-pass-success-ipw --no-pass-intent` when you want pass-success only and do not want to train or supply a propensity model
 - an external `--pass-intent-model-id` applies only when pass-success IPW is enabled and must match the selected feature run, intended-receiver mode, graph schema, velocity edge-feature mode, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
+- `--pass-height-ipw` enables `pass_intent` inverse-propensity weighting for `pass_height`; when `pass_intent` is not trained in the same wrapper call, supply `--pass-height-ipw-model-id pass_intent/<model_run_id>`
 - outcome model loss uses the selected `--target-family` and `--return_type`; outcome F1/ROC AUC/Brier diagnostics use canonical `goal next_10` labels for comparability across target families and return types
 - older feature runs without embedded `goal next_10` diagnostic columns can still be used if the selected run exposes `action_labels_next_10<intended_receiver_suffix>` or if you pass `--diagnostic-feature-run-id <feature_run_id>` pointing to compatible `next_10` labels
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
@@ -568,6 +575,7 @@ python scripts/run_relevant_models.py --split test --bundle-id <bundle_id>
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --run-id component_20260414T123456_abcdef12
 python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
+python scripts/run_relevant_models.py --split test --bundle-id <bundle_id> --pass-height-model-id pass_height/<model_run_id>
 python scripts/run_relevant_models.py --split test --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
 ```
 
@@ -579,6 +587,7 @@ Inputs:
 
 Each invocation creates a new component run under `data/component_runs/sportec/<component_run_id>/` and updates `data/component_runs/sportec/latest.json`.
 When a `success_intent` checkpoint is supplied explicitly or present in the selected bundle, each processed match also gets `success_intent.parquet`.
+When a `pass_height` checkpoint is supplied explicitly or present in the selected bundle, each processed match also gets `pass_height.parquet`.
 
 Useful options:
 
@@ -587,6 +596,7 @@ Useful options:
 - `--run-id <component_run_id>` to pin the created component run id instead of auto-generating one
 - `--match-id DFL-MAT-...` to restrict inference to one or more matches
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
+- `--pass-height-model-id pass_height/<model_run_id>` to additionally export `pass_height.parquet` for each processed match
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/sportec` first
 - `--x-pass-version <max|noise-kernel|topN>` to select the cached xPass metric for the blend; default: `top10`
 - `--xpass-weight {v1,v2,v3}` to select the xPass/model blend weight; default: `v3`
@@ -596,6 +606,7 @@ Useful options:
 ```powershell
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --show-pass-height
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-outcome-scoring
@@ -619,6 +630,7 @@ Outputs:
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+- optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_height.png` when `--show-pass-height` or `--only-pass-height` is selected and a model is available
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
@@ -633,7 +645,9 @@ Useful options:
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--run-id <visualization_run_id>` to pin the created visualization run id instead of auto-generating one
 - `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
-- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
+- `--show-pass-height` to include the optional pass-height component when a `pass_height` checkpoint is selected
+- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
+- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
 - `--only-pass-score` also requires pass-success, outcome-scoring, and outcome-conceding to be selected, because pass score is derived from those components
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
@@ -1236,7 +1250,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--reuse-cache-dir <path>`: reuse compatible Sportec rows from another `physical_xpass` directory and compute only misses. Reuse requires matching source, teammate policy, AS-default parameters, and `physical_eps`.
 - `--return-type <return_type>` and `--intended-receiver-mode <mode>`: optional reference label directory selectors. Defaults are inferred from the feature run.
 - `--physical-eps <eps>`: clamp stored physical xPass metric probabilities. Default: `1e-4`.
-- `--ignore-teammates` / `--consider-teammates`: choose reduced target-plus-defenders simulation or all-player simulation. Default: `--consider-teammates`.
+- `--ignore-teammates` / `--consider-teammates`: choose reduced target-plus-defenders simulation or all-player simulation. Default: `--consider-teammates`. With `--pc-xpass`, `--ignore-teammates` is shorthand for ignoring teammates in both lane survival and endpoint control.
+- `--ignore-teammates-lane-survival`: pc-xPass only; ignore attacking teammates along the pass lane while still considering them for endpoint control unless `--ignore-teammates-control` is also set.
+- `--ignore-teammates-control`: pc-xPass only; ignore attacking teammates at the pass end location while still considering them for lane survival unless `--ignore-teammates-lane-survival` is also set.
 - `--max-speed <m/s>` / `--max_speed <m/s>`: upper speed-grid value. Default: `22`.
 - `--speed-step <m/s>`: speed-grid step from `3` to `--max-speed`. Default: `1`.
 - `--coarse-n-angles <N>`, `--refine-top-k-angles <N>`, `--refine-angle-radius <deg>`, `--angle-step <deg>`: adaptive angle search controls. Defaults: `36`, `2`, `10`, and `2.5`.
@@ -1255,6 +1271,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
 - `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.
+- `--pass-height`: with `--extend-feature-run-id`, overwrite copied label tensors so `pass_max_ball_z` and `pass_high` are available for `pass_height` training. `pass_high` uses `pass_max_ball_z >= 2.0`.
 - `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
 - `--next-action-conditions-on` / `--next-action-conditions-off`: keep or disable the pass/cross next-action consistency filter. Default: on. Derived runs must match the base run's setting.
 
@@ -1264,13 +1281,16 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional feature run containing compatible `action_labels_next_10*` labels for canonical goal-event diagnostics when the selected run lacks embedded `goal next_10` diagnostic columns.
-- `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
+- `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
 - `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
-- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `failure_receiver`.
+- `--only-pass-height`: train only the mode-dependent `pass_height` model from the `pass_high` label.
+- `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--pass-height` / `--no-pass-height`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `pass_height` and `failure_receiver`.
 - `--pass-success-ipw` / `--no-pass-success-ipw`: enable or disable inverse propensity weighting for `pass_success` only. Default: enabled.
 - `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--pass-success-ipw --no-pass-intent` is set.
+- `--pass-height-ipw` / `--no-pass-height-ipw`: enable or disable inverse propensity weighting for `pass_height`. Default: disabled.
+- `--pass-height-ipw-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_height` IPW model when `--pass-height-ipw --no-pass-intent` is set.
 - `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
-- `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
+- `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--pass-height-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
@@ -1298,6 +1318,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
@@ -1315,6 +1336,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used to export `success_intent.parquet`.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id used to export `pass_height.parquet`.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs/sportec`.
@@ -1340,6 +1362,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created HawkEye component run id. Default: auto-generate a new HawkEye component run id.
@@ -1363,6 +1386,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created benchmark component run id. Default: auto-generate a new benchmark component run id.
@@ -1387,6 +1411,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <component_run_id>`: pin the created SkillCorner component run id. Default: auto-generate a new SkillCorner component run id.
@@ -1413,6 +1438,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
+- `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
@@ -1424,11 +1450,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for intended-recipient overlays.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/sportec`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `intended-recipient`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `intended-recipient`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -1443,10 +1470,11 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_benchmark.py`
 
@@ -1459,10 +1487,11 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/benchmark`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/run_and_visualize_hawkeye.py`
 
@@ -1480,18 +1509,20 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id override. Default: none.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id override. Default: none.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id override. Default: none.
+- `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id override. Default: none.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id override. Default: none.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id override. Default: none.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--xpass-weight {v1,v2,v3}` / `--xpass_weight {v1,v2,v3}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; this script does not compute xPass rows.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ### `scripts/visualize_skillcorner.py`
 
@@ -1507,10 +1538,11 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--only-first`: in PNG mode, render only the first addressable possession frame. Default: off.
 - `--only-last`: in PNG mode, render only the last addressable possession frame. Default: off.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--x-pass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
 ## Script I/O Reference
 
@@ -1606,6 +1638,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `saved/pass_intent/<model_run_id>/...`
   - `saved/action_intent/<model_run_id>/...`
   - `saved/pass_success/<model_run_id>/...`
+  - `saved/pass_height/<model_run_id>/...` when `pass_height` is enabled
   - `saved/outcome_scoring/<model_run_id>/...`
   - `saved/outcome_conceding/<model_run_id>/...`
   - `saved/success_intent/<model_run_id>/...` when `success_intent` is enabled
@@ -1630,6 +1663,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/component_runs/sportec/<component_run_id>/<match_id>/pass_intent.parquet`
   - optionally `data/component_runs/sportec/<component_run_id>/<match_id>/success_intent.parquet` when a `success_intent` checkpoint is selected
   - `data/component_runs/sportec/<component_run_id>/<match_id>/pass_success.parquet`
+  - optionally `data/component_runs/sportec/<component_run_id>/<match_id>/pass_height.parquet` when a `pass_height` checkpoint is selected
   - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
   - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
   - `data/component_runs/sportec/<component_run_id>/<match_id>/outcome_conceding_success.parquet`
@@ -1646,6 +1680,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
+  - optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_height.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
@@ -1721,6 +1756,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/action_intent.parquet`
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/pass_intent.parquet`
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/pass_success.parquet`
+  - optionally `data/component_runs/skillcorner/<component_run_id>/<match_id>/pass_height.parquet` when a `pass_height` checkpoint is selected
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_scoring_success.parquet`
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_scoring_failure.parquet`
   - `data/component_runs/skillcorner/<component_run_id>/<match_id>/outcome_conceding_success.parquet`

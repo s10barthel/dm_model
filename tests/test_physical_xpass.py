@@ -103,6 +103,7 @@ from physical_pass_model import (
     physical_xpass_kernel_sigmas,
     physical_xpass_metric,
     physical_xpass_metric_column,
+    pc_xpass_metadata,
     pc_xpass_normalize_if_sum_above_one,
     pc_xpass_raw_control,
     physical_xpass_nearest_opponent_distance_column,
@@ -1030,6 +1031,92 @@ class PhysicalXPassTests(unittest.TestCase):
             float(row[physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10)]),
         )
         self.assertTrue(math.isfinite(float(row[physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX)])))
+
+    def test_compute_graph_pc_xpass_splits_lane_and_control_teammate_ignoring(self) -> None:
+        graph = make_graph(["home_1", "home_2", "home_3", "away_4"])
+        graph.x[0, config.NODE_FEATURE_X] = 0.0
+        graph.x[1, config.NODE_FEATURE_X] = 20.0
+        graph.x[2, config.NODE_FEATURE_X] = 10.0
+        graph.x[3, config.NODE_FEATURE_X] = 50.0
+        graph.x[:, config.NODE_FEATURE_Y] = torch.tensor([34.0, 34.0, 34.0, 50.0])
+        graph.x[:, config.NODE_FEATURE_POSS_DIST] = torch.abs(graph.x[:, config.NODE_FEATURE_X] - graph.x[0, config.NODE_FEATURE_X])
+        graph.x[2, config.NODE_FEATURE_IS_TEAMMATE] = 1.0
+        graph.x[3, config.NODE_FEATURE_IS_TEAMMATE] = 0.0
+
+        lane_considers_teammate = compute_graph_pc_xpass_metrics(
+            graph,
+            max_speed=7,
+            speed_step=2,
+            angle_step=90,
+            ignore_teammates_control=True,
+        )
+        lane_ignores_teammate = compute_graph_pc_xpass_metrics(
+            graph,
+            max_speed=7,
+            speed_step=2,
+            angle_step=90,
+            ignore_teammates_lane_survival=True,
+            ignore_teammates_control=True,
+        )
+        control_considers_teammate = compute_graph_pc_xpass_metrics(
+            graph,
+            max_speed=7,
+            speed_step=2,
+            angle_step=90,
+            ignore_teammates_lane_survival=True,
+        )
+        control_ignores_teammate = compute_graph_pc_xpass_metrics(
+            graph,
+            max_speed=7,
+            speed_step=2,
+            angle_step=90,
+            ignore_teammates_lane_survival=True,
+            ignore_teammates_control=True,
+        )
+
+        self.assertGreater(float(lane_ignores_teammate["home_2__lane_survival"]), float(lane_considers_teammate["home_2__lane_survival"]))
+        self.assertGreater(float(lane_ignores_teammate["home_2"]), float(lane_considers_teammate["home_2"]))
+        self.assertGreater(float(control_ignores_teammate["home_2__control_prob"]), float(control_considers_teammate["home_2__control_prob"]))
+        self.assertGreater(float(control_ignores_teammate["home_2"]), float(control_considers_teammate["home_2"]))
+
+    def test_pc_xpass_metadata_records_split_teammate_policies(self) -> None:
+        metadata = pc_xpass_metadata(
+            PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+            ignore_teammates_lane_survival=True,
+            ignore_teammates_control=False,
+        )
+
+        self.assertTrue(metadata["ignore_teammates_lane_survival"])
+        self.assertFalse(metadata["ignore_teammates_control"])
+        self.assertEqual(metadata["teammate_policy"], "split_teammate_policy")
+        self.assertEqual(metadata["lane_survival_policy"], "non_passer_non_receiver_opponents_only")
+        self.assertEqual(metadata["control_policy"], "all_players")
+
+    def test_pc_xpass_cache_accepts_old_single_teammate_policy_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE)
+            metadata.pop("ignore_teammates_lane_survival", None)
+            metadata.pop("ignore_teammates_control", None)
+            metadata.pop("control_policy", None)
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            prewarm_physical_xpass_runtime_cache(
+                [],
+                cache_dir=cache_dir,
+                source=PC_XPASS_SOURCE,
+                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE,
+                dry_run=True,
+            )
+            with self.assertRaisesRegex(ValueError, "ignore_teammates_lane_survival"):
+                prewarm_physical_xpass_runtime_cache(
+                    [],
+                    cache_dir=cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    dry_run=True,
+                )
 
     def test_runtime_visualization_xpass_loader_selects_metric_columns(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3596,6 +3683,43 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIsNone(source_inputs["reuse_cache_dir"])
         self.assertIn("incompatible source", source_inputs["implicit_reuse_cache_skipped_reason"])
 
+    def test_latest_run_loader_accepts_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            latest_path = Path(tmpdir) / "latest.json"
+            latest_path.write_text(json.dumps({"run_id": "feature_bom"}), encoding="utf-8-sig")
+
+            with patch.object(project_config, "FEATURE_LATEST_PATH", latest_path):
+                self.assertEqual(project_config.load_latest_run_id("feature"), "feature_bom")
+
+    def test_runtime_sportec_pc_xpass_uses_latest_feature_input_and_pc_cache_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_root = root / "feature"
+            graph_dir = feature_root / "action_graphs"
+            label_dir = feature_root / "labels"
+            pc_cache_dir = root / "pc_xpass" / "sportec"
+            feature_cache_dir = feature_root / "physical_xpass"
+            args = generate_physical_xpass.parse_args(["--pc-xpass"])
+
+            with patch.object(generate_physical_xpass, "resolve_feature_run_id", return_value="feature_run") as resolve_mock:
+                with patch.object(generate_physical_xpass, "resolve_feature_root", return_value=feature_root):
+                    with patch.object(generate_physical_xpass, "get_action_graph_dir", return_value=graph_dir):
+                        with patch.object(
+                            generate_physical_xpass,
+                            "resolve_reference_label_context",
+                            return_value=(label_dir, "disc_0.7", "model"),
+                        ):
+                            with patch.object(generate_physical_xpass, "get_pc_xpass_dir", return_value=pc_cache_dir):
+                                with patch.object(generate_physical_xpass, "get_physical_xpass_dir", return_value=feature_cache_dir):
+                                    with patch.object(generate_physical_xpass, "resolve_match_ids", return_value=[]):
+                                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata") as metadata_mock:
+                                            with patch("builtins.print"):
+                                                generate_physical_xpass.run_runtime_sportec(args)
+
+        resolve_mock.assert_called_once_with(None, required=True, allow_latest=True)
+        metadata_mock.assert_called_once()
+        self.assertEqual(metadata_mock.call_args.args[1], pc_cache_dir)
+
     def test_runtime_physical_xpass_dir_points_directly_to_dataset_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -4379,10 +4503,30 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(args.pc_xpass)
         self.assertEqual(args.max_speed, PC_XPASS_DEFAULT_MAX_SPEED)
         self.assertEqual(args.speed_step, PC_XPASS_DEFAULT_SPEED_STEP)
+        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
+        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
 
         top25_args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-n", "25"])
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(top25_args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP25])
+
+    def test_generate_physical_xpass_cli_pc_xpass_accepts_split_teammate_ignoring(self) -> None:
+        lane_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-lane-survival"])
+        control_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-control"])
+        both_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates"])
+
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(lane_args))
+        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(lane_args))
+        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(control_args))
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_control_from_args(control_args))
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(both_args))
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_control_from_args(both_args))
+
+    def test_generate_physical_xpass_cli_rejects_split_teammate_flags_without_pc_xpass(self) -> None:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--ignore-teammates-lane-survival"])
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--ignore-teammates-control"])
 
     def test_generate_physical_xpass_cli_rejects_pc_xpass_legacy_feature_mode(self) -> None:
         with self.assertRaises(SystemExit):
