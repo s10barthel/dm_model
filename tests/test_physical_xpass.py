@@ -3691,6 +3691,27 @@ class PhysicalXPassTests(unittest.TestCase):
             with patch.object(project_config, "FEATURE_LATEST_PATH", latest_path):
                 self.assertEqual(project_config.load_latest_run_id("feature"), "feature_bom")
 
+    def test_run_metadata_loader_accepts_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_root = Path(tmpdir) / "run"
+            run_root.mkdir()
+            (run_root / "metadata.json").write_text(json.dumps({"return_type": "disc_0.7"}), encoding="utf-8-sig")
+
+            self.assertEqual(project_config.load_run_metadata(run_root), {"return_type": "disc_0.7"})
+
+    def test_feature_return_type_inference_accepts_utf8_bom_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_id = "feature_bom"
+            feature_root = Path(tmpdir) / feature_id
+            feature_root.mkdir()
+            (feature_root / "metadata.json").write_text(
+                json.dumps({"return_types": ["disc_0.7"]}),
+                encoding="utf-8-sig",
+            )
+
+            with patch.object(project_config, "get_feature_run_root", return_value=feature_root):
+                self.assertEqual(project_config.infer_feature_run_return_types(feature_id), ["disc_0.7"])
+
     def test_runtime_sportec_pc_xpass_uses_latest_feature_input_and_pc_cache_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

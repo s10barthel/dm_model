@@ -478,7 +478,7 @@ def load_run_metadata(run_root: Path, required: bool = True) -> dict[str, Any] |
         if required:
             raise FileNotFoundError(f"Run metadata not found at {metadata_path}.")
         return None
-    return json.loads(metadata_path.read_text(encoding="utf-8"))
+    return json.loads(metadata_path.read_text(encoding="utf-8-sig"))
 
 
 def load_feature_run_metadata(feature_run_id: str, required: bool = True) -> dict[str, Any] | None:
@@ -735,7 +735,7 @@ def load_split_manifest() -> dict[str, Any]:
             f"Split manifest not found at {SPLIT_PATH}. Run scripts/preprocess_sportec.py first."
         )
 
-    return json.loads(SPLIT_PATH.read_text(encoding="utf-8"))
+    return json.loads(SPLIT_PATH.read_text(encoding="utf-8-sig"))
 
 
 def filter_available_match_ids(match_ids: list[str], feature_dir: str | Path | None = None) -> np.ndarray:
