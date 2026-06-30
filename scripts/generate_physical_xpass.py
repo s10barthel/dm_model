@@ -387,8 +387,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--control-function-inflection-point must be positive.")
     if args.control_function_gamma <= 0:
         parser.error("--control-function-gamma must be positive.")
-    if args.reaction_time <= 0:
-        parser.error("--reaction-time must be positive.")
+    if args.reaction_time < 0:
+        parser.error("--reaction-time must be non-negative.")
     if args.max_player_speed <= 0:
         parser.error("--max-player-speed must be positive.")
     if bool(args.pc_xpass) and args.feature_run_id:

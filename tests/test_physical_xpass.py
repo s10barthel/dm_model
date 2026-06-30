@@ -5073,6 +5073,9 @@ class PhysicalXPassTests(unittest.TestCase):
             [PHYSICAL_XPASS_METRIC_MAX, "top5_xpass", PC_XPASS_METRIC_TOP10, PC_XPASS_METRIC_TOP25],
         )
 
+        zero_reaction_args = generate_physical_xpass.parse_args(["--pc-xpass", "--reaction-time", "0"])
+        self.assertEqual(zero_reaction_args.reaction_time, 0.0)
+
         custom_args = generate_physical_xpass.parse_args(
             [
                 "--pc-xpass",
@@ -5147,7 +5150,11 @@ class PhysicalXPassTests(unittest.TestCase):
                     generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])
 
     def test_generate_physical_xpass_cli_rejects_invalid_pc_motion_grid_flags(self) -> None:
-        for flag in ["--reaction-time", "--max-player-speed", "--min-speed", "--radial-gridsize"]:
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--pc-xpass", "--reaction-time", "-0.1"])
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--reaction-time", "1"])
+        for flag in ["--max-player-speed", "--min-speed", "--radial-gridsize"]:
             with self.subTest(flag=flag):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])
