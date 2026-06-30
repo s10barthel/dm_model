@@ -32,6 +32,7 @@ PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
 PHYSICAL_XPASS_DISTANCE_ATTR = "physical_xpass_pass_distance"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "physical_xpass_nearest_opponent_distance"
 PHYSICAL_XPASS_BALL_Z_ATTR = "physical_xpass_ball_z"
+PHYSICAL_XPASS_PASS_HEIGHT_ATTR = "physical_xpass_pass_height"
 DEFAULT_RESIDUAL_DISTANCE_THRESHOLD = 30.0
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
@@ -74,7 +75,8 @@ PC_XPASS_METRIC_TOP25 = "top25_xpass"
 X_PASS_VERSION_MAX = "max"
 X_PASS_VERSION_NOISE_KERNEL = "noise-kernel"
 X_PASS_VERSION_DEFAULT = "top10"
-XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3"}
+XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3", "v4"}
+PHYSICAL_XPASS_DEFAULT_V4_POWER = 2.0
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
@@ -110,6 +112,10 @@ PC_XPASS_DEFAULT_RADIAL_GRIDSIZE = 3.0
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER = 20.0
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT = 0.2
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA = 1.0
+PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT = True
+PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER = 2.0
+PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE = 20.0
+PC_XPASS_POSITION_DISCOUNT_FUNCTION = "goal_distance_backward_ratio"
 PC_XPASS_SIGMOID_SCALE = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER
 PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT
 PC_XPASS_DEFAULT_MAX_SPEED = 25.0
@@ -279,6 +285,9 @@ def pc_xpass_metadata(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -340,6 +349,10 @@ def pc_xpass_metadata(
         "normalization": "gamma_power_if_sum_gt_1",
         "endpoint_normalization": "gamma_power_if_sum_gt_1",
         "lane_survival_aggregation": "per_player_max_then_independent_product",
+        "use_position_discount": bool(use_position_discount),
+        "position_discount_function": PC_XPASS_POSITION_DISCOUNT_FUNCTION if bool(use_position_discount) else "none",
+        "position_discount_power": float(position_discount_power),
+        "position_discount_distance": float(position_discount_distance),
         "control_policy": control_policy,
         "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
@@ -771,8 +784,16 @@ def physical_xpass_weight_version(args: Any) -> str:
         value = _get_arg(args, "xpass_weight_version", None)
     version = "v3" if value is None else str(value).strip().lower()
     if version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError("--xpass-weight must be one of v1, v2, or v3.")
+        raise ValueError("--xpass-weight must be one of v1, v2, v3, or v4.")
     return version
+
+
+def physical_xpass_v4_power(args: Any) -> float:
+    value = _get_arg(args, "v4_power", None)
+    power = PHYSICAL_XPASS_DEFAULT_V4_POWER if value is None else float(value)
+    if not math.isfinite(power) or power <= 0.0:
+        raise ValueError("--v4-power must be a positive finite float.")
+    return power
 
 
 def physical_xpass_ball_z_limit(args: Any) -> float | None:
@@ -802,6 +823,7 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "metric": metric,
         "x_pass_version": x_pass_version,
         "weight_version": physical_xpass_weight_version(args),
+        "v4_power": physical_xpass_v4_power(args),
         "ball_z_limit": physical_xpass_ball_z_limit(args),
         "source": source,
         "speed_aggregation": PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
@@ -967,21 +989,62 @@ def physical_xpass_blend_weight_v3(pass_distance: np.ndarray | torch.Tensor | fl
     return weights
 
 
+def physical_xpass_blend_weight_v4(
+    pass_distance: np.ndarray | torch.Tensor | float,
+    pass_height: np.ndarray | torch.Tensor | float,
+    *,
+    power: float = PHYSICAL_XPASS_DEFAULT_V4_POWER,
+) -> np.ndarray | torch.Tensor | float:
+    power = float(power)
+    if not math.isfinite(power) or power <= 0.0:
+        raise ValueError("--v4-power must be a positive finite float.")
+    if isinstance(pass_distance, torch.Tensor) or isinstance(pass_height, torch.Tensor):
+        distance_tensor = torch.as_tensor(pass_distance, dtype=torch.float32)
+        pass_height_tensor = torch.as_tensor(pass_height, dtype=torch.float32, device=distance_tensor.device)
+        x = torch.clamp(distance_tensor / 100.0, min=0.0)
+        scaled = torch.pow(x / 0.8, power)
+        raw = pass_height_tensor * torch.cos((torch.pi / 2.0) * scaled)
+        weight = torch.where(x <= 0.8, raw, torch.zeros_like(raw))
+        return torch.clamp(weight, 0.0, 1.0)
+    distance_values = np.asarray(pass_distance, dtype=float)
+    pass_height_values = np.asarray(pass_height, dtype=float)
+    x = np.clip(distance_values / 100.0, 0.0, None)
+    weights = np.where(
+        x <= 0.8,
+        pass_height_values * np.cos((np.pi / 2.0) * np.power(x / 0.8, power)),
+        0.0,
+    )
+    weights = np.clip(weights, 0.0, 1.0)
+    if np.isscalar(pass_distance) and np.isscalar(pass_height):
+        return float(weights)
+    return weights
+
+
 def blend_physical_xpass_predictions(
     *,
     pass_success_model: np.ndarray | torch.Tensor | float,
     xpass: np.ndarray | torch.Tensor | float,
     pass_distance: np.ndarray | torch.Tensor | float,
     distance_to_nearest_opponent: np.ndarray | torch.Tensor | float | None = None,
+    pass_height: np.ndarray | torch.Tensor | float | None = None,
     ball_z: np.ndarray | torch.Tensor | float | None = None,
     ball_z_limit: float | None = None,
     weight_version: str = "v1",
+    v4_power: float = PHYSICAL_XPASS_DEFAULT_V4_POWER,
 ) -> np.ndarray | torch.Tensor | float:
     weight_version = str(weight_version or "v3").lower()
     if weight_version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', or 'v3'.")
+        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', 'v3', or 'v4'.")
     if weight_version == "v2" and distance_to_nearest_opponent is None:
         raise ValueError("weight_version='v2' requires distance_to_nearest_opponent.")
+    if weight_version == "v4" and pass_height is None:
+        raise ValueError("weight_version='v4' requires cached pass_height.")
+    if weight_version == "v4":
+        if isinstance(pass_height, torch.Tensor):
+            if bool((~torch.isfinite(pass_height)).any().item()):
+                raise ValueError("weight_version='v4' requires finite cached pass_height.")
+        elif not np.isfinite(np.asarray(pass_height, dtype=float)).all():
+            raise ValueError("weight_version='v4' requires finite cached pass_height.")
     if isinstance(pass_success_model, torch.Tensor) or isinstance(xpass, torch.Tensor) or isinstance(pass_distance, torch.Tensor):
         model_tensor = torch.as_tensor(pass_success_model, dtype=torch.float32)
         xpass_tensor = torch.as_tensor(xpass, dtype=torch.float32, device=model_tensor.device)
@@ -991,6 +1054,9 @@ def blend_physical_xpass_predictions(
             weight = physical_xpass_blend_weight_v2(distance_tensor, nearest_tensor)
         elif weight_version == "v3":
             weight = physical_xpass_blend_weight_v3(distance_tensor)
+        elif weight_version == "v4":
+            pass_height_tensor = torch.as_tensor(pass_height, dtype=torch.float32, device=model_tensor.device)
+            weight = physical_xpass_blend_weight_v4(distance_tensor, pass_height_tensor, power=v4_power)
         else:
             weight = physical_xpass_blend_weight(distance_tensor)
         if ball_z_limit is not None:
@@ -1006,6 +1072,8 @@ def blend_physical_xpass_predictions(
         weight = physical_xpass_blend_weight_v2(distance_values, np.asarray(distance_to_nearest_opponent, dtype=float))
     elif weight_version == "v3":
         weight = physical_xpass_blend_weight_v3(distance_values)
+    elif weight_version == "v4":
+        weight = physical_xpass_blend_weight_v4(distance_values, np.asarray(pass_height, dtype=float), power=v4_power)
     else:
         weight = physical_xpass_blend_weight(distance_values)
     if ball_z_limit is not None:
@@ -1019,6 +1087,7 @@ def blend_physical_xpass_predictions(
         and np.isscalar(xpass)
         and np.isscalar(pass_distance)
         and (weight_version == "v1" or np.isscalar(distance_to_nearest_opponent))
+        and (weight_version != "v4" or np.isscalar(pass_height))
         and (ball_z_limit is None or np.isscalar(ball_z))
     ):
         return float(blended)
@@ -2286,6 +2355,42 @@ def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
     return lane_survival
 
 
+def pc_xpass_position_discount(
+    target_x: np.ndarray,
+    target_y: np.ndarray,
+    receiver_x: float,
+    receiver_y: float,
+    *,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+) -> np.ndarray:
+    target_x_values = np.asarray(target_x, dtype=float)
+    target_y_values = np.asarray(target_y, dtype=float)
+    if not bool(use_position_discount):
+        return np.ones(np.broadcast_shapes(target_x_values.shape, target_y_values.shape), dtype=float)
+    power = float(position_discount_power)
+    distance_limit = float(position_discount_distance)
+    if power <= 0:
+        raise ValueError("--position-discount-power must be positive.")
+    if distance_limit <= 0:
+        raise ValueError("--position-discount-distance must be positive.")
+
+    goal_x = FIELD_SIZE[0] / 2.0
+    goal_y = 0.0
+    receiver_goal_distance = float(np.hypot(float(receiver_x) - goal_x, float(receiver_y) - goal_y))
+    target_goal_distance = np.hypot(target_x_values - goal_x, target_y_values - goal_y)
+    backward_delta = np.maximum(0.0, target_goal_distance - receiver_goal_distance)
+    discount = np.ones_like(backward_delta, dtype=float)
+    discount = np.where(backward_delta >= distance_limit, 0.0, discount)
+
+    interior = (backward_delta > 0.0) & (backward_delta < distance_limit)
+    if np.any(interior):
+        ratio = backward_delta[interior] / (distance_limit - backward_delta[interior])
+        discount[interior] = 1.0 / (1.0 + np.power(ratio, power))
+    return np.clip(discount, 0.0, 1.0)
+
+
 def _resolve_pc_xpass_ignore_teammate_flags(
     *,
     consider_teammates: bool = True,
@@ -2364,6 +2469,9 @@ def compute_graph_pc_xpass_metrics(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
 ) -> pd.Series:
     ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
         consider_teammates=consider_teammates,
@@ -2457,7 +2565,19 @@ def compute_graph_pc_xpass_metrics(
             lane_raw[attack_mask] = 0.0
         lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
         lane_survival = np.where(on_pitch_grid, lane_survival, np.nan)
-        score = lane_survival * receiver_control
+        receiver_x = float(player_pos[receiver_sim_index, 0])
+        receiver_y = float(player_pos[receiver_sim_index, 1])
+        position_discount = pc_xpass_position_discount(
+            target_x,
+            target_y,
+            receiver_x,
+            receiver_y,
+            use_position_discount=use_position_discount,
+            position_discount_power=position_discount_power,
+            position_discount_distance=position_discount_distance,
+        )
+        position_discount = np.where(on_pitch_grid, position_discount, np.nan)
+        score = lane_survival * receiver_control * position_discount
         if not np.isfinite(score).any():
             continue
 
@@ -2509,6 +2629,9 @@ def compute_graphs_pc_xpass_metrics(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -2530,6 +2653,9 @@ def compute_graphs_pc_xpass_metrics(
             control_function_gamma=control_function_gamma,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            use_position_discount=use_position_discount,
+            position_discount_power=position_discount_power,
+            position_discount_distance=position_discount_distance,
         )
         for graph in graphs
     ]
@@ -3357,6 +3483,9 @@ def _runtime_cache_metadata(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
 ) -> dict[str, Any]:
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
@@ -3376,6 +3505,9 @@ def _runtime_cache_metadata(
             control_function_gamma=control_function_gamma,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            use_position_discount=use_position_discount,
+            position_discount_power=position_discount_power,
+            position_discount_distance=position_discount_distance,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -3451,6 +3583,9 @@ def _ensure_runtime_physical_xpass_cache(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -3480,6 +3615,9 @@ def _ensure_runtime_physical_xpass_cache(
         control_function_gamma=control_function_gamma,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
+        use_position_discount=use_position_discount,
+        position_discount_power=position_discount_power,
+        position_discount_distance=position_discount_distance,
     )
     if metadata_path.exists():
         if source == PC_XPASS_SOURCE:
@@ -3495,6 +3633,7 @@ def _ensure_runtime_physical_xpass_cache(
                 "control_function",
                 "endpoint_normalization",
                 "lane_survival_aggregation",
+                "position_discount_function",
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
@@ -3526,6 +3665,8 @@ def _ensure_runtime_physical_xpass_cache(
                 "control_function_power",
                 "control_function_inflection_point",
                 "control_function_gamma",
+                "position_discount_power",
+                "position_discount_distance",
                 "max_speed",
                 "min_speed",
                 "speed_step",
@@ -3534,6 +3675,11 @@ def _ensure_runtime_physical_xpass_cache(
             ]:
                 if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            if bool(metadata.get("use_position_discount", False)) != bool(expected_metadata.get("use_position_discount", False)):
+                mismatches.append(
+                    "use_position_discount: "
+                    f"expected {expected_metadata.get('use_position_discount')!r}, got {metadata.get('use_position_discount')!r}"
+                )
             if sorted(int(value) for value in (metadata.get("top_n_values") or [metadata.get("top_n")])) != sorted(
                 int(value) for value in expected_metadata.get("top_n_values", [])
             ):
@@ -4063,6 +4209,9 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     control_function_gamma = float(task.get("control_function_gamma", PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA))
     reaction_time = float(task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME))
     max_player_speed = float(task.get("max_player_speed", PC_XPASS_DEFAULT_MAX_PLAYER_SPEED))
+    use_position_discount = bool(task.get("use_position_discount", PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT))
+    position_discount_power = float(task.get("position_discount_power", PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER))
+    position_discount_distance = float(task.get("position_discount_distance", PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE))
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -4105,6 +4254,9 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             control_function_gamma=control_function_gamma,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            use_position_discount=use_position_discount,
+            position_discount_power=position_discount_power,
+            position_discount_distance=position_discount_distance,
         )
     else:
         computed_probs = [
@@ -4242,6 +4394,9 @@ def prewarm_physical_xpass_runtime_cache(
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
+    position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
@@ -4289,6 +4444,9 @@ def prewarm_physical_xpass_runtime_cache(
         control_function_gamma=control_function_gamma,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
+        use_position_discount=use_position_discount,
+        position_discount_power=position_discount_power,
+        position_discount_distance=position_discount_distance,
         create_if_missing=not bool(dry_run),
     )
     refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
@@ -4585,6 +4743,9 @@ def prewarm_physical_xpass_runtime_cache(
             "control_function_gamma": float(control_function_gamma),
             "reaction_time": float(reaction_time),
             "max_player_speed": float(max_player_speed),
+            "use_position_discount": bool(use_position_discount),
+            "position_discount_power": float(position_discount_power),
+            "position_discount_distance": float(position_discount_distance),
         }
         progress = tqdm(
             total=len(misses),
@@ -4775,6 +4936,7 @@ def attach_physical_xpass_to_graph(
         fill_value = float(missing_player_value)
     probs = torch.full((len(node_ids),), fill_value, dtype=torch.float32)
     nearest_opponent_distances = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
+    pass_heights = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
     ball_z_value = float("nan")
     if PHYSICAL_XPASS_BALL_Z_COLUMN in row.index and not pd.isna(row[PHYSICAL_XPASS_BALL_Z_COLUMN]):
         ball_z_value = float(row[PHYSICAL_XPASS_BALL_Z_COLUMN])
@@ -4797,6 +4959,9 @@ def attach_physical_xpass_to_graph(
         nearest_column = physical_xpass_nearest_opponent_distance_column(str(node_id))
         if nearest_column in row.index and not pd.isna(row[nearest_column]):
             nearest_opponent_distances[node_index] = float(row[nearest_column])
+        pass_height_column = physical_xpass_pass_height_column(str(node_id))
+        if pass_height_column in row.index and not pd.isna(row[pass_height_column]):
+            pass_heights[node_index] = float(row[pass_height_column])
 
     if missing_columns and require_observed_target:
         target_index = int(labels[LABEL_INDEX["intent_index"]].item())
@@ -4834,6 +4999,7 @@ def attach_physical_xpass_to_graph(
     setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, pass_distances)
     setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
     setattr(graph, PHYSICAL_XPASS_BALL_Z_ATTR, ball_z)
+    setattr(graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, pass_heights)
     return graph
 
 

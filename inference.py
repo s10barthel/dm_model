@@ -29,6 +29,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+    PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
@@ -43,6 +44,7 @@ from physical_pass_model import (
     physical_xpass_inference_lookup_config,
     physical_xpass_metric,
     physical_xpass_metric_columns,
+    physical_xpass_v4_power,
     physical_xpass_weight_version,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
@@ -622,6 +624,7 @@ def inference_gnn(
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
             physical_nearest_opponent_out = getattr(graphs, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
             physical_ball_z_out = getattr(graphs, PHYSICAL_XPASS_BALL_Z_ATTR, None)
+            physical_pass_height_out = getattr(graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
 
             if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
@@ -637,6 +640,8 @@ def inference_gnn(
                     physical_nearest_opponent_out = physical_nearest_opponent_out[teammate_mask]
                 if physical_ball_z_out is not None:
                     physical_ball_z_out = physical_ball_z_out[teammate_mask]
+                if physical_pass_height_out is not None:
+                    physical_pass_height_out = physical_pass_height_out[teammate_mask]
 
             if "receiver" in model.args["task"] and model.args["include_out"]:
                 batch = torch.cat([batch, torch.unique(graphs.batch)])
@@ -681,6 +686,18 @@ def inference_gnn(
                                 np.nan,
                                 dtype=physical_ball_z_out.dtype,
                                 device=physical_ball_z_out.device,
+                            ),
+                        ]
+                    )
+                if physical_pass_height_out is not None:
+                    physical_pass_height_out = torch.cat(
+                        [
+                            physical_pass_height_out,
+                            torch.full(
+                                (graphs.num_graphs,),
+                                np.nan,
+                                dtype=physical_pass_height_out.dtype,
+                                device=physical_pass_height_out.device,
                             ),
                         ]
                     )
@@ -732,9 +749,12 @@ def inference_gnn(
                 if physical_xpass_out is None or physical_distance_out is None:
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                 weight_version = physical_xpass_weight_version(model.args)
+                v4_power = physical_xpass_v4_power(model.args)
                 ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
                     raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
+                if weight_version == "v4" and physical_pass_height_out is None:
+                    raise ValueError("Inference physical xPass weight v4 requires attached cached pass_height tensors.")
                 if ball_z_limit is not None and physical_ball_z_out is None:
                     raise ValueError("Inference physical xPass ball_z_limit requires attached cached ball_z tensors.")
                 xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
@@ -747,6 +767,11 @@ def inference_gnn(
                 ball_z_i = (
                     physical_ball_z_out[batch == i].cpu().detach().numpy().astype(float)
                     if physical_ball_z_out is not None
+                    else None
+                )
+                pass_height_i = (
+                    physical_pass_height_out[batch == i].cpu().detach().numpy().astype(float)
+                    if physical_pass_height_out is not None
                     else None
                 )
                 if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
@@ -766,6 +791,16 @@ def inference_gnn(
                             "Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player."
                         )
                     finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(nearest_i)
+                elif weight_version == "v4":
+                    if pass_height_i is None or pass_height_i.shape[0] != probs_i.shape[0]:
+                        raise ValueError(
+                            "Physical xPass weight v4 tensors do not match pass-success probabilities: "
+                            f"probs={probs_i.shape}, pass_height={None if pass_height_i is None else pass_height_i.shape}."
+                        )
+                    missing_pass_height_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & ~np.isfinite(pass_height_i)
+                    if bool(missing_pass_height_mask.any()):
+                        raise ValueError("Physical xPass weight v4 requires finite cached pass_height for every blended player.")
+                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(pass_height_i)
                 else:
                     finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
                 if ball_z_limit is not None:
@@ -783,6 +818,9 @@ def inference_gnn(
                     blend_kwargs = {}
                     if weight_version == "v2":
                         blend_kwargs["distance_to_nearest_opponent"] = nearest_i[finite_mask]
+                    if weight_version == "v4":
+                        blend_kwargs["pass_height"] = pass_height_i[finite_mask]
+                        blend_kwargs["v4_power"] = v4_power
                     if ball_z_limit is not None:
                         blend_kwargs["ball_z"] = ball_z_i[finite_mask]
                         blend_kwargs["ball_z_limit"] = ball_z_limit

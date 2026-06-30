@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -68,10 +69,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with cached runtime physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for pass-success blending.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
-    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3"], default="v3", help="Physical xPass/model blend weighting version.")
+    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4"], default="v3", help="Physical xPass/model blend weighting version.")
+    parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.v4_power is not None:
+        if not math.isfinite(args.v4_power) or args.v4_power <= 0:
+            parser.error("--v4-power must be positive.")
+        if args.xpass_weight != "v4":
+            parser.error("--v4-power is only valid with --xpass-weight v4.")
+    return args
 
 
 def summarize_exception(exc: Exception) -> str:
@@ -129,6 +137,8 @@ def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str
         pass_success_model.args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))
         pass_success_model.args["x_pass_version"] = str(getattr(args, "x_pass_version", "top10"))
         pass_success_model.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
+        if getattr(args, "v4_power", None) is not None:
+            pass_success_model.args["v4_power"] = float(args.v4_power)
         pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
@@ -171,6 +181,7 @@ def epv_physical_xpass_metadata(
         "physical_xpass_metric": lookup_config.get("metric"),
         "x_pass_version": lookup_config.get("x_pass_version"),
         "physical_xpass_weight_version": lookup_config.get("weight_version"),
+        "physical_xpass_v4_power": lookup_config.get("v4_power") if lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_ball_z_limit": lookup_config.get("ball_z_limit"),
         "physical_cache_dir": physical_cache_dir,
         "physical_xpass_runtime_stats": runtime_stats,

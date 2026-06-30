@@ -45,9 +45,12 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     PC_XPASS_DEFAULT_MIN_SPEED,
     PC_XPASS_DEFAULT_METRIC,
+    PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
+    PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     PC_XPASS_METRIC_TOP10,
     PC_XPASS_METRIC_TOP25,
     PC_XPASS_SOURCE,
@@ -65,8 +68,10 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
+    PHYSICAL_XPASS_DEFAULT_V4_POWER,
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
+    PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     PHYSICAL_XPASS_FRAME_SCOPE_COLUMN,
     PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
@@ -117,6 +122,7 @@ from physical_pass_model import (
     pc_xpass_endpoint_control_probabilities,
     pc_xpass_lane_survival_from_raw,
     pc_xpass_normalize_if_sum_above_one,
+    pc_xpass_position_discount,
     pc_xpass_raw_control,
     pc_xpass_raw_control_with_params,
     physical_xpass_nearest_opponent_distance_column,
@@ -125,6 +131,7 @@ from physical_pass_model import (
     physical_xpass_weight_version,
     physical_xpass_blend_weight_v2,
     physical_xpass_blend_weight_v3,
+    physical_xpass_blend_weight_v4,
     physical_xpass_source,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
@@ -613,6 +620,62 @@ class PhysicalXPassTests(unittest.TestCase):
             0.65,
         )
 
+    def test_inference_physical_xpass_blend_formula_v4(self) -> None:
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(0.0, 1.0)), 1.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(80.0, 1.0)), 0.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 1.0)), 0.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(40.0, 0.5)), 0.5 * math.cos((math.pi / 2.0) * 0.5**2))
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=40.0,
+                    pass_height=0.5,
+                    weight_version="v4",
+                )
+            ),
+            0.5 + (0.9 - 0.5) * 0.5 * math.cos((math.pi / 2.0) * 0.5**2),
+        )
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=40.0,
+                    pass_height=0.5,
+                    weight_version="v4",
+                    v4_power=1.0,
+                )
+            ),
+            0.5 + (0.9 - 0.5) * 0.5 * math.cos((math.pi / 2.0) * 0.5),
+        )
+
+    def test_inference_physical_xpass_blend_formula_v4_requires_pass_height(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pass_height"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9,
+                xpass=0.5,
+                pass_distance=50.0,
+                weight_version="v4",
+            )
+
+    def test_inference_physical_xpass_ball_z_limit_overrides_v4(self) -> None:
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=40.0,
+                    pass_height=0.0,
+                    ball_z=1.2,
+                    ball_z_limit=1.0,
+                    weight_version="v4",
+                )
+            ),
+            0.9,
+        )
+
     def test_inference_physical_xpass_ball_z_limit_forces_model_weight(self) -> None:
         self.assertAlmostEqual(
             float(
@@ -660,6 +723,33 @@ class PhysicalXPassTests(unittest.TestCase):
         graph.x[:, config.NODE_FEATURE_BALL_Z] = 1.25
 
         self.assertAlmostEqual(graph_ball_z(graph), 1.25)
+
+    def test_attach_physical_xpass_exposes_cached_pass_height(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=5)
+        row = {
+            "action_index": 5,
+            "match_id": "match_1",
+            PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: 12.0,
+            "home_1": 0.7,
+            "home_2": 0.6,
+            physical_xpass_pass_height_column("home_1"): 0.25,
+            physical_xpass_pass_height_column("home_2"): 0.75,
+        }
+        rows = pd.DataFrame([row]).set_index("action_index", drop=False)
+
+        attached = attach_physical_xpass_to_graph(
+            graph,
+            labels,
+            rows,
+            match_id="match_1",
+            require_observed_target=False,
+        )
+
+        pass_height = getattr(attached, PHYSICAL_XPASS_PASS_HEIGHT_ATTR)
+        self.assertAlmostEqual(float(pass_height[0]), 0.25)
+        self.assertAlmostEqual(float(pass_height[1]), 0.75)
+        self.assertTrue(torch.isnan(pass_height[2]))
 
     def test_physical_xpass_robust_defaults_and_kernel_sigmas(self) -> None:
         speeds = as_default_v0_values()
@@ -1070,6 +1160,74 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(survival[0, 0, 2]), 0.3)
         self.assertAlmostEqual(float(survival[0, 0, 3]), (1.0 - 0.7) * (1.0 - 0.2))
 
+    def test_pc_xpass_position_discount_uses_goal_distance_profile(self) -> None:
+        receiver_x = config.FIELD_SIZE[0] / 2.0
+        receiver_y = 0.0
+        target_x = np.asarray([receiver_x, receiver_x - 5.0, receiver_x - 10.0, receiver_x - 15.0, receiver_x - 20.0, receiver_x - 25.0])
+        target_y = np.zeros_like(target_x)
+
+        disabled = pc_xpass_position_discount(
+            target_x,
+            target_y,
+            receiver_x,
+            receiver_y,
+            use_position_discount=False,
+        )
+        discount = pc_xpass_position_discount(
+            target_x,
+            target_y,
+            receiver_x,
+            receiver_y,
+            position_discount_power=2.0,
+            position_discount_distance=20.0,
+        )
+        custom = pc_xpass_position_discount(
+            np.asarray([receiver_x - 10.0]),
+            np.asarray([receiver_y]),
+            receiver_x,
+            receiver_y,
+            position_discount_power=1.0,
+            position_discount_distance=20.0,
+        )
+
+        np.testing.assert_allclose(disabled, np.ones_like(disabled))
+        np.testing.assert_allclose(discount, np.asarray([1.0, 0.9, 0.5, 0.1, 0.0, 0.0]), atol=1e-12)
+        self.assertAlmostEqual(float(custom[0]), 0.5)
+
+    def test_compute_graph_pc_xpass_applies_position_discount_before_aggregation(self) -> None:
+        graph = make_graph()
+
+        def constant_discount(target_x, target_y, receiver_x, receiver_y, **kwargs):
+            values = np.asarray(target_x, dtype=float)
+            if not bool(kwargs.get("use_position_discount", True)):
+                return np.ones_like(values)
+            return np.full_like(values, 0.25)
+
+        with patch("physical_pass_model.pc_xpass_position_discount", side_effect=constant_discount):
+            discounted = compute_graph_pc_xpass_metrics(
+                graph,
+                eps=1e-12,
+                max_speed=7,
+                speed_step=2,
+                angle_step=90,
+                radial_gridsize=4,
+                use_position_discount=True,
+            )
+        undiscounted = compute_graph_pc_xpass_metrics(
+            graph,
+            eps=1e-12,
+            max_speed=7,
+            speed_step=2,
+            angle_step=90,
+            radial_gridsize=4,
+            use_position_discount=False,
+        )
+
+        self.assertLess(
+            float(discounted[physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX)]),
+            float(undiscounted[physical_xpass_metric_column("home_2", PHYSICAL_XPASS_METRIC_MAX)]),
+        )
+
     def test_pc_xpass_motion_and_grid_parameters_affect_helpers(self) -> None:
         player_pos = np.asarray([[0.0, 0.0, 0.0, 0.0]], dtype=float)
         target_x = np.asarray([10.0], dtype=float)
@@ -1198,6 +1356,9 @@ class PhysicalXPassTests(unittest.TestCase):
             control_function_power=20.0,
             control_function_inflection_point=0.2,
             control_function_gamma=2.0,
+            use_position_discount=False,
+            position_discount_power=3.0,
+            position_discount_distance=25.0,
         )
 
         self.assertTrue(metadata["ignore_teammates_lane_survival"])
@@ -1211,6 +1372,10 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["control_function_gamma"], 2.0)
         self.assertEqual(metadata["lane_survival_aggregation"], "per_player_max_then_independent_product")
         self.assertEqual(metadata["endpoint_normalization"], "gamma_power_if_sum_gt_1")
+        self.assertFalse(metadata["use_position_discount"])
+        self.assertEqual(metadata["position_discount_function"], "none")
+        self.assertEqual(metadata["position_discount_power"], 3.0)
+        self.assertEqual(metadata["position_discount_distance"], 25.0)
         self.assertEqual(metadata["top_n_values"], [5, 10, 25])
         self.assertEqual(metadata["available_x_pass_versions"], ["max", "top5", "top10", "top25"])
         self.assertEqual(metadata["reaction_time"], 0.4)
@@ -1260,6 +1425,10 @@ class PhysicalXPassTests(unittest.TestCase):
                 "max_player_speed",
                 "min_speed",
                 "radial_gridsize",
+                "use_position_discount",
+                "position_discount_function",
+                "position_discount_power",
+                "position_discount_distance",
             ]:
                 metadata.pop(key, None)
             (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
@@ -3495,6 +3664,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(config["x_pass_version"], "top10")
         self.assertEqual(config["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
         self.assertEqual(config["weight_version"], "v3")
+        self.assertEqual(config["v4_power"], PHYSICAL_XPASS_DEFAULT_V4_POWER)
 
     def test_inference_lookup_config_records_selected_metric_variants(self) -> None:
         default_args = make_pass_success_args(
@@ -3579,10 +3749,19 @@ class PhysicalXPassTests(unittest.TestCase):
             model_variant="gat_baseline",
             xpass_weight="v2",
         )
+        v4_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            xpass_weight="v4",
+            v4_power=1.5,
+        )
 
         self.assertEqual(physical_xpass_weight_version(args), "v2")
         self.assertEqual(physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")["weight_version"], "v2")
         self.assertEqual(physical_xpass_weight_version(make_pass_success_args()), "v3")
+        self.assertEqual(physical_xpass_weight_version(v4_args), "v4")
+        self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_power"], 1.5)
 
     def test_inference_lookup_config_parses_ball_z_limit(self) -> None:
         disabled_args = make_pass_success_args(
@@ -5059,6 +5238,9 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.control_function_power, PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER)
         self.assertEqual(args.control_function_inflection_point, PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT)
         self.assertEqual(args.control_function_gamma, PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA)
+        self.assertEqual(args.use_position_discount, PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT)
+        self.assertEqual(args.position_discount_power, PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
+        self.assertEqual(args.position_discount_distance, PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
@@ -5093,6 +5275,12 @@ class PhysicalXPassTests(unittest.TestCase):
                 "0.3",
                 "--control-function-gamma",
                 "2",
+                "--use-position-discount",
+                "false",
+                "--position-discount-power",
+                "3",
+                "--position-discount-distance",
+                "25",
             ]
         )
         self.assertEqual(custom_args.reaction_time, 0.4)
@@ -5102,6 +5290,9 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(custom_args.control_function_power, 15)
         self.assertEqual(custom_args.control_function_inflection_point, 0.3)
         self.assertEqual(custom_args.control_function_gamma, 2)
+        self.assertFalse(custom_args.use_position_discount)
+        self.assertEqual(custom_args.position_discount_power, 3)
+        self.assertEqual(custom_args.position_discount_distance, 25)
 
     def test_generate_physical_xpass_cli_pc_xpass_accepts_split_teammate_ignoring(self) -> None:
         lane_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-lane-survival"])
@@ -5149,6 +5340,18 @@ class PhysicalXPassTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])
 
+    def test_generate_physical_xpass_cli_rejects_invalid_position_discount_flags(self) -> None:
+        for flag in ["--position-discount-power", "--position-discount-distance"]:
+            with self.subTest(flag=flag):
+                with self.assertRaises(SystemExit):
+                    generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])
+                with self.assertRaises(SystemExit):
+                    generate_physical_xpass.parse_args([flag, "1"])
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--pc-xpass", "--use-position-discount", "maybe"])
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--use-position-discount", "true"])
+
     def test_generate_physical_xpass_cli_rejects_invalid_pc_motion_grid_flags(self) -> None:
         with self.assertRaises(SystemExit):
             generate_physical_xpass.parse_args(["--pc-xpass", "--reaction-time", "-0.1"])
@@ -5179,6 +5382,19 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.xpass_weight, "v2")
         self.assertEqual(args.x_pass_version, "top25")
         self.assertEqual(args.ball_z_limit, "1.0")
+
+        with patch.object(
+            sys,
+            "argv",
+            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5"],
+        ):
+            v4_args = run_hawkeye.parse_args()
+        self.assertEqual(v4_args.xpass_weight, "v4")
+        self.assertEqual(v4_args.v4_power, 1.5)
+
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--v4-power", "1.5"]):
+            with self.assertRaises(SystemExit):
+                run_hawkeye.parse_args()
 
         for legacy_flag in ["--x-pass-version", "--x_pass_version"]:
             with self.subTest(legacy_flag=legacy_flag):
@@ -5218,6 +5434,12 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.x_pass_version, "top25")
         self.assertEqual(args.xpass_weight, "v2")
         self.assertEqual(args.ball_z_limit, "1.0")
+
+        v4_args = generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5"])
+        self.assertEqual(v4_args.xpass_weight, "v4")
+        self.assertEqual(v4_args.v4_power, 1.5)
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--v4-power", "1.5"])
         self.assertEqual(args.physical_cache_dir, "runtime_cache")
 
     def test_generate_epv_configures_only_pass_success_physical_xpass(self) -> None:

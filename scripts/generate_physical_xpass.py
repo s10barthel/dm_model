@@ -53,9 +53,12 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_MAX_SPEED,
     PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     PC_XPASS_DEFAULT_MIN_SPEED,
+    PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
+    PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     PC_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
@@ -114,6 +117,15 @@ from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_f
 
 
 RUNTIME_DATASETS = ("sportec", "skillcorner", "benchmark", "hawkeye")
+
+
+def parse_bool_text(value: str) -> bool:
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -253,6 +265,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
         help="pc-xPass only: endpoint-control gamma used when raw control sums exceed 1.",
     )
+    parser.add_argument(
+        "--use-position-discount",
+        "--use_position_discount",
+        dest="use_position_discount",
+        type=parse_bool_text,
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: apply goal-distance target-position discount. true/false.",
+    )
+    parser.add_argument(
+        "--position-discount-power",
+        "--position_discount_power",
+        dest="position_discount_power",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: power for the goal-distance target-position discount.",
+    )
+    parser.add_argument(
+        "--position-discount-distance",
+        "--position_discount_distance",
+        dest="position_discount_distance",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: backward goal-distance delta where the target-position discount reaches zero.",
+    )
     parser.add_argument("--no-noise-kernel", "--no_noise_kernel", dest="export_noise_kernel", action="store_false", help="Skip unsuffixed noise-kernel xPass output columns.")
     parser.add_argument("--no-max", "--no_max", dest="export_max", action="store_false", help="Skip __max_xpass output columns.")
     parser.add_argument("--no-topmean", "--no_topmean", dest="export_topmean", action="store_false", help="Skip __topmean_xpass output columns.")
@@ -303,12 +339,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     explicit_pc_only_flags = [
         name
-        for name in ["reaction_time", "max_player_speed", "min_speed", "radial_gridsize"]
+        for name in [
+            "reaction_time",
+            "max_player_speed",
+            "min_speed",
+            "radial_gridsize",
+            "use_position_discount",
+            "position_discount_power",
+            "position_discount_distance",
+        ]
         if hasattr(args, name)
     ]
     if not bool(args.pc_xpass) and explicit_pc_only_flags:
         parser.error(
-            "--reaction-time, --max-player-speed, --min-speed, and --radial-gridsize require --pc-xpass."
+            "--reaction-time, --max-player-speed, --min-speed, --radial-gridsize, "
+            "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
     if not hasattr(args, "reaction_time"):
         args.reaction_time = PC_XPASS_DEFAULT_REACTION_TIME
@@ -318,6 +363,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.min_speed = PC_XPASS_DEFAULT_MIN_SPEED
     if not hasattr(args, "radial_gridsize"):
         args.radial_gridsize = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE
+    if not hasattr(args, "use_position_discount"):
+        args.use_position_discount = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT
+    if not hasattr(args, "position_discount_power"):
+        args.position_discount_power = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER
+    if not hasattr(args, "position_discount_distance"):
+        args.position_discount_distance = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE
     if args.max_speed is None:
         args.max_speed = PC_XPASS_DEFAULT_MAX_SPEED if args.pc_xpass else AS_DEFAULT_V0_MAX
     if args.speed_step is None:
@@ -387,6 +438,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--control-function-inflection-point must be positive.")
     if args.control_function_gamma <= 0:
         parser.error("--control-function-gamma must be positive.")
+    if args.position_discount_power <= 0:
+        parser.error("--position-discount-power must be positive.")
+    if args.position_discount_distance <= 0:
+        parser.error("--position-discount-distance must be positive.")
     if args.reaction_time < 0:
         parser.error("--reaction-time must be non-negative.")
     if args.max_player_speed <= 0:
@@ -1008,6 +1063,9 @@ def prewarm_runtime_items(
         control_function_gamma=float(args.control_function_gamma),
         reaction_time=float(args.reaction_time),
         max_player_speed=float(args.max_player_speed),
+        use_position_discount=bool(args.use_position_discount),
+        position_discount_power=float(args.position_discount_power),
+        position_discount_distance=float(args.position_discount_distance),
         pass_height_model=getattr(args, "_pass_height_model", None),
         pass_height_model_id=getattr(args, "pass_height_model_id", None),
         pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
@@ -1136,6 +1194,9 @@ def write_runtime_dataset_metadata(
             control_function_gamma=float(args.control_function_gamma),
             reaction_time=float(args.reaction_time),
             max_player_speed=float(args.max_player_speed),
+            use_position_discount=bool(args.use_position_discount),
+            position_discount_power=float(args.position_discount_power),
+            position_discount_distance=float(args.position_discount_distance),
         )
         if bool(getattr(args, "pc_xpass", False))
         else physical_xpass_as_default_metadata(
