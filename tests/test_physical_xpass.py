@@ -4523,6 +4523,12 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.physical_batch_size, 16)
         self.assertEqual(args.worker_thread_limit, 1)
         self.assertFalse(args.dry_run)
+        self.assertIsNone(args.time_norm)
+
+    def test_generate_physical_xpass_cli_accepts_hawkeye_time_norm(self) -> None:
+        args = generate_physical_xpass.parse_args(["--time-norm", "0", "--time_norm", "1"])
+
+        self.assertEqual(args.time_norm, [0.0, 1.0])
 
     def test_generate_physical_xpass_cli_accepts_runtime_row_windows(self) -> None:
         args = generate_physical_xpass.parse_args(
@@ -4648,6 +4654,46 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIs(prewarm.call_args.kwargs["pass_height_model"], model)
         self.assertEqual(prewarm.call_args.kwargs["pass_height_model_id"], "pass_height/pass_height_20260629T002934_085928_bc1e56c1")
         self.assertEqual(prewarm.call_args.kwargs["pass_height_device"], "cpu")
+
+    def test_generate_physical_xpass_filters_hawkeye_graphs_by_time_norm(self) -> None:
+        labels = torch.stack([make_label(action_index=1), make_label(action_index=2), make_label(action_index=3)])
+        situation = SimpleNamespace(
+            graph_features_0=["g1", "g2", "g3"],
+            labels=labels,
+        )
+        selections = [
+            {"requested_time_norm": 0.0, "resolved_time_norm": 0.0, "frame_id": 2, "abs_time": 10.0},
+            {"requested_time_norm": 0.01, "resolved_time_norm": 0.0, "frame_id": 2, "abs_time": 10.0},
+            {"requested_time_norm": 1.0, "resolved_time_norm": 1.0, "frame_id": 3, "abs_time": 11.0},
+        ]
+
+        with patch.object(generate_physical_xpass, "resolve_ballreceipt", return_value=10.0) as ballreceipt:
+            with patch.object(generate_physical_xpass, "resolve_hawkeye_png_frames", return_value=selections) as resolver:
+                graphs, filtered_labels, resolved = generate_physical_xpass.filter_hawkeye_runtime_graphs_by_time_norm(
+                    situation,
+                    pd.DataFrame({"BallReceipt": [10.0]}),
+                    [0.0, 0.01, 1.0],
+                )
+
+        self.assertEqual(graphs, ["g2", "g3"])
+        self.assertEqual([int(label[LABEL_INDEX["action_index"]].item()) for label in filtered_labels], [2, 3])
+        self.assertEqual([entry["frame_id"] for entry in resolved], [2, 3])
+        ballreceipt.assert_called_once()
+        resolver.assert_called_once()
+
+    def test_generate_physical_xpass_hawkeye_filter_no_time_norm_keeps_all_rows(self) -> None:
+        labels = torch.stack([make_label(action_index=1), make_label(action_index=2)])
+        situation = SimpleNamespace(graph_features_0=["g1", "g2"], labels=labels)
+
+        graphs, filtered_labels, resolved = generate_physical_xpass.filter_hawkeye_runtime_graphs_by_time_norm(
+            situation,
+            pd.DataFrame(),
+            None,
+        )
+
+        self.assertEqual(graphs, ["g1", "g2"])
+        self.assertIs(filtered_labels, labels)
+        self.assertEqual(resolved, [])
 
     def test_generate_physical_xpass_runtime_metadata_includes_pass_height_model(self) -> None:
         args = generate_physical_xpass.parse_args(

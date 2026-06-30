@@ -106,6 +106,7 @@ from project_config import (
     resolve_feature_run_id,
     write_run_metadata,
 )
+from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_frames
 
 
 RUNTIME_DATASETS = ("sportec", "skillcorner", "benchmark", "hawkeye")
@@ -172,6 +173,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hawkeye-ball-csv", "--ball-csv", dest="hawkeye_ball_csv", default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"))
     parser.add_argument("--hawkeye-situation-id", "--situation-id", dest="hawkeye_situation_id", action="append")
     parser.add_argument("--hawkeye-limit", type=int, help="Only process the first N selected Hawkeye situations.")
+    parser.add_argument(
+        "--time-norm",
+        "--time_norm",
+        dest="time_norm",
+        action="append",
+        type=float,
+        help="Hawkeye only: BallReceipt-relative frame time to process. Repeat to process multiple selected frames.",
+    )
     parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
 
@@ -1491,10 +1500,50 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     return {"dataset": "benchmark", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
 
+def filter_hawkeye_runtime_graphs_by_time_norm(
+    situation: Any,
+    situation_tracking: pd.DataFrame,
+    requested_time_norms: list[float] | tuple[float, ...] | None,
+) -> tuple[list[Any], torch.Tensor, list[dict[str, object]]]:
+    graphs = list(situation.graph_features_0)
+    labels = situation.labels
+    if not requested_time_norms:
+        return graphs, labels, []
+    selections = resolve_hawkeye_png_frames(
+        situation,
+        resolve_ballreceipt(situation_tracking),
+        [float(value) for value in requested_time_norms],
+    )
+    deduped: dict[int, dict[str, object]] = {}
+    for selection in selections:
+        frame_id = int(selection["frame_id"])
+        deduped.setdefault(
+            frame_id,
+            {
+                "requested_time_norm": float(selection["requested_time_norm"]),
+                "resolved_time_norm": float(selection["resolved_time_norm"]),
+                "frame_id": frame_id,
+                "abs_time": float(selection["abs_time"]),
+            },
+        )
+    selected_frame_ids = set(deduped)
+    kept_graphs: list[Any] = []
+    kept_labels: list[torch.Tensor] = []
+    for graph, label in zip(graphs, labels):
+        action_index = int(label[LABEL_INDEX["action_index"]].item())
+        if action_index in selected_frame_ids:
+            kept_graphs.append(graph)
+            kept_labels.append(label)
+    filtered_labels = torch.stack(kept_labels, axis=0) if kept_labels else torch.empty((0, labels.shape[1]), dtype=labels.dtype)
+    ordered_selections = [deduped[frame_id] for frame_id in sorted(deduped)]
+    return kept_graphs, filtered_labels, ordered_selections
+
+
 def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
     cache_dir = get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
+    resolved_time_norms: dict[str, list[dict[str, object]]] = {}
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.hawkeye_tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.hawkeye_ball_csv))
     situation_ids = resolve_situation_ids(tracking, requested_ids=args.hawkeye_situation_id, limit=args.hawkeye_limit)
@@ -1506,8 +1555,15 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 ball,
                 freeze_ballreceipt=args.freeze_ballreceipt,
             )[0]
+            graphs, labels, frame_selections = filter_hawkeye_runtime_graphs_by_time_norm(
+                situation,
+                situation_tracking,
+                getattr(args, "time_norm", None),
+            )
+            if frame_selections:
+                resolved_time_norms[str(situation_id)] = frame_selections
             unit_stats = prewarm_runtime_items(
-                runtime_cache_items_from_graphs(str(situation.match_id), situation.graph_features_0, situation.labels),
+                runtime_cache_items_from_graphs(str(situation.match_id), graphs, labels),
                 cache_dir=cache_dir,
                 args=args,
                 progress_desc=f"hawkeye situation {situation_id}",
@@ -1525,7 +1581,13 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
         cache_dir,
         args,
         stats=stats,
-        source_inputs={"tracking_csv": str(args.hawkeye_tracking_csv), "ball_csv": str(args.hawkeye_ball_csv), "situation_ids": situation_ids},
+        source_inputs={
+            "tracking_csv": str(args.hawkeye_tracking_csv),
+            "ball_csv": str(args.hawkeye_ball_csv),
+            "situation_ids": situation_ids,
+            "time_norm": [float(value) for value in (getattr(args, "time_norm", None) or [])],
+            "resolved_time_norms": resolved_time_norms,
+        },
         skipped=skipped,
     )
     return {"dataset": "hawkeye", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
