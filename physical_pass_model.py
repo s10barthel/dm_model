@@ -105,6 +105,8 @@ PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR = 0.05
 PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
 PC_XPASS_DEFAULT_REACTION_TIME = 0.25
 PC_XPASS_DEFAULT_MAX_PLAYER_SPEED = 5.0
+PC_XPASS_DEFAULT_MIN_SPEED = 3.0
+PC_XPASS_DEFAULT_RADIAL_GRIDSIZE = 3.0
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER = 20.0
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT = 0.2
 PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA = 1.0
@@ -265,14 +267,18 @@ def pc_xpass_metadata(
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -305,7 +311,9 @@ def pc_xpass_metadata(
             available_versions.append(f"top{int(value)}")
     max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
-    v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value)
+    min_speed_value = float(min_speed)
+    radial_gridsize_value = float(radial_gridsize)
+    v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value, min_speed=min_speed_value)
     return {
         "metric": top_metric,
         "metric_family": PC_XPASS_SOURCE,
@@ -320,8 +328,8 @@ def pc_xpass_metadata(
         "disabled_metrics": disabled_physical_xpass_metrics(metrics),
         "top_n": int(top_n),
         "top_n_values": resolved_top_n_values,
-        "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME,
-        "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+        "reaction_time": float(reaction_time),
+        "max_player_speed": float(max_player_speed),
         "arrival_function": f"sigmoid_{float(control_function_power):g}_offset_{float(control_function_inflection_point):g}",
         "arrival_sigmoid_scale": float(control_function_power),
         "arrival_sigmoid_offset": float(control_function_inflection_point),
@@ -335,9 +343,10 @@ def pc_xpass_metadata(
         "control_policy": control_policy,
         "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
+        "min_speed": min_speed_value,
         "speed_step": speed_step_value,
         "angle_step": float(angle_step),
-        "radial_gridsize": AS_DEFAULT_RADIAL_GRIDSIZE,
+        "radial_gridsize": radial_gridsize_value,
         "effective_v0_grid": [float(value) for value in v0_values.tolist()],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
@@ -2297,7 +2306,10 @@ def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
     return float(np.mean(np.partition(finite, -k)[-k:]))
 
 
-def _pc_xpass_r_grid(ball_pos: np.ndarray) -> np.ndarray:
+def _pc_xpass_r_grid(ball_pos: np.ndarray, *, radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE) -> np.ndarray:
+    radial_gridsize = float(radial_gridsize)
+    if radial_gridsize <= 0:
+        raise ValueError("radial_gridsize must be positive.")
     corners = np.asarray(
         [
             [-FIELD_SIZE[0] / 2.0, -FIELD_SIZE[1] / 2.0],
@@ -2308,8 +2320,8 @@ def _pc_xpass_r_grid(ball_pos: np.ndarray) -> np.ndarray:
         dtype=float,
     )
     max_distance = float(np.nanmax(np.linalg.norm(corners - np.asarray(ball_pos, dtype=float)[np.newaxis, :], axis=1)))
-    max_grid = math.ceil(max_distance / AS_DEFAULT_RADIAL_GRIDSIZE) * AS_DEFAULT_RADIAL_GRIDSIZE
-    return np.arange(0.0, max_grid + AS_DEFAULT_RADIAL_GRIDSIZE * 0.5, AS_DEFAULT_RADIAL_GRIDSIZE, dtype=float)
+    max_grid = math.ceil(max_distance / radial_gridsize) * radial_gridsize
+    return np.arange(0.0, max_grid + radial_gridsize * 0.5, radial_gridsize, dtype=float)
 
 
 def _pc_xpass_arrival_margins(
@@ -2340,14 +2352,18 @@ def compute_graph_pc_xpass_metrics(
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
 ) -> pd.Series:
     ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
         consider_teammates=consider_teammates,
@@ -2383,9 +2399,10 @@ def compute_graph_pc_xpass_metrics(
     speeds = as_default_v0_values(
         max_speed=PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed,
         speed_step=PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step,
+        min_speed=float(min_speed),
     )
     angles = np.deg2rad(np.arange(0.0, 360.0, float(angle_step), dtype=float))
-    distances = _pc_xpass_r_grid(ball_pos)
+    distances = _pc_xpass_r_grid(ball_pos, radial_gridsize=radial_gridsize)
     target_x_base = float(ball_pos[0]) + np.cos(angles)[:, np.newaxis] * distances[np.newaxis, :]
     target_y_base = float(ball_pos[1]) + np.sin(angles)[:, np.newaxis] * distances[np.newaxis, :]
     on_pitch = (
@@ -2401,7 +2418,14 @@ def compute_graph_pc_xpass_metrics(
     t_ball = np.repeat((distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]), len(angles), axis=1)
     on_pitch_grid = np.repeat(on_pitch[np.newaxis, :, :], len(speeds), axis=0)
 
-    margins = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball)
+    margins = _pc_xpass_arrival_margins(
+        player_pos,
+        target_x,
+        target_y,
+        t_ball,
+        reaction_time=reaction_time,
+        max_player_speed=max_player_speed,
+    )
     raw = pc_xpass_raw_control_with_params(
         margins,
         power=control_function_power,
@@ -2472,8 +2496,10 @@ def compute_graphs_pc_xpass_metrics(
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     batch_size: int = 16,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
@@ -2481,6 +2507,8 @@ def compute_graphs_pc_xpass_metrics(
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -2490,14 +2518,18 @@ def compute_graphs_pc_xpass_metrics(
             ignore_teammates_lane_survival=ignore_teammates_lane_survival,
             ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
+            min_speed=min_speed,
             speed_step=speed_step,
             angle_step=angle_step,
+            radial_gridsize=radial_gridsize,
             top_n=top_n,
             top_n_values=top_n_values,
             enabled_metrics=enabled_metrics,
             control_function_power=control_function_power,
             control_function_inflection_point=control_function_inflection_point,
             control_function_gamma=control_function_gamma,
+            reaction_time=reaction_time,
+            max_player_speed=max_player_speed,
         )
         for graph in graphs
     ]
@@ -3155,7 +3187,11 @@ def load_physical_xpass_component(
         raise KeyError(f"Physical xPass sidecar has no row for match_id={match_id}, action_index={int(action_index)}{scope_text}.")
     row = frame.loc[int(action_index)]
     selected_metric = normalize_physical_xpass_metric(metric)
-    suffix = PHYSICAL_XPASS_METRIC_SUFFIXES[selected_metric]
+    suffix = PHYSICAL_XPASS_METRIC_SUFFIXES.get(selected_metric)
+    if suffix is None and selected_metric.startswith("top") and selected_metric.endswith("_xpass"):
+        suffix = f"__{selected_metric}"
+    if suffix is None:
+        raise ValueError(f"Unsupported physical xPass metric {selected_metric!r}.")
     suffixes = [suffix]
     legacy_suffix = PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES.get(selected_metric)
     if legacy_suffix:
@@ -3303,11 +3339,13 @@ def _runtime_cache_metadata(
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
@@ -3317,6 +3355,8 @@ def _runtime_cache_metadata(
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
 ) -> dict[str, Any]:
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
@@ -3324,14 +3364,18 @@ def _runtime_cache_metadata(
             ignore_teammates_lane_survival=ignore_teammates_lane_survival,
             ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
+            min_speed=min_speed,
             speed_step=speed_step,
             angle_step=angle_step,
+            radial_gridsize=radial_gridsize,
             top_n=top_n,
             top_n_values=top_n_values,
             available_metrics=available_metrics,
             control_function_power=control_function_power,
             control_function_inflection_point=control_function_inflection_point,
             control_function_gamma=control_function_gamma,
+            reaction_time=reaction_time,
+            max_player_speed=max_player_speed,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -3389,11 +3433,13 @@ def _ensure_runtime_physical_xpass_cache(
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
@@ -3403,6 +3449,8 @@ def _ensure_runtime_physical_xpass_cache(
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -3414,11 +3462,13 @@ def _ensure_runtime_physical_xpass_cache(
         ignore_teammates_lane_survival=ignore_teammates_lane_survival,
         ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
+        min_speed=min_speed,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        radial_gridsize=radial_gridsize,
         sigma_angle=sigma_angle,
         sigma_speed=sigma_speed,
         sigma_distance=sigma_distance,
@@ -3428,6 +3478,8 @@ def _ensure_runtime_physical_xpass_cache(
         control_function_power=control_function_power,
         control_function_inflection_point=control_function_inflection_point,
         control_function_gamma=control_function_gamma,
+        reaction_time=reaction_time,
+        max_player_speed=max_player_speed,
     )
     if metadata_path.exists():
         if source == PC_XPASS_SOURCE:
@@ -3475,8 +3527,10 @@ def _ensure_runtime_physical_xpass_cache(
                 "control_function_inflection_point",
                 "control_function_gamma",
                 "max_speed",
+                "min_speed",
                 "speed_step",
                 "angle_step",
+                "radial_gridsize",
             ]:
                 if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
@@ -3989,11 +4043,13 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     ignore_teammates_lane_survival = task.get("ignore_teammates_lane_survival", None)
     ignore_teammates_control = task.get("ignore_teammates_control", None)
     max_speed = task.get("max_speed", None)
+    min_speed = float(task.get("min_speed", PC_XPASS_DEFAULT_MIN_SPEED))
     speed_step = task.get("speed_step", None)
     coarse_n_angles = int(task.get("coarse_n_angles", AS_DEFAULT_COARSE_N_ANGLES))
     refine_top_k_angles = int(task.get("refine_top_k_angles", AS_DEFAULT_REFINE_TOP_K_ANGLES))
     refine_angle_radius = float(task.get("refine_angle_radius", AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG))
     angle_step = float(task.get("angle_step", AS_DEFAULT_ANGLE_STEP_DEG))
+    radial_gridsize = float(task.get("radial_gridsize", PC_XPASS_DEFAULT_RADIAL_GRIDSIZE))
     sigma_angle = float(task.get("sigma_angle", PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR))
     sigma_speed = float(task.get("sigma_speed", PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR))
     sigma_distance = float(task.get("sigma_distance", PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR))
@@ -4005,6 +4061,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
         task.get("control_function_inflection_point", PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT)
     )
     control_function_gamma = float(task.get("control_function_gamma", PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA))
+    reaction_time = float(task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME))
+    max_player_speed = float(task.get("max_player_speed", PC_XPASS_DEFAULT_MAX_PLAYER_SPEED))
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -4034,8 +4092,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             else bool(ignore_teammates_lane_survival),
             ignore_teammates_control=None if ignore_teammates_control is None else bool(ignore_teammates_control),
             max_speed=max_speed,
+            min_speed=min_speed,
             speed_step=speed_step,
             angle_step=angle_step,
+            radial_gridsize=radial_gridsize,
             batch_size=physical_batch_size,
             top_n=top_n,
             top_n_values=top_n_values,
@@ -4043,6 +4103,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             control_function_power=control_function_power,
             control_function_inflection_point=control_function_inflection_point,
             control_function_gamma=control_function_gamma,
+            reaction_time=reaction_time,
+            max_player_speed=max_player_speed,
         )
     else:
         computed_probs = [
@@ -4162,11 +4224,13 @@ def prewarm_physical_xpass_runtime_cache(
     pass_height_model_id: str | None = None,
     pass_height_device: str = "cpu",
     max_speed: float | None = None,
+    min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
     refine_angle_radius: float = AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
+    radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     sigma_angle: float = PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
@@ -4176,6 +4240,8 @@ def prewarm_physical_xpass_runtime_cache(
     control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
@@ -4205,11 +4271,13 @@ def prewarm_physical_xpass_runtime_cache(
         ignore_teammates_lane_survival=ignore_teammates_lane_survival,
         ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
+        min_speed=min_speed,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
         refine_top_k_angles=refine_top_k_angles,
         refine_angle_radius=refine_angle_radius,
         angle_step=angle_step,
+        radial_gridsize=radial_gridsize,
         sigma_angle=sigma_angle,
         sigma_speed=sigma_speed,
         sigma_distance=sigma_distance,
@@ -4219,6 +4287,8 @@ def prewarm_physical_xpass_runtime_cache(
         control_function_power=control_function_power,
         control_function_inflection_point=control_function_inflection_point,
         control_function_gamma=control_function_gamma,
+        reaction_time=reaction_time,
+        max_player_speed=max_player_speed,
         create_if_missing=not bool(dry_run),
     )
     refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
@@ -4497,11 +4567,13 @@ def prewarm_physical_xpass_runtime_cache(
             "speed_aggregation": speed_aggregation,
             "physical_batch_size": int(physical_batch_size),
             "max_speed": max_speed,
+            "min_speed": float(min_speed),
             "speed_step": speed_step,
             "coarse_n_angles": int(coarse_n_angles),
             "refine_top_k_angles": int(refine_top_k_angles),
             "refine_angle_radius": float(refine_angle_radius),
             "angle_step": float(angle_step),
+            "radial_gridsize": float(radial_gridsize),
             "sigma_angle": float(sigma_angle),
             "sigma_speed": float(sigma_speed),
             "sigma_distance": float(sigma_distance),
@@ -4511,6 +4583,8 @@ def prewarm_physical_xpass_runtime_cache(
             "control_function_power": float(control_function_power),
             "control_function_inflection_point": float(control_function_inflection_point),
             "control_function_gamma": float(control_function_gamma),
+            "reaction_time": float(reaction_time),
+            "max_player_speed": float(max_player_speed),
         }
         progress = tqdm(
             total=len(misses),

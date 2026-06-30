@@ -51,6 +51,10 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
     PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     PC_XPASS_DEFAULT_MAX_SPEED,
+    PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    PC_XPASS_DEFAULT_MIN_SPEED,
+    PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
+    PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
     PC_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
@@ -204,14 +208,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-speed", "--max_speed", dest="max_speed", type=float, default=None)
     parser.add_argument("--speed-step", "--speed_step", dest="speed_step", type=float, default=None)
+    parser.add_argument("--min-speed", "--min_speed", dest="min_speed", type=float, default=argparse.SUPPRESS, help="pc-xPass only: lower speed-grid value.")
     parser.add_argument("--coarse-n-angles", "--coarse_n_angles", dest="coarse_n_angles", type=int, default=AS_DEFAULT_COARSE_N_ANGLES)
     parser.add_argument("--refine-top-k-angles", "--refine_top_k_angles", dest="refine_top_k_angles", type=int, default=AS_DEFAULT_REFINE_TOP_K_ANGLES)
     parser.add_argument("--refine-angle-radius", "--refine_angle_radius", dest="refine_angle_radius", type=float, default=AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG)
     parser.add_argument("--angle-step", "--angle_step", dest="angle_step", type=float, default=AS_DEFAULT_ANGLE_STEP_DEG)
+    parser.add_argument("--radial-gridsize", "--radial_gridsize", dest="radial_gridsize", type=float, default=argparse.SUPPRESS, help="pc-xPass only: distance step along each pass ray.")
     parser.add_argument("--sigma-angle", "--sigma_angle", dest="sigma_angle", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR)
     parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
     parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
+    parser.add_argument("--reaction-time", "--reaction_time", dest="reaction_time", type=float, default=argparse.SUPPRESS, help="pc-xPass only: reaction time before players move toward the target.")
+    parser.add_argument("--max-player-speed", "--max_player_speed", dest="max_player_speed", type=float, default=argparse.SUPPRESS, help="pc-xPass only: player movement speed after reaction time.")
     parser.add_argument(
         "--top-n-values",
         "--top_n_values",
@@ -293,6 +301,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+    explicit_pc_only_flags = [
+        name
+        for name in ["reaction_time", "max_player_speed", "min_speed", "radial_gridsize"]
+        if hasattr(args, name)
+    ]
+    if not bool(args.pc_xpass) and explicit_pc_only_flags:
+        parser.error(
+            "--reaction-time, --max-player-speed, --min-speed, and --radial-gridsize require --pc-xpass."
+        )
+    if not hasattr(args, "reaction_time"):
+        args.reaction_time = PC_XPASS_DEFAULT_REACTION_TIME
+    if not hasattr(args, "max_player_speed"):
+        args.max_player_speed = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED
+    if not hasattr(args, "min_speed"):
+        args.min_speed = PC_XPASS_DEFAULT_MIN_SPEED
+    if not hasattr(args, "radial_gridsize"):
+        args.radial_gridsize = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE
     if args.max_speed is None:
         args.max_speed = PC_XPASS_DEFAULT_MAX_SPEED if args.pc_xpass else AS_DEFAULT_V0_MAX
     if args.speed_step is None:
@@ -326,10 +351,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--worker-thread-limit must be positive.")
     if args.max_auto_workers < 1:
         parser.error("--max-auto-workers must be positive.")
-    if args.max_speed is not None and args.max_speed < int(AS_DEFAULT_V0_MIN):
+    if not bool(args.pc_xpass) and args.max_speed is not None and args.max_speed < int(AS_DEFAULT_V0_MIN):
         parser.error(f"--max-speed must be at least {AS_DEFAULT_V0_MIN:g} m/s.")
     if args.speed_step <= 0:
         parser.error("--speed-step must be positive.")
+    if args.min_speed <= 0:
+        parser.error("--min-speed must be positive.")
+    if args.radial_gridsize <= 0:
+        parser.error("--radial-gridsize must be positive.")
+    if bool(args.pc_xpass) and args.max_speed < args.min_speed:
+        parser.error("--max-speed must be at least --min-speed for --pc-xpass.")
     if args.coarse_n_angles < 1:
         parser.error("--coarse-n-angles must be positive.")
     if args.refine_top_k_angles < 1:
@@ -356,6 +387,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--control-function-inflection-point must be positive.")
     if args.control_function_gamma <= 0:
         parser.error("--control-function-gamma must be positive.")
+    if args.reaction_time <= 0:
+        parser.error("--reaction-time must be positive.")
+    if args.max_player_speed <= 0:
+        parser.error("--max-player-speed must be positive.")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
     if not bool(args.pc_xpass) and (bool(args.ignore_teammates_lane_survival) or bool(args.ignore_teammates_control)):
@@ -955,11 +990,13 @@ def prewarm_runtime_items(
         physical_batch_size=int(args.physical_batch_size),
         reuse_cache_dir=reuse_cache_dir,
         max_speed=args.max_speed,
+        min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
         speed_step=args.speed_step,
         coarse_n_angles=int(args.coarse_n_angles),
         refine_top_k_angles=int(args.refine_top_k_angles),
         refine_angle_radius=float(args.refine_angle_radius),
         angle_step=float(args.angle_step),
+        radial_gridsize=float(args.radial_gridsize) if bool(getattr(args, "pc_xpass", False)) else PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
         sigma_angle=float(args.sigma_angle),
         sigma_speed=float(args.sigma_speed),
         sigma_distance=float(args.sigma_distance),
@@ -969,6 +1006,8 @@ def prewarm_runtime_items(
         control_function_power=float(args.control_function_power),
         control_function_inflection_point=float(args.control_function_inflection_point),
         control_function_gamma=float(args.control_function_gamma),
+        reaction_time=float(args.reaction_time),
+        max_player_speed=float(args.max_player_speed),
         pass_height_model=getattr(args, "_pass_height_model", None),
         pass_height_model_id=getattr(args, "pass_height_model_id", None),
         pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
@@ -1085,14 +1124,18 @@ def write_runtime_dataset_metadata(
             ignore_teammates_lane_survival=pc_ignore_teammates_lane_survival_from_args(args),
             ignore_teammates_control=pc_ignore_teammates_control_from_args(args),
             max_speed=args.max_speed,
+            min_speed=float(args.min_speed),
             speed_step=args.speed_step,
             angle_step=args.angle_step,
+            radial_gridsize=float(args.radial_gridsize),
             top_n=int(args.top_n),
             top_n_values=pc_top_n_values_from_args(args),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
             control_function_power=float(args.control_function_power),
             control_function_inflection_point=float(args.control_function_inflection_point),
             control_function_gamma=float(args.control_function_gamma),
+            reaction_time=float(args.reaction_time),
+            max_player_speed=float(args.max_player_speed),
         )
         if bool(getattr(args, "pc_xpass", False))
         else physical_xpass_as_default_metadata(
@@ -1133,7 +1176,14 @@ def write_runtime_dataset_metadata(
         "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
-        "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
+        "effective_v0_grid": [
+            float(value)
+            for value in as_default_v0_values(
+                max_speed=args.max_speed,
+                speed_step=args.speed_step,
+                min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
+            ).tolist()
+        ],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
     if getattr(args, "pass_height_model_id", None):
