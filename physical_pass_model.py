@@ -379,7 +379,7 @@ def normalize_x_pass_version(value: str | None) -> str:
         version = "top" + version[4:]
     if version.startswith("top") and version[3:].isdigit() and int(version[3:]) >= 1:
         return f"top{int(version[3:])}"
-    raise ValueError("--x-pass-version must be one of max, noise-kernel, or top<N> such as top10/top25/top50.")
+    raise ValueError("--xpass-version must be one of max, noise-kernel, or top<N> such as top10/top25/top50.")
 
 
 def x_pass_version_top_n(version: str | None) -> int | None:
@@ -402,7 +402,7 @@ def physical_xpass_metric_for_version(version: str | None, *, pc_xpass: bool = F
         return PHYSICAL_XPASS_METRIC_MAX
     if resolved == X_PASS_VERSION_NOISE_KERNEL:
         if pc_xpass:
-            raise ValueError("--x-pass-version noise-kernel is not available for pc-xPass caches.")
+            raise ValueError("--xpass-version noise-kernel is not available for pc-xPass caches.")
         return PHYSICAL_XPASS_METRIC_NOISE_KERNEL
     top_n = x_pass_version_top_n(resolved)
     if top_n is None:
@@ -655,26 +655,26 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
         raw_available_metrics = [metadata.get("default_metric") or selected_metric]
     available_metrics = normalize_physical_xpass_metrics(raw_available_metrics)
     if resolved_source == PC_XPASS_SOURCE and version == X_PASS_VERSION_NOISE_KERNEL:
-        raise ValueError("--x-pass-version noise-kernel is not available for pc-xPass caches.")
+        raise ValueError("--xpass-version noise-kernel is not available for pc-xPass caches.")
     if version.startswith("top"):
         requested_top_n = int(version[3:])
         if resolved_source == PHYSICAL_XPASS_SOURCE:
             actual_top_n = metadata.get("top_n")
             if actual_top_n is None or int(actual_top_n) != requested_top_n:
                 raise ValueError(
-                    f"Requested --x-pass-version {version}, but cache at {cache_dir} has top_n={actual_top_n!r}. "
+                    f"Requested --xpass-version {version}, but cache at {cache_dir} has top_n={actual_top_n!r}. "
                     f"Regenerate with scripts/generate_physical_xpass.py --top-n {requested_top_n}."
                 )
             if PHYSICAL_XPASS_METRIC_TOPMEAN not in available_metrics:
-                raise ValueError(f"Requested --x-pass-version {version}, but cache at {cache_dir} has no topmean_xpass metric.")
+                raise ValueError(f"Requested --xpass-version {version}, but cache at {cache_dir} has no topmean_xpass metric.")
         else:
             expected_metric = pc_xpass_top_metric(requested_top_n)
             if expected_metric not in available_metrics and version not in available_versions:
-                raise ValueError(f"Requested --x-pass-version {version}, but cache at {cache_dir} has no {expected_metric} metric.")
+                raise ValueError(f"Requested --xpass-version {version}, but cache at {cache_dir} has no {expected_metric} metric.")
     elif version == X_PASS_VERSION_NOISE_KERNEL and PHYSICAL_XPASS_METRIC_NOISE_KERNEL not in available_metrics:
-        raise ValueError(f"Requested --x-pass-version noise-kernel, but cache at {cache_dir} has no noise_kernel_xpass metric.")
+        raise ValueError(f"Requested --xpass-version noise-kernel, but cache at {cache_dir} has no noise_kernel_xpass metric.")
     elif version == X_PASS_VERSION_MAX and PHYSICAL_XPASS_METRIC_MAX not in available_metrics:
-        raise ValueError(f"Requested --x-pass-version max, but cache at {cache_dir} has no max_xpass metric.")
+        raise ValueError(f"Requested --xpass-version max, but cache at {cache_dir} has no max_xpass metric.")
     if selected_metric not in available_metrics and not (
         selected_metric.startswith("top") and selected_metric.endswith("_xpass") and version in available_versions
     ):

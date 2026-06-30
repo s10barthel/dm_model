@@ -5171,7 +5171,7 @@ class PhysicalXPassTests(unittest.TestCase):
         with patch.object(
             sys,
             "argv",
-            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v2", "--x-pass-version", "top25", "--ball-z-limit", "1.0"],
+            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v2", "--xpass-version", "top25", "--ball-z-limit", "1.0"],
         ):
             args = run_hawkeye.parse_args()
 
@@ -5179,6 +5179,16 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.xpass_weight, "v2")
         self.assertEqual(args.x_pass_version, "top25")
         self.assertEqual(args.ball_z_limit, "1.0")
+
+        for legacy_flag in ["--x-pass-version", "--x_pass_version"]:
+            with self.subTest(legacy_flag=legacy_flag):
+                with patch.object(
+                    sys,
+                    "argv",
+                    ["run_hawkeye.py", "--use-physical-xpass", legacy_flag, "top25"],
+                ):
+                    legacy_args = run_hawkeye.parse_args()
+                self.assertEqual(legacy_args.x_pass_version, "top25")
 
         with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight-v2"]):
             with self.assertRaises(SystemExit):
@@ -5193,7 +5203,7 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_epv.parse_args(
             [
                 "--use-physical-xpass",
-                "--x-pass-version",
+                "--xpass-version",
                 "top25",
                 "--xpass-weight",
                 "v2",
@@ -5214,7 +5224,7 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_epv.parse_args(
             [
                 "--use-physical-xpass",
-                "--x-pass-version",
+                "--xpass-version",
                 "top25",
                 "--xpass-weight",
                 "v2",
@@ -5244,7 +5254,7 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_epv.parse_args(
             [
                 "--use-physical-xpass",
-                "--x-pass-version",
+                "--xpass-version",
                 "top25",
                 "--xpass-weight",
                 "v2",
