@@ -35,6 +35,7 @@ from datatools.skillcorner import (
     build_skillcorner_possession,
     discover_skillcorner_matches,
 )
+from models.utils import get_model_provenance, load_model, parse_model_id
 from physical_pass_model import (
     AS_DEFAULT_V0_MIN,
     AS_DEFAULT_ANGLE_STEP_DEG,
@@ -46,6 +47,9 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PC_XPASS_AVAILABLE_METRICS,
+    PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
     PC_XPASS_DEFAULT_MAX_SPEED,
     PC_XPASS_DEFAULT_SPEED_STEP,
     PC_XPASS_SOURCE,
@@ -53,6 +57,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
+    PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX,
     PHYSICAL_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
@@ -198,6 +203,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
     parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
+    parser.add_argument(
+        "--top-n-values",
+        "--top_n_values",
+        dest="top_n_values",
+        type=int,
+        nargs="+",
+        default=None,
+        help="pc-xPass only: export multiple top-N metrics, e.g. --top-n-values 5 10 25. --top-n remains the unsuffixed default.",
+    )
+    parser.add_argument(
+        "--control-function-power",
+        "--control_function_power",
+        dest="control_function_power",
+        type=float,
+        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+        help="pc-xPass only: sigmoid power in raw control = sigmoid(power * (ball_minus_player + inflection_point)).",
+    )
+    parser.add_argument(
+        "--control-function-inflection-point",
+        "--control_function_inflection_point",
+        dest="control_function_inflection_point",
+        type=float,
+        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+        help="pc-xPass only: offset in raw control = sigmoid(power * (ball_minus_player + inflection_point)).",
+    )
+    parser.add_argument(
+        "--control-function-gamma",
+        "--control_function_gamma",
+        dest="control_function_gamma",
+        type=float,
+        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+        help="pc-xPass only: endpoint-control gamma used when raw control sums exceed 1.",
+    )
     parser.add_argument("--no-noise-kernel", "--no_noise_kernel", dest="export_noise_kernel", action="store_false", help="Skip unsuffixed noise-kernel xPass output columns.")
     parser.add_argument("--no-max", "--no_max", dest="export_max", action="store_false", help="Skip __max_xpass output columns.")
     parser.add_argument("--no-topmean", "--no_topmean", dest="export_topmean", action="store_false", help="Skip __topmean_xpass output columns.")
@@ -205,6 +243,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-auto-workers", type=int, default=PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
     parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.add_argument("--worker-thread-limit", type=int, default=1)
+    parser.add_argument(
+        "--pass-height-model-id",
+        default=None,
+        help="Runtime mode only: enrich xPass rows with per-player high-pass probabilities from pass_height/<run_id>.",
+    )
+    parser.add_argument(
+        "--pass-height-device",
+        default=None,
+        help="Torch device for --pass-height-model-id. Defaults to cuda:0 when CUDA is available, otherwise cpu.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Scan runtime cache hits/misses without computing or writing rows.")
     teammate_policy_group = parser.add_mutually_exclusive_group()
     teammate_policy_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
@@ -240,6 +288,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.max_speed = PC_XPASS_DEFAULT_MAX_SPEED if args.pc_xpass else AS_DEFAULT_V0_MAX
     if args.speed_step is None:
         args.speed_step = PC_XPASS_DEFAULT_SPEED_STEP if args.pc_xpass else AS_DEFAULT_SPEED_STEP
+    if args.pass_height_device is None:
+        args.pass_height_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if args.pass_height_model_id:
+        try:
+            pass_height_task, _pass_height_run_id = parse_model_id(str(args.pass_height_model_id))
+        except ValueError as exc:
+            parser.error(str(exc))
+        if pass_height_task != "pass_height":
+            parser.error("--pass-height-model-id must use the pass_height/<run_id> model id format.")
+        if args.feature_run_id:
+            parser.error("--pass-height-model-id is only supported in runtime cache mode, not legacy --feature-run-id mode.")
     for name in ["limit", "skillcorner_limit", "benchmark_limit", "hawkeye_limit"]:
         value = getattr(args, name, None)
         if value is not None and int(value) < 1:
@@ -278,6 +337,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--sigma-distance must be positive.")
     if args.top_n < 1:
         parser.error("--top-n must be positive.")
+    if args.top_n_values is not None and any(int(value) < 1 for value in args.top_n_values):
+        parser.error("--top-n-values must contain only positive integers.")
+    if not bool(args.pc_xpass) and args.top_n_values is not None:
+        parser.error("--top-n-values is only supported with --pc-xpass.")
+    if args.control_function_power <= 0:
+        parser.error("--control-function-power must be positive.")
+    if args.control_function_inflection_point <= 0:
+        parser.error("--control-function-inflection-point must be positive.")
+    if args.control_function_gamma <= 0:
+        parser.error("--control-function-gamma must be positive.")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
     if not bool(args.pc_xpass) and (bool(args.ignore_teammates_lane_survival) or bool(args.ignore_teammates_control)):
@@ -299,7 +368,8 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
         if bool(getattr(args, "export_max", True)):
             metrics.append(PHYSICAL_XPASS_METRIC_MAX)
         if bool(getattr(args, "export_topmean", True)):
-            metrics.append(f"top{int(args.top_n)}_xpass")
+            for top_n in pc_top_n_values_from_args(args):
+                metrics.append(f"top{int(top_n)}_xpass")
         return normalize_physical_xpass_metrics(metrics)
     metrics: list[str] = []
     if bool(getattr(args, "export_noise_kernel", True)):
@@ -309,6 +379,12 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
     if bool(getattr(args, "export_topmean", True)):
         metrics.append(PHYSICAL_XPASS_METRIC_TOPMEAN)
     return normalize_physical_xpass_metrics(metrics)
+
+
+def pc_top_n_values_from_args(args: argparse.Namespace) -> list[int]:
+    values = [int(getattr(args, "top_n", PHYSICAL_XPASS_DEFAULT_TOP_N))]
+    values.extend(int(value) for value in (getattr(args, "top_n_values", None) or []))
+    return sorted(set(values))
 
 
 def resolve_reference_label_context(feature_run_id: str, feature_root: Path, args: argparse.Namespace) -> tuple[Path, str, str]:
@@ -365,6 +441,21 @@ def pc_ignore_teammates_lane_survival_from_args(args: argparse.Namespace) -> boo
 
 def pc_ignore_teammates_control_from_args(args: argparse.Namespace) -> bool:
     return (not bool(args.consider_teammates)) or bool(getattr(args, "ignore_teammates_control", False))
+
+
+def prepare_pass_height_context(args: argparse.Namespace) -> None:
+    model_id = getattr(args, "pass_height_model_id", None)
+    if not model_id:
+        args._pass_height_model = None
+        args._pass_height_model_record = None
+        return
+    model_id_text = str(model_id)
+    model = load_model(model_id_text, device=str(getattr(args, "pass_height_device", "cpu")))
+    model_args = getattr(model, "args", None)
+    if not isinstance(model_args, dict) or model_args.get("task") != "pass_height":
+        raise ValueError(f"--pass-height-model-id must point to a pass_height checkpoint, got {model_id_text!r}.")
+    args._pass_height_model = model
+    args._pass_height_model_record = get_model_provenance(model_id_text)
 
 
 def resolve_num_workers(value: str | int, *, max_auto_workers: int = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
@@ -676,6 +767,8 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
         "pass_distance_filled",
         "nearest_opponent_distance_filled",
         "ball_z_filled",
+        "pass_height_filled",
+        "pass_height_refreshed",
         "hash_mismatch_recomputed",
         "online_graphs",
         "compute_chunks",
@@ -722,6 +815,8 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "pass_distance_filled": 0,
         "nearest_opponent_distance_filled": 0,
         "ball_z_filled": 0,
+        "pass_height_filled": 0,
+        "pass_height_refreshed": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -752,6 +847,8 @@ def _format_runtime_stats_line(prefix: str, stats: dict[str, Any]) -> str:
         f"pass_distance_filled={int(stats.get('pass_distance_filled', 0) or 0)} "
         f"nearest_opponent_distance_filled={int(stats.get('nearest_opponent_distance_filled', 0) or 0)} "
         f"ball_z_filled={int(stats.get('ball_z_filled', 0) or 0)} "
+        f"pass_height_filled={int(stats.get('pass_height_filled', 0) or 0)} "
+        f"pass_height_refreshed={int(stats.get('pass_height_refreshed', 0) or 0)} "
         f"skipped_all_nan={int(stats.get('skipped_all_nan', 0) or 0)}"
     )
 
@@ -769,6 +866,8 @@ def _runtime_stats_has_work(stats: dict[str, Any]) -> bool:
             "pass_distance_filled",
             "nearest_opponent_distance_filled",
             "ball_z_filled",
+            "pass_height_filled",
+            "pass_height_refreshed",
             "skipped_all_nan",
         ]
     )
@@ -856,7 +955,14 @@ def prewarm_runtime_items(
         sigma_speed=float(args.sigma_speed),
         sigma_distance=float(args.sigma_distance),
         top_n=int(args.top_n),
+        top_n_values=pc_top_n_values_from_args(args) if bool(getattr(args, "pc_xpass", False)) else None,
         available_metrics=enabled_physical_xpass_metrics_from_args(args),
+        control_function_power=float(args.control_function_power),
+        control_function_inflection_point=float(args.control_function_inflection_point),
+        control_function_gamma=float(args.control_function_gamma),
+        pass_height_model=getattr(args, "_pass_height_model", None),
+        pass_height_model_id=getattr(args, "pass_height_model_id", None),
+        pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
         dry_run=bool(args.dry_run),
         show_progress=not bool(args.dry_run),
         progress_desc=progress_desc,
@@ -973,7 +1079,11 @@ def write_runtime_dataset_metadata(
             speed_step=args.speed_step,
             angle_step=args.angle_step,
             top_n=int(args.top_n),
+            top_n_values=pc_top_n_values_from_args(args),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
+            control_function_power=float(args.control_function_power),
+            control_function_inflection_point=float(args.control_function_inflection_point),
+            control_function_gamma=float(args.control_function_gamma),
         )
         if bool(getattr(args, "pc_xpass", False))
         else physical_xpass_as_default_metadata(
@@ -1017,6 +1127,16 @@ def write_runtime_dataset_metadata(
         "effective_v0_grid": [float(value) for value in as_default_v0_values(max_speed=args.max_speed, speed_step=args.speed_step).tolist()],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
+    if getattr(args, "pass_height_model_id", None):
+        metadata.update(
+            {
+                "pass_height_model_id": str(args.pass_height_model_id),
+                "pass_height_model_record": getattr(args, "_pass_height_model_record", None),
+                "pass_height_column_suffix": PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX,
+                "pass_height_storage": "per_player_probability_columns",
+                "pass_height_device": str(getattr(args, "pass_height_device", "cpu")),
+            }
+        )
     write_run_metadata(cache_dir, metadata)
 
 
@@ -1537,6 +1657,7 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
     if not args.normalize:
         warnings.warn("--no-normalize is ignored; AS-default physical xPass always uses normalize=True.")
     configure_physical_worker_thread_limit(int(args.worker_thread_limit))
+    prepare_pass_height_context(args)
     runners = {
         "sportec": run_runtime_sportec,
         "skillcorner": run_runtime_skillcorner,
@@ -1556,6 +1677,8 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
             f"hits={int(stats.get('cache_hits', 0))}, misses={int(stats.get('cache_misses', 0))}, "
             f"written={int(stats.get('cache_written', 0))}, filled_distance={int(stats.get('pass_distance_filled', 0))}, "
             f"filled_ball_z={int(stats.get('ball_z_filled', 0))}, "
+            f"pass_height_filled={int(stats.get('pass_height_filled', 0))}, "
+            f"pass_height_refreshed={int(stats.get('pass_height_refreshed', 0))}, "
             f"skipped={len(_flatten_skip_reasons(summary.get('skipped') or {}))}, "
             f"skip_reasons={summarize_skip_reasons(summary.get('skipped') or {})}"
         )

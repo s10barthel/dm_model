@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
-from torch_geometric.data import Data
+from torch_geometric.data import Batch, Data
 
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
@@ -59,6 +59,7 @@ PHYSICAL_XPASS_PASS_DISTANCE_COLUMN = "pass_distance"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX = "__distance_to_nearest_opponent"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_COLUMN = "distance_to_nearest_opponent"
 PHYSICAL_XPASS_BALL_Z_COLUMN = "ball_z"
+PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX = "__pass_height"
 PHYSICAL_XPASS_FRAME_SCOPE_COLUMN = "frame_scope"
 PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN = "state_frame_id"
 PHYSICAL_XPASS_FRAME_SCOPE_ACTION = "frame_id"
@@ -104,8 +105,11 @@ PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR = 0.05
 PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
 PC_XPASS_DEFAULT_REACTION_TIME = 0.25
 PC_XPASS_DEFAULT_MAX_PLAYER_SPEED = 5.0
-PC_XPASS_SIGMOID_SCALE = 15.0
-PC_XPASS_SIGMOID_OFFSET = 0.3
+PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER = 20.0
+PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT = 0.2
+PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA = 1.0
+PC_XPASS_SIGMOID_SCALE = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER
+PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT
 PC_XPASS_DEFAULT_MAX_SPEED = 25.0
 PC_XPASS_DEFAULT_SPEED_STEP = 2.0
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
@@ -264,7 +268,11 @@ def pc_xpass_metadata(
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -284,12 +292,17 @@ def pc_xpass_metadata(
     lane_survival_policy = _pc_xpass_lane_survival_policy(ignore_lane)
     control_policy = _pc_xpass_control_policy(ignore_control)
     top_metric = pc_xpass_top_metric(top_n)
-    metrics = normalize_physical_xpass_metrics(available_metrics or [PHYSICAL_XPASS_METRIC_MAX, top_metric])
+    resolved_top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or []))})
+    if any(value < 1 for value in resolved_top_n_values):
+        raise ValueError("top_n and top_n_values must be positive.")
+    top_metrics = [pc_xpass_top_metric(value) for value in resolved_top_n_values]
+    metrics = normalize_physical_xpass_metrics(available_metrics or [PHYSICAL_XPASS_METRIC_MAX, *top_metrics])
     available_versions = []
     if PHYSICAL_XPASS_METRIC_MAX in metrics:
         available_versions.append(X_PASS_VERSION_MAX)
-    if top_metric in metrics:
-        available_versions.append(f"top{int(top_n)}")
+    for value in resolved_top_n_values:
+        if pc_xpass_top_metric(value) in metrics:
+            available_versions.append(f"top{int(value)}")
     max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value)
@@ -306,12 +319,19 @@ def pc_xpass_metadata(
         "available_x_pass_versions": available_versions,
         "disabled_metrics": disabled_physical_xpass_metrics(metrics),
         "top_n": int(top_n),
+        "top_n_values": resolved_top_n_values,
         "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME,
         "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
-        "arrival_function": "sigmoid_15_offset_0.3",
-        "arrival_sigmoid_scale": PC_XPASS_SIGMOID_SCALE,
-        "arrival_sigmoid_offset": PC_XPASS_SIGMOID_OFFSET,
-        "normalization": "divide_if_sum_gt_1",
+        "arrival_function": f"sigmoid_{float(control_function_power):g}_offset_{float(control_function_inflection_point):g}",
+        "arrival_sigmoid_scale": float(control_function_power),
+        "arrival_sigmoid_offset": float(control_function_inflection_point),
+        "control_function": "sigmoid",
+        "control_function_power": float(control_function_power),
+        "control_function_inflection_point": float(control_function_inflection_point),
+        "control_function_gamma": float(control_function_gamma),
+        "normalization": "gamma_power_if_sum_gt_1",
+        "endpoint_normalization": "gamma_power_if_sum_gt_1",
+        "lane_survival_aggregation": "per_player_max_then_independent_product",
         "control_policy": control_policy,
         "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
@@ -403,12 +423,21 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
     if values is None:
         return list(PHYSICAL_XPASS_AVAILABLE_METRICS)
     normalized = {normalize_physical_xpass_metric(value) for value in values}
-    dynamic_top = sorted(
+    base_metrics = [
+        PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
+        PHYSICAL_XPASS_METRIC_MAX,
+        PHYSICAL_XPASS_METRIC_TOPMEAN,
+    ]
+    pc_top = sorted(
         metric
         for metric in normalized
-        if metric.startswith("top") and metric.endswith("_xpass") and metric not in PHYSICAL_XPASS_SUPPORTED_METRICS
+        if metric.startswith("top") and metric.endswith("_xpass") and metric != PHYSICAL_XPASS_METRIC_TOPMEAN
     )
-    metrics = [metric for metric in PHYSICAL_XPASS_SUPPORTED_METRICS if metric in normalized] + dynamic_top
+    pc_top = sorted(
+        pc_top,
+        key=lambda metric: int(metric[3:-6]),
+    )
+    metrics = [metric for metric in base_metrics if metric in normalized] + pc_top
     if not metrics:
         raise ValueError("At least one physical xPass metric must be enabled.")
     return metrics
@@ -461,6 +490,14 @@ def physical_xpass_nearest_opponent_distance_column(player_id: str) -> str:
 
 def physical_xpass_nearest_opponent_distance_columns(player_ids: list[str] | tuple[str, ...]) -> list[str]:
     return [physical_xpass_nearest_opponent_distance_column(str(player_id)) for player_id in player_ids]
+
+
+def physical_xpass_pass_height_column(player_id: str) -> str:
+    return f"{player_id}{PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX}"
+
+
+def physical_xpass_pass_height_columns(player_ids: list[str] | tuple[str, ...]) -> list[str]:
+    return [physical_xpass_pass_height_column(str(player_id)) for player_id in player_ids]
 
 
 def normalize_physical_xpass_speed_aggregation(value: str | None) -> str:
@@ -1009,6 +1046,19 @@ def _candidate_target_indices(graph: Data) -> list[int]:
     finite_xy = torch.isfinite(graph.x[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]).all(dim=1)
     mask = teammate & (~possessor) & (~goal) & finite_xy
     return torch.nonzero(mask, as_tuple=False).flatten().tolist()
+
+
+def _pass_height_output_mask(graph: Data) -> torch.Tensor:
+    mask = graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+    if graph.x.shape[1] > config.NODE_FEATURE_IS_GOAL:
+        mask = mask & (graph.x[:, config.NODE_FEATURE_IS_GOAL] != 1)
+    return mask
+
+
+def _pass_height_output_player_ids(graph: Data) -> list[str]:
+    node_ids = _node_ids(graph)
+    mask = _pass_height_output_mask(graph).detach().cpu().numpy().astype(bool)
+    return [node_id for node_id, keep in zip(node_ids, mask) if keep]
 
 
 def physical_state_hash(graph: Data) -> str:
@@ -2155,9 +2205,13 @@ def pc_xpass_output_columns(
     player_ids: list[str] | tuple[str, ...],
     *,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[str]:
-    metrics = normalize_physical_xpass_metrics(enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, pc_xpass_top_metric(top_n)])
+    resolved_top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or []))})
+    metrics = normalize_physical_xpass_metrics(
+        enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, *(pc_xpass_top_metric(value) for value in resolved_top_n_values)]
+    )
     columns: list[str] = []
     top_metric = pc_xpass_top_metric(top_n)
     for player_id in player_ids:
@@ -2171,13 +2225,56 @@ def pc_xpass_output_columns(
 
 
 def pc_xpass_raw_control(ball_minus_player: np.ndarray) -> np.ndarray:
-    return 1.0 / (1.0 + np.exp(-np.clip(PC_XPASS_SIGMOID_SCALE * (ball_minus_player + PC_XPASS_SIGMOID_OFFSET), -60.0, 60.0)))
+    return pc_xpass_raw_control_with_params(
+        ball_minus_player,
+        power=PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+        inflection_point=PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    )
+
+
+def pc_xpass_raw_control_with_params(
+    ball_minus_player: np.ndarray,
+    *,
+    power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(float(power) * (ball_minus_player + float(inflection_point)), -60.0, 60.0)))
 
 
 def pc_xpass_normalize_if_sum_above_one(raw: np.ndarray, axis: int = 0) -> np.ndarray:
     sums = np.nansum(raw, axis=axis, keepdims=True)
     normalized = np.divide(raw, sums, out=np.zeros_like(raw), where=sums > 0)
     return np.where(sums > 1.0, normalized, raw)
+
+
+def pc_xpass_endpoint_control_probabilities(raw: np.ndarray, *, axis: int = 0, gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA) -> np.ndarray:
+    sums = np.nansum(raw, axis=axis, keepdims=True)
+    if float(gamma) == 1.0:
+        powered = np.asarray(raw, dtype=float)
+    else:
+        powered = np.power(np.clip(np.asarray(raw, dtype=float), 0.0, 1.0), float(gamma))
+    powered_sums = np.nansum(powered, axis=axis, keepdims=True)
+    normalized = np.divide(powered, powered_sums, out=np.zeros_like(powered), where=powered_sums > 0)
+    return np.where(sums > 1.0, normalized, raw)
+
+
+def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
+    raw = np.asarray(lane_raw, dtype=float)
+    if raw.ndim != 4:
+        raise ValueError("pc_xpass lane raw controls must have shape players x speeds x angles x distances.")
+    lane_survival = np.ones(raw.shape[1:], dtype=float)
+    for distance_i in range(raw.shape[3]):
+        if distance_i == 0:
+            lane_survival[:, :, distance_i] = 1.0
+            continue
+        prior_raw = np.where(
+            np.isfinite(raw[:, :, :, :distance_i]),
+            np.clip(raw[:, :, :, :distance_i], 0.0, 1.0),
+            0.0,
+        )
+        player_max = np.max(prior_raw, axis=3)
+        lane_survival[:, :, distance_i] = np.prod(1.0 - player_max, axis=0)
+    return lane_survival
 
 
 def _resolve_pc_xpass_ignore_teammate_flags(
@@ -2246,7 +2343,11 @@ def compute_graph_pc_xpass_metrics(
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
 ) -> pd.Series:
     ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
         consider_teammates=consider_teammates,
@@ -2256,8 +2357,19 @@ def compute_graph_pc_xpass_metrics(
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
     top_metric = pc_xpass_top_metric(top_n)
-    enabled_metrics = normalize_physical_xpass_metrics(enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, top_metric])
-    result = pd.Series(np.nan, index=pc_xpass_output_columns(node_ids, top_n=top_n, enabled_metrics=enabled_metrics), dtype=float)
+    resolved_top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or []))})
+    top_metrics = [pc_xpass_top_metric(value) for value in resolved_top_n_values]
+    enabled_metrics = normalize_physical_xpass_metrics(enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, *top_metrics])
+    result = pd.Series(
+        np.nan,
+        index=pc_xpass_output_columns(
+            node_ids,
+            top_n=top_n,
+            top_n_values=resolved_top_n_values,
+            enabled_metrics=enabled_metrics,
+        ),
+        dtype=float,
+    )
     if not candidate_indices:
         return result
 
@@ -2290,7 +2402,11 @@ def compute_graph_pc_xpass_metrics(
     on_pitch_grid = np.repeat(on_pitch[np.newaxis, :, :], len(speeds), axis=0)
 
     margins = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball)
-    raw = pc_xpass_raw_control(margins)
+    raw = pc_xpass_raw_control_with_params(
+        margins,
+        power=control_function_power,
+        inflection_point=control_function_inflection_point,
+    )
     raw[:, :, ~on_pitch] = np.nan
     attack_mask = player_teams == "attack"
 
@@ -2303,7 +2419,11 @@ def compute_graph_pc_xpass_metrics(
         if ignore_control_teammates:
             endpoint_raw[attack_mask] = 0.0
             endpoint_raw[receiver_sim_index] = raw[receiver_sim_index]
-        endpoint_probs = pc_xpass_normalize_if_sum_above_one(endpoint_raw, axis=0)
+        endpoint_probs = pc_xpass_endpoint_control_probabilities(
+            endpoint_raw,
+            axis=0,
+            gamma=control_function_gamma,
+        )
         receiver_control = endpoint_probs[receiver_sim_index]
 
         lane_raw = raw.copy()
@@ -2311,15 +2431,7 @@ def compute_graph_pc_xpass_metrics(
         lane_raw[receiver_sim_index] = 0.0
         if ignore_lane_teammates:
             lane_raw[attack_mask] = 0.0
-        lane_probs = pc_xpass_normalize_if_sum_above_one(lane_raw, axis=0)
-        other_control = np.nansum(lane_probs, axis=0)
-        per_location_survival = np.clip(1.0 - other_control, 0.0, 1.0)
-        lane_survival = np.ones_like(receiver_control, dtype=float)
-        for distance_i in range(len(distances)):
-            if distance_i == 0:
-                lane_survival[:, :, distance_i] = 1.0
-            else:
-                lane_survival[:, :, distance_i] = np.prod(per_location_survival[:, :, :distance_i], axis=2)
+        lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
         lane_survival = np.where(on_pitch_grid, lane_survival, np.nan)
         score = lane_survival * receiver_control
         if not np.isfinite(score).any():
@@ -2328,13 +2440,20 @@ def compute_graph_pc_xpass_metrics(
         flat = int(np.nanargmax(score))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
-        top_value = _pc_xpass_top_mean(score, int(top_n))
+        top_values = {
+            int(value): _pc_xpass_top_mean(score, int(value))
+            for value in resolved_top_n_values
+            if pc_xpass_top_metric(value) in enabled_metrics
+        }
+        default_top_value = top_values.get(int(top_n), float("nan"))
         if top_metric in enabled_metrics:
-            result.loc[node_id] = float(np.clip(top_value, eps, 1.0 - eps)) if math.isfinite(top_value) else np.nan
+            result.loc[node_id] = float(np.clip(default_top_value, eps, 1.0 - eps)) if math.isfinite(default_top_value) else np.nan
         if PHYSICAL_XPASS_METRIC_MAX in enabled_metrics:
             result.loc[physical_xpass_metric_column(node_id, PHYSICAL_XPASS_METRIC_MAX)] = float(np.clip(max_score, eps, 1.0 - eps))
-        if top_metric in enabled_metrics and math.isfinite(top_value):
-            result.loc[physical_xpass_metric_column(node_id, top_metric)] = float(np.clip(top_value, eps, 1.0 - eps))
+        for value, top_value in top_values.items():
+            metric = pc_xpass_top_metric(value)
+            if math.isfinite(top_value):
+                result.loc[physical_xpass_metric_column(node_id, metric)] = float(np.clip(top_value, eps, 1.0 - eps))
         result.loc[f"{node_id}__lane_survival"] = float(lane_survival[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__control_prob"] = float(receiver_control[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__speed"] = float(speeds[speed_i])
@@ -2357,7 +2476,11 @@ def compute_graphs_pc_xpass_metrics(
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     batch_size: int = 16,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -2370,7 +2493,11 @@ def compute_graphs_pc_xpass_metrics(
             speed_step=speed_step,
             angle_step=angle_step,
             top_n=top_n,
+            top_n_values=top_n_values,
             enabled_metrics=enabled_metrics,
+            control_function_power=control_function_power,
+            control_function_inflection_point=control_function_inflection_point,
+            control_function_gamma=control_function_gamma,
         )
         for graph in graphs
     ]
@@ -3185,7 +3312,11 @@ def _runtime_cache_metadata(
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
 ) -> dict[str, Any]:
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
@@ -3196,7 +3327,11 @@ def _runtime_cache_metadata(
             speed_step=speed_step,
             angle_step=angle_step,
             top_n=top_n,
+            top_n_values=top_n_values,
             available_metrics=available_metrics,
+            control_function_power=control_function_power,
+            control_function_inflection_point=control_function_inflection_point,
+            control_function_gamma=control_function_gamma,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -3263,7 +3398,11 @@ def _ensure_runtime_physical_xpass_cache(
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -3284,7 +3423,11 @@ def _ensure_runtime_physical_xpass_cache(
         sigma_speed=sigma_speed,
         sigma_distance=sigma_distance,
         top_n=top_n,
+        top_n_values=top_n_values,
         available_metrics=available_metrics,
+        control_function_power=control_function_power,
+        control_function_inflection_point=control_function_inflection_point,
+        control_function_gamma=control_function_gamma,
     )
     if metadata_path.exists():
         if source == PC_XPASS_SOURCE:
@@ -3297,6 +3440,9 @@ def _ensure_runtime_physical_xpass_cache(
                 "default_metric",
                 "arrival_function",
                 "normalization",
+                "control_function",
+                "endpoint_normalization",
+                "lane_survival_aggregation",
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
@@ -3320,9 +3466,26 @@ def _ensure_runtime_physical_xpass_cache(
             expected_control_policy = expected_metadata.get("control_policy")
             if actual_control_policy != expected_control_policy:
                 mismatches.append(f"control_policy: expected {expected_control_policy!r}, got {actual_control_policy!r}")
-            for key in ["reaction_time", "max_player_speed", "arrival_sigmoid_scale", "arrival_sigmoid_offset", "max_speed", "speed_step", "angle_step"]:
+            for key in [
+                "reaction_time",
+                "max_player_speed",
+                "arrival_sigmoid_scale",
+                "arrival_sigmoid_offset",
+                "control_function_power",
+                "control_function_inflection_point",
+                "control_function_gamma",
+                "max_speed",
+                "speed_step",
+                "angle_step",
+            ]:
                 if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            if sorted(int(value) for value in (metadata.get("top_n_values") or [metadata.get("top_n")])) != sorted(
+                int(value) for value in expected_metadata.get("top_n_values", [])
+            ):
+                mismatches.append(
+                    f"top_n_values: expected {expected_metadata.get('top_n_values')!r}, got {metadata.get('top_n_values')!r}"
+                )
             if normalize_physical_xpass_metrics(metadata.get("available_metrics")) != normalize_physical_xpass_metrics(
                 expected_metadata.get("available_metrics")
             ):
@@ -3478,6 +3641,8 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
         "pass_distance_filled": 0,
         "nearest_opponent_distance_filled": 0,
         "ball_z_filled": 0,
+        "pass_height_filled": 0,
+        "pass_height_refreshed": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -3508,6 +3673,8 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
         "pass_distance_filled",
         "nearest_opponent_distance_filled",
         "ball_z_filled",
+        "pass_height_filled",
+        "pass_height_refreshed",
         "hash_mismatch_recomputed",
         "online_graphs",
         "compute_chunks",
@@ -3539,6 +3706,8 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
                     "pass_distance_filled",
                     "nearest_opponent_distance_filled",
                     "ball_z_filled",
+                    "pass_height_filled",
+                    "pass_height_refreshed",
                     "hash_mismatch_recomputed",
                     "online_graphs",
                     "compute_chunks",
@@ -3557,6 +3726,8 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
         "pass_distance_filled": 0,
         "nearest_opponent_distance_filled": 0,
         "ball_z_filled": 0,
+        "pass_height_filled": 0,
+        "pass_height_refreshed": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -3624,6 +3795,8 @@ def summarize_physical_xpass_cache_usage(
     pass_distance_filled = int(totals["pass_distance_filled"])
     nearest_opponent_distance_filled = int(totals["nearest_opponent_distance_filled"])
     ball_z_filled = int(totals["ball_z_filled"])
+    pass_height_filled = int(totals["pass_height_filled"])
+    pass_height_refreshed = int(totals["pass_height_refreshed"])
     hash_mismatch_recomputed = int(totals["hash_mismatch_recomputed"])
     online_graphs = int(totals["online_graphs"])
     requested_rows = cache_hits + cache_misses
@@ -3658,6 +3831,8 @@ def summarize_physical_xpass_cache_usage(
         "pass_distance_filled": pass_distance_filled,
         "nearest_opponent_distance_filled": nearest_opponent_distance_filled,
         "ball_z_filled": ball_z_filled,
+        "pass_height_filled": pass_height_filled,
+        "pass_height_refreshed": pass_height_refreshed,
         "hash_mismatch_recomputed": hash_mismatch_recomputed,
         "online_graphs": online_graphs,
         "requested_rows": requested_rows,
@@ -3676,6 +3851,8 @@ def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
     distance_filled = int(summary.get("pass_distance_filled", 0) or 0)
     nearest_filled = int(summary.get("nearest_opponent_distance_filled", 0) or 0)
     ball_z_filled = int(summary.get("ball_z_filled", 0) or 0)
+    pass_height_filled = int(summary.get("pass_height_filled", 0) or 0)
+    pass_height_refreshed = int(summary.get("pass_height_refreshed", 0) or 0)
     requested = int(summary.get("requested_rows", hits + misses) or 0)
     online_graphs = int(summary.get("online_graphs", 0) or 0)
 
@@ -3687,14 +3864,16 @@ def format_physical_xpass_cache_summary(summary: dict[str, object]) -> str:
         return (
             f"Physical xPass cache: reused {hits}/{requested} rows from {cache_dir}; "
             f"copied={copied} pass_distance_filled={distance_filled} "
-            f"nearest_opponent_distance_filled={nearest_filled} ball_z_filled={ball_z_filled}."
+            f"nearest_opponent_distance_filled={nearest_filled} ball_z_filled={ball_z_filled} "
+            f"pass_height_filled={pass_height_filled} pass_height_refreshed={pass_height_refreshed}."
         )
     if reason in {"hash_mismatch", "missing_or_cold_cache_rows", "refresh_requested"}:
         return (
             f"Physical xPass cache: recomputed {written} rows; reason={reason}; "
             f"hits={hits} misses={misses} written={written} copied={copied} "
             f"pass_distance_filled={distance_filled} nearest_opponent_distance_filled={nearest_filled} "
-            f"ball_z_filled={ball_z_filled}."
+            f"ball_z_filled={ball_z_filled} pass_height_filled={pass_height_filled} "
+            f"pass_height_refreshed={pass_height_refreshed}."
         )
     if reason == "read_only_cache_rows_skipped":
         skipped_rows = int(summary.get("skipped_rows", 0) or 0)
@@ -3738,6 +3917,67 @@ def _physical_xpass_row_has_finite_metric(row: dict[str, Any], enabled_metrics: 
     return False
 
 
+def _has_finite_pass_height_predictions(row: pd.Series, graph: Data) -> bool:
+    for player_id in _pass_height_output_player_ids(graph):
+        column = physical_xpass_pass_height_column(player_id)
+        if column not in row.index:
+            return False
+        try:
+            if not math.isfinite(float(row.get(column))):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _apply_pass_height_predictions(row: dict[str, Any], predictions: dict[str, float] | None) -> dict[str, Any]:
+    if not predictions:
+        return row
+    for player_id, value in predictions.items():
+        row[physical_xpass_pass_height_column(str(player_id))] = float(value)
+    return row
+
+
+def _pass_height_predictions_for_graphs(
+    graphs: list[Data],
+    model: Any,
+    *,
+    device: str,
+) -> list[dict[str, float]]:
+    if not graphs:
+        return []
+    model_args = getattr(model, "args", None)
+    if not isinstance(model_args, dict) or model_args.get("task") != "pass_height":
+        raise ValueError("Pass-height cache enrichment requires a loaded model with args['task'] == 'pass_height'.")
+    was_training = bool(getattr(model, "training", False))
+    try:
+        model.eval()
+        batch = Batch.from_data_list(graphs).to(device)
+        node_in_dim = int(model_args["node_in_dim"])
+        batch.x = batch.x[:, :node_in_dim]
+        with torch.no_grad():
+            out = torch.sigmoid(model(batch)).reshape(-1).detach().cpu()
+        predictions: list[dict[str, float]] = []
+        offset = 0
+        for graph in graphs:
+            node_count = int(graph.x.shape[0])
+            graph_probs = out[offset : offset + node_count]
+            mask = _pass_height_output_mask(graph).detach().cpu().bool()
+            player_ids = _node_ids(graph)
+            predictions.append(
+                {
+                    str(player_id): float(value)
+                    for player_id, value, keep in zip(player_ids, graph_probs.tolist(), mask.tolist())
+                    if bool(keep)
+                }
+            )
+            offset += node_count
+    finally:
+        if was_training:
+            model.train()
+    return predictions
+
+
 def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, object]:
     misses = list(task["misses"])
     source = str(task["source"])
@@ -3758,7 +3998,13 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     sigma_speed = float(task.get("sigma_speed", PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR))
     sigma_distance = float(task.get("sigma_distance", PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR))
     top_n = int(task.get("top_n", PHYSICAL_XPASS_DEFAULT_TOP_N))
+    top_n_values = task.get("top_n_values", None)
     enabled_metrics = normalize_physical_xpass_metrics(task.get("enabled_metrics"))
+    control_function_power = float(task.get("control_function_power", PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER))
+    control_function_inflection_point = float(
+        task.get("control_function_inflection_point", PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT)
+    )
+    control_function_gamma = float(task.get("control_function_gamma", PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA))
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -3792,7 +4038,11 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             angle_step=angle_step,
             batch_size=physical_batch_size,
             top_n=top_n,
+            top_n_values=top_n_values,
             enabled_metrics=enabled_metrics,
+            control_function_power=control_function_power,
+            control_function_inflection_point=control_function_inflection_point,
+            control_function_gamma=control_function_gamma,
         )
     else:
         computed_probs = [
@@ -3822,6 +4072,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             row[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = str(item[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN])
         if item.get(PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN) is not None:
             row[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN] = item[PHYSICAL_XPASS_STATE_FRAME_ID_COLUMN]
+        for key, value in item.items():
+            key = str(key)
+            if key.endswith(PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX):
+                row[key] = float(value)
         row.update({str(player_id): float(value) for player_id, value in probs.items()})
         row.update(graph_nearest_opponent_distance_row_values(item["graph"]))
         rows.append(row)
@@ -3879,6 +4133,8 @@ def _runtime_match_stats_template() -> dict[str, int]:
         "pass_distance_filled": 0,
         "nearest_opponent_distance_filled": 0,
         "ball_z_filled": 0,
+        "pass_height_filled": 0,
+        "pass_height_refreshed": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -3902,6 +4158,9 @@ def prewarm_physical_xpass_runtime_cache(
     worker_thread_limit: int = 1,
     physical_batch_size: int = 16,
     reuse_cache_dir: str | Path | None = None,
+    pass_height_model: Any | None = None,
+    pass_height_model_id: str | None = None,
+    pass_height_device: str = "cpu",
     max_speed: float | None = None,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
@@ -3912,14 +4171,19 @@ def prewarm_physical_xpass_runtime_cache(
     sigma_speed: float = PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     sigma_distance: float = PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
+    top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
+    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
     verbose_status: bool = False,
 ) -> dict[str, object]:
     if available_metrics is None and source == PC_XPASS_SOURCE:
-        available_metrics = [PHYSICAL_XPASS_METRIC_MAX, pc_xpass_top_metric(top_n)]
+        resolved_top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or []))})
+        available_metrics = [PHYSICAL_XPASS_METRIC_MAX, *(pc_xpass_top_metric(value) for value in resolved_top_n_values)]
     available_metrics = normalize_physical_xpass_metrics(available_metrics)
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)
     teammate_policy = teammate_policy or (
@@ -3950,10 +4214,19 @@ def prewarm_physical_xpass_runtime_cache(
         sigma_speed=sigma_speed,
         sigma_distance=sigma_distance,
         top_n=top_n,
+        top_n_values=top_n_values,
         available_metrics=available_metrics,
+        control_function_power=control_function_power,
+        control_function_inflection_point=control_function_inflection_point,
+        control_function_gamma=control_function_gamma,
         create_if_missing=not bool(dry_run),
     )
     refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
+    pass_height_enabled = pass_height_model is not None
+    pass_height_model_id_text = None if pass_height_model_id is None else str(pass_height_model_id)
+    pass_height_refresh_required = bool(
+        pass_height_enabled and str(cache_metadata.get("pass_height_model_id")) != str(pass_height_model_id_text)
+    )
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
@@ -3963,6 +4236,8 @@ def prewarm_physical_xpass_runtime_cache(
     stats["available_metrics"] = list(available_metrics)
     stats["disabled_metrics"] = disabled_physical_xpass_metrics(available_metrics)
     stats["dry_run"] = bool(dry_run)
+    stats["pass_height_model_id"] = pass_height_model_id_text
+    stats["pass_height_refresh_required"] = pass_height_refresh_required
     match_stats_by_id: dict[str, dict[str, int]] = {}
     misses: list[dict[str, Any]] = []
     copied_rows: list[dict[str, Any]] = []
@@ -4014,6 +4289,19 @@ def prewarm_physical_xpass_runtime_cache(
         stats["pass_rows"] = int(stats["pass_rows"]) + pass_count
         match_stats["rows_scanned"] += row_count
         match_stats["pass_rows"] += pass_count
+        pass_height_prediction_cache: dict[int, dict[str, float] | None] = {}
+
+        def pass_height_values_for(graph: Data) -> dict[str, float] | None:
+            if not pass_height_enabled or bool(dry_run):
+                return None
+            cache_key = id(graph)
+            if cache_key not in pass_height_prediction_cache:
+                pass_height_prediction_cache[cache_key] = _pass_height_predictions_for_graphs(
+                    [graph],
+                    pass_height_model,
+                    device=str(pass_height_device),
+                )[0]
+            return pass_height_prediction_cache[cache_key]
 
         for graph, label, state_frame_id in zip(graphs, labels, state_frame_ids):
             action_index = int(label[LABEL_INDEX["action_index"]].item())
@@ -4032,13 +4320,23 @@ def prewarm_physical_xpass_runtime_cache(
                     and _has_finite_nearest_opponent_distances(cached_row, graph)
                     and _physical_xpass_row_has_finite_metric(cached_row.to_dict(), available_metrics)
                 ):
-                    stats["cache_hits"] = int(stats["cache_hits"]) + 1
-                    match_stats["cache_hits"] += 1
-                    continue
+                    has_current_pass_height = (
+                        not pass_height_enabled
+                        or (
+                            not pass_height_refresh_required
+                            and _has_finite_pass_height_predictions(cached_row, graph)
+                        )
+                    )
+                    if has_current_pass_height:
+                        stats["cache_hits"] = int(stats["cache_hits"]) + 1
+                        match_stats["cache_hits"] += 1
+                        continue
                 if not hash_matches:
                     stats["hash_mismatch_recomputed"] = int(stats["hash_mismatch_recomputed"]) + 1
                     match_stats["hash_mismatch_recomputed"] += 1
                 if hash_matches and _physical_xpass_row_has_finite_metric(cached_row.to_dict(), available_metrics):
+                    had_pass_height = _has_finite_pass_height_predictions(cached_row, graph) if pass_height_enabled else True
+                    pass_height_values = pass_height_values_for(graph)
                     copied_row = cached_row.to_dict()
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
@@ -4050,6 +4348,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
+                    _apply_pass_height_predictions(copied_row, pass_height_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
@@ -4059,18 +4358,28 @@ def prewarm_physical_xpass_runtime_cache(
                         not _has_finite_nearest_opponent_distances(cached_row, graph)
                     )
                     stats["ball_z_filled"] = int(stats["ball_z_filled"]) + int(not _has_finite_ball_z(cached_row))
+                    stats["pass_height_filled"] = int(stats["pass_height_filled"]) + int(pass_height_enabled and not had_pass_height)
+                    stats["pass_height_refreshed"] = int(stats["pass_height_refreshed"]) + int(
+                        pass_height_enabled and had_pass_height and pass_height_refresh_required
+                    )
                     match_stats["copied_from_reuse"] += 1
                     match_stats["pass_distance_filled"] += int(not _has_finite_pass_distance(cached_row))
                     match_stats["nearest_opponent_distance_filled"] += int(
                         not _has_finite_nearest_opponent_distances(cached_row, graph)
                     )
                     match_stats["ball_z_filled"] += int(not _has_finite_ball_z(cached_row))
+                    match_stats["pass_height_filled"] += int(pass_height_enabled and not had_pass_height)
+                    match_stats["pass_height_refreshed"] += int(
+                        pass_height_enabled and had_pass_height and pass_height_refresh_required
+                    )
                     continue
 
             if not refresh and reuse_rows is not None and action_index in reuse_rows.index:
                 reuse_row = reuse_rows.loc[action_index]
                 hash_matches, _missing_hash = _physical_row_hash_matches_or_missing(reuse_row, state_hash)
                 if hash_matches and _physical_xpass_row_has_finite_metric(reuse_row.to_dict(), available_metrics):
+                    had_pass_height = _has_finite_pass_height_predictions(reuse_row, graph) if pass_height_enabled else True
+                    pass_height_values = pass_height_values_for(graph)
                     copied_row = reuse_row.to_dict()
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
@@ -4082,6 +4391,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
+                    _apply_pass_height_predictions(copied_row, pass_height_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
@@ -4091,15 +4401,21 @@ def prewarm_physical_xpass_runtime_cache(
                         not _has_finite_nearest_opponent_distances(reuse_row, graph)
                     )
                     stats["ball_z_filled"] = int(stats["ball_z_filled"]) + int(not _has_finite_ball_z(reuse_row))
+                    stats["pass_height_filled"] = int(stats["pass_height_filled"]) + int(pass_height_enabled and not had_pass_height)
+                    stats["pass_height_refreshed"] = int(stats["pass_height_refreshed"]) + int(
+                        pass_height_enabled and had_pass_height and pass_height_refresh_required
+                    )
                     match_stats["copied_from_reuse"] += 1
                     match_stats["pass_distance_filled"] += int(not _has_finite_pass_distance(reuse_row))
                     match_stats["nearest_opponent_distance_filled"] += int(
                         not _has_finite_nearest_opponent_distances(reuse_row, graph)
                     )
                     match_stats["ball_z_filled"] += int(not _has_finite_ball_z(reuse_row))
+                    match_stats["pass_height_filled"] += int(pass_height_enabled and not had_pass_height)
+                    match_stats["pass_height_refreshed"] += int(
+                        pass_height_enabled and had_pass_height and pass_height_refresh_required
+                    )
                     continue
-                stats["hash_mismatch_recomputed"] = int(stats["hash_mismatch_recomputed"]) + 1
-                match_stats["hash_mismatch_recomputed"] += 1
 
             stats["cache_misses"] = int(stats["cache_misses"]) + 1
             match_stats["cache_misses"] += 1
@@ -4115,6 +4431,11 @@ def prewarm_physical_xpass_runtime_cache(
                 PHYSICAL_XPASS_BALL_Z_COLUMN: ball_z,
                 "graph": graph,
             }
+            pass_height_values = pass_height_values_for(graph)
+            _apply_pass_height_predictions(miss, pass_height_values)
+            if pass_height_enabled:
+                stats["pass_height_filled"] = int(stats["pass_height_filled"]) + 1
+                match_stats["pass_height_filled"] += 1
             if frame_scope is not None:
                 miss[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = frame_scope
             if state_frame_id is not None:
@@ -4133,7 +4454,9 @@ def prewarm_physical_xpass_runtime_cache(
                 f"hits={int(match_stats.get('cache_hits', 0))} "
                 f"misses={int(match_stats.get('cache_misses', 0))} "
                 f"to_compute={int(match_stats.get('cache_misses', 0))} "
-                f"copied={int(match_stats.get('copied_from_reuse', 0))}"
+                f"copied={int(match_stats.get('copied_from_reuse', 0))} "
+                f"pass_height_filled={int(match_stats.get('pass_height_filled', 0))} "
+                f"pass_height_refreshed={int(match_stats.get('pass_height_refreshed', 0))}"
             )
 
     if dry_run:
@@ -4183,7 +4506,11 @@ def prewarm_physical_xpass_runtime_cache(
             "sigma_speed": float(sigma_speed),
             "sigma_distance": float(sigma_distance),
             "top_n": int(top_n),
+            "top_n_values": sorted({int(top_n), *(int(value) for value in (top_n_values or []))}),
             "enabled_metrics": list(available_metrics),
+            "control_function_power": float(control_function_power),
+            "control_function_inflection_point": float(control_function_inflection_point),
+            "control_function_gamma": float(control_function_gamma),
         }
         progress = tqdm(
             total=len(misses),
