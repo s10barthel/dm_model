@@ -1024,7 +1024,7 @@ w = pass_height * cos((pi / 2) * (x / 0.8)^n)  if x <= 0.8, otherwise 0
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-The default is `n=2`; override it with `--v4-power <float>` when using `--xpass-weight v4`.
+The default is `n=2`; override it with `--v4-power <float>` when using `--xpass-weight v4`. Add `--discount false` to disable the cosine distance discount and use `w = pass_height` directly.
 
 `--xpass-weight v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
 
@@ -1100,6 +1100,7 @@ Only the `pass_success` low-level training command receives physical xPass flags
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values and `v4` requires cached `<player_id>__pass_height` values.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--ball-z-limit <float|none>`: with a numeric limit, use 100% pass-success model weight when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: override the runtime physical xPass cache directory; default is `data/runtime_physical_xpass/<dataset>`.
 - `--no-physical-cache`: disable the runtime cache override. Do not use this with inference-time blending unless you intentionally want cache lookup disabled.
@@ -1252,6 +1253,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--ball-z-limit <float|none>`: with a numeric limit, use the pass-success model only when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: Sportec runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 
@@ -1368,6 +1370,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1396,6 +1399,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1421,6 +1425,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1447,6 +1452,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
@@ -1472,6 +1478,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override for inference/visualization. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; visualization does not compute xPass rows.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
@@ -1549,6 +1556,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; this script does not compute xPass rows.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.

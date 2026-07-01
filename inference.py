@@ -45,6 +45,7 @@ from physical_pass_model import (
     physical_xpass_inference_lookup_config,
     physical_xpass_metric,
     physical_xpass_metric_columns,
+    physical_xpass_v4_discount,
     physical_xpass_v4_power,
     physical_xpass_weight_version,
     physical_xpass_speed_aggregation,
@@ -751,6 +752,7 @@ def inference_gnn(
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                 weight_version = physical_xpass_weight_version(model.args)
                 v4_power = physical_xpass_v4_power(model.args)
+                v4_discount = physical_xpass_v4_discount(model.args)
                 ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
                     raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
@@ -822,6 +824,7 @@ def inference_gnn(
                     if weight_version == "v4":
                         blend_kwargs["pass_height"] = pass_height_i[finite_mask]
                         blend_kwargs["v4_power"] = v4_power
+                        blend_kwargs["v4_discount"] = v4_discount
                     if ball_z_limit is not None:
                         blend_kwargs["ball_z"] = ball_z_i[finite_mask]
                         blend_kwargs["ball_z_limit"] = ball_z_limit

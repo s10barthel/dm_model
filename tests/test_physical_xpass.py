@@ -130,6 +130,7 @@ from physical_pass_model import (
     physical_xpass_nearest_opponent_distance_column,
     physical_xpass_pass_height_column,
     physical_xpass_ball_z_limit,
+    physical_xpass_v4_discount,
     physical_xpass_weight_version,
     physical_xpass_blend_weight_v2,
     physical_xpass_blend_weight_v3,
@@ -640,6 +641,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(80.0, 1.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 1.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(40.0, 0.5)), 0.5 * math.cos((math.pi / 2.0) * 0.5**2))
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 0.5, use_discount=False)), 0.5)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(20.0, 1.4, use_discount=False)), 1.0)
         self.assertAlmostEqual(
             float(
                 blend_physical_xpass_predictions(
@@ -651,6 +654,19 @@ class PhysicalXPassTests(unittest.TestCase):
                 )
             ),
             0.5 + (0.9 - 0.5) * 0.5 * math.cos((math.pi / 2.0) * 0.5**2),
+        )
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=120.0,
+                    pass_height=0.5,
+                    weight_version="v4",
+                    v4_discount=False,
+                )
+            ),
+            0.7,
         )
         self.assertAlmostEqual(
             float(
@@ -686,6 +702,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     ball_z=1.2,
                     ball_z_limit=1.0,
                     weight_version="v4",
+                    v4_discount=False,
                 )
             ),
             0.9,
@@ -1722,6 +1739,83 @@ class PhysicalXPassTests(unittest.TestCase):
         )
         save_animation.assert_called_once()
         self.assertEqual(save_animation.call_args.args[1], Path("out") / "s1" / "physical_xpass.gif")
+
+    def test_run_and_visualize_hawkeye_png_physical_xpass_uses_selected_time_norm_frames(self) -> None:
+        frame_meta = pd.DataFrame(
+            [
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 0.0},
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 1.0},
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 2.0},
+            ],
+            index=pd.Index([0, 300, 325], name="frame_id"),
+        )
+        tracking = pd.DataFrame(
+            {"id": ["s1", "s1", "s1"], "BallReceipt": [1.0, 1.0, 1.0]},
+            index=pd.Index([0, 300, 325], name="frame_id"),
+        )
+        situation = SimpleNamespace(
+            situation_id="s1",
+            match_id="s1",
+            tracking=tracking,
+            frame_meta=frame_meta,
+            labels=torch.empty((0, len(LABEL_COLUMNS))),
+            graph_features_0=[],
+        )
+        args = SimpleNamespace(
+            tracking_csv="tracking.csv",
+            freeze_ballreceipt=True,
+            show_physical_xpass=True,
+            physical_cache_dir="hawkeye_cache",
+            x_pass_version="top10",
+            output="png",
+            time_norm=[0.0, 1.0],
+            show_trajectories=False,
+        )
+        selected_frames = [
+            {"label": "time_norm_0", "frame_id": 300},
+            {"label": "time_norm_1", "frame_id": 325},
+        ]
+
+        with patch.object(run_and_visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, {}, {})):
+            with patch.object(run_and_visualize_hawkeye, "resolve_ballreceipt", return_value=1.0):
+                with patch.object(
+                    run_and_visualize_hawkeye,
+                    "resolve_hawkeye_png_frames",
+                    return_value=selected_frames,
+                ) as resolve_frames:
+                    with patch.object(
+                        run_and_visualize_hawkeye,
+                        "load_runtime_physical_xpass_visualization_table",
+                        return_value=pd.DataFrame(
+                            {"home_2": [0.8, 0.9]},
+                            index=pd.Index([300, 325], name="action_index"),
+                        ),
+                    ) as load_xpass:
+                        with patch.object(
+                            run_and_visualize_hawkeye,
+                            "render_frame_image",
+                            return_value=SimpleNamespace(save=lambda _path: None),
+                        ):
+                            run_and_visualize_hawkeye.render_situation(
+                                situation_id="s1",
+                                tracking=pd.DataFrame({"id": ["s1"]}),
+                                ball=pd.DataFrame(),
+                                model_specs={},
+                                graph_schema={"add_v_edge_features": False},
+                                args=args,
+                                device="cpu",
+                                output_root=Path("out"),
+                                rendered_components=[],
+                            )
+
+        resolve_frames.assert_called_once()
+        load_xpass.assert_called_once_with(
+            "hawkeye_cache",
+            "s1",
+            [300, 325],
+            metric=PHYSICAL_XPASS_METRIC_TOPMEAN,
+            x_pass_version="top10",
+        )
 
     def test_pass_distance_is_reserved_sidecar_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3821,13 +3915,20 @@ class PhysicalXPassTests(unittest.TestCase):
             model_variant="gat_baseline",
             xpass_weight="v4",
             v4_power=1.5,
+            v4_discount=False,
         )
 
         self.assertEqual(physical_xpass_weight_version(args), "v2")
         self.assertEqual(physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")["weight_version"], "v2")
         self.assertEqual(physical_xpass_weight_version(make_pass_success_args()), "v3")
         self.assertEqual(physical_xpass_weight_version(v4_args), "v4")
+        self.assertTrue(physical_xpass_v4_discount({}))
+        self.assertFalse(physical_xpass_v4_discount({"v4_discount": False}))
+        self.assertFalse(physical_xpass_v4_discount({"discount": "false"}))
+        with self.assertRaises(ValueError):
+            physical_xpass_v4_discount({"discount": "maybe"})
         self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_power"], 1.5)
+        self.assertFalse(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_discount"])
 
     def test_inference_lookup_config_parses_ball_z_limit(self) -> None:
         disabled_args = make_pass_success_args(
@@ -5540,13 +5641,20 @@ class PhysicalXPassTests(unittest.TestCase):
         with patch.object(
             sys,
             "argv",
-            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5"],
+            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5", "--discount", "false"],
         ):
             v4_args = run_hawkeye.parse_args()
         self.assertEqual(v4_args.xpass_weight, "v4")
         self.assertEqual(v4_args.v4_power, 1.5)
+        self.assertFalse(v4_args.v4_discount)
 
         with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--v4-power", "1.5"]):
+            with self.assertRaises(SystemExit):
+                run_hawkeye.parse_args()
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--discount", "false"]):
+            with self.assertRaises(SystemExit):
+                run_hawkeye.parse_args()
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--discount", "maybe"]):
             with self.assertRaises(SystemExit):
                 run_hawkeye.parse_args()
 
@@ -5589,11 +5697,14 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.xpass_weight, "v2")
         self.assertEqual(args.ball_z_limit, "1.0")
 
-        v4_args = generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5"])
+        v4_args = generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5", "--discount", "false"])
         self.assertEqual(v4_args.xpass_weight, "v4")
         self.assertEqual(v4_args.v4_power, 1.5)
+        self.assertFalse(v4_args.v4_discount)
         with self.assertRaises(SystemExit):
             generate_epv.parse_args(["--use-physical-xpass", "--v4-power", "1.5"])
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--discount", "false"])
         self.assertEqual(args.physical_cache_dir, "runtime_cache")
 
     def test_generate_epv_configures_only_pass_success_physical_xpass(self) -> None:
