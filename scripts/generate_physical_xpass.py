@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,9 +48,10 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PC_XPASS_AVAILABLE_METRICS,
-    PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
-    PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
+    PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    PC_XPASS_DEFAULT_CONTROL_POWER,
+    PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    PC_XPASS_DEFAULT_LANE_POWER,
     PC_XPASS_DEFAULT_MAX_SPEED,
     PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     PC_XPASS_DEFAULT_MIN_SPEED,
@@ -242,28 +244,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="pc-xPass only: export multiple top-N metrics, e.g. --top-n-values 5 10 25. --top-n remains the unsuffixed default.",
     )
     parser.add_argument(
-        "--control-function-power",
-        "--control_function_power",
-        dest="control_function_power",
+        "--lane-power",
+        "--lane_power",
+        dest="lane_power",
         type=float,
-        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-        help="pc-xPass only: sigmoid power in raw control = sigmoid(power * (ball_minus_player + inflection_point)).",
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: sigmoid power for lane-survival interception control.",
     )
     parser.add_argument(
-        "--control-function-inflection-point",
-        "--control_function_inflection_point",
-        dest="control_function_inflection_point",
+        "--lane-inflection-point",
+        "--lane_inflection_point",
+        dest="lane_inflection_point",
         type=float,
-        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-        help="pc-xPass only: offset in raw control = sigmoid(power * (ball_minus_player + inflection_point)).",
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: sigmoid offset for lane-survival interception control.",
     )
     parser.add_argument(
-        "--control-function-gamma",
-        "--control_function_gamma",
-        dest="control_function_gamma",
+        "--control-power",
+        "--control_power",
+        dest="control_power",
         type=float,
-        default=PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
-        help="pc-xPass only: endpoint-control gamma used when raw control sums exceed 1.",
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: sigmoid power for endpoint receiver control.",
+    )
+    parser.add_argument(
+        "--control-inflection-point",
+        "--control_inflection_point",
+        dest="control_inflection_point",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: sigmoid offset for endpoint receiver control.",
     )
     parser.add_argument(
         "--use-position-discount",
@@ -344,6 +354,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "max_player_speed",
             "min_speed",
             "radial_gridsize",
+            "lane_power",
+            "lane_inflection_point",
+            "control_power",
+            "control_inflection_point",
             "use_position_discount",
             "position_discount_power",
             "position_discount_distance",
@@ -353,6 +367,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not bool(args.pc_xpass) and explicit_pc_only_flags:
         parser.error(
             "--reaction-time, --max-player-speed, --min-speed, --radial-gridsize, "
+            "--lane-power, --lane-inflection-point, --control-power, --control-inflection-point, "
             "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
     if not hasattr(args, "reaction_time"):
@@ -363,6 +378,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.min_speed = PC_XPASS_DEFAULT_MIN_SPEED
     if not hasattr(args, "radial_gridsize"):
         args.radial_gridsize = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE
+    if not hasattr(args, "lane_power"):
+        args.lane_power = PC_XPASS_DEFAULT_LANE_POWER
+    if not hasattr(args, "lane_inflection_point"):
+        args.lane_inflection_point = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT
+    if not hasattr(args, "control_power"):
+        args.control_power = PC_XPASS_DEFAULT_CONTROL_POWER
+    if not hasattr(args, "control_inflection_point"):
+        args.control_inflection_point = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT
     if not hasattr(args, "use_position_discount"):
         args.use_position_discount = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT
     if not hasattr(args, "position_discount_power"):
@@ -432,12 +455,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-n-values must contain only positive integers.")
     if not bool(args.pc_xpass) and args.top_n_values is not None:
         parser.error("--top-n-values is only supported with --pc-xpass.")
-    if args.control_function_power <= 0:
-        parser.error("--control-function-power must be positive.")
-    if args.control_function_inflection_point <= 0:
-        parser.error("--control-function-inflection-point must be positive.")
-    if args.control_function_gamma <= 0:
-        parser.error("--control-function-gamma must be positive.")
+    for attr_name, flag_name in [
+        ("lane_power", "--lane-power"),
+        ("lane_inflection_point", "--lane-inflection-point"),
+        ("control_power", "--control-power"),
+        ("control_inflection_point", "--control-inflection-point"),
+    ]:
+        value = float(getattr(args, attr_name))
+        if not math.isfinite(value) or value <= 0:
+            parser.error(f"{flag_name} must be a positive finite float.")
     if args.position_discount_power <= 0:
         parser.error("--position-discount-power must be positive.")
     if args.position_discount_distance <= 0:
@@ -1058,9 +1084,10 @@ def prewarm_runtime_items(
         top_n=int(args.top_n),
         top_n_values=pc_top_n_values_from_args(args) if bool(getattr(args, "pc_xpass", False)) else None,
         available_metrics=enabled_physical_xpass_metrics_from_args(args),
-        control_function_power=float(args.control_function_power),
-        control_function_inflection_point=float(args.control_function_inflection_point),
-        control_function_gamma=float(args.control_function_gamma),
+        lane_power=float(args.lane_power),
+        lane_inflection_point=float(args.lane_inflection_point),
+        control_power=float(args.control_power),
+        control_inflection_point=float(args.control_inflection_point),
         reaction_time=float(args.reaction_time),
         max_player_speed=float(args.max_player_speed),
         use_position_discount=bool(args.use_position_discount),
@@ -1189,9 +1216,10 @@ def write_runtime_dataset_metadata(
             top_n=int(args.top_n),
             top_n_values=pc_top_n_values_from_args(args),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
-            control_function_power=float(args.control_function_power),
-            control_function_inflection_point=float(args.control_function_inflection_point),
-            control_function_gamma=float(args.control_function_gamma),
+            lane_power=float(args.lane_power),
+            lane_inflection_point=float(args.lane_inflection_point),
+            control_power=float(args.control_power),
+            control_inflection_point=float(args.control_inflection_point),
             reaction_time=float(args.reaction_time),
             max_player_speed=float(args.max_player_speed),
             use_position_discount=bool(args.use_position_discount),

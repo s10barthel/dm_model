@@ -109,15 +109,16 @@ PC_XPASS_DEFAULT_REACTION_TIME = 0.25
 PC_XPASS_DEFAULT_MAX_PLAYER_SPEED = 5.0
 PC_XPASS_DEFAULT_MIN_SPEED = 3.0
 PC_XPASS_DEFAULT_RADIAL_GRIDSIZE = 3.0
-PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER = 20.0
-PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT = 0.2
-PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA = 1.0
+PC_XPASS_DEFAULT_LANE_POWER = 15.0
+PC_XPASS_DEFAULT_LANE_INFLECTION_POINT = 0.3
+PC_XPASS_DEFAULT_CONTROL_POWER = 15.0
+PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT = 0.3
 PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT = True
 PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER = 2.0
 PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE = 20.0
 PC_XPASS_POSITION_DISCOUNT_FUNCTION = "goal_distance_backward_ratio"
-PC_XPASS_SIGMOID_SCALE = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER
-PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT
+PC_XPASS_SIGMOID_SCALE = PC_XPASS_DEFAULT_CONTROL_POWER
+PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT
 PC_XPASS_DEFAULT_MAX_SPEED = 25.0
 PC_XPASS_DEFAULT_SPEED_STEP = 2.0
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
@@ -280,9 +281,10 @@ def pc_xpass_metadata(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -339,15 +341,14 @@ def pc_xpass_metadata(
         "top_n_values": resolved_top_n_values,
         "reaction_time": float(reaction_time),
         "max_player_speed": float(max_player_speed),
-        "arrival_function": f"sigmoid_{float(control_function_power):g}_offset_{float(control_function_inflection_point):g}",
-        "arrival_sigmoid_scale": float(control_function_power),
-        "arrival_sigmoid_offset": float(control_function_inflection_point),
+        "lane_function": "sigmoid",
+        "lane_power": float(lane_power),
+        "lane_inflection_point": float(lane_inflection_point),
         "control_function": "sigmoid",
-        "control_function_power": float(control_function_power),
-        "control_function_inflection_point": float(control_function_inflection_point),
-        "control_function_gamma": float(control_function_gamma),
-        "normalization": "gamma_power_if_sum_gt_1",
-        "endpoint_normalization": "gamma_power_if_sum_gt_1",
+        "control_power": float(control_power),
+        "control_inflection_point": float(control_inflection_point),
+        "normalization": "proportional_if_sum_gt_1",
+        "endpoint_normalization": "proportional_if_sum_gt_1",
         "lane_survival_aggregation": "per_player_max_then_independent_product",
         "use_position_discount": bool(use_position_discount),
         "position_discount_function": PC_XPASS_POSITION_DISCOUNT_FUNCTION if bool(use_position_discount) else "none",
@@ -2305,16 +2306,16 @@ def pc_xpass_output_columns(
 def pc_xpass_raw_control(ball_minus_player: np.ndarray) -> np.ndarray:
     return pc_xpass_raw_control_with_params(
         ball_minus_player,
-        power=PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-        inflection_point=PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+        power=PC_XPASS_DEFAULT_CONTROL_POWER,
+        inflection_point=PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     )
 
 
 def pc_xpass_raw_control_with_params(
     ball_minus_player: np.ndarray,
     *,
-    power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
+    power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
 ) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(float(power) * (ball_minus_player + float(inflection_point)), -60.0, 60.0)))
 
@@ -2325,15 +2326,8 @@ def pc_xpass_normalize_if_sum_above_one(raw: np.ndarray, axis: int = 0) -> np.nd
     return np.where(sums > 1.0, normalized, raw)
 
 
-def pc_xpass_endpoint_control_probabilities(raw: np.ndarray, *, axis: int = 0, gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA) -> np.ndarray:
-    sums = np.nansum(raw, axis=axis, keepdims=True)
-    if float(gamma) == 1.0:
-        powered = np.asarray(raw, dtype=float)
-    else:
-        powered = np.power(np.clip(np.asarray(raw, dtype=float), 0.0, 1.0), float(gamma))
-    powered_sums = np.nansum(powered, axis=axis, keepdims=True)
-    normalized = np.divide(powered, powered_sums, out=np.zeros_like(powered), where=powered_sums > 0)
-    return np.where(sums > 1.0, normalized, raw)
+def pc_xpass_endpoint_control_probabilities(raw: np.ndarray, *, axis: int = 0) -> np.ndarray:
+    return pc_xpass_normalize_if_sum_above_one(np.asarray(raw, dtype=float), axis=axis)
 
 
 def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
@@ -2464,9 +2458,10 @@ def compute_graph_pc_xpass_metrics(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -2534,31 +2529,33 @@ def compute_graph_pc_xpass_metrics(
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
     )
-    raw = pc_xpass_raw_control_with_params(
+    lane_raw_all = pc_xpass_raw_control_with_params(
         margins,
-        power=control_function_power,
-        inflection_point=control_function_inflection_point,
+        power=lane_power,
+        inflection_point=lane_inflection_point,
     )
-    raw[:, :, ~on_pitch] = np.nan
+    control_raw_all = pc_xpass_raw_control_with_params(
+        margins,
+        power=control_power,
+        inflection_point=control_inflection_point,
+    )
+    lane_raw_all[:, :, ~on_pitch] = np.nan
+    control_raw_all[:, :, ~on_pitch] = np.nan
     attack_mask = player_teams == "attack"
 
     for graph_target_index in candidate_indices:
         receiver_sim_index = int(target_index_lookup[graph_target_index])
         node_id = str(node_ids[graph_target_index])
 
-        endpoint_raw = raw.copy()
+        endpoint_raw = control_raw_all.copy()
         endpoint_raw[passer_sim_index] = 0.0
         if ignore_control_teammates:
             endpoint_raw[attack_mask] = 0.0
-            endpoint_raw[receiver_sim_index] = raw[receiver_sim_index]
-        endpoint_probs = pc_xpass_endpoint_control_probabilities(
-            endpoint_raw,
-            axis=0,
-            gamma=control_function_gamma,
-        )
+            endpoint_raw[receiver_sim_index] = control_raw_all[receiver_sim_index]
+        endpoint_probs = pc_xpass_endpoint_control_probabilities(endpoint_raw, axis=0)
         receiver_control = endpoint_probs[receiver_sim_index]
 
-        lane_raw = raw.copy()
+        lane_raw = lane_raw_all.copy()
         lane_raw[passer_sim_index] = 0.0
         lane_raw[receiver_sim_index] = 0.0
         if ignore_lane_teammates:
@@ -2624,9 +2621,10 @@ def compute_graphs_pc_xpass_metrics(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -2648,9 +2646,10 @@ def compute_graphs_pc_xpass_metrics(
             top_n=top_n,
             top_n_values=top_n_values,
             enabled_metrics=enabled_metrics,
-            control_function_power=control_function_power,
-            control_function_inflection_point=control_function_inflection_point,
-            control_function_gamma=control_function_gamma,
+            lane_power=lane_power,
+            lane_inflection_point=lane_inflection_point,
+            control_power=control_power,
+            control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
             use_position_discount=use_position_discount,
@@ -3478,9 +3477,10 @@ def _runtime_cache_metadata(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -3500,9 +3500,10 @@ def _runtime_cache_metadata(
             top_n=top_n,
             top_n_values=top_n_values,
             available_metrics=available_metrics,
-            control_function_power=control_function_power,
-            control_function_inflection_point=control_function_inflection_point,
-            control_function_gamma=control_function_gamma,
+            lane_power=lane_power,
+            lane_inflection_point=lane_inflection_point,
+            control_power=control_power,
+            control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
             use_position_discount=use_position_discount,
@@ -3578,9 +3579,10 @@ def _ensure_runtime_physical_xpass_cache(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -3610,9 +3612,10 @@ def _ensure_runtime_physical_xpass_cache(
         top_n=top_n,
         top_n_values=top_n_values,
         available_metrics=available_metrics,
-        control_function_power=control_function_power,
-        control_function_inflection_point=control_function_inflection_point,
-        control_function_gamma=control_function_gamma,
+        lane_power=lane_power,
+        lane_inflection_point=lane_inflection_point,
+        control_power=control_power,
+        control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
         use_position_discount=use_position_discount,
@@ -3628,8 +3631,8 @@ def _ensure_runtime_physical_xpass_cache(
                 "source",
                 "metric_family",
                 "default_metric",
-                "arrival_function",
                 "normalization",
+                "lane_function",
                 "control_function",
                 "endpoint_normalization",
                 "lane_survival_aggregation",
@@ -3660,11 +3663,10 @@ def _ensure_runtime_physical_xpass_cache(
             for key in [
                 "reaction_time",
                 "max_player_speed",
-                "arrival_sigmoid_scale",
-                "arrival_sigmoid_offset",
-                "control_function_power",
-                "control_function_inflection_point",
-                "control_function_gamma",
+                "lane_power",
+                "lane_inflection_point",
+                "control_power",
+                "control_inflection_point",
                 "position_discount_power",
                 "position_discount_distance",
                 "max_speed",
@@ -4202,11 +4204,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     top_n = int(task.get("top_n", PHYSICAL_XPASS_DEFAULT_TOP_N))
     top_n_values = task.get("top_n_values", None)
     enabled_metrics = normalize_physical_xpass_metrics(task.get("enabled_metrics"))
-    control_function_power = float(task.get("control_function_power", PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER))
-    control_function_inflection_point = float(
-        task.get("control_function_inflection_point", PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT)
-    )
-    control_function_gamma = float(task.get("control_function_gamma", PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA))
+    lane_power = float(task.get("lane_power", PC_XPASS_DEFAULT_LANE_POWER))
+    lane_inflection_point = float(task.get("lane_inflection_point", PC_XPASS_DEFAULT_LANE_INFLECTION_POINT))
+    control_power = float(task.get("control_power", PC_XPASS_DEFAULT_CONTROL_POWER))
+    control_inflection_point = float(task.get("control_inflection_point", PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT))
     reaction_time = float(task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME))
     max_player_speed = float(task.get("max_player_speed", PC_XPASS_DEFAULT_MAX_PLAYER_SPEED))
     use_position_discount = bool(task.get("use_position_discount", PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT))
@@ -4249,9 +4250,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             top_n=top_n,
             top_n_values=top_n_values,
             enabled_metrics=enabled_metrics,
-            control_function_power=control_function_power,
-            control_function_inflection_point=control_function_inflection_point,
-            control_function_gamma=control_function_gamma,
+            lane_power=lane_power,
+            lane_inflection_point=lane_inflection_point,
+            control_power=control_power,
+            control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
             use_position_discount=use_position_discount,
@@ -4389,9 +4391,10 @@ def prewarm_physical_xpass_runtime_cache(
     top_n: int = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     available_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
-    control_function_power: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_POWER,
-    control_function_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_INFLECTION_POINT,
-    control_function_gamma: float = PC_XPASS_DEFAULT_CONTROL_FUNCTION_GAMMA,
+    lane_power: float = PC_XPASS_DEFAULT_LANE_POWER,
+    lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
+    control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
+    control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
@@ -4439,9 +4442,10 @@ def prewarm_physical_xpass_runtime_cache(
         top_n=top_n,
         top_n_values=top_n_values,
         available_metrics=available_metrics,
-        control_function_power=control_function_power,
-        control_function_inflection_point=control_function_inflection_point,
-        control_function_gamma=control_function_gamma,
+        lane_power=lane_power,
+        lane_inflection_point=lane_inflection_point,
+        control_power=control_power,
+        control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
         use_position_discount=use_position_discount,
@@ -4738,9 +4742,10 @@ def prewarm_physical_xpass_runtime_cache(
             "top_n": int(top_n),
             "top_n_values": sorted({int(top_n), *(int(value) for value in (top_n_values or []))}),
             "enabled_metrics": list(available_metrics),
-            "control_function_power": float(control_function_power),
-            "control_function_inflection_point": float(control_function_inflection_point),
-            "control_function_gamma": float(control_function_gamma),
+            "lane_power": float(lane_power),
+            "lane_inflection_point": float(lane_inflection_point),
+            "control_power": float(control_power),
+            "control_inflection_point": float(control_inflection_point),
             "reaction_time": float(reaction_time),
             "max_player_speed": float(max_player_speed),
             "use_position_discount": bool(use_position_discount),
