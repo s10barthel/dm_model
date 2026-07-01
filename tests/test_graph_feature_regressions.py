@@ -107,8 +107,10 @@ class DummyNodeModel(torch.nn.Module):
             "filter_blockers": False,
         }
         self._logits = torch.tensor(logits, dtype=torch.float32)
+        self.seen_edge_attr: torch.Tensor | None = None
 
     def forward(self, graphs: Data, _batch_dests: torch.Tensor | None = None) -> torch.Tensor:
+        self.seen_edge_attr = graphs.edge_attr.detach().cpu().clone()
         return self._logits[: graphs.x.shape[0]].to(graphs.x.device)
 
 
@@ -798,6 +800,31 @@ class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
 
         self.assertEqual(probs.columns.tolist(), ["home_10", "home_11", "home_12"])
         torch.testing.assert_close(torch.tensor(probs.loc[0].tolist()), expected, atol=1e-6, rtol=0.0)
+
+    def test_inference_gnn_trims_extra_edge_features_for_model(self) -> None:
+        model = DummyNodeModel("action_intent", logits=[2.0, 1.0, 0.0, -1.0])
+        match = make_inference_match(make_inference_labels())
+        match.graph_features_0 = [make_model_mode_graph()]
+
+        inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertIsNotNone(model.seen_edge_attr)
+        self.assertEqual(model.seen_edge_attr.shape[1], 2)
+
+    def test_inference_gnn_masks_possessor_velocity_edges_for_no_poss_model(self) -> None:
+        model = DummyNodeModel("action_intent", logits=[2.0, 1.0, 0.0, -1.0])
+        model.args["edge_in_dim"] = 4
+        model.args["v_edge_feature_mode"] = "no_poss"
+        match = make_inference_match(make_inference_labels())
+        match.graph_features_0 = [make_model_mode_graph()]
+
+        inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertIsNotNone(model.seen_edge_attr)
+        graph = match.graph_features_0[0]
+        incident_edges = (graph.edge_index[0] == 0) | (graph.edge_index[1] == 0)
+        self.assertTrue(torch.equal(model.seen_edge_attr[incident_edges, 2:4], torch.zeros((6, 2))))
+        self.assertTrue(torch.equal(model.seen_edge_attr[~incident_edges, 2:4], torch.ones((6, 2))))
 
     def test_pass_intent_keeps_offside_options_and_renormalizes(self) -> None:
         model = DummyNodeModel("pass_intent", logits=[0.0, 5.0, 0.0, 0.0], node_in_dim=26)

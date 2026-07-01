@@ -36,7 +36,7 @@ from datatools.skillcorner import (
     build_skillcorner_possession,
     discover_skillcorner_matches,
 )
-from models.utils import get_model_provenance, load_model, parse_model_id
+from models.utils import get_model_provenance, load_model, parse_model_id, validate_model_graph_schemas
 from physical_pass_model import (
     AS_DEFAULT_V0_MIN,
     AS_DEFAULT_ANGLE_STEP_DEG,
@@ -581,6 +581,25 @@ def prepare_pass_height_context(args: argparse.Namespace) -> None:
         raise ValueError(f"--pass-height-model-id must point to a pass_height checkpoint, got {model_id_text!r}.")
     args._pass_height_model = model
     args._pass_height_model_record = get_model_provenance(model_id_text)
+
+
+def prepare_runtime_graph_schema(args: argparse.Namespace) -> None:
+    model_specs: dict[str, Any] = {}
+    pass_height_model = getattr(args, "_pass_height_model", None)
+    if pass_height_model is not None:
+        model_specs["pass_height"] = pass_height_model
+    args._runtime_graph_schema = validate_model_graph_schemas(model_specs)
+
+
+def runtime_graph_schema_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    schema = getattr(args, "_runtime_graph_schema", None)
+    if isinstance(schema, dict):
+        return schema
+    return {"edge_in_dim": 2, "add_v_edge_features": False}
+
+
+def runtime_add_v_edge_features_from_args(args: argparse.Namespace) -> bool:
+    return bool(runtime_graph_schema_from_args(args).get("add_v_edge_features", False))
 
 
 def resolve_num_workers(value: str | int, *, max_auto_workers: int = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
@@ -1265,6 +1284,7 @@ def write_runtime_dataset_metadata(
         "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)),
         "physical_batch_size": int(args.physical_batch_size),
         "worker_thread_limit": int(args.worker_thread_limit),
+        "runtime_graph_schema": runtime_graph_schema_from_args(args),
         "effective_v0_grid": [
             float(value)
             for value in as_default_v0_values(
@@ -1607,8 +1627,20 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         try:
             data = load_benchmark_modification_data(int(modification_id), args.benchmark_input_dir)
             states = [
-                build_benchmark_state(data["game_state_1"], int(modification_id), 1, int(data["higher_state_id"]))[0],
-                build_benchmark_state(data["game_state_2"], int(modification_id), 2, int(data["higher_state_id"]))[0],
+                build_benchmark_state(
+                    data["game_state_1"],
+                    int(modification_id),
+                    1,
+                    int(data["higher_state_id"]),
+                    add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                )[0],
+                build_benchmark_state(
+                    data["game_state_2"],
+                    int(modification_id),
+                    2,
+                    int(data["higher_state_id"]),
+                    add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                )[0],
             ]
             items: list[dict[str, Any]] = []
             for state in states:
@@ -1693,6 +1725,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 situation_tracking,
                 ball,
                 freeze_ballreceipt=args.freeze_ballreceipt,
+                add_v_edge_features=runtime_add_v_edge_features_from_args(args),
             )[0]
             graphs, labels, frame_selections = filter_hawkeye_runtime_graphs_by_time_norm(
                 situation,
@@ -1782,6 +1815,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                     possession, _stats = build_skillcorner_possession(
                         context,
                         int(event_index),
+                        add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                         frames_mode=args.skillcorner_frames_mode,
                     )
                     unit = make_runtime_buffer_unit(
@@ -1859,6 +1893,7 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
         warnings.warn("--no-normalize is ignored; AS-default physical xPass always uses normalize=True.")
     configure_physical_worker_thread_limit(int(args.worker_thread_limit))
     prepare_pass_height_context(args)
+    prepare_runtime_graph_schema(args)
     runners = {
         "sportec": run_runtime_sportec,
         "skillcorner": run_runtime_skillcorner,

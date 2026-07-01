@@ -4155,8 +4155,9 @@ def _pass_height_predictions_for_graphs(
     try:
         model.eval()
         batch = Batch.from_data_list(graphs).to(device)
-        node_in_dim = int(model_args["node_in_dim"])
-        batch.x = batch.x[:, :node_in_dim]
+        from models.utils import adapt_batch_graphs_for_model
+
+        batch = adapt_batch_graphs_for_model(batch, model_args, context="Pass-height model")
         with torch.no_grad():
             out = torch.sigmoid(model(batch)).reshape(-1).detach().cpu()
         predictions: list[dict[str, float]] = []

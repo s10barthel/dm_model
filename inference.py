@@ -21,6 +21,7 @@ from datatools.utils import (
     player_sort_key,
 )
 from models.gnn import GNN
+from models.utils import adapt_batch_graphs_for_model
 from physical_pass_model import (
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
@@ -595,7 +596,7 @@ def inference_gnn(
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
 
     graphs = Batch.from_data_list(graphs).to(device)
-    graphs.x = graphs.x[:, : model.args["node_in_dim"]]
+    graphs = adapt_batch_graphs_for_model(graphs, model.args, context=f"{model.args['task']} model")
     use_offside_rule_mask = model.args["task"] == "pass_success" and _uses_offside_rule_mask(model, int(graphs.x.shape[1]))
     offside_node_mask = (
         graphs.x[:, -1].bool()

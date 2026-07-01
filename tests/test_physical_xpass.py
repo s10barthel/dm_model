@@ -21,6 +21,7 @@ from datatools import config, metadata_summary
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from dataset import ActionDataset, pass_success_observed_target_invalid_reason
 import inference
+import physical_pass_model
 import project_config
 from models.gnn import Decoder
 from models import utils as model_utils
@@ -160,9 +161,22 @@ class DummyEpvModel:
 
 
 class ConstantPassHeightModel(nn.Module):
-    def __init__(self, *, probability: float = 0.8, node_in_dim: int = 25) -> None:
+    def __init__(
+        self,
+        *,
+        probability: float = 0.8,
+        node_in_dim: int = 25,
+        edge_in_dim: int = 2,
+        v_edge_feature_mode: str | None = None,
+    ) -> None:
         super().__init__()
-        self.args = {"task": "pass_height", "node_in_dim": int(node_in_dim)}
+        self.args = {
+            "task": "pass_height",
+            "node_in_dim": int(node_in_dim),
+            "edge_in_dim": int(edge_in_dim),
+        }
+        if v_edge_feature_mode is not None:
+            self.args["v_edge_feature_mode"] = str(v_edge_feature_mode)
         self.logit = float(torch.logit(torch.tensor(float(probability))).item())
 
     def forward(self, batch: Data) -> torch.Tensor:
@@ -178,7 +192,7 @@ def make_epv_model_specs() -> dict[str, DummyEpvModel]:
     }
 
 
-def make_graph(node_ids: list[str] | None = None) -> Data:
+def make_graph(node_ids: list[str] | None = None, *, edge_dim: int = 2) -> Data:
     node_ids = node_ids or ["home_1", "home_2", "away_3"]
     x = torch.zeros((len(node_ids), 25), dtype=torch.float32)
     x[:, 3] = torch.arange(len(node_ids), dtype=torch.float32) * 20.0
@@ -191,7 +205,7 @@ def make_graph(node_ids: list[str] | None = None) -> Data:
     if len(node_ids) > 2:
         x[2, 0] = 0.0
     edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-    edge_attr = torch.ones((2, 2), dtype=torch.float32)
+    edge_attr = torch.ones((2, int(edge_dim)), dtype=torch.float32)
     graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     graph.node_ids = node_ids
     return graph
@@ -3137,6 +3151,31 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_1")]), 0.7, places=6)
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.7, places=6)
 
+    def test_pass_height_predictions_accept_matching_four_edge_schema(self) -> None:
+        graph = make_graph(edge_dim=4)
+        model = ConstantPassHeightModel(probability=0.6, edge_in_dim=4)
+
+        predictions = physical_pass_model._pass_height_predictions_for_graphs([graph], model, device="cpu")
+
+        self.assertAlmostEqual(predictions[0]["home_1"], 0.6, places=6)
+        self.assertAlmostEqual(predictions[0]["home_2"], 0.6, places=6)
+
+    def test_pass_height_predictions_trim_four_edge_graph_for_two_edge_model(self) -> None:
+        graph = make_graph(edge_dim=4)
+        model = ConstantPassHeightModel(probability=0.65, edge_in_dim=2)
+
+        predictions = physical_pass_model._pass_height_predictions_for_graphs([graph], model, device="cpu")
+
+        self.assertAlmostEqual(predictions[0]["home_1"], 0.65, places=6)
+        self.assertAlmostEqual(predictions[0]["home_2"], 0.65, places=6)
+
+    def test_pass_height_predictions_reject_missing_required_edge_schema(self) -> None:
+        graph = make_graph(edge_dim=2)
+        model = ConstantPassHeightModel(edge_in_dim=4)
+
+        with self.assertRaisesRegex(ValueError, "requires edge_in_dim=4"):
+            physical_pass_model._pass_height_predictions_for_graphs([graph], model, device="cpu")
+
     def test_runtime_physical_xpass_cache_writes_two_sportec_frame_scopes_for_same_action(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
         graph = make_graph()
@@ -5012,11 +5051,83 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["pass_height_column_suffix"], "__pass_height")
         self.assertEqual(metadata["pass_height_storage"], "per_player_probability_columns")
 
+    def test_generate_physical_xpass_runtime_metadata_includes_runtime_graph_schema(self) -> None:
+        args = generate_physical_xpass.parse_args([])
+        args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
+
+        with patch.object(generate_physical_xpass, "write_run_metadata") as write_metadata:
+            generate_physical_xpass.write_runtime_dataset_metadata(
+                "hawkeye",
+                Path("cache"),
+                args,
+                stats=generate_physical_xpass.empty_runtime_stats(Path("cache")),
+                source_inputs={},
+                skipped={},
+            )
+
+        metadata = write_metadata.call_args.args[1]
+        self.assertEqual(metadata["runtime_graph_schema"], {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True})
+
+    def test_generate_physical_xpass_runtime_graph_schema_defaults_without_pass_height_model(self) -> None:
+        args = generate_physical_xpass.parse_args([])
+        args._pass_height_model = None
+
+        generate_physical_xpass.prepare_runtime_graph_schema(args)
+
+        self.assertEqual(args._runtime_graph_schema, {"edge_in_dim": 2, "add_v_edge_features": False})
+        self.assertFalse(generate_physical_xpass.runtime_add_v_edge_features_from_args(args))
+
+    def test_generate_physical_xpass_runtime_graph_schema_uses_pass_height_model_schema(self) -> None:
+        args = generate_physical_xpass.parse_args([])
+        args._pass_height_model = ConstantPassHeightModel(node_in_dim=26, edge_in_dim=4)
+
+        generate_physical_xpass.prepare_runtime_graph_schema(args)
+
+        self.assertEqual(args._runtime_graph_schema, {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True})
+        self.assertTrue(generate_physical_xpass.runtime_add_v_edge_features_from_args(args))
+
+    def test_generate_physical_xpass_hawkeye_runtime_builds_required_edge_schema(self) -> None:
+        args = generate_physical_xpass.parse_args(["--hawkeye-situation-id", "s1"])
+        args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
+        tracking = pd.DataFrame({"id": ["s1"]})
+        situation = SimpleNamespace(
+            match_id="hawkeye_s1",
+            graph_features_0=[object()],
+            labels=torch.stack([make_label(action_index=5)]),
+        )
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "load_hawkeye_tracking", return_value=tracking):
+                with patch.object(generate_physical_xpass, "clean_hawkeye_tracking", side_effect=lambda frame: frame):
+                    with patch.object(generate_physical_xpass, "load_hawkeye_ball", return_value=pd.DataFrame()):
+                        with patch.object(generate_physical_xpass, "clean_hawkeye_ball", side_effect=lambda frame: frame):
+                            with patch.object(generate_physical_xpass, "resolve_situation_ids", return_value=["s1"]):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "build_hawkeye_situation",
+                                    return_value=(situation, pd.DataFrame(), {}),
+                                ) as build_situation:
+                                    with patch.object(
+                                        generate_physical_xpass,
+                                        "prewarm_runtime_items",
+                                        return_value=make_runtime_prewarm_stats(1),
+                                    ):
+                                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                                result = generate_physical_xpass.run_runtime_hawkeye(args)
+
+        self.assertTrue(build_situation.call_args.kwargs["add_v_edge_features"])
+        self.assertEqual(result["stats"]["cache_misses"], 1)
+        self.assertEqual(result["skipped"], {})
+
     def test_generate_physical_xpass_skillcorner_batches_runtime_prewarm_by_rows(self) -> None:
         args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "3"])
+        args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
         context = {"events": pd.DataFrame({"index": [1, 2, 3]})}
+        add_v_edge_values: list[bool] = []
 
-        def fake_possession(_context, event_index: int, **_kwargs):
+        def fake_possession(_context, event_index: int, **kwargs):
+            add_v_edge_values.append(bool(kwargs.get("add_v_edge_features")))
             return (
                 SimpleNamespace(
                     match_id="m1",
@@ -5043,6 +5154,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(len(prewarm.call_args.args[0]), 3)
         self.assertEqual(result["stats"]["cache_misses"], 3)
         self.assertEqual(result["skipped"], {})
+        self.assertEqual(add_v_edge_values, [True, True, True])
 
     def test_generate_physical_xpass_skillcorner_batch_failure_retries_per_event(self) -> None:
         args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "2"])
@@ -5087,9 +5199,12 @@ class PhysicalXPassTests(unittest.TestCase):
 
     def test_generate_physical_xpass_benchmark_batches_runtime_prewarm_by_rows(self) -> None:
         args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
+        args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
         call_sizes: list[int] = []
+        add_v_edge_values: list[bool] = []
 
-        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int):
+        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int, **kwargs):
+            add_v_edge_values.append(bool(kwargs.get("add_v_edge_features")))
             return (
                 SimpleNamespace(
                     match_id=f"modification_{int(modification_id)}_game_state_{int(game_state_id)}",
@@ -5124,12 +5239,13 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(call_sizes, [4, 2])
         self.assertEqual(result["stats"]["cache_misses"], 6)
         self.assertEqual(result["skipped"], {})
+        self.assertEqual(add_v_edge_values, [True, True, True, True, True, True])
 
     def test_generate_physical_xpass_benchmark_batch_failure_retries_per_modification(self) -> None:
         args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
         call_sizes: list[int] = []
 
-        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int):
+        def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int, **_kwargs):
             return (
                 SimpleNamespace(
                     match_id=f"modification_{int(modification_id)}_game_state_{int(game_state_id)}",
