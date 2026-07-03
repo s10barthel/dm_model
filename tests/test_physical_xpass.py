@@ -1858,6 +1858,88 @@ class PhysicalXPassTests(unittest.TestCase):
             x_pass_version="top10",
         )
 
+    def test_run_and_visualize_hawkeye_animation_time_norm_range_limits_frames_and_xpass(self) -> None:
+        frame_meta = pd.DataFrame(
+            [
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 9.8},
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 10.0},
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 10.5},
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": 11.0},
+            ],
+            index=pd.Index([0, 10, 20, 30], name="frame_id"),
+        )
+        tracking = pd.DataFrame(
+            {
+                "id": ["s1", "s1", "s1", "s1"],
+                "BallReceipt": [10.0, 10.0, 10.0, 10.0],
+                "ball_x": [0.0, 0.0, 0.0, 0.0],
+                "ball_y": [0.0, 0.0, 0.0, 0.0],
+            },
+            index=pd.Index([0, 10, 20, 30], name="frame_id"),
+        )
+        situation = SimpleNamespace(
+            situation_id="s1",
+            match_id="s1",
+            tracking=tracking,
+            frame_meta=frame_meta,
+            labels=torch.empty((0, len(LABEL_COLUMNS))),
+            graph_features_0=[],
+        )
+        args = SimpleNamespace(
+            tracking_csv="tracking.csv",
+            freeze_ballreceipt=True,
+            show_physical_xpass=True,
+            physical_cache_dir="hawkeye_cache",
+            x_pass_version="top10",
+            output="gif",
+            time_norm=None,
+            time_norm_start=0.1,
+            time_norm_end=0.7,
+            show_trajectories=False,
+        )
+        rendered_frame_ids: list[int] = []
+
+        def fake_render_frame_image(_situation, frame_id, *_args, **_kwargs):
+            rendered_frame_ids.append(int(frame_id))
+            return object()
+
+        def consume_animation(images, *_args, **_kwargs):
+            list(images)
+
+        with patch.object(run_and_visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, {}, {})):
+            with patch.object(
+                run_and_visualize_hawkeye,
+                "load_runtime_physical_xpass_visualization_table",
+                return_value=pd.DataFrame(
+                    {"home_2": [0.8, 0.9]},
+                    index=pd.Index([10, 20], name="action_index"),
+                ),
+            ) as load_xpass:
+                with patch.object(run_and_visualize_hawkeye, "render_frame_image", side_effect=fake_render_frame_image):
+                    with patch.object(run_and_visualize_hawkeye, "save_animation", side_effect=consume_animation):
+                        _output_dir, _stats, render_info = run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=pd.DataFrame({"id": ["s1"], "BallReceipt": [10.0]}),
+                            ball=pd.DataFrame(),
+                            model_specs={},
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+
+        self.assertEqual(rendered_frame_ids, [10, 20])
+        self.assertEqual(render_info["selected_frame_ids"], [10, 20])
+        self.assertEqual(render_info["selected_time_norm_range"]["selected_frame_count"], 2)
+        load_xpass.assert_called_once_with(
+            "hawkeye_cache",
+            "s1",
+            [10, 20],
+            metric=PHYSICAL_XPASS_METRIC_TOPMEAN,
+            x_pass_version="top10",
+        )
+
     def test_pass_distance_is_reserved_sidecar_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir) / "physical_xpass"
@@ -5735,6 +5817,63 @@ class PhysicalXPassTests(unittest.TestCase):
                 with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", old_flag]):
                     with self.assertRaises(SystemExit):
                         run_hawkeye.parse_args()
+
+    def test_run_hawkeye_cli_accepts_time_norm_range(self) -> None:
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--time-norm-start", "0.1", "--time_norm_end", "0.7"]):
+            args = run_hawkeye.parse_args()
+
+        self.assertEqual(args.time_norm_start, 0.1)
+        self.assertEqual(args.time_norm_end, 0.7)
+
+    def test_run_hawkeye_time_norm_range_filters_situation_frames(self) -> None:
+        labels = torch.stack(
+            [
+                make_label(action_index=0),
+                make_label(action_index=10),
+                make_label(action_index=20),
+                make_label(action_index=30),
+            ]
+        )
+        situation = SimpleNamespace(
+            situation_id="s1",
+            frame_meta=pd.DataFrame(
+                {"abs_time": [9.8, 10.0, 10.5, 11.0]},
+                index=pd.Index([0, 10, 20, 30], name="frame_id"),
+            ),
+            labels=labels,
+            graph_features_0=["g0", "g10", "g20", "g30"],
+            graph_features_by_dir={"action_graphs": ["g0", "g10", "g20", "g30"]},
+            actions=pd.DataFrame(
+                {"frame_id": [0, 10, 20, 30]},
+                index=pd.Index([0, 10, 20, 30], name="frame_id"),
+            ),
+        )
+        attacking_rows = pd.DataFrame(
+            [
+                {"frame_id": 0, "player": "a"},
+                {"frame_id": 10, "player": "b"},
+                {"frame_id": 20, "player": "c"},
+                {"frame_id": 30, "player": "d"},
+            ]
+        )
+        situation_tracking = pd.DataFrame({"id": ["s1"], "BallReceipt": [10.0]})
+        args = SimpleNamespace(time_norm_start=0.1, time_norm_end=0.7)
+
+        filtered_rows, metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm_range(
+            situation,
+            attacking_rows,
+            situation_tracking,
+            args,
+        )
+
+        self.assertEqual(situation.graph_features_0, ["g10", "g20"])
+        self.assertEqual(situation.graph_features_by_dir["action_graphs"], ["g10", "g20"])
+        self.assertEqual(situation.labels[:, LABEL_INDEX["action_index"]].tolist(), [10.0, 20.0])
+        self.assertEqual(situation.actions.index.tolist(), [10, 20])
+        self.assertEqual(filtered_rows["frame_id"].tolist(), [10, 20])
+        self.assertEqual(metadata["frame_ids"], [10, 20])
+        self.assertEqual(metadata["valid_frame_ids"], [10, 20])
+        self.assertEqual(metadata["valid_frame_count"], 2)
 
     def test_generate_epv_cli_accepts_physical_xpass_flags(self) -> None:
         args = generate_epv.parse_args(

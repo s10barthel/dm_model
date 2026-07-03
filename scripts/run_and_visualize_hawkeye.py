@@ -51,9 +51,11 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualize_hawkeye import (
     output_mode,
+    requested_time_norm_range,
     requested_time_norms,
     resolve_ballreceipt,
     resolve_hawkeye_png_frames,
+    resolve_hawkeye_time_norm_range,
 )
 
 
@@ -87,6 +89,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         help="BallReceipt-relative Hawkeye frame time to export in PNG mode. Repeat to export multiple frames.",
     )
+    parser.add_argument(
+        "--time-norm-start",
+        "--time_norm_start",
+        dest="time_norm_start",
+        type=float,
+        help="BallReceipt-relative Hawkeye start time for gif/mp4 frame range.",
+    )
+    parser.add_argument(
+        "--time-norm-end",
+        "--time_norm_end",
+        dest="time_norm_end",
+        type=float,
+        help="BallReceipt-relative Hawkeye end time for gif/mp4 frame range.",
+    )
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -114,6 +130,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.output != "png" and args.time_norm is not None:
         parser.error("--time-norm is only valid with --output png.")
+    if args.output == "png" and (args.time_norm_start is not None or args.time_norm_end is not None):
+        parser.error("--time-norm-start/--time-norm-end are only valid with --output gif or --output mp4.")
     if args.output == "png" and args.time_norm is None:
         args.time_norm = [0.0]
     try:
@@ -294,22 +312,31 @@ def render_situation(
     selected_output_mode = output_mode(args)
     output_paths: list[str] = []
     selected_frames: list[dict[str, object]] = []
+    selected_range: dict[str, object] | None = None
     if selected_output_mode == "png":
         selected_frames = resolve_hawkeye_png_frames(
             situation,
             resolve_ballreceipt(situation_tracking),
             requested_time_norms(args),
         )
+        animation_frame_ids = frame_ids
+    else:
+        time_norm_start, time_norm_end = requested_time_norm_range(args)
+        if time_norm_start is None and time_norm_end is None:
+            animation_frame_ids = frame_ids
+        else:
+            animation_frame_ids, selected_range = resolve_hawkeye_time_norm_range(
+                situation,
+                resolve_ballreceipt(situation_tracking),
+                time_norm_start,
+                time_norm_end,
+            )
 
     if bool(getattr(args, "show_physical_xpass", False)):
         if selected_output_mode == "png":
             physical_frame_ids = [int(frame_selection["frame_id"]) for frame_selection in selected_frames]
         else:
-            physical_frame_ids = (
-                [int(index) for index in component_frames["pass_success"].index.tolist()]
-                if component_frames.get("pass_success") is not None
-                else frame_ids
-            )
+            physical_frame_ids = animation_frame_ids
         component_frames["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
             args.physical_cache_dir,
             str(situation.match_id),
@@ -339,7 +366,7 @@ def render_situation(
             component_table = component_frames.get(component_name)
 
             def iter_component_images():
-                for frame_id in frame_ids:
+                for frame_id in animation_frame_ids:
                     frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
                     yield render_frame_image(
                         situation,
@@ -356,6 +383,8 @@ def render_situation(
     render_info = {
         "frame_ids": frame_ids,
         "selected_frames": selected_frames,
+        "selected_frame_ids": animation_frame_ids if selected_output_mode != "png" else [int(item["frame_id"]) for item in selected_frames],
+        "selected_time_norm_range": selected_range,
         "output_paths": output_paths,
     }
     render_info["physical_xpass_skipped_actions"] = getattr(situation, "physical_xpass_skipped_actions", {})
@@ -449,6 +478,7 @@ def main() -> None:
     rendered_situations: list[dict[str, object]] = []
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
+    resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
     for situation_id in situation_ids:
         output_dir, runtime_physical_stats, render_info = render_situation(
@@ -467,12 +497,17 @@ def main() -> None:
         physical_skip_stats = render_info.get("physical_xpass_skipped_actions")
         if physical_skip_stats:
             physical_xpass_skipped_actions[str(situation_id)] = physical_skip_stats
+        selected_range = render_info.get("selected_time_norm_range")
+        if selected_range:
+            resolved_time_norm_ranges[str(situation_id)] = selected_range
         output_dirs.append(output_dir)
         rendered_situations.append(
             {
                 "situation_id": str(situation_id),
                 "frame_ids": render_info["frame_ids"],
                 "selected_frames": render_info["selected_frames"],
+                "selected_frame_ids": render_info.get("selected_frame_ids", []),
+                "selected_time_norm_range": selected_range,
                 "output_dir": str(output_dir.resolve()),
                 "output_paths": render_info["output_paths"],
             }
@@ -539,6 +574,9 @@ def main() -> None:
         "freeze_ballreceipt": bool(args.freeze_ballreceipt),
         "output": selected_output_mode,
         "time_norm": requested_time_norms(args) if selected_output_mode == "png" else [],
+        "time_norm_start": requested_time_norm_range(args)[0] if selected_output_mode != "png" else None,
+        "time_norm_end": requested_time_norm_range(args)[1] if selected_output_mode != "png" else None,
+        "resolved_time_norm_ranges": resolved_time_norm_ranges,
         "show_trajectories": bool(args.show_trajectories),
         "graph_schema": graph_schema,
     }

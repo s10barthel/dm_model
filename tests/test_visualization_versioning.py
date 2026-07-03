@@ -786,12 +786,84 @@ class VisualizationVersioningTests(unittest.TestCase):
             ],
         )
 
+    def test_hawkeye_time_norm_range_resolves_nearest_inclusive_frames(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="sit1",
+            frame_meta=pd.DataFrame({"abs_time": [9.8, 10.0, 10.6, 11.0]}, index=[0, 10, 20, 30]),
+        )
+
+        frame_ids, metadata = visualize_hawkeye.resolve_hawkeye_time_norm_range(
+            situation,
+            ballreceipt=10.0,
+            time_norm_start=0.1,
+            time_norm_end=0.8,
+        )
+
+        self.assertEqual(frame_ids, [10, 20, 30])
+        self.assertEqual(metadata["start_frame_id"], 10)
+        self.assertEqual(metadata["end_frame_id"], 30)
+        self.assertEqual(metadata["resolved_time_norm_start"], 0.0)
+        self.assertEqual(metadata["resolved_time_norm_end"], 1.0)
+        self.assertEqual(metadata["selected_frame_count"], 3)
+
+    def test_hawkeye_time_norm_range_supports_open_ended_bounds(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="sit1",
+            frame_meta=pd.DataFrame({"abs_time": [9.8, 10.0, 10.6, 11.0]}, index=[0, 10, 20, 30]),
+        )
+
+        start_ids, start_metadata = visualize_hawkeye.resolve_hawkeye_time_norm_range(
+            situation,
+            ballreceipt=10.0,
+            time_norm_start=0.1,
+            time_norm_end=None,
+        )
+        end_ids, end_metadata = visualize_hawkeye.resolve_hawkeye_time_norm_range(
+            situation,
+            ballreceipt=10.0,
+            time_norm_start=None,
+            time_norm_end=0.2,
+        )
+
+        self.assertEqual(start_ids, [10, 20, 30])
+        self.assertIsNone(start_metadata["requested_time_norm_end"])
+        self.assertEqual(end_ids, [0, 10])
+        self.assertIsNone(end_metadata["requested_time_norm_start"])
+
+    def test_hawkeye_time_norm_range_rejects_out_of_range_values(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="sit1",
+            frame_meta=pd.DataFrame({"abs_time": [9.8, 10.0]}, index=[0, 1]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside available range"):
+            visualize_hawkeye.resolve_hawkeye_time_norm_range(
+                situation,
+                ballreceipt=10.0,
+                time_norm_start=None,
+                time_norm_end=2.0,
+            )
+
     def test_hawkeye_parse_args_rejects_time_norm_for_animations(self) -> None:
         with self.assertRaises(SystemExit):
             visualize_hawkeye.parse_args(["--output", "mp4", "--time-norm", "0"])
 
         with self.assertRaises(SystemExit):
             run_and_visualize_hawkeye.parse_args(["--situation-id", "sit1", "--output", "gif", "--time-norm", "0"])
+
+    def test_hawkeye_parse_args_accepts_time_norm_ranges_for_animations(self) -> None:
+        args = visualize_hawkeye.parse_args(["--output", "mp4", "--time-norm-start", "0.1", "--time-norm-end", "0.8"])
+        self.assertEqual(args.time_norm_start, 0.1)
+        self.assertEqual(args.time_norm_end, 0.8)
+
+        direct_args = run_and_visualize_hawkeye.parse_args(
+            ["--situation-id", "sit1", "--output", "gif", "--time_norm_start", "0.1", "--time_norm_end", "0.8"]
+        )
+        self.assertEqual(direct_args.time_norm_start, 0.1)
+        self.assertEqual(direct_args.time_norm_end, 0.8)
+
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--output", "png", "--time-norm-start", "0.1"])
 
     def test_skillcorner_png_frame_selection_defaults_to_first_and_last(self) -> None:
         args = SimpleNamespace(only_first=False, only_last=False)

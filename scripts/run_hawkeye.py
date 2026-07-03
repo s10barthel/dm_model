@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 import pandas as pd
 import torch
 
+from datatools.config import LABEL_INDEX
 from datatools.hawkeye import (
     build_hawkeye_export,
     build_hawkeye_situation,
@@ -24,6 +25,11 @@ from datatools.hawkeye import (
     load_hawkeye_tracking,
     resolve_situation_ids,
     summarize_hawkeye_stats,
+)
+from scripts.visualize_hawkeye import (
+    requested_time_norm_range,
+    resolve_ballreceipt,
+    resolve_hawkeye_time_norm_range,
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
@@ -66,6 +72,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, help="Only process the first N Hawkeye situations after sorting.")
     parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
+    parser.add_argument(
+        "--time-norm-start",
+        "--time_norm_start",
+        dest="time_norm_start",
+        type=float,
+        help="BallReceipt-relative Hawkeye start time for inference frame range.",
+    )
+    parser.add_argument(
+        "--time-norm-end",
+        "--time_norm_end",
+        dest="time_norm_end",
+        type=float,
+        help="BallReceipt-relative Hawkeye end time for inference frame range.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id")
     parser.add_argument("--action-intent-model-id")
@@ -163,6 +183,57 @@ def _prewarm_hawkeye_physical_xpass(
     )
 
 
+def filter_hawkeye_situation_by_time_norm_range(
+    situation,
+    attacking_rows: pd.DataFrame,
+    situation_tracking: pd.DataFrame,
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, dict[str, object] | None]:
+    time_norm_start, time_norm_end = requested_time_norm_range(args)
+    if time_norm_start is None and time_norm_end is None:
+        return attacking_rows, None
+
+    frame_ids, range_metadata = resolve_hawkeye_time_norm_range(
+        situation,
+        resolve_ballreceipt(situation_tracking),
+        time_norm_start,
+        time_norm_end,
+    )
+
+    selected_frame_ids = set(int(frame_id) for frame_id in frame_ids)
+    kept_graphs = []
+    kept_labels = []
+    for graph, label in zip(situation.graph_features_0, situation.labels):
+        action_index = int(label[LABEL_INDEX["action_index"]].item())
+        if action_index in selected_frame_ids:
+            kept_graphs.append(graph)
+            kept_labels.append(label)
+
+    situation.graph_features_0 = kept_graphs
+    situation.labels = (
+        torch.stack(kept_labels, axis=0)
+        if kept_labels
+        else torch.empty((0, situation.labels.shape[1]), dtype=situation.labels.dtype)
+    )
+    situation.graph_features_by_dir["action_graphs"] = kept_graphs
+    if getattr(situation, "actions", None) is not None and not situation.actions.empty:
+        situation.actions = situation.actions.loc[situation.actions.index.astype(int).isin(selected_frame_ids)].copy()
+
+    filtered_attacking_rows = attacking_rows.loc[attacking_rows["frame_id"].astype("Int64").isin(selected_frame_ids)].copy()
+    range_metadata = dict(range_metadata)
+    range_metadata["valid_frame_ids"] = [
+        int(label[LABEL_INDEX["action_index"]].item())
+        for label in situation.labels
+    ]
+    range_metadata["valid_frame_count"] = int(situation.labels.shape[0])
+    if situation.labels.numel() == 0 or not situation.graph_features_0:
+        raise ValueError(
+            f"Hawkeye situation {situation.situation_id} has no valid graph frames in selected time_norm range "
+            f"[{range_metadata['effective_time_norm_start']:g}, {range_metadata['effective_time_norm_end']:g}]."
+        )
+    return filtered_attacking_rows, range_metadata
+
+
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -245,6 +316,7 @@ def main() -> None:
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
+    resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     skipped_situations: list[dict[str, str]] = []
 
     for index, situation_id in enumerate(situation_ids, start=1):
@@ -257,9 +329,17 @@ def main() -> None:
                 freeze_ballreceipt=args.freeze_ballreceipt,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
             )
+            attacking_rows, range_metadata = filter_hawkeye_situation_by_time_norm_range(
+                situation,
+                attacking_rows,
+                situation_tracking,
+                args,
+            )
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
             stats_by_situation[situation_id] = stats
+            if range_metadata is not None:
+                resolved_time_norm_ranges[str(situation_id)] = range_metadata
             runtime_physical_stats = getattr(situation, "physical_xpass_runtime_stats", None)
             if runtime_physical_stats:
                 physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
@@ -323,6 +403,9 @@ def main() -> None:
         "physical_batch_size": physical_batch_size,
         "requested_situation_ids": args.situation_id or [],
         "limit": args.limit,
+        "time_norm_start": requested_time_norm_range(args)[0],
+        "time_norm_end": requested_time_norm_range(args)[1],
+        "resolved_time_norm_ranges": resolved_time_norm_ranges,
         "processed_situation_ids": processed_situation_ids,
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_skipped_actions": physical_xpass_skipped_actions,

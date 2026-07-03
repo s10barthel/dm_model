@@ -1387,6 +1387,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--limit <N>`: process only the first `N` selected situations. Default: no limit.
 - `--freeze-ballreceipt`: freeze possessor and ball state after `BallReceipt`. Default: on.
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
+- `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: restrict HawkEye inference to the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: process all frames.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
@@ -1505,6 +1506,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
+- `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: in `mp4`/`gif` mode, render the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: render all frames.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
@@ -1543,6 +1545,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
+- `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: in `mp4`/`gif` mode, render the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: render all frames.
 - `--bundle-id <bundle_id>`: preferred model bundle containing the enabled component checkpoints. Default: none.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id override. Default: none.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id override. Default: none.
