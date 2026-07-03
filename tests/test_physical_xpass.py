@@ -1288,9 +1288,19 @@ class PhysicalXPassTests(unittest.TestCase):
         fast_margin = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball, reaction_time=0.25, max_player_speed=10.0)
         slow_margin = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball, reaction_time=0.25, max_player_speed=5.0)
         long_reaction_margin = _pc_xpass_arrival_margins(player_pos, target_x, target_y, t_ball, reaction_time=0.5, max_player_speed=10.0)
+        split_margin = _pc_xpass_arrival_margins(
+            np.asarray([[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], dtype=float),
+            target_x,
+            target_y,
+            t_ball,
+            reaction_time=0.25,
+            max_player_speed=5.0,
+            max_player_speed_by_player=np.asarray([10.0, 5.0], dtype=float),
+        )
 
         self.assertGreater(float(fast_margin[0, 0]), float(slow_margin[0, 0]))
         self.assertGreater(float(fast_margin[0, 0]), float(long_reaction_margin[0, 0]))
+        self.assertGreater(float(split_margin[0, 0]), float(split_margin[1, 0]))
         default_grid = _pc_xpass_r_grid(np.asarray([0.0, 0.0]), radial_gridsize=3.0)
         fine_grid = _pc_xpass_r_grid(np.asarray([0.0, 0.0]), radial_gridsize=1.5)
         self.assertAlmostEqual(float(default_grid[1] - default_grid[0]), 3.0)
@@ -1402,6 +1412,8 @@ class PhysicalXPassTests(unittest.TestCase):
             available_metrics=[PHYSICAL_XPASS_METRIC_MAX, "top5_xpass", PC_XPASS_METRIC_TOP10, PC_XPASS_METRIC_TOP25],
             reaction_time=0.4,
             max_player_speed=6.0,
+            max_player_speed_off=7.0,
+            max_player_speed_def=4.0,
             min_speed=2.0,
             radial_gridsize=1.5,
             lane_power=12.0,
@@ -1434,8 +1446,17 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["available_x_pass_versions"], ["max", "top5", "top10", "top25"])
         self.assertEqual(metadata["reaction_time"], 0.4)
         self.assertEqual(metadata["max_player_speed"], 6.0)
+        self.assertEqual(metadata["max_player_speed_off"], 7.0)
+        self.assertEqual(metadata["max_player_speed_def"], 4.0)
         self.assertEqual(metadata["min_speed"], 2.0)
         self.assertEqual(metadata["radial_gridsize"], 1.5)
+
+    def test_pc_xpass_metadata_defaults_split_speeds_to_overall_speed(self) -> None:
+        metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, max_player_speed=6.0)
+
+        self.assertEqual(metadata["max_player_speed"], 6.0)
+        self.assertEqual(metadata["max_player_speed_off"], 6.0)
+        self.assertEqual(metadata["max_player_speed_def"], 6.0)
 
     def test_pc_xpass_cache_accepts_old_single_teammate_policy_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1481,6 +1502,8 @@ class PhysicalXPassTests(unittest.TestCase):
                 "endpoint_normalization",
                 "reaction_time",
                 "max_player_speed",
+                "max_player_speed_off",
+                "max_player_speed_def",
                 "min_speed",
                 "radial_gridsize",
                 "use_position_discount",
@@ -1492,6 +1515,24 @@ class PhysicalXPassTests(unittest.TestCase):
             (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "lane_function"):
+                prewarm_physical_xpass_runtime_cache(
+                    [],
+                    cache_dir=cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    dry_run=True,
+                )
+
+    def test_pc_xpass_cache_rejects_old_metadata_missing_split_speed_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+            metadata.pop("max_player_speed_off", None)
+            metadata.pop("max_player_speed_def", None)
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "max_player_speed_off"):
                 prewarm_physical_xpass_runtime_cache(
                     [],
                     cache_dir=cache_dir,
@@ -5477,6 +5518,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.speed_step, PC_XPASS_DEFAULT_SPEED_STEP)
         self.assertEqual(args.reaction_time, PC_XPASS_DEFAULT_REACTION_TIME)
         self.assertEqual(args.max_player_speed, PC_XPASS_DEFAULT_MAX_PLAYER_SPEED)
+        self.assertIsNone(args.max_player_speed_off)
+        self.assertIsNone(args.max_player_speed_def)
         self.assertEqual(args.min_speed, PC_XPASS_DEFAULT_MIN_SPEED)
         self.assertEqual(args.radial_gridsize, PC_XPASS_DEFAULT_RADIAL_GRIDSIZE)
         self.assertEqual(args.lane_power, PC_XPASS_DEFAULT_LANE_POWER)
@@ -5510,6 +5553,10 @@ class PhysicalXPassTests(unittest.TestCase):
                 "0.4",
                 "--max-player-speed",
                 "6",
+                "--max-player-speed-off",
+                "7",
+                "--max-player-speed-def",
+                "4",
                 "--min-speed",
                 "2",
                 "--radial-gridsize",
@@ -5532,6 +5579,8 @@ class PhysicalXPassTests(unittest.TestCase):
         )
         self.assertEqual(custom_args.reaction_time, 0.4)
         self.assertEqual(custom_args.max_player_speed, 6)
+        self.assertEqual(custom_args.max_player_speed_off, 7)
+        self.assertEqual(custom_args.max_player_speed_def, 4)
         self.assertEqual(custom_args.min_speed, 2)
         self.assertEqual(custom_args.radial_gridsize, 1.5)
         self.assertEqual(custom_args.lane_power, 12)
@@ -5541,6 +5590,16 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertFalse(custom_args.use_position_discount)
         self.assertEqual(custom_args.position_discount_power, 3)
         self.assertEqual(custom_args.position_discount_distance, 25)
+
+        overall_args = generate_physical_xpass.parse_args(["--pc-xpass", "--max-player-speed", "6"])
+        self.assertEqual(overall_args.max_player_speed, 6)
+        self.assertIsNone(overall_args.max_player_speed_off)
+        self.assertIsNone(overall_args.max_player_speed_def)
+
+        defense_args = generate_physical_xpass.parse_args(["--pc-xpass", "--max-player-speed-def", "4"])
+        self.assertEqual(defense_args.max_player_speed, PC_XPASS_DEFAULT_MAX_PLAYER_SPEED)
+        self.assertIsNone(defense_args.max_player_speed_off)
+        self.assertEqual(defense_args.max_player_speed_def, 4)
 
     def test_generate_physical_xpass_cli_pc_xpass_accepts_split_teammate_ignoring(self) -> None:
         lane_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-lane-survival"])
@@ -5612,7 +5671,7 @@ class PhysicalXPassTests(unittest.TestCase):
             generate_physical_xpass.parse_args(["--pc-xpass", "--reaction-time", "-0.1"])
         with self.assertRaises(SystemExit):
             generate_physical_xpass.parse_args(["--reaction-time", "1"])
-        for flag in ["--max-player-speed", "--min-speed", "--radial-gridsize"]:
+        for flag in ["--max-player-speed", "--max-player-speed-off", "--max-player-speed-def", "--min-speed", "--radial-gridsize"]:
             with self.subTest(flag=flag):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])

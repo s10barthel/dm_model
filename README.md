@@ -1281,6 +1281,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--top-n <N>`: number of highest finite xPass grid values averaged for the default top-N metric. Original physical xPass stores this as `__topmean_xpass` with metadata `top_n=N`; pc-xPass stores it as `__top<N>_xpass` and uses it for unsuffixed default player columns. Default: `10`.
 - `--top-n-values <N...>`: pc-xPass only; export additional top-N columns in one run, for example `--top-n-values 5 10 25` writes `__top5_xpass`, `__top10_xpass`, and `__top25_xpass`. The `--top-n` value is always included.
 - `--pc-xpass`: generate pc-xPass caches under `data/pc_xpass/<dataset>` instead of runtime physical xPass caches.
+- `--max-player-speed <m/s>`: pc-xPass only; overall player movement speed after reaction time. Default: `5.0`.
+- `--max-player-speed-off <m/s>`: pc-xPass only; override movement speed for attacking players, including the possessor and teammates. Default: use `--max-player-speed`.
+- `--max-player-speed-def <m/s>`: pc-xPass only; override movement speed for defending players. Default: use `--max-player-speed`.
 - `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich existing or newly generated xPass rows with per-player `<player_id>__pass_height` probabilities from the selected `pass_height` checkpoint. If xPass metrics are already valid, only missing/stale pass-height columns are backfilled.
 - `--pass-height-device <device>`: device used for `--pass-height-model-id`. Default: `cuda:0` when CUDA is available, otherwise `cpu`.
 - `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--xpass-version top<N>` during inference/visualization.

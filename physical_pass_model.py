@@ -287,6 +287,8 @@ def pc_xpass_metadata(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -341,6 +343,8 @@ def pc_xpass_metadata(
         "top_n_values": resolved_top_n_values,
         "reaction_time": float(reaction_time),
         "max_player_speed": float(max_player_speed),
+        "max_player_speed_off": float(max_player_speed if max_player_speed_off is None else max_player_speed_off),
+        "max_player_speed_def": float(max_player_speed if max_player_speed_def is None else max_player_speed_def),
         "lane_function": "sigmoid",
         "lane_power": float(lane_power),
         "lane_inflection_point": float(lane_inflection_point),
@@ -2472,14 +2476,23 @@ def _pc_xpass_arrival_margins(
     *,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_by_player: np.ndarray | list[float] | tuple[float, ...] | None = None,
 ) -> np.ndarray:
     positions = np.asarray(player_pos, dtype=float)
+    if max_player_speed_by_player is None:
+        player_speeds = np.full(positions.shape[0], float(max_player_speed), dtype=float)
+    else:
+        player_speeds = np.asarray(max_player_speed_by_player, dtype=float)
+        if player_speeds.shape[0] != positions.shape[0]:
+            raise ValueError("max_player_speed_by_player must contain one speed per player.")
+    if not np.isfinite(player_speeds).all() or np.any(player_speeds <= 0.0):
+        raise ValueError("pc-xPass player speeds must be positive finite floats.")
     margins = []
-    for player in positions:
+    for player, player_speed in zip(positions, player_speeds):
         x, y, vx, vy = [float(value) for value in player]
         inertial_x = x + vx * float(reaction_time)
         inertial_y = y + vy * float(reaction_time)
-        tta = float(reaction_time) + np.hypot(target_x - inertial_x, target_y - inertial_y) / float(max_player_speed)
+        tta = float(reaction_time) + np.hypot(target_x - inertial_x, target_y - inertial_y) / float(player_speed)
         margins.append(t_ball - tta)
     return np.stack(margins, axis=0)
 
@@ -2505,6 +2518,8 @@ def compute_graph_pc_xpass_metrics(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -2561,6 +2576,9 @@ def compute_graph_pc_xpass_metrics(
     target_y = np.repeat(target_y_base[np.newaxis, :, :], len(speeds), axis=0)
     t_ball = np.repeat((distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]), len(angles), axis=1)
     on_pitch_grid = np.repeat(on_pitch[np.newaxis, :, :], len(speeds), axis=0)
+    effective_off_speed = float(max_player_speed if max_player_speed_off is None else max_player_speed_off)
+    effective_def_speed = float(max_player_speed if max_player_speed_def is None else max_player_speed_def)
+    max_player_speed_by_player = np.where(player_teams == "attack", effective_off_speed, effective_def_speed).astype(float)
 
     margins = _pc_xpass_arrival_margins(
         player_pos,
@@ -2569,6 +2587,7 @@ def compute_graph_pc_xpass_metrics(
         t_ball,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
+        max_player_speed_by_player=max_player_speed_by_player,
     )
     lane_raw_all = pc_xpass_raw_control_with_params(
         margins,
@@ -2668,6 +2687,8 @@ def compute_graphs_pc_xpass_metrics(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -2693,6 +2714,8 @@ def compute_graphs_pc_xpass_metrics(
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            max_player_speed_off=max_player_speed_off,
+            max_player_speed_def=max_player_speed_def,
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
@@ -3524,6 +3547,8 @@ def _runtime_cache_metadata(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -3547,6 +3572,8 @@ def _runtime_cache_metadata(
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            max_player_speed_off=max_player_speed_off,
+            max_player_speed_def=max_player_speed_def,
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
@@ -3626,6 +3653,8 @@ def _ensure_runtime_physical_xpass_cache(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -3659,6 +3688,8 @@ def _ensure_runtime_physical_xpass_cache(
         control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
+        max_player_speed_off=max_player_speed_off,
+        max_player_speed_def=max_player_speed_def,
         use_position_discount=use_position_discount,
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
@@ -3704,6 +3735,8 @@ def _ensure_runtime_physical_xpass_cache(
             for key in [
                 "reaction_time",
                 "max_player_speed",
+                "max_player_speed_off",
+                "max_player_speed_def",
                 "lane_power",
                 "lane_inflection_point",
                 "control_power",
@@ -3716,7 +3749,19 @@ def _ensure_runtime_physical_xpass_cache(
                 "angle_step",
                 "radial_gridsize",
             ]:
-                if abs(float(metadata.get(key, float("nan"))) - float(expected_metadata.get(key, float("nan")))) > 1e-9:
+                actual_value = metadata.get(key)
+                expected_value = expected_metadata.get(key)
+                try:
+                    actual_float = float(actual_value)
+                    expected_float = float(expected_value)
+                    values_match = (
+                        math.isfinite(actual_float)
+                        and math.isfinite(expected_float)
+                        and abs(actual_float - expected_float) <= 1e-9
+                    )
+                except (TypeError, ValueError):
+                    values_match = False
+                if not values_match:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
             if bool(metadata.get("use_position_discount", False)) != bool(expected_metadata.get("use_position_discount", False)):
                 mismatches.append(
@@ -4252,6 +4297,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     control_inflection_point = float(task.get("control_inflection_point", PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT))
     reaction_time = float(task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME))
     max_player_speed = float(task.get("max_player_speed", PC_XPASS_DEFAULT_MAX_PLAYER_SPEED))
+    max_player_speed_off = task.get("max_player_speed_off", None)
+    max_player_speed_def = task.get("max_player_speed_def", None)
+    max_player_speed_off = None if max_player_speed_off is None else float(max_player_speed_off)
+    max_player_speed_def = None if max_player_speed_def is None else float(max_player_speed_def)
     use_position_discount = bool(task.get("use_position_discount", PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT))
     position_discount_power = float(task.get("position_discount_power", PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER))
     position_discount_distance = float(task.get("position_discount_distance", PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE))
@@ -4298,6 +4347,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
             max_player_speed=max_player_speed,
+            max_player_speed_off=max_player_speed_off,
+            max_player_speed_def=max_player_speed_def,
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
@@ -4439,6 +4490,8 @@ def prewarm_physical_xpass_runtime_cache(
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
+    max_player_speed_off: float | None = None,
+    max_player_speed_def: float | None = None,
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
@@ -4490,6 +4543,8 @@ def prewarm_physical_xpass_runtime_cache(
         control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
         max_player_speed=max_player_speed,
+        max_player_speed_off=max_player_speed_off,
+        max_player_speed_def=max_player_speed_def,
         use_position_discount=use_position_discount,
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
@@ -4790,6 +4845,8 @@ def prewarm_physical_xpass_runtime_cache(
             "control_inflection_point": float(control_inflection_point),
             "reaction_time": float(reaction_time),
             "max_player_speed": float(max_player_speed),
+            "max_player_speed_off": None if max_player_speed_off is None else float(max_player_speed_off),
+            "max_player_speed_def": None if max_player_speed_def is None else float(max_player_speed_def),
             "use_position_discount": bool(use_position_discount),
             "position_discount_power": float(position_discount_power),
             "position_discount_distance": float(position_discount_distance),
