@@ -6,7 +6,7 @@ import json
 import os
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -106,6 +106,12 @@ PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR = 0.05
 PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR = 0.05
 PHYSICAL_XPASS_INFERENCE_HASH_POLICY = "none_for_inference"
 PC_XPASS_DEFAULT_REACTION_TIME = 0.25
+PC_XPASS_REACTION_TIME_MODE_FIXED = "fixed"
+PC_XPASS_REACTION_TIME_MODE_DIST_PASS = "dist_pass"
+PC_XPASS_REACTION_TIME_MODES = {PC_XPASS_REACTION_TIME_MODE_FIXED, PC_XPASS_REACTION_TIME_MODE_DIST_PASS}
+PC_XPASS_DEFAULT_DIST_PASS_DIV = 50.0
+PC_XPASS_DEFAULT_DIST_PASS_MIN = 0.2
+PC_XPASS_DEFAULT_DIST_PASS_MAX = 0.7
 PC_XPASS_DEFAULT_MAX_PLAYER_SPEED = 5.0
 PC_XPASS_DEFAULT_MIN_SPEED = 3.0
 PC_XPASS_DEFAULT_RADIAL_GRIDSIZE = 3.0
@@ -285,7 +291,11 @@ def pc_xpass_metadata(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -326,6 +336,10 @@ def pc_xpass_metadata(
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
     min_speed_value = float(min_speed)
     radial_gridsize_value = float(radial_gridsize)
+    reaction_time_mode = str(reaction_time_mode)
+    if reaction_time_mode not in PC_XPASS_REACTION_TIME_MODES:
+        raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
+    reaction_time_value = None if reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_DIST_PASS else float(reaction_time)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value, min_speed=min_speed_value)
     return {
         "metric": top_metric,
@@ -341,7 +355,11 @@ def pc_xpass_metadata(
         "disabled_metrics": disabled_physical_xpass_metrics(metrics),
         "top_n": int(top_n),
         "top_n_values": resolved_top_n_values,
-        "reaction_time": float(reaction_time),
+        "reaction_time_mode": reaction_time_mode,
+        "reaction_time": reaction_time_value,
+        "dist_pass_div": float(dist_pass_div),
+        "dist_pass_min": float(dist_pass_min),
+        "dist_pass_max": float(dist_pass_max),
         "max_player_speed": float(max_player_speed),
         "max_player_speed_off": float(max_player_speed if max_player_speed_off is None else max_player_speed_off),
         "max_player_speed_def": float(max_player_speed if max_player_speed_def is None else max_player_speed_def),
@@ -490,16 +508,41 @@ def physical_xpass_metric_column(player_id: str, metric: str | None = None) -> s
     return f"{player_id}{suffix}"
 
 
-def physical_xpass_metric_columns(player_id: str, metric: str | None = None) -> list[str]:
+def physical_xpass_metric_columns(
+    player_id: str,
+    metric: str | None = None,
+    *,
+    default_metric: str | None = None,
+) -> list[str]:
     metric = normalize_physical_xpass_metric(metric)
-    if metric == PC_XPASS_METRIC_TOP25:
-        columns = [str(player_id), physical_xpass_metric_column(player_id, metric)]
-    else:
-        columns = [physical_xpass_metric_column(player_id, metric)]
+    columns = [physical_xpass_metric_column(player_id, metric)]
+    if default_metric is not None and normalize_physical_xpass_metric(default_metric) == metric:
+        default_column = str(player_id)
+        if default_column not in columns:
+            columns.append(default_column)
     legacy_suffix = PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES.get(metric)
     if legacy_suffix:
         columns.append(f"{player_id}{legacy_suffix}")
     return columns
+
+
+def _default_physical_xpass_metric_from_metadata(metadata: Mapping[str, Any] | None) -> str | None:
+    if not isinstance(metadata, Mapping):
+        return None
+    default_metric = metadata.get("default_metric")
+    if default_metric is not None:
+        try:
+            return normalize_physical_xpass_metric(str(default_metric))
+        except ValueError:
+            pass
+    default_version = metadata.get("default_x_pass_version")
+    if default_version is not None:
+        try:
+            source = str(metadata.get("source") or metadata.get("metric_family") or "")
+            return physical_xpass_metric_for_version(str(default_version), pc_xpass=(source == PC_XPASS_SOURCE))
+        except ValueError:
+            return None
+    return None
 
 
 def physical_xpass_output_columns(player_ids: list[str] | tuple[str, ...], enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None) -> list[str]:
@@ -2474,11 +2517,20 @@ def _pc_xpass_arrival_margins(
     target_y: np.ndarray,
     t_ball: np.ndarray,
     *,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | np.ndarray | list[float] | tuple[float, ...] = PC_XPASS_DEFAULT_REACTION_TIME,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_by_player: np.ndarray | list[float] | tuple[float, ...] | None = None,
 ) -> np.ndarray:
     positions = np.asarray(player_pos, dtype=float)
+    reaction_times = np.asarray(reaction_time, dtype=float)
+    if reaction_times.ndim == 0:
+        player_reaction_times = np.full(positions.shape[0], float(reaction_times), dtype=float)
+    else:
+        player_reaction_times = reaction_times.astype(float)
+        if player_reaction_times.shape[0] != positions.shape[0]:
+            raise ValueError("reaction_time must be a scalar or contain one value per player.")
+    if not np.isfinite(player_reaction_times).all() or np.any(player_reaction_times < 0.0):
+        raise ValueError("pc-xPass reaction times must be non-negative finite floats.")
     if max_player_speed_by_player is None:
         player_speeds = np.full(positions.shape[0], float(max_player_speed), dtype=float)
     else:
@@ -2488,13 +2540,27 @@ def _pc_xpass_arrival_margins(
     if not np.isfinite(player_speeds).all() or np.any(player_speeds <= 0.0):
         raise ValueError("pc-xPass player speeds must be positive finite floats.")
     margins = []
-    for player, player_speed in zip(positions, player_speeds):
+    for player, player_speed, player_reaction_time in zip(positions, player_speeds, player_reaction_times):
         x, y, vx, vy = [float(value) for value in player]
-        inertial_x = x + vx * float(reaction_time)
-        inertial_y = y + vy * float(reaction_time)
-        tta = float(reaction_time) + np.hypot(target_x - inertial_x, target_y - inertial_y) / float(player_speed)
+        inertial_x = x + vx * float(player_reaction_time)
+        inertial_y = y + vy * float(player_reaction_time)
+        tta = float(player_reaction_time) + np.hypot(target_x - inertial_x, target_y - inertial_y) / float(player_speed)
         margins.append(t_ball - tta)
     return np.stack(margins, axis=0)
+
+
+def _pc_xpass_dist_pass_reaction_times(
+    player_pos: np.ndarray,
+    passer_index: int,
+    *,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
+) -> np.ndarray:
+    positions = np.asarray(player_pos, dtype=float)
+    passer_xy = positions[int(passer_index), :2]
+    dist_pass = np.linalg.norm(positions[:, :2] - passer_xy[np.newaxis, :], axis=1)
+    return np.clip(dist_pass / float(dist_pass_div), float(dist_pass_min), float(dist_pass_max)).astype(float)
 
 
 def compute_graph_pc_xpass_metrics(
@@ -2516,7 +2582,11 @@ def compute_graph_pc_xpass_metrics(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -2579,13 +2649,26 @@ def compute_graph_pc_xpass_metrics(
     effective_off_speed = float(max_player_speed if max_player_speed_off is None else max_player_speed_off)
     effective_def_speed = float(max_player_speed if max_player_speed_def is None else max_player_speed_def)
     max_player_speed_by_player = np.where(player_teams == "attack", effective_off_speed, effective_def_speed).astype(float)
+    reaction_time_mode = str(reaction_time_mode)
+    if reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_DIST_PASS:
+        reaction_times = _pc_xpass_dist_pass_reaction_times(
+            player_pos,
+            passer_sim_index,
+            dist_pass_div=dist_pass_div,
+            dist_pass_min=dist_pass_min,
+            dist_pass_max=dist_pass_max,
+        )
+    elif reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_FIXED:
+        reaction_times = float(PC_XPASS_DEFAULT_REACTION_TIME if reaction_time is None else reaction_time)
+    else:
+        raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
 
     margins = _pc_xpass_arrival_margins(
         player_pos,
         target_x,
         target_y,
         t_ball,
-        reaction_time=reaction_time,
+        reaction_time=reaction_times,
         max_player_speed=max_player_speed,
         max_player_speed_by_player=max_player_speed_by_player,
     )
@@ -2685,7 +2768,11 @@ def compute_graphs_pc_xpass_metrics(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -2713,6 +2800,10 @@ def compute_graphs_pc_xpass_metrics(
             control_power=control_power,
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
+            reaction_time_mode=reaction_time_mode,
+            dist_pass_div=dist_pass_div,
+            dist_pass_min=dist_pass_min,
+            dist_pass_max=dist_pass_max,
             max_player_speed=max_player_speed,
             max_player_speed_off=max_player_speed_off,
             max_player_speed_def=max_player_speed_def,
@@ -3359,7 +3450,11 @@ def load_physical_xpass_match(
             else ""
         )
         raise ValueError(f"Physical xPass sidecar {path} contains duplicate action_index rows, e.g. {duplicates}.{scope_hint}")
-    return frame.set_index("action_index", drop=False)
+    frame = frame.set_index("action_index", drop=False)
+    metadata = validate_runtime_physical_xpass_visualization_cache(cache_root)
+    frame.attrs["physical_xpass_cache_metadata"] = metadata
+    frame.attrs["physical_xpass_default_metric"] = _default_physical_xpass_metric_from_metadata(metadata)
+    return frame
 
 
 def load_physical_xpass_component(
@@ -3387,17 +3482,19 @@ def load_physical_xpass_component(
         has_primary = any(str(column).endswith(suffix) for column in row.index)
         if not has_primary:
             suffixes.append(legacy_suffix)
+    default_metric = frame.attrs.get("physical_xpass_default_metric")
+    allow_unsuffixed_default = default_metric is not None and normalize_physical_xpass_metric(default_metric) == selected_metric
     player_columns = []
     output_index = []
-    pc_default_players: set[str] = set()
     for column in row.index:
         if column in PHYSICAL_XPASS_ID_COLUMNS:
             continue
         column = str(column)
-        if selected_metric == PC_XPASS_METRIC_TOP25 and "__" not in column:
+        if allow_unsuffixed_default and "__" not in column:
+            if suffix and physical_xpass_metric_column(column, selected_metric) in row.index:
+                continue
             player_columns.append(column)
             output_index.append(column)
-            pc_default_players.add(column)
             continue
         if "__" in column and not suffix:
             continue
@@ -3408,8 +3505,6 @@ def load_physical_xpass_component(
                 continue
             selected_suffix = matching_suffixes[0]
         player_id = column[: -len(selected_suffix)] if selected_suffix else column
-        if selected_metric == PC_XPASS_METRIC_TOP25 and player_id in pc_default_players:
-            continue
         player_columns.append(column)
         output_index.append(player_id)
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
@@ -3545,7 +3640,11 @@ def _runtime_cache_metadata(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -3571,6 +3670,10 @@ def _runtime_cache_metadata(
             control_power=control_power,
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
+            reaction_time_mode=reaction_time_mode,
+            dist_pass_div=dist_pass_div,
+            dist_pass_min=dist_pass_min,
+            dist_pass_max=dist_pass_max,
             max_player_speed=max_player_speed,
             max_player_speed_off=max_player_speed_off,
             max_player_speed_def=max_player_speed_def,
@@ -3651,7 +3754,11 @@ def _ensure_runtime_physical_xpass_cache(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -3687,6 +3794,10 @@ def _ensure_runtime_physical_xpass_cache(
         control_power=control_power,
         control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
+        reaction_time_mode=reaction_time_mode,
+        dist_pass_div=dist_pass_div,
+        dist_pass_min=dist_pass_min,
+        dist_pass_max=dist_pass_max,
         max_player_speed=max_player_speed,
         max_player_speed_off=max_player_speed_off,
         max_player_speed_def=max_player_speed_def,
@@ -3709,6 +3820,7 @@ def _ensure_runtime_physical_xpass_cache(
                 "endpoint_normalization",
                 "lane_survival_aggregation",
                 "position_discount_function",
+                "reaction_time_mode",
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
@@ -3734,6 +3846,9 @@ def _ensure_runtime_physical_xpass_cache(
                 mismatches.append(f"control_policy: expected {expected_control_policy!r}, got {actual_control_policy!r}")
             for key in [
                 "reaction_time",
+                "dist_pass_div",
+                "dist_pass_min",
+                "dist_pass_max",
                 "max_player_speed",
                 "max_player_speed_off",
                 "max_player_speed_def",
@@ -3751,16 +3866,19 @@ def _ensure_runtime_physical_xpass_cache(
             ]:
                 actual_value = metadata.get(key)
                 expected_value = expected_metadata.get(key)
-                try:
-                    actual_float = float(actual_value)
-                    expected_float = float(expected_value)
-                    values_match = (
-                        math.isfinite(actual_float)
-                        and math.isfinite(expected_float)
-                        and abs(actual_float - expected_float) <= 1e-9
-                    )
-                except (TypeError, ValueError):
-                    values_match = False
+                if expected_value is None:
+                    values_match = actual_value is None
+                else:
+                    try:
+                        actual_float = float(actual_value)
+                        expected_float = float(expected_value)
+                        values_match = (
+                            math.isfinite(actual_float)
+                            and math.isfinite(expected_float)
+                            and abs(actual_float - expected_float) <= 1e-9
+                        )
+                    except (TypeError, ValueError):
+                        values_match = False
                 if not values_match:
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
             if bool(metadata.get("use_position_discount", False)) != bool(expected_metadata.get("use_position_discount", False)):
@@ -4295,7 +4413,12 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     lane_inflection_point = float(task.get("lane_inflection_point", PC_XPASS_DEFAULT_LANE_INFLECTION_POINT))
     control_power = float(task.get("control_power", PC_XPASS_DEFAULT_CONTROL_POWER))
     control_inflection_point = float(task.get("control_inflection_point", PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT))
-    reaction_time = float(task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME))
+    reaction_time_value = task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME)
+    reaction_time = None if reaction_time_value is None else float(reaction_time_value)
+    reaction_time_mode = str(task.get("reaction_time_mode", PC_XPASS_REACTION_TIME_MODE_FIXED))
+    dist_pass_div = float(task.get("dist_pass_div", PC_XPASS_DEFAULT_DIST_PASS_DIV))
+    dist_pass_min = float(task.get("dist_pass_min", PC_XPASS_DEFAULT_DIST_PASS_MIN))
+    dist_pass_max = float(task.get("dist_pass_max", PC_XPASS_DEFAULT_DIST_PASS_MAX))
     max_player_speed = float(task.get("max_player_speed", PC_XPASS_DEFAULT_MAX_PLAYER_SPEED))
     max_player_speed_off = task.get("max_player_speed_off", None)
     max_player_speed_def = task.get("max_player_speed_def", None)
@@ -4346,6 +4469,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             control_power=control_power,
             control_inflection_point=control_inflection_point,
             reaction_time=reaction_time,
+            reaction_time_mode=reaction_time_mode,
+            dist_pass_div=dist_pass_div,
+            dist_pass_min=dist_pass_min,
+            dist_pass_max=dist_pass_max,
             max_player_speed=max_player_speed,
             max_player_speed_off=max_player_speed_off,
             max_player_speed_def=max_player_speed_def,
@@ -4488,7 +4615,11 @@ def prewarm_physical_xpass_runtime_cache(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
-    reaction_time: float = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
+    reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
     max_player_speed: float = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED,
     max_player_speed_off: float | None = None,
     max_player_speed_def: float | None = None,
@@ -4542,6 +4673,10 @@ def prewarm_physical_xpass_runtime_cache(
         control_power=control_power,
         control_inflection_point=control_inflection_point,
         reaction_time=reaction_time,
+        reaction_time_mode=reaction_time_mode,
+        dist_pass_div=dist_pass_div,
+        dist_pass_min=dist_pass_min,
+        dist_pass_max=dist_pass_max,
         max_player_speed=max_player_speed,
         max_player_speed_off=max_player_speed_off,
         max_player_speed_def=max_player_speed_def,
@@ -4843,7 +4978,11 @@ def prewarm_physical_xpass_runtime_cache(
             "lane_inflection_point": float(lane_inflection_point),
             "control_power": float(control_power),
             "control_inflection_point": float(control_inflection_point),
-            "reaction_time": float(reaction_time),
+            "reaction_time": None if reaction_time is None else float(reaction_time),
+            "reaction_time_mode": str(reaction_time_mode),
+            "dist_pass_div": float(dist_pass_div),
+            "dist_pass_min": float(dist_pass_min),
+            "dist_pass_max": float(dist_pass_max),
             "max_player_speed": float(max_player_speed),
             "max_player_speed_off": None if max_player_speed_off is None else float(max_player_speed_off),
             "max_player_speed_def": None if max_player_speed_def is None else float(max_player_speed_def),
@@ -5050,8 +5189,9 @@ def attach_physical_xpass_to_graph(
         )
     ball_z = torch.full((len(node_ids),), ball_z_value, dtype=torch.float32)
     missing_columns = []
+    default_metric = physical_rows.attrs.get("physical_xpass_default_metric") if hasattr(physical_rows, "attrs") else None
     for node_index, node_id in enumerate(node_ids):
-        value_columns = physical_xpass_metric_columns(str(node_id), selected_metric)
+        value_columns = physical_xpass_metric_columns(str(node_id), selected_metric, default_metric=default_metric)
         value_column = next((column for column in value_columns if column in row.index), None)
         if value_column is None:
             missing_columns.append(node_id)
@@ -5089,7 +5229,7 @@ def attach_physical_xpass_to_graph(
     if require_observed_target:
         target_index = int(labels[LABEL_INDEX["intent_index"]].item())
         if 0 <= target_index < len(node_ids):
-            target_columns = physical_xpass_metric_columns(str(node_ids[target_index]), selected_metric)
+            target_columns = physical_xpass_metric_columns(str(node_ids[target_index]), selected_metric, default_metric=default_metric)
             target_column = next((column for column in target_columns if column in row.index), None)
             target_value = row[target_column] if target_column is not None else np.nan
             if pd.isna(target_value):

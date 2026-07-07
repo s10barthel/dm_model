@@ -50,6 +50,9 @@ from physical_pass_model import (
     PC_XPASS_AVAILABLE_METRICS,
     PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     PC_XPASS_DEFAULT_CONTROL_POWER,
+    PC_XPASS_DEFAULT_DIST_PASS_DIV,
+    PC_XPASS_DEFAULT_DIST_PASS_MIN,
+    PC_XPASS_DEFAULT_DIST_PASS_MAX,
     PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     PC_XPASS_DEFAULT_LANE_POWER,
     PC_XPASS_DEFAULT_MAX_SPEED,
@@ -61,6 +64,8 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
     PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
+    PC_XPASS_REACTION_TIME_MODE_DIST_PASS,
+    PC_XPASS_REACTION_TIME_MODE_FIXED,
     PC_XPASS_SOURCE,
     PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR,
     PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR,
@@ -232,7 +237,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
     parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
-    parser.add_argument("--reaction-time", "--reaction_time", dest="reaction_time", type=float, default=argparse.SUPPRESS, help="pc-xPass only: reaction time before players move toward the target.")
+    parser.add_argument(
+        "--reaction-time",
+        "--reaction_time",
+        dest="reaction_time",
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: fixed reaction time in seconds, or 'dist_pass' for distance-to-passer reaction time.",
+    )
+    parser.add_argument("--dist-pass-div", "--dist_pass_div", dest="dist_pass_div", type=float, default=argparse.SUPPRESS, help="pc-xPass only: divisor for --reaction-time dist_pass.")
+    parser.add_argument("--dist-pass-min", "--dist_pass_min", dest="dist_pass_min", type=float, default=argparse.SUPPRESS, help="pc-xPass only: lower clamp for --reaction-time dist_pass.")
+    parser.add_argument("--dist-pass-max", "--dist_pass_max", dest="dist_pass_max", type=float, default=argparse.SUPPRESS, help="pc-xPass only: cap for --reaction-time dist_pass.")
     parser.add_argument("--max-player-speed", "--max_player_speed", dest="max_player_speed", type=float, default=argparse.SUPPRESS, help="pc-xPass only: player movement speed after reaction time.")
     parser.add_argument("--max-player-speed-off", "--max_player_speed_off", dest="max_player_speed_off", type=float, default=argparse.SUPPRESS, help="pc-xPass only: attacking-player movement speed after reaction time.")
     parser.add_argument("--max-player-speed-def", "--max_player_speed_def", dest="max_player_speed_def", type=float, default=argparse.SUPPRESS, help="pc-xPass only: defending-player movement speed after reaction time.")
@@ -353,6 +367,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         name
         for name in [
             "reaction_time",
+            "dist_pass_div",
+            "dist_pass_min",
+            "dist_pass_max",
             "max_player_speed",
             "max_player_speed_off",
             "max_player_speed_def",
@@ -370,13 +387,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ]
     if not bool(args.pc_xpass) and explicit_pc_only_flags:
         parser.error(
-            "--reaction-time, --max-player-speed, --min-speed, --radial-gridsize, "
+            "--reaction-time, --dist-pass-div, --dist-pass-min, --dist-pass-max, --max-player-speed, --min-speed, --radial-gridsize, "
             "--max-player-speed-off, --max-player-speed-def, "
             "--lane-power, --lane-inflection-point, --control-power, --control-inflection-point, "
             "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
     if not hasattr(args, "reaction_time"):
         args.reaction_time = PC_XPASS_DEFAULT_REACTION_TIME
+    if not hasattr(args, "dist_pass_div"):
+        args.dist_pass_div = PC_XPASS_DEFAULT_DIST_PASS_DIV
+    if not hasattr(args, "dist_pass_min"):
+        args.dist_pass_min = PC_XPASS_DEFAULT_DIST_PASS_MIN
+    if not hasattr(args, "dist_pass_max"):
+        args.dist_pass_max = PC_XPASS_DEFAULT_DIST_PASS_MAX
+    raw_reaction_time = args.reaction_time
+    if isinstance(raw_reaction_time, str) and raw_reaction_time.lower() == PC_XPASS_REACTION_TIME_MODE_DIST_PASS:
+        args.reaction_time_mode = PC_XPASS_REACTION_TIME_MODE_DIST_PASS
+        args.reaction_time = None
+    else:
+        try:
+            reaction_time_value = float(raw_reaction_time)
+        except (TypeError, ValueError):
+            parser.error("--reaction-time must be a non-negative finite float or 'dist_pass'.")
+        if not math.isfinite(reaction_time_value) or reaction_time_value < 0:
+            parser.error("--reaction-time must be a non-negative finite float or 'dist_pass'.")
+        args.reaction_time_mode = PC_XPASS_REACTION_TIME_MODE_FIXED
+        args.reaction_time = reaction_time_value
     if not hasattr(args, "max_player_speed"):
         args.max_player_speed = PC_XPASS_DEFAULT_MAX_PLAYER_SPEED
     if not hasattr(args, "max_player_speed_off"):
@@ -477,8 +513,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--position-discount-power must be positive.")
     if args.position_discount_distance <= 0:
         parser.error("--position-discount-distance must be positive.")
-    if args.reaction_time < 0:
-        parser.error("--reaction-time must be non-negative.")
+    if not math.isfinite(float(args.dist_pass_div)) or float(args.dist_pass_div) <= 0:
+        parser.error("--dist-pass-div must be a positive finite float.")
+    if not math.isfinite(float(args.dist_pass_min)) or float(args.dist_pass_min) < 0:
+        parser.error("--dist-pass-min must be a non-negative finite float.")
+    if not math.isfinite(float(args.dist_pass_max)) or float(args.dist_pass_max) < 0:
+        parser.error("--dist-pass-max must be a non-negative finite float.")
+    if float(args.dist_pass_min) > float(args.dist_pass_max):
+        parser.error("--dist-pass-min must be less than or equal to --dist-pass-max.")
     if not math.isfinite(float(args.max_player_speed)) or args.max_player_speed <= 0:
         parser.error("--max-player-speed must be a positive finite float.")
     for attr_name, flag_name in [
@@ -1123,7 +1165,11 @@ def prewarm_runtime_items(
         lane_inflection_point=float(args.lane_inflection_point),
         control_power=float(args.control_power),
         control_inflection_point=float(args.control_inflection_point),
-        reaction_time=float(args.reaction_time),
+        reaction_time=None if args.reaction_time is None else float(args.reaction_time),
+        reaction_time_mode=str(args.reaction_time_mode),
+        dist_pass_div=float(args.dist_pass_div),
+        dist_pass_min=float(args.dist_pass_min),
+        dist_pass_max=float(args.dist_pass_max),
         max_player_speed=float(args.max_player_speed),
         max_player_speed_off=None if args.max_player_speed_off is None else float(args.max_player_speed_off),
         max_player_speed_def=None if args.max_player_speed_def is None else float(args.max_player_speed_def),
@@ -1257,7 +1303,11 @@ def write_runtime_dataset_metadata(
             lane_inflection_point=float(args.lane_inflection_point),
             control_power=float(args.control_power),
             control_inflection_point=float(args.control_inflection_point),
-            reaction_time=float(args.reaction_time),
+            reaction_time=None if args.reaction_time is None else float(args.reaction_time),
+            reaction_time_mode=str(args.reaction_time_mode),
+            dist_pass_div=float(args.dist_pass_div),
+            dist_pass_min=float(args.dist_pass_min),
+            dist_pass_max=float(args.dist_pass_max),
             max_player_speed=float(args.max_player_speed),
             max_player_speed_off=None if args.max_player_speed_off is None else float(args.max_player_speed_off),
             max_player_speed_def=None if args.max_player_speed_def is None else float(args.max_player_speed_def),

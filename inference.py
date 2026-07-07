@@ -341,6 +341,7 @@ def _physical_xpass_row_skip_reason(
     match_id: str,
     action_index: int,
     metric: str | None = None,
+    default_metric: str | None = None,
     require_ball_z: bool = False,
 ) -> str | None:
     if require_ball_z:
@@ -353,7 +354,11 @@ def _physical_xpass_row_skip_reason(
             return "non_finite_ball_z"
     if metric is not None:
         node_ids = [str(node_id) for node_id in getattr(graph, "node_ids", [])]
-        candidate_columns = [column for node_id in node_ids for column in physical_xpass_metric_columns(node_id, metric)]
+        candidate_columns = [
+            column
+            for node_id in node_ids
+            for column in physical_xpass_metric_columns(node_id, metric, default_metric=default_metric)
+        ]
         has_metric_column = any(column in row.index for column in candidate_columns)
         if not has_metric_column:
             return f"missing_{metric}_columns"
@@ -423,6 +428,7 @@ def filter_missing_physical_xpass_rows_for_inference(
             "No usable graph/label pairs remain because the physical xPass cache is missing or invalid."
         ) from exc
     available_action_indexes = set(physical_rows.index.astype(int).tolist())
+    default_metric = physical_rows.attrs.get("physical_xpass_default_metric")
 
     kept_graphs: list[Data] = []
     kept_labels: list[torch.Tensor] = []
@@ -441,6 +447,7 @@ def filter_missing_physical_xpass_rows_for_inference(
             match_id=match_id,
             action_index=action_index,
             metric=metric,
+            default_metric=default_metric,
             require_ball_z=require_ball_z,
         )
         if reason is not None:

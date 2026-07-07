@@ -983,6 +983,10 @@ Add `--pass-height-model-id pass_height/<model_run_id>` to enrich either cache f
 
 Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; the default generated top version is controlled by `--top-n` and defaults to `top10`. To export several pc top-N columns in one cache, use `--top-n-values 5 10 25`; `--top-n` still controls the unsuffixed default player columns.
 
+pc-xPass motion and control assumptions are generation-time settings. `--reaction-time` accepts a fixed seconds value or `dist_pass`, where each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)` with defaults `50`, `0.2`, and `0.7`. Player movement speed defaults to `--max-player-speed 5.0`; `--max-player-speed-off` and `--max-player-speed-def` can override attacking and defending players separately. Lane survival and endpoint control use separate sigmoid settings: `--lane-power`, `--lane-inflection-point`, `--control-power`, and `--control-inflection-point`, all defaulting to `15` and `0.3` for their respective power/inflection values.
+
+pc-xPass also applies a target-position discount by default for pass end locations that move the receiver farther from the opponent goal than the receiver's current position. Disable it with `--use-position-discount false`. The default discount uses `--position-discount-power 2.0` and `--position-discount-distance 20.0`: no backward goal-distance change gives discount `1`, a `10m` backward goal-distance change gives `0.5`, and `20m` or more gives `0`.
+
 ### Inference-time blending
 
 Use physical xPass at inference by adding `--use-physical-xpass` to the inference script. The pass-success model still runs normally, then each receiver probability is blended with cached physical xPass:
@@ -1281,9 +1285,18 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--top-n <N>`: number of highest finite xPass grid values averaged for the default top-N metric. Original physical xPass stores this as `__topmean_xpass` with metadata `top_n=N`; pc-xPass stores it as `__top<N>_xpass` and uses it for unsuffixed default player columns. Default: `10`.
 - `--top-n-values <N...>`: pc-xPass only; export additional top-N columns in one run, for example `--top-n-values 5 10 25` writes `__top5_xpass`, `__top10_xpass`, and `__top25_xpass`. The `--top-n` value is always included.
 - `--pc-xpass`: generate pc-xPass caches under `data/pc_xpass/<dataset>` instead of runtime physical xPass caches.
+- `--reaction-time <seconds|dist_pass>`: pc-xPass only; fixed player reaction time or distance-to-passer mode. With `dist_pass`, each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)`. Default: `0.25`.
+- `--dist-pass-div <float>`: pc-xPass only; divisor for `--reaction-time dist_pass`. Default: `50`.
+- `--dist-pass-min <seconds>`: pc-xPass only; minimum reaction time for `--reaction-time dist_pass`. Default: `0.2`.
+- `--dist-pass-max <seconds>`: pc-xPass only; maximum reaction time for `--reaction-time dist_pass`. Default: `0.7`.
 - `--max-player-speed <m/s>`: pc-xPass only; overall player movement speed after reaction time. Default: `5.0`.
 - `--max-player-speed-off <m/s>`: pc-xPass only; override movement speed for attacking players, including the possessor and teammates. Default: use `--max-player-speed`.
 - `--max-player-speed-def <m/s>`: pc-xPass only; override movement speed for defending players. Default: use `--max-player-speed`.
+- `--lane-power <float>` and `--lane-inflection-point <float>`: pc-xPass only; sigmoid parameters for lane-survival interception control. Defaults: `15` and `0.3`.
+- `--control-power <float>` and `--control-inflection-point <float>`: pc-xPass only; sigmoid parameters for endpoint receiver control. Defaults: `15` and `0.3`.
+- `--use-position-discount <true|false>`: pc-xPass only; apply the goal-distance target-position discount before max/top-N aggregation. Default: `true`.
+- `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
+- `--position-discount-distance <m>`: pc-xPass only; backward goal-distance delta where the target-position discount reaches zero. Default: `20.0`.
 - `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich existing or newly generated xPass rows with per-player `<player_id>__pass_height` probabilities from the selected `pass_height` checkpoint. If xPass metrics are already valid, only missing/stale pass-height columns are backfilled.
 - `--pass-height-device <device>`: device used for `--pass-height-model-id`. Default: `cuda:0` when CUDA is available, otherwise `cpu`.
 - `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--xpass-version top<N>` during inference/visualization.
