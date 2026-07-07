@@ -50,9 +50,11 @@ from physical_pass_model import (
     PC_XPASS_AVAILABLE_METRICS,
     PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     PC_XPASS_DEFAULT_CONTROL_POWER,
+    PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     PC_XPASS_DEFAULT_DIST_PASS_DIV,
     PC_XPASS_DEFAULT_DIST_PASS_MIN,
     PC_XPASS_DEFAULT_DIST_PASS_MAX,
+    PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
     PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     PC_XPASS_DEFAULT_LANE_POWER,
     PC_XPASS_DEFAULT_MAX_SPEED,
@@ -292,6 +294,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="pc-xPass only: sigmoid offset for endpoint receiver control.",
     )
     parser.add_argument(
+        "--endpoint-normalization",
+        "--endpoint_normalization",
+        dest="endpoint_normalization",
+        choices=["normal", "normal-one", "subtract", "subtract-one"],
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: endpoint receiver-control competition mode. Default: normal.",
+    )
+    parser.add_argument(
+        "--boost-def-endpoint-control",
+        "--boost_def_endpoint_control",
+        dest="boost_def_endpoint_control",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="pc-xPass only: multiply defending-player endpoint raw controls before endpoint competition.",
+    )
+    parser.add_argument(
         "--use-position-discount",
         "--use_position_discount",
         dest="use_position_discount",
@@ -379,6 +397,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "lane_inflection_point",
             "control_power",
             "control_inflection_point",
+            "endpoint_normalization",
+            "boost_def_endpoint_control",
             "use_position_discount",
             "position_discount_power",
             "position_discount_distance",
@@ -390,6 +410,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--reaction-time, --dist-pass-div, --dist-pass-min, --dist-pass-max, --max-player-speed, --min-speed, --radial-gridsize, "
             "--max-player-speed-off, --max-player-speed-def, "
             "--lane-power, --lane-inflection-point, --control-power, --control-inflection-point, "
+            "--endpoint-normalization, --boost-def-endpoint-control, "
             "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
     if not hasattr(args, "reaction_time"):
@@ -431,6 +452,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.control_power = PC_XPASS_DEFAULT_CONTROL_POWER
     if not hasattr(args, "control_inflection_point"):
         args.control_inflection_point = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT
+    if not hasattr(args, "endpoint_normalization"):
+        args.endpoint_normalization = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION
+    if not hasattr(args, "boost_def_endpoint_control"):
+        args.boost_def_endpoint_control = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL
     if not hasattr(args, "use_position_discount"):
         args.use_position_discount = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT
     if not hasattr(args, "position_discount_power"):
@@ -509,6 +534,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         value = float(getattr(args, attr_name))
         if not math.isfinite(value) or value <= 0:
             parser.error(f"{flag_name} must be a positive finite float.")
+    if not math.isfinite(float(args.boost_def_endpoint_control)) or float(args.boost_def_endpoint_control) < 0:
+        parser.error("--boost-def-endpoint-control must be a non-negative finite float.")
     if args.position_discount_power <= 0:
         parser.error("--position-discount-power must be positive.")
     if args.position_discount_distance <= 0:
@@ -1165,6 +1192,8 @@ def prewarm_runtime_items(
         lane_inflection_point=float(args.lane_inflection_point),
         control_power=float(args.control_power),
         control_inflection_point=float(args.control_inflection_point),
+        endpoint_normalization=str(args.endpoint_normalization),
+        boost_def_endpoint_control=float(args.boost_def_endpoint_control),
         reaction_time=None if args.reaction_time is None else float(args.reaction_time),
         reaction_time_mode=str(args.reaction_time_mode),
         dist_pass_div=float(args.dist_pass_div),
@@ -1303,6 +1332,8 @@ def write_runtime_dataset_metadata(
             lane_inflection_point=float(args.lane_inflection_point),
             control_power=float(args.control_power),
             control_inflection_point=float(args.control_inflection_point),
+            endpoint_normalization=str(args.endpoint_normalization),
+            boost_def_endpoint_control=float(args.boost_def_endpoint_control),
             reaction_time=None if args.reaction_time is None else float(args.reaction_time),
             reaction_time_mode=str(args.reaction_time_mode),
             dist_pass_div=float(args.dist_pass_div),

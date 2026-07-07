@@ -985,6 +985,8 @@ Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc
 
 pc-xPass motion and control assumptions are generation-time settings. `--reaction-time` accepts a fixed seconds value or `dist_pass`, where each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)` with defaults `50`, `0.2`, and `0.7`. Player movement speed defaults to `--max-player-speed 5.0`; `--max-player-speed-off` and `--max-player-speed-def` can override attacking and defending players separately. Lane survival and endpoint control use separate sigmoid settings: `--lane-power`, `--lane-inflection-point`, `--control-power`, and `--control-inflection-point`, all defaulting to `15` and `0.3` for their respective power/inflection values.
 
+Endpoint receiver control defaults to `--endpoint-normalization normal`, which keeps raw control when total endpoint control is at most `1` and otherwise normalizes by total raw control. Alternative pc-xPass modes are `normal-one` (receiver plus strongest challenger), `subtract` (receiver raw minus all challenger raw controls), and `subtract-one` (receiver raw minus strongest challenger). `--boost-def-endpoint-control <factor>` multiplies defending-player endpoint raw controls before this competition step; default is `1.0`.
+
 pc-xPass also applies a target-position discount by default for pass end locations that move the receiver farther from the opponent goal than the receiver's current position. Disable it with `--use-position-discount false`. The default discount uses `--position-discount-power 2.0` and `--position-discount-distance 20.0`: no backward goal-distance change gives discount `1`, a `10m` backward goal-distance change gives `0.5`, and `20m` or more gives `0`.
 
 ### Inference-time blending
@@ -1294,6 +1296,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--max-player-speed-def <m/s>`: pc-xPass only; override movement speed for defending players. Default: use `--max-player-speed`.
 - `--lane-power <float>` and `--lane-inflection-point <float>`: pc-xPass only; sigmoid parameters for lane-survival interception control. Defaults: `15` and `0.3`.
 - `--control-power <float>` and `--control-inflection-point <float>`: pc-xPass only; sigmoid parameters for endpoint receiver control. Defaults: `15` and `0.3`.
+- `--endpoint-normalization {normal,normal-one,subtract,subtract-one}`: pc-xPass only; endpoint receiver-control competition mode. Default: `normal`.
+- `--boost-def-endpoint-control <float>`: pc-xPass only; multiply defending-player endpoint raw controls before endpoint normalization. Default: `1.0`.
 - `--use-position-discount <true|false>`: pc-xPass only; apply the goal-distance target-position discount before max/top-N aggregation. Default: `true`.
 - `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
 - `--position-discount-distance <m>`: pc-xPass only; backward goal-distance delta where the target-position discount reaches zero. Default: `20.0`.

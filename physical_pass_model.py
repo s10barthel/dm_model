@@ -119,6 +119,18 @@ PC_XPASS_DEFAULT_LANE_POWER = 15.0
 PC_XPASS_DEFAULT_LANE_INFLECTION_POINT = 0.3
 PC_XPASS_DEFAULT_CONTROL_POWER = 15.0
 PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT = 0.3
+PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL = "normal"
+PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE = "normal-one"
+PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT = "subtract"
+PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE = "subtract-one"
+PC_XPASS_ENDPOINT_NORMALIZATIONS = {
+    PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
+    PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE,
+    PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT,
+    PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE,
+}
+PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION = PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL
+PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL = 1.0
 PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT = True
 PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER = 2.0
 PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE = 20.0
@@ -291,6 +303,8 @@ def pc_xpass_metadata(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -339,6 +353,12 @@ def pc_xpass_metadata(
     reaction_time_mode = str(reaction_time_mode)
     if reaction_time_mode not in PC_XPASS_REACTION_TIME_MODES:
         raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
+    endpoint_normalization = str(endpoint_normalization)
+    if endpoint_normalization not in PC_XPASS_ENDPOINT_NORMALIZATIONS:
+        raise ValueError(f"Unsupported pc-xPass endpoint_normalization={endpoint_normalization!r}.")
+    boost_def_endpoint_control_value = float(boost_def_endpoint_control)
+    if not math.isfinite(boost_def_endpoint_control_value) or boost_def_endpoint_control_value < 0.0:
+        raise ValueError("boost_def_endpoint_control must be a non-negative finite float.")
     reaction_time_value = None if reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_DIST_PASS else float(reaction_time)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value, min_speed=min_speed_value)
     return {
@@ -369,8 +389,9 @@ def pc_xpass_metadata(
         "control_function": "sigmoid",
         "control_power": float(control_power),
         "control_inflection_point": float(control_inflection_point),
-        "normalization": "proportional_if_sum_gt_1",
-        "endpoint_normalization": "proportional_if_sum_gt_1",
+        "normalization": endpoint_normalization,
+        "endpoint_normalization": endpoint_normalization,
+        "boost_def_endpoint_control": boost_def_endpoint_control_value,
         "lane_survival_aggregation": "per_player_max_then_independent_product",
         "use_position_discount": bool(use_position_discount),
         "position_discount_function": PC_XPASS_POSITION_DISCOUNT_FUNCTION if bool(use_position_discount) else "none",
@@ -2414,8 +2435,66 @@ def pc_xpass_normalize_if_sum_above_one(raw: np.ndarray, axis: int = 0) -> np.nd
     return np.where(sums > 1.0, normalized, raw)
 
 
-def pc_xpass_endpoint_control_probabilities(raw: np.ndarray, *, axis: int = 0) -> np.ndarray:
-    return pc_xpass_normalize_if_sum_above_one(np.asarray(raw, dtype=float), axis=axis)
+def pc_xpass_endpoint_control_probabilities(
+    raw: np.ndarray,
+    *,
+    axis: int = 0,
+    receiver_index: int | None = None,
+    player_teams: np.ndarray | list[str] | tuple[str, ...] | None = None,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
+) -> np.ndarray:
+    values = np.asarray(raw, dtype=float).copy()
+    mode = str(endpoint_normalization)
+    if mode not in PC_XPASS_ENDPOINT_NORMALIZATIONS:
+        raise ValueError(f"Unsupported pc-xPass endpoint_normalization={mode!r}.")
+    boost = float(boost_def_endpoint_control)
+    if not math.isfinite(boost) or boost < 0.0:
+        raise ValueError("--boost-def-endpoint-control must be a non-negative finite float.")
+    if boost != 1.0:
+        if player_teams is None:
+            raise ValueError("player_teams are required when boosting defender endpoint control.")
+        teams = np.asarray(player_teams)
+        if axis != 0:
+            raise ValueError("Defender endpoint boost currently requires player axis 0.")
+        if teams.shape[0] != values.shape[0]:
+            raise ValueError("player_teams must contain one team value per endpoint-control player.")
+        values[teams.astype(str) == "defense"] *= boost
+
+    if mode == PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL and receiver_index is None:
+        return pc_xpass_normalize_if_sum_above_one(values, axis=axis)
+    if axis != 0:
+        raise ValueError("Receiver-specific endpoint normalization requires player axis 0.")
+    if receiver_index is None:
+        raise ValueError("receiver_index is required for receiver-specific endpoint normalization.")
+    receiver_index = int(receiver_index)
+    if receiver_index < 0 or receiver_index >= values.shape[0]:
+        raise ValueError("receiver_index is outside the endpoint-control player axis.")
+
+    receiver_raw = values[receiver_index]
+    other_raw = values.copy()
+    other_raw[receiver_index] = np.nan
+    finite_other = np.where(np.isfinite(other_raw), np.clip(other_raw, 0.0, 1.0), 0.0)
+    receiver_values = np.where(np.isfinite(receiver_raw), np.clip(receiver_raw, 0.0, 1.0), np.nan)
+
+    if mode == PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL:
+        total = np.nansum(values, axis=0)
+        normalized_receiver = np.divide(receiver_values, total, out=np.zeros_like(receiver_values), where=total > 0)
+        receiver_control = np.where(total > 1.0, normalized_receiver, receiver_values)
+    elif mode == PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE:
+        challenger = np.max(finite_other, axis=0)
+        total = receiver_values + challenger
+        normalized_receiver = np.divide(receiver_values, total, out=np.zeros_like(receiver_values), where=total > 0)
+        receiver_control = np.where(total > 1.0, normalized_receiver, receiver_values)
+    elif mode == PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT:
+        receiver_control = receiver_values - np.sum(finite_other, axis=0)
+    else:
+        receiver_control = receiver_values - np.max(finite_other, axis=0)
+
+    output = np.zeros_like(values)
+    output[receiver_index] = np.clip(receiver_control, 0.0, 1.0)
+    output[receiver_index] = np.where(np.isfinite(receiver_raw), output[receiver_index], np.nan)
+    return output
 
 
 def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
@@ -2582,6 +2661,8 @@ def compute_graph_pc_xpass_metrics(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -2695,7 +2776,14 @@ def compute_graph_pc_xpass_metrics(
         if ignore_control_teammates:
             endpoint_raw[attack_mask] = 0.0
             endpoint_raw[receiver_sim_index] = control_raw_all[receiver_sim_index]
-        endpoint_probs = pc_xpass_endpoint_control_probabilities(endpoint_raw, axis=0)
+        endpoint_probs = pc_xpass_endpoint_control_probabilities(
+            endpoint_raw,
+            axis=0,
+            receiver_index=receiver_sim_index,
+            player_teams=player_teams,
+            endpoint_normalization=endpoint_normalization,
+            boost_def_endpoint_control=boost_def_endpoint_control,
+        )
         receiver_control = endpoint_probs[receiver_sim_index]
 
         lane_raw = lane_raw_all.copy()
@@ -2768,6 +2856,8 @@ def compute_graphs_pc_xpass_metrics(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -2799,6 +2889,8 @@ def compute_graphs_pc_xpass_metrics(
             lane_inflection_point=lane_inflection_point,
             control_power=control_power,
             control_inflection_point=control_inflection_point,
+            endpoint_normalization=endpoint_normalization,
+            boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
             dist_pass_div=dist_pass_div,
@@ -3640,6 +3732,8 @@ def _runtime_cache_metadata(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -3669,6 +3763,8 @@ def _runtime_cache_metadata(
             lane_inflection_point=lane_inflection_point,
             control_power=control_power,
             control_inflection_point=control_inflection_point,
+            endpoint_normalization=endpoint_normalization,
+            boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
             dist_pass_div=dist_pass_div,
@@ -3754,6 +3850,8 @@ def _ensure_runtime_physical_xpass_cache(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -3793,6 +3891,8 @@ def _ensure_runtime_physical_xpass_cache(
         lane_inflection_point=lane_inflection_point,
         control_power=control_power,
         control_inflection_point=control_inflection_point,
+        endpoint_normalization=endpoint_normalization,
+        boost_def_endpoint_control=boost_def_endpoint_control,
         reaction_time=reaction_time,
         reaction_time_mode=reaction_time_mode,
         dist_pass_div=dist_pass_div,
@@ -3856,6 +3956,7 @@ def _ensure_runtime_physical_xpass_cache(
                 "lane_inflection_point",
                 "control_power",
                 "control_inflection_point",
+                "boost_def_endpoint_control",
                 "position_discount_power",
                 "position_discount_distance",
                 "max_speed",
@@ -4413,6 +4514,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     lane_inflection_point = float(task.get("lane_inflection_point", PC_XPASS_DEFAULT_LANE_INFLECTION_POINT))
     control_power = float(task.get("control_power", PC_XPASS_DEFAULT_CONTROL_POWER))
     control_inflection_point = float(task.get("control_inflection_point", PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT))
+    endpoint_normalization = str(task.get("endpoint_normalization", PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION))
+    boost_def_endpoint_control = float(task.get("boost_def_endpoint_control", PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL))
     reaction_time_value = task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME)
     reaction_time = None if reaction_time_value is None else float(reaction_time_value)
     reaction_time_mode = str(task.get("reaction_time_mode", PC_XPASS_REACTION_TIME_MODE_FIXED))
@@ -4468,6 +4571,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             lane_inflection_point=lane_inflection_point,
             control_power=control_power,
             control_inflection_point=control_inflection_point,
+            endpoint_normalization=endpoint_normalization,
+            boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
             dist_pass_div=dist_pass_div,
@@ -4615,6 +4720,8 @@ def prewarm_physical_xpass_runtime_cache(
     lane_inflection_point: float = PC_XPASS_DEFAULT_LANE_INFLECTION_POINT,
     control_power: float = PC_XPASS_DEFAULT_CONTROL_POWER,
     control_inflection_point: float = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
+    endpoint_normalization: str = PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
+    boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
@@ -4672,6 +4779,8 @@ def prewarm_physical_xpass_runtime_cache(
         lane_inflection_point=lane_inflection_point,
         control_power=control_power,
         control_inflection_point=control_inflection_point,
+        endpoint_normalization=endpoint_normalization,
+        boost_def_endpoint_control=boost_def_endpoint_control,
         reaction_time=reaction_time,
         reaction_time_mode=reaction_time_mode,
         dist_pass_div=dist_pass_div,
@@ -4978,6 +5087,8 @@ def prewarm_physical_xpass_runtime_cache(
             "lane_inflection_point": float(lane_inflection_point),
             "control_power": float(control_power),
             "control_inflection_point": float(control_inflection_point),
+            "endpoint_normalization": str(endpoint_normalization),
+            "boost_def_endpoint_control": float(boost_def_endpoint_control),
             "reaction_time": None if reaction_time is None else float(reaction_time),
             "reaction_time_mode": str(reaction_time_mode),
             "dist_pass_div": float(dist_pass_div),
