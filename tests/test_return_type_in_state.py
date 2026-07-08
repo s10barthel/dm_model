@@ -130,6 +130,12 @@ class ReturnTypeValidationTests(unittest.TestCase):
         self.assertEqual(project_config.parse_return_type("next_3_skip1"), ("next", 3, True))
         self.assertEqual(project_config.parse_return_type("disc_0.5_skip1"), ("disc", 0.5, True))
 
+    def test_validate_return_type_accepts_disc_max_variants(self) -> None:
+        self.assertEqual(project_config.validate_return_type("disc_max_0.9"), "disc_max_0.9")
+        self.assertEqual(project_config.validate_return_type("disc_max_0.5_skip1"), "disc_max_0.5_skip1")
+        self.assertEqual(project_config.parse_return_type("disc_max_0.9"), ("disc_max", 0.9, False))
+        self.assertEqual(project_config.parse_return_type("disc_max_0.5_skip1"), ("disc_max", 0.5, True))
+
     def test_validate_return_type_rejects_invalid_in_variant(self) -> None:
         with self.assertRaises(ValueError):
             project_config.validate_return_type("in_0")
@@ -146,6 +152,12 @@ class ReturnTypeValidationTests(unittest.TestCase):
                 project_config.validate_return_type_for_target_family("in_3", target_family=target_family)
             self.assertIn("only supported", str(exc.exception))
 
+    def test_validate_return_type_for_target_family_rejects_goal_and_xg_disc_max(self) -> None:
+        for target_family in ["goal", "xg"]:
+            with self.assertRaises(ValueError) as exc:
+                project_config.validate_return_type_for_target_family("disc_max_0.5", target_family=target_family)
+            self.assertIn("only supported", str(exc.exception))
+
     def test_validate_return_type_for_target_family_accepts_xt_and_goal_distance(self) -> None:
         self.assertEqual(
             project_config.validate_return_type_for_target_family("in_3", target_family="xt"),
@@ -155,6 +167,13 @@ class ReturnTypeValidationTests(unittest.TestCase):
             project_config.validate_return_type_for_target_family("in_3", target_family="goal_distance"),
             "in_3",
         )
+
+    def test_validate_return_type_for_target_family_accepts_soft_disc_max(self) -> None:
+        for target_family in ["xt", "goal_distance", "epv"]:
+            self.assertEqual(
+                project_config.validate_return_type_for_target_family("disc_max_0.5", target_family=target_family),
+                "disc_max_0.5",
+            )
 
     def test_resolve_effective_return_type_rejects_invalid_in_state_target_family(self) -> None:
         with self.assertRaises(ValueError):
@@ -167,6 +186,7 @@ class ReturnTypeValidationTests(unittest.TestCase):
             (run_root / "action_labels_in_3").mkdir()
             (run_root / "action_labels_next_5_skip1_angle_only").mkdir()
             (run_root / "action_labels_disc_0.5_skip1_model").mkdir()
+            (run_root / "action_labels_disc_max_0.5_skip1_model").mkdir()
 
             with (
                 patch.object(project_config, "load_feature_run_metadata", return_value={}),
@@ -174,7 +194,7 @@ class ReturnTypeValidationTests(unittest.TestCase):
             ):
                 return_types = project_config.infer_feature_run_return_types("feature_run")
 
-        self.assertEqual(return_types, ["disc_0.5_skip1", "in_3", "next_5_skip1"])
+        self.assertEqual(return_types, ["disc_0.5_skip1", "disc_max_0.5_skip1", "in_3", "next_5_skip1"])
 
 
 class InStateLabelingTests(unittest.TestCase):
@@ -315,6 +335,53 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_epv"]), expected_conceding)
 
+    def test_discounted_xt_returns_max_aggregation_uses_best_discounted_value(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "home_1", 0.70),
+                ("pass", "away_1", 0.80),
+                ("pass", "away_1", 0.30),
+            ]
+        )
+
+        labeled = utils.label_discounted_xt_returns(events, gamma=0.5, aggregation="max")
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.35)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.20)
+
+    def test_discounted_soft_value_max_aggregation_applies_to_goal_distance_and_epv(self) -> None:
+        goal_distance_labeled = utils.label_discounted_goal_distance_returns(
+            make_goal_distance_events(
+                [
+                    ("pass", "home_1", 0.10),
+                    ("pass", "home_1", 0.20),
+                    ("pass", "home_1", 0.70),
+                    ("pass", "away_1", 0.80),
+                ]
+            ),
+            gamma=0.5,
+            aggregation="max",
+        )
+        epv_labeled = utils.label_discounted_epv_returns(
+            make_epv_events(
+                [
+                    ("pass", "home_1", 0.10),
+                    ("pass", "home_1", 0.20),
+                    ("pass", "home_1", 0.70),
+                    ("pass", "away_1", 0.80),
+                ]
+            ),
+            gamma=0.5,
+            aggregation="max",
+        )
+
+        self.assertAlmostEqual(float(goal_distance_labeled.at[0, "scores_goal_distance"]), 0.35)
+        self.assertAlmostEqual(float(goal_distance_labeled.at[0, "concedes_goal_distance"]), 0.20)
+        self.assertAlmostEqual(float(epv_labeled.at[0, "scores_epv"]), 0.35)
+        self.assertAlmostEqual(float(epv_labeled.at[0, "concedes_epv"]), 0.20)
+
     def test_label_future_max_value_skip1_matches_next_3_example(self) -> None:
         events = make_xt_events(
             [
@@ -351,6 +418,22 @@ class InStateLabelingTests(unittest.TestCase):
         expected_conceding = 1 - (1 - 0.5**2 * 0.10)
         self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_scoring)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), expected_conceding)
+
+    def test_label_discounted_future_max_value_skip1_skips_first_non_shot_without_consuming_rank(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.10),
+                ("pass", "home_1", 0.20),
+                ("pass", "home_1", 0.70),
+                ("pass", "home_1", 0.20),
+                ("pass", "away_1", 0.10),
+            ]
+        )
+
+        labeled = utils.label_discounted_xt_returns(events, gamma=0.5, skip_first=True, aggregation="max")
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.70)
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.025)
 
     def test_discounted_future_probability_value_clips_out_of_range_values(self) -> None:
         events = make_xt_events(
@@ -459,6 +542,47 @@ class OutcomeTargetSelectionTests(unittest.TestCase):
 
 
 class WrapperValidationTests(unittest.TestCase):
+    def test_train_wrapper_accepts_xt_disc_max_return_type(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_max_0.5"]),
+        ):
+            args = train_wrapper.parse_args(
+                [
+                    "--feature-run-id",
+                    "feature_run",
+                    "--target-family",
+                    "xt",
+                    "--return_type",
+                    "disc_max_0.5",
+                    "--intended-receiver-mode",
+                    "original",
+                ]
+            )
+
+        self.assertEqual(args.return_type, "disc_max_0.5")
+
+    def test_train_wrapper_rejects_xg_disc_max_return_type(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original", "angle_only"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_max_0.5"]),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "xg",
+                        "--return_type",
+                        "disc_max_0.5",
+                        "--intended-receiver-mode",
+                        "original",
+                    ]
+                )
+
     def test_train_wrapper_accepts_xt_in_state_return_type(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),

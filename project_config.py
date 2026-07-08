@@ -536,6 +536,15 @@ def validate_return_type(return_type: str) -> str:
     skip_first = value.endswith("_skip1")
     core_value = value[:-6] if skip_first else value
 
+    if core_value.startswith("disc_max_"):
+        try:
+            gamma = float(core_value.split("_", 2)[2])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Invalid discounted max return type: {return_type!r}.") from exc
+        if not (0.0 < gamma <= 1.0):
+            raise ValueError(f"Discount factor must satisfy 0 < gamma <= 1, got {gamma}.")
+        return value
+
     if core_value.startswith("disc_"):
         try:
             gamma = float(core_value.split("_", 1)[1])
@@ -567,7 +576,7 @@ def validate_return_type(return_type: str) -> str:
 
     raise ValueError(
         f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
-        "next_<N>, next_<N>_skip1, or in_<N>."
+        "disc_max_<gamma>, disc_max_<gamma>_skip1, next_<N>, next_<N>_skip1, or in_<N>."
     )
 
 
@@ -585,6 +594,10 @@ def validate_return_type_for_target_family(
 
     kind, _, _ = parse_return_type(normalized)
     if kind == "in" and family not in {"xt", "goal_distance", "epv"}:
+        raise ValueError(
+            f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
+        )
+    if kind == "disc_max" and family not in {"xt", "goal_distance", "epv"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
         )
@@ -667,6 +680,8 @@ def parse_return_type(return_type: str) -> tuple[str, float | int, bool]:
     value = validate_return_type(return_type)
     skip_first = value.endswith("_skip1")
     core_value = value[:-6] if skip_first else value
+    if core_value.startswith("disc_max_"):
+        return "disc_max", float(core_value.split("_", 2)[2]), skip_first
     kind, raw = core_value.split("_", 1)
     return kind, float(raw) if kind == "disc" else int(raw), skip_first
 

@@ -77,6 +77,7 @@ X_PASS_VERSION_NOISE_KERNEL = "noise-kernel"
 X_PASS_VERSION_DEFAULT = "top10"
 XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3", "v4"}
 PHYSICAL_XPASS_DEFAULT_V4_POWER = 2.0
+PHYSICAL_XPASS_DEFAULT_V4_ZERO = 0.8
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
@@ -865,6 +866,14 @@ def physical_xpass_v4_power(args: Any) -> float:
     return power
 
 
+def physical_xpass_v4_zero(args: Any) -> float:
+    value = _get_arg(args, "v4_zero", None)
+    zero = PHYSICAL_XPASS_DEFAULT_V4_ZERO if value is None else float(value)
+    if not math.isfinite(zero) or zero <= 0.0:
+        raise ValueError("--v4-zero must be a positive finite float.")
+    return zero
+
+
 def parse_physical_xpass_bool(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
@@ -916,6 +925,7 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "x_pass_version": x_pass_version,
         "weight_version": physical_xpass_weight_version(args),
         "v4_power": physical_xpass_v4_power(args),
+        "v4_zero": physical_xpass_v4_zero(args),
         "v4_discount": physical_xpass_v4_discount(args),
         "ball_z_limit": physical_xpass_ball_z_limit(args),
         "source": source,
@@ -1087,6 +1097,7 @@ def physical_xpass_blend_weight_v4(
     pass_height: np.ndarray | torch.Tensor | float,
     *,
     power: float = PHYSICAL_XPASS_DEFAULT_V4_POWER,
+    zero_point: float = PHYSICAL_XPASS_DEFAULT_V4_ZERO,
     use_discount: bool = True,
 ) -> np.ndarray | torch.Tensor | float:
     if isinstance(pass_distance, torch.Tensor) or isinstance(pass_height, torch.Tensor):
@@ -1097,10 +1108,13 @@ def physical_xpass_blend_weight_v4(
         power = float(power)
         if not math.isfinite(power) or power <= 0.0:
             raise ValueError("--v4-power must be a positive finite float.")
+        zero_point = float(zero_point)
+        if not math.isfinite(zero_point) or zero_point <= 0.0:
+            raise ValueError("--v4-zero must be a positive finite float.")
         x = torch.clamp(distance_tensor / 100.0, min=0.0)
-        scaled = torch.pow(x / 0.8, power)
+        scaled = torch.pow(x / zero_point, power)
         raw = pass_height_tensor * torch.cos((torch.pi / 2.0) * scaled)
-        weight = torch.where(x <= 0.8, raw, torch.zeros_like(raw))
+        weight = torch.where(x <= zero_point, raw, torch.zeros_like(raw))
         return torch.clamp(weight, 0.0, 1.0)
     distance_values = np.asarray(pass_distance, dtype=float)
     pass_height_values = np.asarray(pass_height, dtype=float)
@@ -1112,10 +1126,13 @@ def physical_xpass_blend_weight_v4(
     power = float(power)
     if not math.isfinite(power) or power <= 0.0:
         raise ValueError("--v4-power must be a positive finite float.")
+    zero_point = float(zero_point)
+    if not math.isfinite(zero_point) or zero_point <= 0.0:
+        raise ValueError("--v4-zero must be a positive finite float.")
     x = np.clip(distance_values / 100.0, 0.0, None)
     weights = np.where(
-        x <= 0.8,
-        pass_height_values * np.cos((np.pi / 2.0) * np.power(x / 0.8, power)),
+        x <= zero_point,
+        pass_height_values * np.cos((np.pi / 2.0) * np.power(x / zero_point, power)),
         0.0,
     )
     weights = np.clip(weights, 0.0, 1.0)
@@ -1135,6 +1152,7 @@ def blend_physical_xpass_predictions(
     ball_z_limit: float | None = None,
     weight_version: str = "v1",
     v4_power: float = PHYSICAL_XPASS_DEFAULT_V4_POWER,
+    v4_zero: float = PHYSICAL_XPASS_DEFAULT_V4_ZERO,
     v4_discount: bool = True,
 ) -> np.ndarray | torch.Tensor | float:
     weight_version = str(weight_version or "v3").lower()
@@ -1161,7 +1179,13 @@ def blend_physical_xpass_predictions(
             weight = physical_xpass_blend_weight_v3(distance_tensor)
         elif weight_version == "v4":
             pass_height_tensor = torch.as_tensor(pass_height, dtype=torch.float32, device=model_tensor.device)
-            weight = physical_xpass_blend_weight_v4(distance_tensor, pass_height_tensor, power=v4_power, use_discount=v4_discount)
+            weight = physical_xpass_blend_weight_v4(
+                distance_tensor,
+                pass_height_tensor,
+                power=v4_power,
+                zero_point=v4_zero,
+                use_discount=v4_discount,
+            )
         else:
             weight = physical_xpass_blend_weight(distance_tensor)
         if ball_z_limit is not None:
@@ -1182,6 +1206,7 @@ def blend_physical_xpass_predictions(
             distance_values,
             np.asarray(pass_height, dtype=float),
             power=v4_power,
+            zero_point=v4_zero,
             use_discount=v4_discount,
         )
     else:

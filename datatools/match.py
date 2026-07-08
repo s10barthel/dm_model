@@ -243,6 +243,7 @@ class Match(ABC):
             )
         else:
             gamma = float(return_value)
+            soft_discount_aggregation = "max" if return_kind == "disc_max" else "probability"
             events = utils.label_discounted_goal_returns(events, gamma, skip_first=skip_first)
             events = utils.label_discounted_returns(events, gamma, skip_first=skip_first)
             events = utils.label_discounted_xt_returns(
@@ -250,18 +251,21 @@ class Match(ABC):
                 gamma=gamma,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
                 skip_first=skip_first,
+                aggregation=soft_discount_aggregation,
             )
             events = utils.label_discounted_goal_distance_returns(
                 events,
                 gamma=gamma,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
                 skip_first=skip_first,
+                aggregation=soft_discount_aggregation,
             )
             events = utils.label_discounted_epv_returns(
                 events,
                 gamma=gamma,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
                 skip_first=skip_first,
+                aggregation=soft_discount_aggregation,
             )
 
         self._cached_events_by_return_type[return_type] = events
@@ -627,7 +631,7 @@ class Match(ABC):
 
         self.actions["scores"] = self.events.loc[self.actions.index, "scores"]
         self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
-        if return_kind == "disc":
+        if return_kind in {"disc", "disc_max"}:
             self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg_disc"]
             self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg_disc"]
         else:

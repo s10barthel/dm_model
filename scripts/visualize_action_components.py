@@ -118,6 +118,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
     parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4"], default="v3", help="Physical xPass/model blend weighting version.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
+    parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
     parser.add_argument("--discount", dest="v4_discount", type=parse_physical_xpass_bool, default=None, help="For --xpass-weight v4, enable/disable the distance cosine discount. Default: true.")
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
@@ -153,6 +154,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--v4-power must be positive.")
         if args.xpass_weight != "v4":
             parser.error("--v4-power is only valid with --xpass-weight v4.")
+    if args.v4_zero is not None:
+        if not math.isfinite(args.v4_zero) or args.v4_zero <= 0:
+            parser.error("--v4-zero must be positive.")
+        if args.xpass_weight != "v4":
+            parser.error("--v4-zero is only valid with --xpass-weight v4.")
     if args.v4_discount is not None and args.xpass_weight != "v4":
         parser.error("--discount is only valid with --xpass-weight v4.")
     if args.v4_discount is None:
@@ -798,6 +804,8 @@ def main() -> None:
         pass_success_model.args["xpass_weight"] = str(getattr(args, "xpass_weight", "v3"))
         if getattr(args, "v4_power", None) is not None:
             pass_success_model.args["v4_power"] = float(args.v4_power)
+        if getattr(args, "v4_zero", None) is not None:
+            pass_success_model.args["v4_zero"] = float(args.v4_zero)
         pass_success_model.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
         pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
@@ -919,6 +927,12 @@ def main() -> None:
         "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_model is not None else None,
         "physical_xpass_v4_power": (
             physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_power"]
+            if pass_success_model is not None
+            and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
+            else None
+        ),
+        "physical_xpass_v4_zero": (
+            physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_zero"]
             if pass_success_model is not None
             and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v4"
             else None

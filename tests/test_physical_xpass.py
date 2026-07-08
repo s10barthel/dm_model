@@ -82,6 +82,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR,
     PHYSICAL_XPASS_DEFAULT_TOP_N,
     PHYSICAL_XPASS_DEFAULT_V4_POWER,
+    PHYSICAL_XPASS_DEFAULT_V4_ZERO,
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
@@ -144,6 +145,7 @@ from physical_pass_model import (
     physical_xpass_pass_height_column,
     physical_xpass_ball_z_limit,
     physical_xpass_v4_discount,
+    physical_xpass_v4_zero,
     physical_xpass_weight_version,
     physical_xpass_blend_weight_v2,
     physical_xpass_blend_weight_v3,
@@ -633,6 +635,73 @@ class PhysicalXPassTests(unittest.TestCase):
                 weight_version="v2",
             )
 
+    def test_inference_physical_xpass_blend_mask_excludes_offside_players(self) -> None:
+        probs = np.asarray([0.8, 0.0], dtype=float)
+        offside = np.asarray([False, True], dtype=bool)
+        finite_mask, missing_mask = inference._physical_xpass_blend_finite_mask(
+            xpass=np.asarray([0.2, 0.9], dtype=float),
+            pass_distance=np.asarray([20.0, 20.0], dtype=float),
+            offside=offside,
+            weight_version="v1",
+        )
+
+        self.assertEqual(finite_mask.tolist(), [True, False])
+        self.assertEqual(missing_mask.tolist(), [False, False])
+        probs[finite_mask] = np.asarray(
+            blend_physical_xpass_predictions(
+                pass_success_model=probs[finite_mask],
+                xpass=np.asarray([0.2, 0.9], dtype=float)[finite_mask],
+                pass_distance=np.asarray([20.0, 20.0], dtype=float)[finite_mask],
+                weight_version="v1",
+            ),
+            dtype=float,
+        )
+        probs[missing_mask] = np.nan
+        probs[offside] = 0.0
+
+        self.assertGreater(float(probs[0]), 0.0)
+        self.assertEqual(float(probs[1]), 0.0)
+
+    def test_inference_physical_xpass_blend_mask_ignores_offside_missing_v2_auxiliary(self) -> None:
+        finite_mask, missing_mask = inference._physical_xpass_blend_finite_mask(
+            xpass=np.asarray([0.9, 0.9], dtype=float),
+            pass_distance=np.asarray([20.0, 20.0], dtype=float),
+            offside=np.asarray([True, False], dtype=bool),
+            weight_version="v2",
+            distance_to_nearest_opponent=np.asarray([np.nan, 10.0], dtype=float),
+        )
+
+        self.assertEqual(finite_mask.tolist(), [False, True])
+        self.assertEqual(missing_mask.tolist(), [False, False])
+        with self.assertRaisesRegex(ValueError, "distance_to_nearest_opponent"):
+            inference._physical_xpass_blend_finite_mask(
+                xpass=np.asarray([0.9, 0.9], dtype=float),
+                pass_distance=np.asarray([20.0, 20.0], dtype=float),
+                offside=np.asarray([True, False], dtype=bool),
+                weight_version="v2",
+                distance_to_nearest_opponent=np.asarray([np.nan, np.nan], dtype=float),
+            )
+
+    def test_inference_physical_xpass_blend_mask_ignores_offside_missing_v4_auxiliary(self) -> None:
+        finite_mask, missing_mask = inference._physical_xpass_blend_finite_mask(
+            xpass=np.asarray([0.9, 0.9], dtype=float),
+            pass_distance=np.asarray([20.0, 20.0], dtype=float),
+            offside=np.asarray([True, False], dtype=bool),
+            weight_version="v4",
+            pass_height=np.asarray([np.nan, 0.25], dtype=float),
+        )
+
+        self.assertEqual(finite_mask.tolist(), [False, True])
+        self.assertEqual(missing_mask.tolist(), [False, False])
+        with self.assertRaisesRegex(ValueError, "pass_height"):
+            inference._physical_xpass_blend_finite_mask(
+                xpass=np.asarray([0.9, 0.9], dtype=float),
+                pass_distance=np.asarray([20.0, 20.0], dtype=float),
+                offside=np.asarray([True, False], dtype=bool),
+                weight_version="v4",
+                pass_height=np.asarray([np.nan, np.nan], dtype=float),
+            )
+
     def test_inference_physical_xpass_blend_formula_v3(self) -> None:
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v3(0.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v3(100.0)), 0.0)
@@ -654,7 +723,11 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(80.0, 1.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 1.0)), 0.0)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(40.0, 0.5)), 0.5 * math.cos((math.pi / 2.0) * 0.5**2))
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(50.0, 1.0, zero_point=1.0)), math.cos((math.pi / 2.0) * 0.5**2))
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(90.0, 1.0)), 0.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(90.0, 1.0, zero_point=1.0)), math.cos((math.pi / 2.0) * 0.9**2))
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 0.5, use_discount=False)), 0.5)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(120.0, 0.5, zero_point=0.2, use_discount=False)), 0.5)
         self.assertAlmostEqual(float(physical_xpass_blend_weight_v4(20.0, 1.4, use_discount=False)), 1.0)
         self.assertAlmostEqual(
             float(
@@ -690,9 +763,10 @@ class PhysicalXPassTests(unittest.TestCase):
                     pass_height=0.5,
                     weight_version="v4",
                     v4_power=1.0,
+                    v4_zero=1.0,
                 )
             ),
-            0.5 + (0.9 - 0.5) * 0.5 * math.cos((math.pi / 2.0) * 0.5),
+            0.5 + (0.9 - 0.5) * 0.5 * math.cos((math.pi / 2.0) * 0.4),
         )
 
     def test_inference_physical_xpass_blend_formula_v4_requires_pass_height(self) -> None:
@@ -4311,6 +4385,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(config["metric_schema_version"], PHYSICAL_XPASS_METRIC_SCHEMA_VERSION)
         self.assertEqual(config["weight_version"], "v3")
         self.assertEqual(config["v4_power"], PHYSICAL_XPASS_DEFAULT_V4_POWER)
+        self.assertEqual(config["v4_zero"], PHYSICAL_XPASS_DEFAULT_V4_ZERO)
 
     def test_inference_lookup_config_records_selected_metric_variants(self) -> None:
         default_args = make_pass_success_args(
@@ -4401,6 +4476,7 @@ class PhysicalXPassTests(unittest.TestCase):
             model_variant="gat_baseline",
             xpass_weight="v4",
             v4_power=1.5,
+            v4_zero=1.0,
             v4_discount=False,
         )
 
@@ -4409,11 +4485,16 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(physical_xpass_weight_version(make_pass_success_args()), "v3")
         self.assertEqual(physical_xpass_weight_version(v4_args), "v4")
         self.assertTrue(physical_xpass_v4_discount({}))
+        self.assertEqual(physical_xpass_v4_zero({}), PHYSICAL_XPASS_DEFAULT_V4_ZERO)
+        self.assertEqual(physical_xpass_v4_zero({"v4_zero": 1.0}), 1.0)
+        with self.assertRaises(ValueError):
+            physical_xpass_v4_zero({"v4_zero": 0.0})
         self.assertFalse(physical_xpass_v4_discount({"v4_discount": False}))
         self.assertFalse(physical_xpass_v4_discount({"discount": "false"}))
         with self.assertRaises(ValueError):
             physical_xpass_v4_discount({"discount": "maybe"})
         self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_power"], 1.5)
+        self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_zero"], 1.0)
         self.assertFalse(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_discount"])
 
     def test_inference_lookup_config_parses_ball_z_limit(self) -> None:
@@ -5429,7 +5510,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIsNone(args.feature_run_id)
         self.assertEqual(
             generate_physical_xpass.selected_runtime_datasets(args),
-            ["sportec", "skillcorner", "benchmark", "hawkeye"],
+            ["benchmark", "hawkeye", "skillcorner", "sportec"],
         )
         self.assertEqual(args.num_workers, "auto")
         self.assertEqual(args.max_auto_workers, PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
@@ -5469,7 +5550,7 @@ class PhysicalXPassTests(unittest.TestCase):
         args = generate_physical_xpass.parse_args(["--dry-run", "--no-skillcorner"])
 
         self.assertTrue(args.dry_run)
-        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["sportec", "benchmark", "hawkeye"])
+        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["benchmark", "hawkeye", "sportec"])
 
     def test_generate_physical_xpass_cli_accepts_pass_height_model_id(self) -> None:
         args = generate_physical_xpass.parse_args(
@@ -5876,7 +5957,7 @@ class PhysicalXPassTests(unittest.TestCase):
     def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
         args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])
 
-        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["sportec", "benchmark"])
+        self.assertEqual(generate_physical_xpass.selected_runtime_datasets(args), ["benchmark", "sportec"])
 
     def test_generate_physical_xpass_cli_feature_run_uses_legacy_mode(self) -> None:
         args = generate_physical_xpass.parse_args(["--feature-run-id", "feature_run"])
@@ -6187,14 +6268,32 @@ class PhysicalXPassTests(unittest.TestCase):
         with patch.object(
             sys,
             "argv",
-            ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5", "--discount", "false"],
+            [
+                "run_hawkeye.py",
+                "--use-physical-xpass",
+                "--xpass-weight",
+                "v4",
+                "--v4-power",
+                "1.5",
+                "--v4-zero",
+                "1.0",
+                "--discount",
+                "false",
+            ],
         ):
             v4_args = run_hawkeye.parse_args()
         self.assertEqual(v4_args.xpass_weight, "v4")
         self.assertEqual(v4_args.v4_power, 1.5)
+        self.assertEqual(v4_args.v4_zero, 1.0)
         self.assertFalse(v4_args.v4_discount)
 
         with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--v4-power", "1.5"]):
+            with self.assertRaises(SystemExit):
+                run_hawkeye.parse_args()
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--v4-zero", "1.0"]):
+            with self.assertRaises(SystemExit):
+                run_hawkeye.parse_args()
+        with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--xpass-weight", "v4", "--v4-zero", "0"]):
             with self.assertRaises(SystemExit):
                 run_hawkeye.parse_args()
         with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--discount", "false"]):
@@ -6300,12 +6399,19 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.xpass_weight, "v2")
         self.assertEqual(args.ball_z_limit, "1.0")
 
-        v4_args = generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5", "--discount", "false"])
+        v4_args = generate_epv.parse_args(
+            ["--use-physical-xpass", "--xpass-weight", "v4", "--v4-power", "1.5", "--v4-zero", "1.0", "--discount", "false"]
+        )
         self.assertEqual(v4_args.xpass_weight, "v4")
         self.assertEqual(v4_args.v4_power, 1.5)
+        self.assertEqual(v4_args.v4_zero, 1.0)
         self.assertFalse(v4_args.v4_discount)
         with self.assertRaises(SystemExit):
             generate_epv.parse_args(["--use-physical-xpass", "--v4-power", "1.5"])
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--v4-zero", "1.0"])
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-zero", "0"])
         with self.assertRaises(SystemExit):
             generate_epv.parse_args(["--use-physical-xpass", "--discount", "false"])
         self.assertEqual(args.physical_cache_dir, "runtime_cache")

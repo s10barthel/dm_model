@@ -1601,7 +1601,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Way of defining future returns. Repeat the flag to generate multiple return types in one run, "
-            "including disc_<gamma>_skip1, next_<N>_skip1, and in_<N> for xt/goal_distance/epv training."
+            "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], next_<N>_skip1, "
+            "and in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")

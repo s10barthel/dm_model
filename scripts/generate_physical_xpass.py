@@ -1976,14 +1976,14 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
 
 def selected_runtime_datasets(args: argparse.Namespace) -> list[str]:
     selected = []
-    if not args.no_sportec:
-        selected.append("sportec")
-    if not args.no_skillcorner:
-        selected.append("skillcorner")
     if not args.no_benchmark:
         selected.append("benchmark")
     if not args.no_hawkeye:
         selected.append("hawkeye")
+    if not args.no_skillcorner:
+        selected.append("skillcorner")
+    if not args.no_sportec:
+        selected.append("sportec")
     return selected
 
 

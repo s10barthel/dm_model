@@ -47,6 +47,7 @@ from physical_pass_model import (
     physical_xpass_metric_columns,
     physical_xpass_v4_discount,
     physical_xpass_v4_power,
+    physical_xpass_v4_zero,
     physical_xpass_weight_version,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
@@ -91,6 +92,49 @@ def _renormalize_probabilities(probs: np.ndarray) -> np.ndarray:
     if total > 0:
         return np.asarray(probs, dtype=float) / total
     return np.asarray(probs, dtype=float)
+
+
+def _physical_xpass_blend_finite_mask(
+    *,
+    xpass: np.ndarray,
+    pass_distance: np.ndarray,
+    offside: np.ndarray,
+    weight_version: str,
+    distance_to_nearest_opponent: np.ndarray | None = None,
+    pass_height: np.ndarray | None = None,
+    ball_z: np.ndarray | None = None,
+    ball_z_limit: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    xpass_values = np.asarray(xpass, dtype=float)
+    distance_values = np.asarray(pass_distance, dtype=float)
+    offside_values = np.asarray(offside, dtype=bool)
+    if offside_values.shape != xpass_values.shape:
+        offside_values = np.zeros(xpass_values.shape, dtype=bool)
+    blend_eligible = ~offside_values
+
+    if weight_version == "v2":
+        nearest_values = np.asarray(distance_to_nearest_opponent, dtype=float)
+        missing_nearest_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(nearest_values)
+        if bool(missing_nearest_mask.any()):
+            raise ValueError("Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player.")
+        finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(nearest_values)
+    elif weight_version == "v4":
+        pass_height_values = np.asarray(pass_height, dtype=float)
+        missing_pass_height_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(pass_height_values)
+        if bool(missing_pass_height_mask.any()):
+            raise ValueError("Physical xPass weight v4 requires finite cached pass_height for every blended player.")
+        finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(pass_height_values)
+    else:
+        finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values)
+
+    if ball_z_limit is not None:
+        ball_z_values = np.asarray(ball_z, dtype=float)
+        missing_ball_z_mask = finite_mask & ~np.isfinite(ball_z_values)
+        if bool(missing_ball_z_mask.any()):
+            raise ValueError("Physical xPass ball_z_limit requires finite cached ball_z for every blended player.")
+        finite_mask = finite_mask & np.isfinite(ball_z_values)
+
+    return finite_mask, blend_eligible & ~finite_mask
 
 
 def _uses_offside_rule_mask(model: GNN, node_dim: int) -> bool:
@@ -759,6 +803,7 @@ def inference_gnn(
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                 weight_version = physical_xpass_weight_version(model.args)
                 v4_power = physical_xpass_v4_power(model.args)
+                v4_zero = physical_xpass_v4_zero(model.args)
                 v4_discount = physical_xpass_v4_discount(model.args)
                 ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
@@ -795,35 +840,28 @@ def inference_gnn(
                             "Physical xPass weight v2 tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, distance_to_nearest_opponent={None if nearest_i is None else nearest_i.shape}."
                         )
-                    missing_nearest_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & ~np.isfinite(nearest_i)
-                    if bool(missing_nearest_mask.any()):
-                        raise ValueError(
-                            "Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player."
-                        )
-                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(nearest_i)
                 elif weight_version == "v4":
                     if pass_height_i is None or pass_height_i.shape[0] != probs_i.shape[0]:
                         raise ValueError(
                             "Physical xPass weight v4 tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, pass_height={None if pass_height_i is None else pass_height_i.shape}."
                         )
-                    missing_pass_height_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & ~np.isfinite(pass_height_i)
-                    if bool(missing_pass_height_mask.any()):
-                        raise ValueError("Physical xPass weight v4 requires finite cached pass_height for every blended player.")
-                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i) & np.isfinite(pass_height_i)
-                else:
-                    finite_mask = np.isfinite(xpass_i) & np.isfinite(distance_i)
                 if ball_z_limit is not None:
                     if ball_z_i is None or ball_z_i.shape[0] != probs_i.shape[0]:
                         raise ValueError(
                             "Physical xPass ball_z_limit tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, ball_z={None if ball_z_i is None else ball_z_i.shape}."
                         )
-                    missing_ball_z_mask = finite_mask & ~np.isfinite(ball_z_i)
-                    if bool(missing_ball_z_mask.any()):
-                        raise ValueError("Physical xPass ball_z_limit requires finite cached ball_z for every blended player.")
-                    finite_mask = finite_mask & np.isfinite(ball_z_i)
-                missing_physical_mask = ~finite_mask
+                finite_mask, missing_physical_mask = _physical_xpass_blend_finite_mask(
+                    xpass=xpass_i,
+                    pass_distance=distance_i,
+                    offside=offside_i,
+                    weight_version=weight_version,
+                    distance_to_nearest_opponent=nearest_i,
+                    pass_height=pass_height_i,
+                    ball_z=ball_z_i,
+                    ball_z_limit=ball_z_limit,
+                )
                 if finite_mask.any():
                     blend_kwargs = {}
                     if weight_version == "v2":
@@ -831,6 +869,7 @@ def inference_gnn(
                     if weight_version == "v4":
                         blend_kwargs["pass_height"] = pass_height_i[finite_mask]
                         blend_kwargs["v4_power"] = v4_power
+                        blend_kwargs["v4_zero"] = v4_zero
                         blend_kwargs["v4_discount"] = v4_discount
                     if ball_z_limit is not None:
                         blend_kwargs["ball_z"] = ball_z_i[finite_mask]
@@ -847,6 +886,8 @@ def inference_gnn(
                     )
                     probs_i[finite_mask] = blended_i
                 probs_i[missing_physical_mask] = np.nan
+            if probs_i.shape[0] == offside_i.shape[0]:
+                probs_i[offside_i] = 0.0
 
         if model.args["task"] in two_case_tasks:
             probs_i0 = dict(zip(player_indices_i, probs_i[:, 0].tolist()))

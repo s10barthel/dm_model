@@ -567,15 +567,71 @@ def label_discounted_future_max_value(
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
 ) -> pd.DataFrame:
-    return label_discounted_future_sum_value(
-        events,
-        value_col=value_col,
-        scores_col=scores_col,
-        concedes_col=concedes_col,
-        gamma=gamma,
-        eligible_types=eligible_types,
-        skip_first=skip_first,
+    events = events.copy()
+    eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
+
+    if value_col not in events.columns:
+        events[value_col] = np.nan
+    events[value_col] = pd.to_numeric(events[value_col], errors="coerce")
+    events[scores_col] = 0.0
+    events[concedes_col] = 0.0
+
+    if events.empty or "spadl_type" not in events.columns or "object_id" not in events.columns:
+        return events
+
+    expected_goal_source = events["expected_goal"] if "expected_goal" in events.columns else pd.Series(0.0, index=events.index)
+    expected_goals = pd.to_numeric(expected_goal_source, errors="coerce").fillna(0)
+    teams = events["object_id"].astype(str).str[:4]
+    goal_array = ((expected_goals > 0) & events["success"].fillna(False).astype(bool)).to_numpy(dtype=bool)
+    team_values = teams.to_numpy(dtype=object)
+    value_array = events[value_col].to_numpy(dtype=float)
+    shot_array = events["spadl_type"].eq("shot").to_numpy(dtype=bool)
+    eligible_array = (
+        events["spadl_type"].isin(eligible_types).to_numpy(dtype=bool)
+        & np.isfinite(value_array)
+        & np.isin(team_values, ["home", "away"])
     )
+
+    score_loc = events.columns.get_loc(scores_col)
+    concede_loc = events.columns.get_loc(concedes_col)
+    period_loc = events.columns.get_loc("period_id")
+
+    for row_pos in range(len(events)):
+        period_i = events.iat[row_pos, period_loc]
+        team_i = team_values[row_pos]
+        best_score = 0.0
+        best_concede = 0.0
+        eligible_rank = 0
+        first_eligible_seen = False
+
+        if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
+            events.iat[row_pos, score_loc] = float(best_score)
+            events.iat[row_pos, concede_loc] = float(best_concede)
+            continue
+
+        for future_pos in range(row_pos + 1, len(events)):
+            if eligible_array[future_pos]:
+                skip_current = False
+                if not first_eligible_seen:
+                    first_eligible_seen = True
+                    skip_current = skip_first and not shot_array[future_pos]
+
+                if not skip_current:
+                    weight = gamma ** eligible_rank
+                    candidate = weight * value_array[future_pos]
+                    if team_values[future_pos] == team_i:
+                        best_score = max(best_score, candidate)
+                    else:
+                        best_concede = max(best_concede, candidate)
+                    eligible_rank += 1
+
+            if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
+                break
+
+        events.iat[row_pos, score_loc] = float(best_score)
+        events.iat[row_pos, concede_loc] = float(best_concede)
+
+    return events
 
 
 def label_xt_returns(
@@ -600,7 +656,20 @@ def label_discounted_xt_returns(
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
+    aggregation: str = "probability",
 ) -> pd.DataFrame:
+    if aggregation == "max":
+        return label_discounted_future_max_value(
+            events,
+            value_col="xT",
+            scores_col="scores_xT",
+            concedes_col="concedes_xT",
+            gamma=gamma,
+            eligible_types=eligible_types,
+            skip_first=skip_first,
+        )
+    if aggregation != "probability":
+        raise ValueError(f"Unsupported discounted xT aggregation: {aggregation!r}.")
     return label_discounted_future_probability_value(
         events,
         value_col="xT",
@@ -681,7 +750,20 @@ def label_discounted_epv_returns(
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
+    aggregation: str = "probability",
 ) -> pd.DataFrame:
+    if aggregation == "max":
+        return label_discounted_future_max_value(
+            events,
+            value_col="epv",
+            scores_col="scores_epv",
+            concedes_col="concedes_epv",
+            gamma=gamma,
+            eligible_types=eligible_types,
+            skip_first=skip_first,
+        )
+    if aggregation != "probability":
+        raise ValueError(f"Unsupported discounted EPV aggregation: {aggregation!r}.")
     return label_discounted_future_probability_value(
         events,
         value_col="epv",
@@ -713,7 +795,20 @@ def label_discounted_goal_distance_returns(
     gamma: float = 0.95,
     eligible_types: tuple[str, ...] | None = None,
     skip_first: bool = False,
+    aggregation: str = "probability",
 ) -> pd.DataFrame:
+    if aggregation == "max":
+        return label_discounted_future_max_value(
+            events,
+            value_col="goal_distance",
+            scores_col="scores_goal_distance",
+            concedes_col="concedes_goal_distance",
+            gamma=gamma,
+            eligible_types=eligible_types,
+            skip_first=skip_first,
+        )
+    if aggregation != "probability":
+        raise ValueError(f"Unsupported discounted goal-distance aggregation: {aggregation!r}.")
     return label_discounted_future_probability_value(
         events,
         value_col="goal_distance",

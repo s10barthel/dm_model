@@ -434,7 +434,7 @@ Useful options:
 - `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - `--pass-height` with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
 - `--num-workers <N|auto>` to parallelize matches inside each `datatools/graph_feature.py` subprocess; default: `1`
@@ -816,10 +816,12 @@ The logged metric names remain `f1`, `roc_auc`, and `brier`. For non-goal target
 
 ### `--return_type` Applies To All Outcome Target Families
 
-`--return_type` accepts five resolved forms overall:
+`--return_type` accepts seven resolved forms overall:
 
 - `disc_<gamma>` uses discounted returns
 - `disc_<gamma>_skip1` uses discounted returns but skips the first rated future non-shot action
+- `disc_max_<gamma>` uses the maximum discounted future eligible value and is supported only for `xt`, `goal_distance`, and `epv`
+- `disc_max_<gamma>_skip1` uses the same discounted max scan, but skips the first rated future non-shot action
 - `next_<N>` uses non-discounted lookahead returns
 - `next_<N>_skip1` uses non-discounted lookahead returns but skips the first rated future non-shot action
 - `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt`, `goal_distance`, and `epv`
@@ -851,6 +853,8 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `in_<N>` uses the xT value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_xT` / `concedes_xT` is non-zero
   - `disc_<gamma>` combines future eligible xT values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
   - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
+  - `disc_max_<gamma>` uses the maximum `gamma^k * xT` over future eligible actions separately for teammate and opponent actions, where the first contributing eligible action has `k=0`
+  - `disc_max_<gamma>_skip1` skips the first future eligible non-shot action without consuming discount rank
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - goal_distance:
   - raw `goal_distance` is a bounded proximity-to-goal score in `[0.0, 1.0]`, using `1.0 * (1 - raw_distance / sqrt(105^2 + 34^2))`
@@ -859,6 +863,8 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `in_<N>` uses the goal-distance value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_goal_distance` / `concedes_goal_distance` is non-zero
   - `disc_<gamma>` combines future eligible goal-distance values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
   - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
+  - `disc_max_<gamma>` uses the maximum `gamma^k * goal_distance` over future eligible actions separately for teammate and opponent actions, where the first contributing eligible action has `k=0`
+  - `disc_max_<gamma>_skip1` skips the first future eligible non-shot action without consuming discount rank
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - EPV:
   - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
@@ -866,6 +872,8 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `in_<N>` uses the EPV value at the Nth future eligible `pass` / `cross` / `shot` action, unless an earlier eligible `shot` occurs first; only one of `scores_epv` / `concedes_epv` is non-zero
   - `disc_<gamma>` combines future eligible EPV values with xG-style probability-complement aggregation; the first considered post-action/reception row has exponent `0`, and later rows use raw event offset from that anchor
   - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
+  - `disc_max_<gamma>` uses the maximum `gamma^k * EPV` over future eligible actions separately for teammate and opponent actions, where the first contributing eligible action has `k=0`
+  - `disc_max_<gamma>_skip1` skips the first future eligible non-shot action without consuming discount rank
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 
 ### Where to switch targets
@@ -1026,11 +1034,11 @@ pass_success = (1 - w) * physical_xpass + w * pass_success_model
 
 ```text
 x = pass_distance / 100
-w = pass_height * cos((pi / 2) * (x / 0.8)^n)  if x <= 0.8, otherwise 0
+w = pass_height * cos((pi / 2) * (x / z)^n)  if x <= z, otherwise 0
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-The default is `n=2`; override it with `--v4-power <float>` when using `--xpass-weight v4`. Add `--discount false` to disable the cosine distance discount and use `w = pass_height` directly.
+The defaults are `n=2` and `z=0.8`; override them with `--v4-power <float>` and `--v4-zero <float>` when using `--xpass-weight v4`. Add `--discount false` to disable the cosine distance discount and use `w = pass_height` directly.
 
 `--xpass-weight v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
 
@@ -1106,6 +1114,7 @@ Only the `pass_success` low-level training command receives physical xPass flags
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values and `v4` requires cached `<player_id>__pass_height` values.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--ball-z-limit <float|none>`: with a numeric limit, use 100% pass-success model weight when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: override the runtime physical xPass cache directory; default is `data/runtime_physical_xpass/<dataset>`.
@@ -1203,7 +1212,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/main.py`
 
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when feature generation or training is enabled.
+- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
@@ -1259,6 +1268,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--ball-z-limit <float|none>`: with a numeric limit, use the pass-success model only when cached `ball_z` exceeds the limit. Default: `none`.
 - `--physical-cache-dir <path>`: Sportec runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
@@ -1309,7 +1319,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `in_N` is valid only for `xt`, `goal_distance`, and `epv`.
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
@@ -1323,7 +1333,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/train_relevant_models.py`
 
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
-- `--return_type <disc_gamma|disc_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `in_N` is valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
+- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional feature run containing compatible `action_labels_next_10*` labels for canonical goal-event diagnostics when the selected run lacks embedded `goal next_10` diagnostic columns.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
@@ -1390,6 +1400,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
@@ -1420,6 +1431,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
@@ -1446,6 +1458,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
@@ -1473,6 +1486,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
@@ -1499,6 +1513,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override for inference/visualization. Default: `data/runtime_physical_xpass/sportec`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; visualization does not compute xPass rows.
@@ -1579,6 +1594,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
+- `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; this script does not compute xPass rows.
