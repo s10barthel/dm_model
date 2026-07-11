@@ -404,8 +404,10 @@ python scripts/generate_relevant_features.py --run-id feature_20260414T123456_ab
 python scripts/generate_relevant_features.py --return_type disc_0.9 --next-action-conditions-off
 python scripts/generate_relevant_features.py --return_type disc_0.9 --num-workers auto --worker-thread-limit 1
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --return_type disc_max_0.9 --in-place
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv --overwrite-feature-run
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height
 ```
 
@@ -418,7 +420,7 @@ Inputs:
 - optional sidecars from `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-Each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by copying a completed base run and generating only newly requested return types, refreshed target labels, and/or the model intended-receiver variant. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied; replacement still creates a new derived run and regenerates only copied model-mode artifacts. Extension runs must use the same `--next-action-conditions-on/off` setting as the base run because copied graph tensors cannot change pass/cross action filtering.
+By default, each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a new derived run by default, copying a completed base run and generating only newly requested return types, refreshed target labels, and/or the model intended-receiver variant. Use this default when you want immutable experiment artifacts. `--in-place` is an explicit mutating mode for additive extensions only: it writes newly requested return-type directories and/or a missing model intended-receiver variant directly into the base run and records the attempt in `metadata.json`. `--overwrite-feature-run` is an explicit mutating mode for regenerative extensions such as target refreshes, pass-height backfills, or intended-receiver model replacement; it can overwrite existing label/model-mode artifacts in the base run. Mutating modes do not accept `--run-id` and do not change `latest.json` because the run id is unchanged. If the base run already contains `model` artifacts, a different `--intended-receiver-model-id` is rejected unless `--replace-intended-receiver-model` is supplied. Extension runs must use the same `--next-action-conditions-on/off` setting as the base run because copied graph tensors cannot change pass/cross action filtering.
 
 Behavior:
 
@@ -432,6 +434,8 @@ Useful options:
 
 - `--run-id <feature_run_id>` to pin the created run id instead of auto-generating one
 - `--extend-feature-run-id <existing_feature_run_id>` to create a new derived run from an existing completed run without rebuilding shared graph tensors
+- `--in-place` with `--extend-feature-run-id` to add only missing return-type or model-mode artifacts directly to the existing run; incompatible with `--run-id`, target refreshes, pass-height refreshes, and model replacement
+- `--overwrite-feature-run` with `--extend-feature-run-id` to intentionally mutate the existing run for target refreshes, pass-height backfills, or model-mode replacement; incompatible with `--run-id`
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - `--pass-height` with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
@@ -477,7 +481,7 @@ An `--extend-feature-run-id` run with both new `--return_type` values and `--int
 5. **test split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
 6. **train split with model mode intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
 
-An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars. `--pass-height` uses the same labels-only extension shape to backfill `pass_max_ball_z` and `pass_high` into older feature runs.
+An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars. `--pass-height` uses the same labels-only extension shape to backfill `pass_max_ball_z` and `pass_high` into older feature runs. With `--overwrite-feature-run`, those regenerated labels are written into the base run instead of a copied derived run.
 
 This writes, inside the run root:
 
@@ -1323,6 +1327,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
+- `--in-place`: with `--extend-feature-run-id`, mutate the existing feature run only for additive extensions that add missing return types or a missing `model` intended-receiver variant. Incompatible with `--run-id`, target refreshes, pass-height refreshes, and model replacement.
+- `--overwrite-feature-run`: with `--extend-feature-run-id`, mutate the existing feature run for regenerative extensions such as target refreshes, pass-height backfills, or intended-receiver model replacement. Incompatible with `--run-id`.
 - `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
 - `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.

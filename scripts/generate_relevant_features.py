@@ -37,6 +37,9 @@ from project_config import (
 EXPECTED_GRAPH_SCHEMA = {"node_in_dim": infer_node_feature_dim(extend=True), "edge_in_dim": 4, "add_v_edge_features": True}
 EXPECTED_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
 REFRESH_TARGET_FAMILIES = ("xt", "goal_distance", "epv")
+EXTENSION_MODE_DERIVED = "derived"
+EXTENSION_MODE_IN_PLACE = "in_place"
+EXTENSION_MODE_OVERWRITE_FEATURE_RUN = "overwrite_feature_run"
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,8 @@ class FeatureGenerationStep:
 class FeatureExtensionPlan:
     base_run_id: str
     output_run_id: str
+    target_run_id: str
+    extension_mode: str
     base_metadata: dict[str, Any]
     base_return_types: list[str]
     final_return_types: list[str]
@@ -123,6 +128,25 @@ def parse_args() -> argparse.Namespace:
             "new derived run and regenerate only model-mode artifacts with --intended-receiver-model-id."
         ),
     )
+    extension_mode_group = parser.add_mutually_exclusive_group()
+    extension_mode_group.add_argument(
+        "--in-place",
+        action="store_true",
+        default=False,
+        help=(
+            "With --extend-feature-run-id, add only missing return-type or intended-receiver-mode artifacts "
+            "directly to the existing feature run instead of copying it."
+        ),
+    )
+    extension_mode_group.add_argument(
+        "--overwrite-feature-run",
+        action="store_true",
+        default=False,
+        help=(
+            "With --extend-feature-run-id, mutate the existing feature run and allow copied labels/model-mode "
+            "artifacts to be overwritten or regenerated."
+        ),
+    )
     next_action_group = parser.add_mutually_exclusive_group()
     next_action_group.add_argument(
         "--next-action-conditions-on",
@@ -155,6 +179,18 @@ def parse_args() -> argparse.Namespace:
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
+    if (args.in_place or args.overwrite_feature_run) and not args.extend_feature_run_id:
+        parser.error("--in-place and --overwrite-feature-run require --extend-feature-run-id.")
+    if (args.in_place or args.overwrite_feature_run) and args.run_id:
+        parser.error("--run-id cannot be used with --in-place or --overwrite-feature-run.")
+    if args.in_place and args.refresh_target_families:
+        parser.error("--in-place only supports additive extensions; use --overwrite-feature-run for target refreshes.")
+    if args.in_place and args.pass_height:
+        parser.error("--in-place only supports additive extensions; use --overwrite-feature-run for pass-height refreshes.")
+    if args.in_place and args.replace_intended_receiver_model:
+        parser.error(
+            "--in-place only supports additive extensions; use --overwrite-feature-run to replace model-mode artifacts."
+        )
     if args.worker_thread_limit < 1:
         parser.error("--worker-thread-limit must be a positive integer.")
     return args
@@ -681,16 +717,43 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             "--refresh-target-family / --pass-height."
         )
 
-    output_run_id = str(args.run_id) if args.run_id else generate_run_id("feature")
-    if output_run_id == base_run_id:
-        raise ValueError("--run-id for an extension must name a new feature run, not the base run.")
-    output_root = get_feature_run_root(output_run_id)
-    if output_root.exists():
-        raise FileExistsError(f"Derived feature run {output_run_id} already exists at {output_root}.")
+    in_place = bool(getattr(args, "in_place", False))
+    overwrite_feature_run = bool(getattr(args, "overwrite_feature_run", False))
+    if in_place and overwrite_feature_run:
+        raise ValueError("--in-place and --overwrite-feature-run are mutually exclusive.")
+    if (in_place or overwrite_feature_run) and getattr(args, "run_id", None):
+        raise ValueError("--run-id cannot be used with --in-place or --overwrite-feature-run.")
+
+    extension_mode = EXTENSION_MODE_DERIVED
+    if in_place:
+        extension_mode = EXTENSION_MODE_IN_PLACE
+    elif overwrite_feature_run:
+        extension_mode = EXTENSION_MODE_OVERWRITE_FEATURE_RUN
+
+    is_regenerative = bool(
+        refresh_target_families or refresh_pass_height_labels or regenerate_model_mode or replace_model
+    )
+    if extension_mode == EXTENSION_MODE_IN_PLACE and is_regenerative:
+        raise ValueError(
+            "--in-place only supports additive extensions. Use --overwrite-feature-run for target refreshes, "
+            "pass-height refreshes, or intended-receiver model replacement."
+        )
+
+    if extension_mode == EXTENSION_MODE_DERIVED:
+        output_run_id = str(args.run_id) if args.run_id else generate_run_id("feature")
+        if output_run_id == base_run_id:
+            raise ValueError("--run-id for an extension must name a new feature run, not the base run.")
+        output_root = get_feature_run_root(output_run_id)
+        if output_root.exists():
+            raise FileExistsError(f"Derived feature run {output_run_id} already exists at {output_root}.")
+    else:
+        output_run_id = base_run_id
+
+    target_run_id = output_run_id
 
     command_steps = extension_commands_for_plan(
         python=python,
-        output_run_id=output_run_id,
+        output_run_id=target_run_id,
         base_return_types=base_return_types,
         final_return_types=final_return_types,
         added_return_types=added_return_types,
@@ -708,6 +771,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     return FeatureExtensionPlan(
         base_run_id=base_run_id,
         output_run_id=output_run_id,
+        target_run_id=target_run_id,
+        extension_mode=extension_mode,
         base_metadata=copy.deepcopy(base_metadata),
         base_return_types=base_return_types,
         final_return_types=final_return_types,
@@ -764,6 +829,105 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
     return metadata
 
 
+def extension_history_entry(
+    args: argparse.Namespace,
+    plan: FeatureExtensionPlan,
+    status: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "mode": plan.extension_mode,
+        "status": status,
+        "command": subprocess.list2cmdline(sys.argv),
+        "requested_return_types": args.requested_return_types,
+        "added_return_types": plan.added_return_types,
+        "added_intended_receiver_modes": plan.added_intended_receiver_modes,
+        "refresh_target_families": plan.refresh_target_families,
+        "refresh_pass_height_labels": plan.refresh_pass_height_labels,
+        "refreshed_return_types": plan.refreshed_return_types,
+        "refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
+        "replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
+        "replaced_intended_receiver_modes": plan.replaced_intended_receiver_modes,
+        "intended_receiver_model_id": plan.intended_receiver_model_id,
+        "num_workers": str(getattr(args, "num_workers", "1")),
+        "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+        "commands": plan.commands,
+    }
+    if error:
+        entry["error"] = error
+    return entry
+
+
+def mutating_metadata(
+    args: argparse.Namespace,
+    plan: FeatureExtensionPlan,
+    status: str,
+    error: str | None = None,
+    *,
+    advertise_final_state: bool = True,
+    history_status: str | None = None,
+) -> dict[str, Any]:
+    metadata = copy.deepcopy(plan.base_metadata)
+    history = metadata.get("extension_history")
+    if not isinstance(history, list):
+        history = []
+    history.append(extension_history_entry(args, plan, history_status or status, error=error))
+
+    return_types = plan.final_return_types if advertise_final_state else plan.base_return_types
+    intended_receiver_modes = (
+        plan.final_intended_receiver_modes if advertise_final_state else plan.base_intended_receiver_modes
+    )
+    intended_receiver_model_id = (
+        plan.intended_receiver_model_id
+        if advertise_final_state
+        else plan.base_metadata.get("intended_receiver_model_id")
+    )
+
+    metadata.update(
+        {
+            "run_id": plan.base_run_id,
+            "command": subprocess.list2cmdline(sys.argv),
+            "last_extension_mode": plan.extension_mode,
+            "extension_requested_return_types": args.requested_return_types,
+            "extension_added_return_types": plan.added_return_types if advertise_final_state else [],
+            "extension_added_intended_receiver_modes": (
+                plan.added_intended_receiver_modes if advertise_final_state else []
+            ),
+            "extension_refresh_target_families": plan.refresh_target_families,
+            "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
+            "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
+            "extension_refreshed_return_types": plan.refreshed_return_types if advertise_final_state else [],
+            "extension_refreshed_intended_receiver_modes": (
+                plan.refreshed_intended_receiver_modes if advertise_final_state else []
+            ),
+            "extension_replaced_intended_receiver_model_id": (
+                plan.replaced_intended_receiver_model_id if advertise_final_state else None
+            ),
+            "extension_replaced_intended_receiver_modes": (
+                plan.replaced_intended_receiver_modes if advertise_final_state else []
+            ),
+            "next_action_conditions_enabled": plan.next_action_conditions_enabled,
+            "num_workers": str(getattr(args, "num_workers", "1")),
+            "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+            "extension_commands": plan.commands,
+            "intended_receiver_modes": intended_receiver_modes,
+            "intended_receiver_model_id": intended_receiver_model_id,
+            "graph_schema": copy.deepcopy(plan.graph_schema),
+            "splits": ["train", "test"],
+            "return_types": return_types,
+            "return_type": return_types[0] if len(return_types) == 1 else None,
+            "extension_history": history,
+            "status": status,
+        }
+    )
+    if error:
+        metadata["error"] = error
+    else:
+        metadata.pop("error", None)
+    return metadata
+
+
 def copy_base_feature_run(base_run_id: str, output_run_id: str) -> Path:
     base_root = get_feature_run_root(base_run_id)
     output_root = get_feature_run_root(output_run_id)
@@ -804,20 +968,51 @@ def remove_model_mode_artifacts(output_root: Path, return_types: list[str]) -> N
 
 def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
-    output_root = copy_base_feature_run(plan.base_run_id, plan.output_run_id)
-    write_run_metadata(output_root, derived_metadata(args, plan, "in_progress"))
+    if plan.extension_mode == EXTENSION_MODE_DERIVED:
+        output_root = copy_base_feature_run(plan.base_run_id, plan.output_run_id)
+        write_run_metadata(output_root, derived_metadata(args, plan, "in_progress"))
+        try:
+            if plan.regenerate_model_mode:
+                remove_model_mode_artifacts(output_root, plan.final_return_types)
+            run_generation_steps(plan.command_steps)
+        except Exception as exc:
+            write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
+            raise
+
+        write_run_metadata(output_root, derived_metadata(args, plan, "completed"))
+        write_latest_run("feature", plan.output_run_id)
+        print(f"Derived feature run id: {plan.output_run_id}")
+        print(f"Derived from feature run id: {plan.base_run_id}")
+        return
+
+    target_root = get_feature_run_root(plan.target_run_id)
+    if plan.extension_mode == EXTENSION_MODE_OVERWRITE_FEATURE_RUN:
+        write_run_metadata(target_root, mutating_metadata(args, plan, "in_progress"))
+
     try:
         if plan.regenerate_model_mode:
-            remove_model_mode_artifacts(output_root, plan.final_return_types)
+            remove_model_mode_artifacts(target_root, plan.final_return_types)
         run_generation_steps(plan.command_steps)
     except Exception as exc:
-        write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
+        if plan.extension_mode == EXTENSION_MODE_IN_PLACE:
+            write_run_metadata(
+                target_root,
+                mutating_metadata(
+                    args,
+                    plan,
+                    "completed",
+                    error=str(exc),
+                    advertise_final_state=False,
+                    history_status="failed",
+                ),
+            )
+        else:
+            write_run_metadata(target_root, mutating_metadata(args, plan, "failed", error=str(exc)))
         raise
 
-    write_run_metadata(output_root, derived_metadata(args, plan, "completed"))
-    write_latest_run("feature", plan.output_run_id)
-    print(f"Derived feature run id: {plan.output_run_id}")
-    print(f"Derived from feature run id: {plan.base_run_id}")
+    write_run_metadata(target_root, mutating_metadata(args, plan, "completed"))
+    print(f"Updated feature run id: {plan.target_run_id}")
+    print(f"Extension mode: {plan.extension_mode}")
 
 
 def run_full_generation(args: argparse.Namespace) -> None:

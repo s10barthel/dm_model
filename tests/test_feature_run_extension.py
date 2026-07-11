@@ -40,6 +40,9 @@ def make_args(
     run_id: str | None = "derived",
     replace_model: bool = False,
     refresh_target_families: list[str] | None = None,
+    pass_height: bool = False,
+    in_place: bool = False,
+    overwrite_feature_run: bool = False,
     next_action_conditions_enabled: bool = True,
     num_workers: str = "1",
     worker_thread_limit: int = 1,
@@ -53,6 +56,9 @@ def make_args(
         intended_receiver_model_id=model_id,
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
+        pass_height=pass_height,
+        in_place=in_place,
+        overwrite_feature_run=overwrite_feature_run,
         next_action_conditions_enabled=next_action_conditions_enabled,
         num_workers=num_workers,
         worker_thread_limit=worker_thread_limit,
@@ -260,6 +266,97 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.build_plan(make_args(["next_5"], run_id="base"))
 
+    def test_in_place_targets_base_run_for_additive_extension(self) -> None:
+        plan = self.build_plan(make_args(["next_5"], run_id=None, in_place=True))
+
+        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_IN_PLACE)
+        self.assertEqual(plan.output_run_id, "base")
+        self.assertEqual(plan.target_run_id, "base")
+        self.assertTrue(all("--run-id" in command and "base" in command for command in plan.commands))
+
+    def test_in_place_rejects_run_id(self) -> None:
+        with self.assertRaises(ValueError):
+            self.build_plan(make_args(["next_5"], run_id="derived", in_place=True))
+
+    def test_in_place_rejects_refresh_pass_height_and_model_replacement(self) -> None:
+        with self.assertRaises(ValueError):
+            self.build_plan(make_args(run_id=None, in_place=True, refresh_target_families=["epv"]))
+
+        with self.assertRaises(ValueError):
+            self.build_plan(make_args(["next_5"], run_id=None, in_place=True, pass_height=True))
+
+        metadata = make_metadata(
+            modes=["original", "angle_only", "model"],
+            model_id="success_intent/old",
+        )
+        with self.assertRaises(ValueError):
+            self.build_plan(
+                make_args(run_id=None, in_place=True, model_id="success_intent/new", replace_model=True),
+                metadata=metadata,
+            )
+
+    def test_overwrite_feature_run_targets_base_run_for_refresh_and_replacement(self) -> None:
+        metadata = make_metadata(
+            modes=["original", "angle_only", "model"],
+            model_id="success_intent/old",
+        )
+        plan = self.build_plan(
+            make_args(
+                run_id=None,
+                overwrite_feature_run=True,
+                model_id="success_intent/new",
+                replace_model=True,
+                refresh_target_families=["epv"],
+            ),
+            metadata=metadata,
+        )
+
+        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_OVERWRITE_FEATURE_RUN)
+        self.assertEqual(plan.output_run_id, "base")
+        self.assertEqual(plan.target_run_id, "base")
+        self.assertTrue(plan.regenerate_model_mode)
+        self.assertTrue(all("--run-id" in command and "base" in command for command in plan.commands))
+
+    def test_mutating_extension_modes_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(ValueError):
+            self.build_plan(
+                make_args(["next_5"], run_id=None, in_place=True, overwrite_feature_run=True),
+            )
+
+    def test_parse_rejects_mutating_mode_without_extension(self) -> None:
+        with patch.object(sys, "argv", ["generate_relevant_features.py", "--in-place"]):
+            with self.assertRaises(SystemExit):
+                generator.parse_args()
+
+    def test_parse_rejects_mutating_mode_with_run_id(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "generate_relevant_features.py",
+                "--extend-feature-run-id",
+                "base",
+                "--run-id",
+                "derived",
+                "--overwrite-feature-run",
+            ],
+        ):
+            with self.assertRaises(SystemExit):
+                generator.parse_args()
+
+    def test_parse_rejects_in_place_regenerative_flags(self) -> None:
+        for flag in ["--refresh-target-family", "--pass-height", "--replace-intended-receiver-model"]:
+            argv = ["generate_relevant_features.py", "--extend-feature-run-id", "base", "--in-place"]
+            if flag == "--refresh-target-family":
+                argv.extend([flag, "epv"])
+            elif flag == "--replace-intended-receiver-model":
+                argv.extend(["--intended-receiver-model-id", "success_intent/new", flag])
+            else:
+                argv.append(flag)
+            with patch.object(sys, "argv", argv):
+                with self.assertRaises(SystemExit):
+                    generator.parse_args()
+
     def test_next_action_conditions_off_propagates_to_extension_commands(self) -> None:
         metadata = make_metadata(next_action_conditions_enabled=False)
         plan = self.build_plan(
@@ -457,6 +554,100 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(run_command.call_count, 3)
             write_latest_run.assert_called_once_with("feature", "derived")
 
+    def test_in_place_extension_mutates_base_without_copy_or_latest_update(self) -> None:
+        args = make_args(["next_5"], run_id=None, in_place=True)
+        metadata = make_metadata()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            (base_root / "artifact.txt").write_text("stays", encoding="utf-8")
+            (base_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "copy_base_feature_run") as copy_base_feature_run,
+                patch.object(generator, "run_command") as run_command,
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                generator.run_extension_generation(args)
+
+            output_metadata = json.loads((base_root / "metadata.json").read_text(encoding="utf-8"))
+            self.assertFalse((root / "derived").exists())
+            copy_base_feature_run.assert_not_called()
+            write_latest_run.assert_not_called()
+            self.assertEqual(output_metadata["status"], "completed")
+            self.assertEqual(output_metadata["run_id"], "base")
+            self.assertEqual(output_metadata["return_types"], ["disc_0.9", "next_5"])
+            self.assertEqual(output_metadata["last_extension_mode"], generator.EXTENSION_MODE_IN_PLACE)
+            self.assertEqual(output_metadata["extension_history"][-1]["status"], "completed")
+            self.assertEqual(output_metadata["extension_history"][-1]["mode"], generator.EXTENSION_MODE_IN_PLACE)
+            self.assertEqual(run_command.call_count, 3)
+            self.assertTrue(all("base" in call.args[0] for call in run_command.call_args_list))
+
+    def test_failed_in_place_extension_keeps_advertised_base_metadata(self) -> None:
+        args = make_args(["next_5"], run_id=None, in_place=True)
+        metadata = make_metadata()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            (base_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "copy_base_feature_run") as copy_base_feature_run,
+                patch.object(generator, "run_command", side_effect=RuntimeError("boom")),
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                with self.assertRaises(RuntimeError):
+                    generator.run_extension_generation(args)
+
+            output_metadata = json.loads((base_root / "metadata.json").read_text(encoding="utf-8"))
+            copy_base_feature_run.assert_not_called()
+            write_latest_run.assert_not_called()
+            self.assertEqual(output_metadata["status"], "completed")
+            self.assertEqual(output_metadata["return_types"], ["disc_0.9"])
+            self.assertEqual(output_metadata["extension_added_return_types"], [])
+            self.assertEqual(output_metadata["extension_history"][-1]["status"], "failed")
+            self.assertIn("boom", output_metadata["extension_history"][-1]["error"])
+
+    def test_overwrite_feature_run_refresh_mutates_base_without_copy_or_latest_update(self) -> None:
+        args = make_args(run_id=None, overwrite_feature_run=True, refresh_target_families=["epv"])
+        metadata = make_metadata(return_types=["next_5", "in_3"])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            (base_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "copy_base_feature_run") as copy_base_feature_run,
+                patch.object(generator, "run_command") as run_command,
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                generator.run_extension_generation(args)
+
+            output_metadata = json.loads((base_root / "metadata.json").read_text(encoding="utf-8"))
+            copy_base_feature_run.assert_not_called()
+            write_latest_run.assert_not_called()
+            self.assertEqual(output_metadata["status"], "completed")
+            self.assertEqual(output_metadata["run_id"], "base")
+            self.assertEqual(output_metadata["return_types"], ["next_5", "in_3"])
+            self.assertEqual(output_metadata["last_extension_mode"], generator.EXTENSION_MODE_OVERWRITE_FEATURE_RUN)
+            self.assertEqual(output_metadata["extension_history"][-1]["status"], "completed")
+            self.assertTrue(all("--overwrite-labels" in call.args[0] for call in run_command.call_args_list))
+
     def test_refresh_extension_records_metadata_and_overwrites_labels(self) -> None:
         args = make_args(run_id="derived", refresh_target_families=["epv"])
         metadata = make_metadata(return_types=["next_5", "in_3"])
@@ -578,6 +769,59 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(run_command.call_count, 3)
             write_latest_run.assert_called_once_with("feature", "derived")
 
+    def test_overwrite_feature_run_replacement_removes_base_model_mode_artifacts(self) -> None:
+        args = make_args(
+            model_id="success_intent/new",
+            run_id=None,
+            replace_model=True,
+            overwrite_feature_run=True,
+        )
+        metadata = make_metadata(
+            modes=["original", "angle_only", "model"],
+            model_id="success_intent/old",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            for relative_path in [
+                "resolved_actions_model/copied.parquet",
+                "action_labels_disc_0.9_model/copied.pt",
+                "action_labels_intent_train_disc_0.9_model/copied.pt",
+                "augmented_graphs_model/copied.pt",
+                "augmented_labels_model/copied.pt",
+                "action_labels_disc_0.9/keep.pt",
+            ]:
+                path = base_root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("copied", encoding="utf-8")
+            (base_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "copy_base_feature_run") as copy_base_feature_run,
+                patch.object(generator, "run_command") as run_command,
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                generator.run_extension_generation(args)
+
+            self.assertFalse((base_root / "resolved_actions_model").exists())
+            self.assertFalse((base_root / "action_labels_disc_0.9_model").exists())
+            self.assertFalse((base_root / "action_labels_intent_train_disc_0.9_model").exists())
+            self.assertFalse((base_root / "augmented_graphs_model").exists())
+            self.assertFalse((base_root / "augmented_labels_model").exists())
+            self.assertTrue((base_root / "action_labels_disc_0.9" / "keep.pt").exists())
+            output_metadata = json.loads((base_root / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(output_metadata["status"], "completed")
+            self.assertEqual(output_metadata["intended_receiver_model_id"], "success_intent/new")
+            self.assertEqual(output_metadata["extension_replaced_intended_receiver_model_id"], "success_intent/old")
+            copy_base_feature_run.assert_not_called()
+            write_latest_run.assert_not_called()
+            self.assertEqual(run_command.call_count, 3)
+
     def test_failed_extension_records_failure_without_updating_latest(self) -> None:
         args = make_args(["next_5"], run_id="derived")
 
@@ -599,6 +843,34 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(output_metadata["status"], "failed")
             self.assertIn("boom", output_metadata["error"])
             write_latest_run.assert_not_called()
+
+    def test_failed_overwrite_feature_run_marks_base_metadata_failed(self) -> None:
+        args = make_args(run_id=None, overwrite_feature_run=True, refresh_target_families=["epv"])
+        metadata = make_metadata()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_root = root / "base"
+            base_root.mkdir()
+            (base_root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with (
+                patch.object(generator, "resolve_feature_run_id", return_value="base"),
+                patch.object(generator, "load_feature_run_metadata", return_value=metadata),
+                patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
+                patch.object(generator, "copy_base_feature_run") as copy_base_feature_run,
+                patch.object(generator, "run_command", side_effect=RuntimeError("boom")),
+                patch.object(generator, "write_latest_run") as write_latest_run,
+            ):
+                with self.assertRaises(RuntimeError):
+                    generator.run_extension_generation(args)
+
+            output_metadata = json.loads((base_root / "metadata.json").read_text(encoding="utf-8"))
+            copy_base_feature_run.assert_not_called()
+            write_latest_run.assert_not_called()
+            self.assertEqual(output_metadata["status"], "failed")
+            self.assertEqual(output_metadata["extension_history"][-1]["status"], "failed")
+            self.assertIn("boom", output_metadata["error"])
 
 
 if __name__ == "__main__":
