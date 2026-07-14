@@ -52,6 +52,7 @@ from project_config import (
     get_augmented_feature_dir,
     get_augmented_label_dir,
     get_model_run_root,
+    get_pc_xpass_dir,
     get_physical_xpass_dir,
     get_success_intent_graph_dir,
     get_success_intent_label_dir,
@@ -137,6 +138,20 @@ offside_group.add_argument(
 )
 parser.set_defaults(offside_aware=True)
 parser.add_argument("--extend_features", action="store_true", default=False, help="handcraft more node features")
+lane_survival_group = parser.add_mutually_exclusive_group()
+lane_survival_group.add_argument(
+    "--lane-survival",
+    dest="lane_survival",
+    action="store_true",
+    help="Append cached pc-xPass lane_survival as a node feature for node-level tasks.",
+)
+lane_survival_group.add_argument(
+    "--no-lane-survival",
+    dest="lane_survival",
+    action="store_false",
+    help="Do not append cached pc-xPass lane_survival node features.",
+)
+parser.set_defaults(lane_survival=False)
 
 parser.add_argument("--more_dest_features", action="store_true", default=False, help="handcraft more dest features")
 parser.add_argument("--adjust_dest", action="store_true", default=False, help="adjust destinations of failed actions")
@@ -369,9 +384,10 @@ normalize_v_edge_feature_args(vars(args))
 args.learn_physical_scale = not bool(args.freeze_beta1)
 
 
-def infer_node_in_dim(feature_dir: str, task: str) -> int:
+def infer_node_in_dim(feature_dir: str, task: str, lane_survival: bool = False) -> int:
     node_in_dim, _ = infer_graph_input_dims(feature_dir)
-    return node_in_dim + int(task == "failure_receiver")
+    node_task = str(config.TASK_CONFIG.at[task, "gnn_task"]).startswith("node")
+    return node_in_dim + int(task == "failure_receiver") + int(bool(lane_survival) and node_task)
 
 
 def infer_graph_input_dims(feature_dir: str) -> tuple[int, int]:
@@ -571,6 +587,7 @@ if __name__ == "__main__":
     feature_root = resolve_feature_root(args.feature_run_id)
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
+    args.lane_survival_cache_dir = str(get_pc_xpass_dir("sportec")) if args.lane_survival else None
     label_intended_receiver_mode = (
         args.intended_receiver_mode
         if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
@@ -612,7 +629,7 @@ if __name__ == "__main__":
     args.diagnostic_return_type = (
         config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE if args.require_goal_next10_diagnostics else None
     )
-    args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task)
+    args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task, lane_survival=args.lane_survival)
     _, feature_edge_dim = infer_graph_input_dims(args.train_feature_dir)
     feature_schema = {
         "edge_in_dim": int(feature_edge_dim),
@@ -691,6 +708,7 @@ if __name__ == "__main__":
             "valid_label_dir": args.valid_label_dir,
             "ipw_feature_dir": args.ipw_feature_dir,
             "physical_cache_dir": args.physical_cache_dir,
+            "lane_survival_cache_dir": args.lane_survival_cache_dir,
         },
         "physical_xpass": {
             "enabled": bool(model_uses_physical_xpass(args)),
@@ -711,6 +729,10 @@ if __name__ == "__main__":
             "long_residual_regularization_lambda": args.long_residual_regularization_lambda,
             "short_residual_clip_value": args.short_residual_clip_value,
             "long_residual_clip_value": args.long_residual_clip_value,
+        },
+        "lane_survival": {
+            "enabled": bool(args.lane_survival),
+            "cache_dir": args.lane_survival_cache_dir,
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
@@ -776,6 +798,8 @@ if __name__ == "__main__":
         "physical_cache_dir": args.physical_cache_dir,
         "physical_eps": args.physical_eps,
         "physical_xpass_floor": args.physical_xpass_floor,
+        "lane_survival": args.lane_survival,
+        "lane_survival_cache_dir": args.lane_survival_cache_dir,
     }
     train_dataset = ActionDataset(
         train_match_ids,

@@ -140,6 +140,7 @@ PC_XPASS_SIGMOID_SCALE = PC_XPASS_DEFAULT_CONTROL_POWER
 PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT
 PC_XPASS_DEFAULT_MAX_SPEED = 25.0
 PC_XPASS_DEFAULT_SPEED_STEP = 2.0
+PC_XPASS_LANE_SURVIVAL_SUFFIX = "__lane_survival"
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
@@ -2404,7 +2405,7 @@ def compute_graph_physical_xpass_metrics_as_defaults(
 
 
 PC_XPASS_DETAIL_SUFFIXES = [
-    "__lane_survival",
+    PC_XPASS_LANE_SURVIVAL_SUFFIX,
     "__control_prob",
     "__speed",
     "__angle",
@@ -2412,6 +2413,10 @@ PC_XPASS_DETAIL_SUFFIXES = [
     "__target_x",
     "__target_y",
 ]
+
+
+def pc_xpass_lane_survival_column(player_id: str) -> str:
+    return f"{player_id}{PC_XPASS_LANE_SURVIVAL_SUFFIX}"
 
 
 def pc_xpass_output_columns(
@@ -5380,6 +5385,70 @@ def attach_physical_xpass_to_graph(
     setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
     setattr(graph, PHYSICAL_XPASS_BALL_Z_ATTR, ball_z)
     setattr(graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, pass_heights)
+    return graph
+
+
+def append_pc_xpass_lane_survival_to_graph(
+    graph: Data,
+    labels: torch.Tensor,
+    pc_xpass_rows: pd.DataFrame,
+    *,
+    match_id: str,
+    require_observed_target: bool = True,
+    possessor_index: int | None = None,
+) -> Data:
+    if pc_xpass_rows is None:
+        raise ValueError("pc_xpass_rows must be provided when attaching lane_survival.")
+    action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    if action_index not in pc_xpass_rows.index:
+        raise FileNotFoundError(
+            f"pc-xPass cache for match {match_id} has no row for action_index={action_index}. "
+            "Run scripts/generate_physical_xpass.py --pc-xpass before training with --lane-survival."
+        )
+
+    row = pc_xpass_rows.loc[action_index]
+    node_ids = _node_ids(graph)
+    candidate_indices = _candidate_target_indices(graph)
+    if possessor_index is not None:
+        candidate_indices = [index for index in candidate_indices if int(index) != int(possessor_index)]
+    lane_survival = torch.zeros((len(node_ids), 1), dtype=graph.x.dtype, device=graph.x.device)
+
+    missing_columns = []
+    nonfinite_columns = []
+    for node_index in candidate_indices:
+        node_id = str(node_ids[int(node_index)])
+        column = pc_xpass_lane_survival_column(node_id)
+        if column not in row.index:
+            missing_columns.append(node_id)
+            continue
+        value = row[column]
+        if pd.isna(value) or not math.isfinite(float(value)):
+            nonfinite_columns.append(node_id)
+            continue
+        lane_survival[int(node_index), 0] = float(value)
+
+    if missing_columns:
+        raise ValueError(
+            f"pc-xPass cache for match {match_id}, action_index={action_index} is missing "
+            f"lane_survival columns for candidate nodes: {missing_columns[:5]}."
+        )
+    if nonfinite_columns:
+        raise ValueError(
+            f"pc-xPass cache for match {match_id}, action_index={action_index} has non-finite "
+            f"lane_survival values for candidate nodes: {nonfinite_columns[:5]}."
+        )
+
+    if require_observed_target:
+        target_index = int(labels[LABEL_INDEX["intent_index"]].item())
+        if 0 <= target_index < len(node_ids) and target_index in candidate_indices:
+            target_value = lane_survival[target_index, 0]
+            if not bool(torch.isfinite(target_value).item()):
+                raise ValueError(
+                    f"pc-xPass cache for match {match_id}, action_index={action_index} has no finite "
+                    f"lane_survival value for observed target {node_ids[target_index]!r}."
+                )
+
+    graph.x = torch.cat([graph.x, lane_survival], dim=-1)
     return graph
 
 

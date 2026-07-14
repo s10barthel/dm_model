@@ -24,7 +24,14 @@ from datatools.match import Match
 from datatools.utils import filter_features_and_labels
 from models import utils as model_utils
 from models.gnn import GNN
-from physical_pass_model import AS_DEFAULT_N_ANGLES, AS_DEFAULT_N_V0, _candidate_target_indices, compute_graph_player_cum_prob
+from physical_pass_model import (
+    AS_DEFAULT_N_ANGLES,
+    AS_DEFAULT_N_V0,
+    _candidate_target_indices,
+    compute_graph_player_cum_prob,
+    pc_xpass_lane_survival_column,
+    pc_xpass_metadata,
+)
 from scripts import run_benchmark
 from scripts import train_relevant_models as train_wrapper
 from validation.benchmark import benchmark_postprocessing as benchmark_post
@@ -131,6 +138,29 @@ def make_physical_xpass_graph(node_dim: int = 26) -> Data:
 
 def make_labels() -> torch.Tensor:
     return torch.zeros((1, len(LABEL_COLUMNS)), dtype=torch.float32)
+
+
+def make_pass_labels(*, action_index: int = 7, intent_index: int = 1, success: float = 1.0) -> torch.Tensor:
+    labels = make_labels()
+    labels[0, LABEL_INDEX["action_index"]] = action_index
+    labels[0, LABEL_INDEX["is_pass"]] = 1
+    labels[0, LABEL_INDEX["intent_index"]] = intent_index
+    labels[0, LABEL_INDEX["success"]] = float(success)
+    return labels
+
+
+def write_pc_xpass_lane_survival_cache(cache_dir: Path, *, match_id: str = "match_1", action_index: int = 7, target_value: float = 0.42) -> None:
+    (cache_dir / "matches").mkdir(parents=True, exist_ok=True)
+    (cache_dir / "metadata.json").write_text(json.dumps(pc_xpass_metadata("consider_teammates")), encoding="utf-8")
+    pd.DataFrame(
+        [
+            {
+                "match_id": match_id,
+                "action_index": action_index,
+                pc_xpass_lane_survival_column("target"): target_value,
+            }
+        ]
+    ).to_parquet(cache_dir / "matches" / f"{match_id}.parquet", index=False)
 
 
 def make_legacy_labels() -> torch.Tensor:
@@ -806,6 +836,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 accel_aware=None,
                 offside_aware=None,
                 extend_features=None,
+                lane_survival=None,
             )
 
             with (
@@ -947,9 +978,57 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(feature_flags["poss_geometry_aware"])
         self.assertTrue(feature_flags["goal_features_aware"])
         self.assertTrue(feature_flags["goal_nodes_aware"])
+        self.assertFalse(feature_flags["lane_survival"])
         self.assertNotIn("--no-poss-geometry", commands[0])
         self.assertNotIn("--no-goal-features", commands[0])
         self.assertNotIn("--no-goal-nodes", commands[0])
+        self.assertIn("--no-lane-survival", commands[0])
+
+    def test_build_training_commands_emit_lane_survival_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = SimpleNamespace(
+                feature_run_id="feature_run",
+                success_intent_only=True,
+                enabled_tasks=make_enabled_tasks(
+                    action_intent=False,
+                    pass_intent=False,
+                    pass_success=False,
+                    outcome_scoring=False,
+                    outcome_conceding=False,
+                    failure_receiver=False,
+                ),
+                trained_tasks=["success_intent"],
+                intended_receiver_mode=None,
+                target_family=None,
+                return_type="disc_0.9",
+                use_v_edge_features=True,
+                outcome_scoring_trial=None,
+                outcome_conceding_trial=None,
+                xy_only=None,
+                possessor_aware=None,
+                keeper_aware=None,
+                ball_z_aware=None,
+                poss_vel_aware=None,
+                poss_rel_vel_aware=None,
+                poss_geometry_aware=None,
+                goal_features_aware=None,
+                goal_nodes_aware=None,
+                accel_aware=None,
+                offside_aware=None,
+                extend_features=None,
+                lane_survival=True,
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
+
+        self.assertTrue(feature_flags["lane_survival"])
+        self.assertIn("--lane-survival", commands[0])
+        self.assertNotIn("--no-lane-survival", commands[0])
 
     def test_build_training_commands_emit_feature_ablation_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1863,6 +1942,18 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(signature["goal_features_aware"])
         self.assertFalse(signature["goal_nodes_aware"])
 
+    def test_feature_signature_records_lane_survival_flag(self) -> None:
+        signature = model_utils.extract_model_feature_signature(
+            {
+                "node_in_dim": 26,
+                "edge_in_dim": 4,
+                "lane_survival": True,
+            }
+        )
+
+        self.assertTrue(signature["lane_survival"])
+        self.assertEqual(signature["node_in_dim"], 26)
+
     def test_no_poss_velocity_edge_mode_requires_four_edge_features(self) -> None:
         with self.assertRaises(ValueError):
             model_utils.infer_training_edge_schema(
@@ -1875,6 +1966,21 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             v_edge_feature_mode="no_poss",
         )
         self.assertEqual(schema, {"edge_in_dim": 4, "add_v_edge_features": True})
+
+    def test_pass_success_runtime_schema_adds_lane_survival_node_dim(self) -> None:
+        with patch.object(
+            train_wrapper,
+            "infer_feature_graph_schema",
+            return_value={"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+        ):
+            schema = train_wrapper.resolve_pass_success_runtime_schema(
+                Path("feature_root"),
+                "all",
+                lane_survival=True,
+            )
+
+        self.assertEqual(schema["node_in_dim"], 26)
+        self.assertEqual(schema["edge_in_dim"], 4)
 
     def test_adapt_batch_graphs_for_model_truncates_extra_edge_features(self) -> None:
         batch = Batch.from_data_list([make_velocity_edge_graph()])
@@ -2262,6 +2368,63 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertTrue(torch.equal(graph.x[:, 8], torch.zeros_like(graph.x[:, 8])))
         self.assertTrue(torch.equal(graph.x[:, 7], torch.full_like(graph.x[:, 7], 7)))
         self.assertTrue(torch.equal(graph.x[:, 9], torch.full_like(graph.x[:, 9], 9)))
+
+    def test_action_dataset_appends_lane_survival_before_failure_intent_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            graph = make_graph()
+            graph.node_ids = ["possessor", "target"]
+            torch.save([graph], feature_dir / "match_1.pt")
+            torch.save(make_pass_labels(action_index=7, intent_index=1, success=0.0), label_dir / "match_1.pt")
+            write_pc_xpass_lane_survival_cache(cache_dir, action_index=7, target_value=0.42)
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="failure_receiver",
+                lane_survival=True,
+                lane_survival_cache_dir=str(cache_dir),
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertEqual(graph.x.shape[1], 27)
+        self.assertTrue(torch.allclose(graph.x[:, -2], torch.tensor([0.0, 0.42])))
+        self.assertTrue(torch.equal(graph.x[:, -1], torch.tensor([0.0, 1.0])))
+
+    def test_action_dataset_lane_survival_is_independent_of_xy_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_dir = Path(tmpdir) / "features"
+            label_dir = Path(tmpdir) / "labels"
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            feature_dir.mkdir(parents=True, exist_ok=True)
+            label_dir.mkdir(parents=True, exist_ok=True)
+            graph = make_graph()
+            graph.node_ids = ["possessor", "target"]
+            torch.save([graph], feature_dir / "match_1.pt")
+            torch.save(make_pass_labels(action_index=7, intent_index=1), label_dir / "match_1.pt")
+            write_pc_xpass_lane_survival_cache(cache_dir, action_index=7, target_value=0.73)
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=str(feature_dir),
+                label_dir=str(label_dir),
+                task="pass_intent",
+                xy_only=True,
+                lane_survival=True,
+                lane_survival_cache_dir=str(cache_dir),
+            )
+
+        self.assertEqual(len(dataset), 1)
+        graph, _, _ = dataset[0]
+        self.assertEqual(graph.x.shape[1], 26)
+        self.assertTrue(torch.allclose(graph.x[:, -1], torch.tensor([0.0, 0.73])))
+        self.assertTrue(torch.equal(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR], torch.zeros(2)))
 
     def test_action_dataset_zeroes_poss_geometry_but_preserves_possessor_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

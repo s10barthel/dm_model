@@ -36,6 +36,7 @@ from project_config import (
     get_intent_train_label_dir,
     get_model_bundle_root,
     get_model_run_root,
+    get_pc_xpass_dir,
     get_success_intent_graph_dir,
     get_success_intent_label_dir,
     infer_feature_run_intended_receiver_modes,
@@ -63,6 +64,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
+    "lane_survival": False,
 }
 
 LOW_LEVEL_FEATURE_FLAGS = {
@@ -84,6 +86,7 @@ LOW_LEVEL_FALSE_FLAGS = {
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
     "accel_aware": ("--accel", "--no-accel"),
     "offside_aware": ("--offside", "--no-offside"),
+    "lane_survival": ("--lane-survival", "--no-lane-survival"),
 }
 
 MODEL_TOGGLE_SPECS = (
@@ -548,7 +551,6 @@ def validate_external_pass_intent_model_id(
     option_name: str = "--pass-intent-model-id",
     runtime_context: str = "pass_success",
 ) -> str | None:
-    del feature_flags
     pass_intent_model_id = getattr(args, model_id_attr, None)
     if not pass_intent_model_id:
         return None
@@ -566,7 +568,11 @@ def validate_external_pass_intent_model_id(
 
     if runtime_schema is None:
         feature_root = resolve_feature_root(resolved_feature_run_id)
-        runtime_schema = resolve_pass_success_runtime_schema(feature_root, cli_v_edge_feature_mode(args))
+        runtime_schema = resolve_pass_success_runtime_schema(
+            feature_root,
+            cli_v_edge_feature_mode(args),
+            lane_survival=bool(feature_flags.get("lane_survival", False)),
+        )
 
     required_schema = record.get("graph_schema", {})
     runtime_node_dim = runtime_schema.get("node_in_dim")
@@ -598,7 +604,11 @@ def validate_external_pass_intent_model_id(
     return str(pass_intent_model_id)
 
 
-def resolve_pass_success_runtime_schema(feature_root: Path, v_edge_feature_mode: str) -> dict[str, int | bool]:
+def resolve_pass_success_runtime_schema(
+    feature_root: Path,
+    v_edge_feature_mode: str,
+    lane_survival: bool = False,
+) -> dict[str, int | bool]:
     action_graph_dir = get_action_graph_dir(feature_root)
     try:
         feature_schema = infer_feature_graph_schema(action_graph_dir)
@@ -612,8 +622,11 @@ def resolve_pass_success_runtime_schema(feature_root: Path, v_edge_feature_mode:
             "add_v_edge_features": bool(metadata_schema.get("add_v_edge_features", metadata_edge_dim > 2)),
         }
     training_edge_schema = infer_training_edge_schema(feature_schema, v_edge_feature_mode=v_edge_feature_mode)
+    node_in_dim = int(feature_schema["node_in_dim"]) if feature_schema.get("node_in_dim") is not None else None
+    if node_in_dim is not None and bool(lane_survival):
+        node_in_dim += 1
     return {
-        "node_in_dim": int(feature_schema["node_in_dim"]) if feature_schema.get("node_in_dim") is not None else None,
+        "node_in_dim": node_in_dim,
         "edge_in_dim": int(training_edge_schema["edge_in_dim"]),
         "add_v_edge_features": bool(training_edge_schema["add_v_edge_features"]),
     }
@@ -932,6 +945,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "extend_features",
         "Enable the extended handcrafted node features during training.",
         "Disable the extended handcrafted node features during training.",
+    )
+    add_bool_override(
+        parser,
+        "lane-survival",
+        "lane_survival",
+        "Append cached pc-xPass lane_survival as a node feature during training.",
+        "Disable cached pc-xPass lane_survival node features.",
     )
     parser.add_argument(
         "--use_physical_xpass",
@@ -1628,6 +1648,10 @@ def main() -> None:
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
                 "physical_xpass": physical_xpass_settings(cli_args),
+                "lane_survival": {
+                    "enabled": bool(feature_flags.get("lane_survival", False)),
+                    "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
+                },
                 "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
                 "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
                 "training_feature_flags": feature_flags,
@@ -1693,6 +1717,10 @@ def main() -> None:
         "training_feature_flags": feature_flags,
         "batch_sizes": trained_batch_sizes,
         "physical_xpass": physical_xpass_settings(cli_args),
+        "lane_survival": {
+            "enabled": bool(feature_flags.get("lane_survival", False)),
+            "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
+        },
         "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
         "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
         "device": getattr(cli_args, "device", None),

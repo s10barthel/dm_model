@@ -15,7 +15,8 @@ from datatools.utils import (
     mask_possessor_velocity_edge_features,
     sparsify_edges,
 )
-from physical_pass_model import attach_physical_xpass_to_graph, load_physical_xpass_match
+from physical_pass_model import append_pc_xpass_lane_survival_to_graph, attach_physical_xpass_to_graph, load_physical_xpass_match
+from project_config import get_pc_xpass_dir
 
 
 OUTCOME_DIAGNOSTIC_TASKS = {
@@ -155,17 +156,22 @@ class ActionDataset(Dataset):
         physical_cache_dir=None,
         physical_eps=1e-4,
         physical_xpass_floor=None,
+        lane_survival=False,
+        lane_survival_cache_dir=None,
     ):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
         physical_cache_root = Path(physical_cache_dir) if physical_cache_dir else None
+        lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else get_pc_xpass_dir("sportec")
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
         self.skipped_rows: dict[str, int] = {}
         self.use_physical_xpass = bool(use_physical_xpass)
+        self.lane_survival = bool(lane_survival) and str(TASK_CONFIG.at[task, "gnn_task"]).startswith("node")
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
+        self.lane_survival_cache_dir = str(lane_survival_cache_root)
         self.physical_eps = float(physical_eps)
         self.physical_xpass_floor = None if physical_xpass_floor is None else float(physical_xpass_floor)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
@@ -314,6 +320,7 @@ class ActionDataset(Dataset):
         self.features = []
         self.labels = []
         physical_rows_by_match: dict[str, object] = {}
+        lane_survival_rows_by_match: dict[str, object] = {}
 
         for i in tqdm(condition.nonzero()[:, 0].numpy()):
             graph: Data = features[i]
@@ -415,6 +422,19 @@ class ActionDataset(Dataset):
                 graph = sparsify_edges(graph, "distance", possessor_index, max_edge_dist)
             elif sparsify == "delaunay" and graph.x.shape[0] > 3:
                 graph = sparsify_edges(graph, "delaunay")
+
+            if self.lane_survival:
+                match_id = feature_match_ids[int(i)]
+                if match_id not in lane_survival_rows_by_match:
+                    lane_survival_rows_by_match[match_id] = load_physical_xpass_match(lane_survival_cache_root, match_id)
+                graph = append_pc_xpass_lane_survival_to_graph(
+                    graph,
+                    graph_labels,
+                    lane_survival_rows_by_match[match_id],
+                    match_id=match_id,
+                    require_observed_target=True,
+                    possessor_index=int(possessor_index),
+                )
 
             if task == "failure_receiver":
                 intent_onehot = torch.zeros(graph.x.shape[0])

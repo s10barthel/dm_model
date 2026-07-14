@@ -110,6 +110,7 @@ from physical_pass_model import (
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graph,
+    append_pc_xpass_lane_survival_to_graph,
     blend_physical_xpass_predictions,
     compute_graph_pc_xpass_metrics,
     compute_graphs_max_player_cum_prob_as_defaults,
@@ -134,6 +135,7 @@ from physical_pass_model import (
     physical_xpass_kernel_sigmas,
     physical_xpass_metric,
     physical_xpass_metric_column,
+    pc_xpass_lane_survival_column,
     pc_xpass_metadata,
     pc_xpass_endpoint_control_probabilities,
     pc_xpass_lane_survival_from_raw,
@@ -585,6 +587,58 @@ def write_runtime_visualization_xpass_cache(cache_dir: Path, match_id: str = "ma
 
 
 class PhysicalXPassTests(unittest.TestCase):
+    def test_append_pc_xpass_lane_survival_appends_candidate_value(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [
+                {
+                    "action_index": 7,
+                    pc_xpass_lane_survival_column("home_2"): 0.42,
+                }
+            ]
+        ).set_index("action_index", drop=False)
+
+        appended = append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
+        self.assertEqual(tuple(appended.x.shape), (3, 26))
+        self.assertTrue(torch.equal(appended.x[:, -1], torch.tensor([0.0, 0.42, 0.0])))
+        self.assertEqual(appended.node_ids, ["home_1", "home_2", "away_3"])
+
+    def test_append_pc_xpass_lane_survival_raises_on_missing_row(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame([{"action_index": 8, pc_xpass_lane_survival_column("home_2"): 0.42}]).set_index(
+            "action_index",
+            drop=False,
+        )
+
+        with self.assertRaisesRegex(FileNotFoundError, "action_index=7"):
+            append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
+    def test_append_pc_xpass_lane_survival_raises_on_missing_candidate_column(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame([{"action_index": 7}]).set_index("action_index", drop=False)
+
+        with self.assertRaisesRegex(ValueError, "missing lane_survival columns"):
+            append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
+    def test_append_pc_xpass_lane_survival_raises_on_nonfinite_observed_target(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [
+                {
+                    "action_index": 7,
+                    pc_xpass_lane_survival_column("home_2"): float("nan"),
+                }
+            ]
+        ).set_index("action_index", drop=False)
+
+        with self.assertRaisesRegex(ValueError, "non-finite lane_survival"):
+            append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
     def test_inference_physical_xpass_blend_formula(self) -> None:
         self.assertAlmostEqual(
             float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=10.0)),
