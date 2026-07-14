@@ -5775,7 +5775,12 @@ class PhysicalXPassTests(unittest.TestCase):
 
     def test_generate_physical_xpass_runtime_metadata_includes_runtime_graph_schema(self) -> None:
         args = generate_physical_xpass.parse_args([])
-        args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
+        args._runtime_graph_schema = {
+            "node_in_dim": 26,
+            "edge_in_dim": 4,
+            "add_v_edge_features": True,
+            "add_relative_speed_edge_features": False,
+        }
 
         with patch.object(generate_physical_xpass, "write_run_metadata") as write_metadata:
             generate_physical_xpass.write_runtime_dataset_metadata(
@@ -5788,7 +5793,15 @@ class PhysicalXPassTests(unittest.TestCase):
             )
 
         metadata = write_metadata.call_args.args[1]
-        self.assertEqual(metadata["runtime_graph_schema"], {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True})
+        self.assertEqual(
+            metadata["runtime_graph_schema"],
+            {
+                "node_in_dim": 26,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            },
+        )
 
     def test_generate_physical_xpass_runtime_graph_schema_defaults_without_pass_height_model(self) -> None:
         args = generate_physical_xpass.parse_args([])
@@ -5796,7 +5809,10 @@ class PhysicalXPassTests(unittest.TestCase):
 
         generate_physical_xpass.prepare_runtime_graph_schema(args)
 
-        self.assertEqual(args._runtime_graph_schema, {"edge_in_dim": 2, "add_v_edge_features": False})
+        self.assertEqual(
+            args._runtime_graph_schema,
+            {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False},
+        )
         self.assertFalse(generate_physical_xpass.runtime_add_v_edge_features_from_args(args))
 
     def test_generate_physical_xpass_runtime_graph_schema_uses_pass_height_model_schema(self) -> None:
@@ -5805,7 +5821,15 @@ class PhysicalXPassTests(unittest.TestCase):
 
         generate_physical_xpass.prepare_runtime_graph_schema(args)
 
-        self.assertEqual(args._runtime_graph_schema, {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True})
+        self.assertEqual(
+            args._runtime_graph_schema,
+            {
+                "node_in_dim": 26,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            },
+        )
         self.assertTrue(generate_physical_xpass.runtime_add_v_edge_features_from_args(args))
 
     def test_generate_physical_xpass_hawkeye_runtime_builds_required_edge_schema(self) -> None:
@@ -6735,8 +6759,16 @@ class PhysicalXPassTests(unittest.TestCase):
             )
             model_specs = {"pass_success": pass_success_model}
 
-            def build_state(_game_state, *, modification_id, game_state_id, higher_state_id, add_v_edge_features):
-                del higher_state_id, add_v_edge_features
+            def build_state(
+                _game_state,
+                *,
+                modification_id,
+                game_state_id,
+                higher_state_id,
+                add_v_edge_features,
+                add_relative_speed_edge_features,
+            ):
+                del higher_state_id, add_v_edge_features, add_relative_speed_edge_features
                 if modification_id == 2 and game_state_id == 2:
                     raise ValueError("bad state")
                 state = SimpleNamespace(

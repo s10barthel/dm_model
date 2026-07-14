@@ -129,6 +129,7 @@ def load_match(
     return_type: str | None = None,
     feature_root: Path | None = None,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -167,6 +168,7 @@ def load_match(
                 extend=True,
                 post_action=False,
                 add_v_edge_features=add_v_edge_features,
+                add_relative_speed_edge_features=add_relative_speed_edge_features,
             )
         else:
             if count_valid_graphs(match.graph_features_0) == 0:
@@ -176,6 +178,7 @@ def load_match(
                     extend=True,
                     post_action=False,
                     add_v_edge_features=add_v_edge_features,
+                    add_relative_speed_edge_features=add_relative_speed_edge_features,
                 )
     else:
         match.graph_features_0 = construct_graph_features(
@@ -183,6 +186,7 @@ def load_match(
             extend=True,
             post_action=False,
             add_v_edge_features=add_v_edge_features,
+            add_relative_speed_edge_features=add_relative_speed_edge_features,
         )
     if count_valid_graphs(match.graph_features_0) == 0:
         raise ValueError("No usable action graphs are available for this match.")
@@ -199,6 +203,7 @@ def load_match(
                 extend=True,
                 post_action=True,
                 add_v_edge_features=add_v_edge_features,
+                add_relative_speed_edge_features=add_relative_speed_edge_features,
             )
         else:
             if count_valid_graphs(match.graph_features_1) == 0:
@@ -208,6 +213,7 @@ def load_match(
                     extend=True,
                     post_action=True,
                     add_v_edge_features=add_v_edge_features,
+                    add_relative_speed_edge_features=add_relative_speed_edge_features,
                 )
     else:
         match.graph_features_1 = construct_graph_features(
@@ -215,6 +221,7 @@ def load_match(
             extend=True,
             post_action=True,
             add_v_edge_features=add_v_edge_features,
+            add_relative_speed_edge_features=add_relative_speed_edge_features,
         )
     if count_valid_graphs(match.graph_features_1) == 0:
         raise ValueError("No usable post-action graphs are available for this match.")
@@ -716,6 +723,7 @@ def main() -> None:
                 return_type=return_type,
                 feature_root=feature_root,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
             )
             match_output_dir = output_dir / match_id
 

@@ -28,6 +28,7 @@ from models.utils import (
     estimate_propensity,
     is_validation_loss_improved,
     load_splits,
+    mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
     normalize_v_edge_feature_args,
     num_trainable_params,
@@ -314,7 +315,30 @@ edge_feature_group.add_argument(
     const="no_poss",
     help="Use velocity-angle edge features except on edges incident to the ball possessor.",
 )
-parser.set_defaults(v_edge_feature_mode="all")
+parser.set_defaults(v_edge_feature_mode="none")
+relative_speed_edge_feature_group = parser.add_mutually_exclusive_group()
+relative_speed_edge_feature_group.add_argument(
+    "--relative-speed-edge-features",
+    dest="relative_speed_edge_feature_mode",
+    action="store_const",
+    const="all",
+    help="Use stored raw relative-speed edge features after velocity-angle edge features.",
+)
+relative_speed_edge_feature_group.add_argument(
+    "--no-relative-speed-edge-features",
+    dest="relative_speed_edge_feature_mode",
+    action="store_const",
+    const="none",
+    help="Ignore stored raw relative-speed edge features.",
+)
+relative_speed_edge_feature_group.add_argument(
+    "--relative-speed-edge-features-no-poss",
+    dest="relative_speed_edge_feature_mode",
+    action="store_const",
+    const="no_poss",
+    help="Use raw relative-speed edge features except on edges incident to the ball possessor.",
+)
+parser.set_defaults(relative_speed_edge_feature_mode="none")
 pin_memory_group = parser.add_mutually_exclusive_group()
 pin_memory_group.add_argument(
     "--pin-memory",
@@ -634,11 +658,20 @@ if __name__ == "__main__":
     feature_schema = {
         "edge_in_dim": int(feature_edge_dim),
         "add_v_edge_features": bool(feature_edge_dim > 2),
+        "add_relative_speed_edge_features": bool(feature_edge_dim > 4),
     }
-    training_schema = infer_training_edge_schema(feature_schema, v_edge_feature_mode=args.v_edge_feature_mode)
+    training_schema = infer_training_edge_schema(
+        feature_schema,
+        v_edge_feature_mode=args.v_edge_feature_mode,
+        relative_speed_edge_feature_mode=args.relative_speed_edge_feature_mode,
+    )
     args.edge_in_dim = int(training_schema["edge_in_dim"])
     args.add_v_edge_features = bool(training_schema["add_v_edge_features"])
+    args.add_relative_speed_edge_features = bool(training_schema["add_relative_speed_edge_features"])
     args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)
+    args.mask_possessor_relative_speed_edge_features = mask_possessor_relative_speed_edge_features_for_mode(
+        args.relative_speed_edge_feature_mode
+    )
     validate_physical_xpass_args(args)
     physical_xpass_metadata = None
     if model_uses_physical_xpass(args):
@@ -699,6 +732,9 @@ if __name__ == "__main__":
         "use_v_edge_features": bool(args.use_v_edge_features),
         "v_edge_feature_mode": args.v_edge_feature_mode,
         "mask_possessor_v_edge_features": bool(args.mask_possessor_v_edge_features),
+        "use_relative_speed_edge_features": bool(args.use_relative_speed_edge_features),
+        "relative_speed_edge_feature_mode": args.relative_speed_edge_feature_mode,
+        "mask_possessor_relative_speed_edge_features": bool(args.mask_possessor_relative_speed_edge_features),
         "resolved_dirs": {
             "feature_dir": args.feature_dir,
             "label_dir": args.label_dir,
@@ -792,6 +828,8 @@ if __name__ == "__main__":
         "edge_in_dim": args.edge_in_dim,
         "v_edge_feature_mode": args.v_edge_feature_mode,
         "mask_possessor_v_edge_features": args.mask_possessor_v_edge_features,
+        "relative_speed_edge_feature_mode": args.relative_speed_edge_feature_mode,
+        "mask_possessor_relative_speed_edge_features": args.mask_possessor_relative_speed_edge_features,
         "diagnostic_label_dir": args.diagnostic_label_dir,
         "require_goal_next10_diagnostics": args.require_goal_next10_diagnostics,
         "use_physical_xpass": model_uses_physical_xpass(args),

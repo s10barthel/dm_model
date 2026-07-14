@@ -352,6 +352,7 @@ def main() -> None:
                         context,
                         int(event_index),
                         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                         frames_mode=args.frames_mode,
                     )
                     match_stats["possessions"] += 1

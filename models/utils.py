@@ -65,6 +65,8 @@ FEATURE_SIGNATURE_KEYS = (
     "max_edge_dist",
     "v_edge_feature_mode",
     "add_v_edge_features",
+    "relative_speed_edge_feature_mode",
+    "add_relative_speed_edge_features",
     "node_in_dim",
     "edge_in_dim",
 )
@@ -76,6 +78,14 @@ V_EDGE_FEATURE_MODES = (
     V_EDGE_FEATURE_MODE_ALL,
     V_EDGE_FEATURE_MODE_NONE,
     V_EDGE_FEATURE_MODE_NO_POSS,
+)
+RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL = "all"
+RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE = "none"
+RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS = "no_poss"
+RELATIVE_SPEED_EDGE_FEATURE_MODES = (
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS,
 )
 RUNTIME_INTENDED_RECEIVER_MODE_PREFERENCE = ("model", "original", "angle_only")
 DEFAULT_RUNTIME_RETURN_TYPE = "disc_0.9"
@@ -105,7 +115,34 @@ def normalize_v_edge_feature_mode(
         return V_EDGE_FEATURE_MODE_ALL if bool(add_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
     if edge_in_dim is not None:
         return V_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 2 else V_EDGE_FEATURE_MODE_NONE
-    return V_EDGE_FEATURE_MODE_ALL
+    return V_EDGE_FEATURE_MODE_NONE
+
+
+def normalize_relative_speed_edge_feature_mode(
+    relative_speed_edge_feature_mode: str | None = None,
+    *,
+    use_relative_speed_edge_features: bool | None = None,
+    mask_possessor_relative_speed_edge_features: bool | None = None,
+    add_relative_speed_edge_features: bool | None = None,
+    edge_in_dim: int | None = None,
+) -> str:
+    if relative_speed_edge_feature_mode is not None:
+        mode = str(relative_speed_edge_feature_mode).strip().replace("-", "_")
+        if mode in RELATIVE_SPEED_EDGE_FEATURE_MODES:
+            return mode
+        raise ValueError(
+            f"Invalid relative_speed_edge_feature_mode={relative_speed_edge_feature_mode!r}. "
+            f"Expected one of: {', '.join(RELATIVE_SPEED_EDGE_FEATURE_MODES)}."
+        )
+    if bool(mask_possessor_relative_speed_edge_features):
+        return RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS
+    if use_relative_speed_edge_features is not None:
+        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if bool(use_relative_speed_edge_features) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
+    if add_relative_speed_edge_features is not None:
+        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if bool(add_relative_speed_edge_features) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
+    if edge_in_dim is not None:
+        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 4 else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
+    return RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
 
 
 def use_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> bool:
@@ -116,6 +153,22 @@ def mask_possessor_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> 
     return normalize_v_edge_feature_mode(v_edge_feature_mode) == V_EDGE_FEATURE_MODE_NO_POSS
 
 
+def use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode: str | None) -> bool:
+    return normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode) != RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
+
+
+def mask_possessor_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode: str | None) -> bool:
+    return normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode) == RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS
+
+
+def validate_relative_speed_edge_feature_mode(
+    v_edge_feature_mode: str | None,
+    relative_speed_edge_feature_mode: str | None,
+) -> None:
+    if use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode) and not use_v_edge_features_for_mode(v_edge_feature_mode):
+        raise ValueError("Relative-speed edge features require velocity-angle edge features.")
+
+
 def normalize_v_edge_feature_args(args: dict[str, Any]) -> dict[str, Any]:
     mode = normalize_v_edge_feature_mode(
         args.get("v_edge_feature_mode"),
@@ -124,9 +177,20 @@ def normalize_v_edge_feature_args(args: dict[str, Any]) -> dict[str, Any]:
         add_v_edge_features=args.get("add_v_edge_features"),
         edge_in_dim=args.get("edge_in_dim"),
     )
+    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
+        args.get("relative_speed_edge_feature_mode"),
+        use_relative_speed_edge_features=args.get("use_relative_speed_edge_features"),
+        mask_possessor_relative_speed_edge_features=args.get("mask_possessor_relative_speed_edge_features"),
+        add_relative_speed_edge_features=args.get("add_relative_speed_edge_features"),
+        edge_in_dim=args.get("edge_in_dim"),
+    )
+    validate_relative_speed_edge_feature_mode(mode, relative_speed_mode)
     args["v_edge_feature_mode"] = mode
     args["use_v_edge_features"] = use_v_edge_features_for_mode(mode)
     args["mask_possessor_v_edge_features"] = mask_possessor_v_edge_features_for_mode(mode)
+    args["relative_speed_edge_feature_mode"] = relative_speed_mode
+    args["use_relative_speed_edge_features"] = use_relative_speed_edge_features_for_mode(relative_speed_mode)
+    args["mask_possessor_relative_speed_edge_features"] = mask_possessor_relative_speed_edge_features_for_mode(relative_speed_mode)
     return args
 
 
@@ -154,6 +218,14 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         add_v_edge_features=args.get("add_v_edge_features"),
         edge_in_dim=args.get("edge_in_dim"),
     )
+    relative_speed_edge_feature_mode = normalize_relative_speed_edge_feature_mode(
+        args.get("relative_speed_edge_feature_mode"),
+        use_relative_speed_edge_features=args.get("use_relative_speed_edge_features"),
+        mask_possessor_relative_speed_edge_features=args.get("mask_possessor_relative_speed_edge_features"),
+        add_relative_speed_edge_features=args.get("add_relative_speed_edge_features"),
+        edge_in_dim=args.get("edge_in_dim"),
+    )
+    validate_relative_speed_edge_feature_mode(v_edge_feature_mode, relative_speed_edge_feature_mode)
     signature = {
         "xy_only": bool(args.get("xy_only", False)),
         "possessor_aware": bool(args.get("possessor_aware", False)),
@@ -172,10 +244,14 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "sparsify": args.get("sparsify", "none"),
         "max_edge_dist": args.get("max_edge_dist", 10),
         "v_edge_feature_mode": v_edge_feature_mode,
+        "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
         "node_in_dim": int(args.get("node_in_dim", 0)),
         "edge_in_dim": int(args.get("edge_in_dim", 2)),
     }
     signature["add_v_edge_features"] = use_v_edge_features_for_mode(v_edge_feature_mode)
+    signature["add_relative_speed_edge_features"] = use_relative_speed_edge_features_for_mode(
+        relative_speed_edge_feature_mode
+    )
     return signature
 
 
@@ -235,6 +311,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
 
     args.setdefault("edge_in_dim", 2)
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+    args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
     enrich_model_args_from_metadata(args, metadata)
@@ -283,6 +360,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
             "node_in_dim": feature_signature["node_in_dim"],
             "edge_in_dim": feature_signature["edge_in_dim"],
             "add_v_edge_features": feature_signature["add_v_edge_features"],
+            "add_relative_speed_edge_features": feature_signature["add_relative_speed_edge_features"],
         },
         "status": status,
         "has_weights": has_weights,
@@ -470,6 +548,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         metadata = _read_json_if_exists(model_path / "metadata.json") or {}
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
+        args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
@@ -624,10 +703,17 @@ def infer_training_edge_schema(
     feature_schema: dict[str, int | bool],
     use_v_edge_features: bool | None = None,
     v_edge_feature_mode: str | None = None,
+    use_relative_speed_edge_features: bool | None = None,
+    relative_speed_edge_feature_mode: str | None = None,
 ) -> dict[str, int | bool]:
     mode = normalize_v_edge_feature_mode(v_edge_feature_mode, use_v_edge_features=use_v_edge_features)
+    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
+        relative_speed_edge_feature_mode,
+        use_relative_speed_edge_features=use_relative_speed_edge_features,
+    )
+    validate_relative_speed_edge_feature_mode(mode, relative_speed_mode)
     feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
-    required_edge_dim = 4 if use_v_edge_features_for_mode(mode) else 2
+    required_edge_dim = 5 if use_relative_speed_edge_features_for_mode(relative_speed_mode) else 4 if use_v_edge_features_for_mode(mode) else 2
     if feature_edge_dim < required_edge_dim:
         raise ValueError(
             "Selected feature artifacts do not provide the requested edge-feature schema: "
@@ -636,6 +722,7 @@ def infer_training_edge_schema(
     return {
         "edge_in_dim": required_edge_dim,
         "add_v_edge_features": use_v_edge_features_for_mode(mode),
+        "add_relative_speed_edge_features": use_relative_speed_edge_features_for_mode(relative_speed_mode),
     }
 
 
@@ -645,7 +732,7 @@ def get_model_records(model_ids: dict[str, str]) -> dict[str, dict[str, Any]]:
 
 def aggregate_graph_schemas(schemas: dict[str, dict[str, Any]]) -> dict[str, int | bool]:
     if not schemas:
-        return {"edge_in_dim": 2, "add_v_edge_features": False}
+        return {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
 
     edge_dims = [int(schema.get("edge_in_dim", 2)) for schema in schemas.values()]
     node_dims = [int(schema["node_in_dim"]) for schema in schemas.values() if schema.get("node_in_dim") is not None]
@@ -653,6 +740,9 @@ def aggregate_graph_schemas(schemas: dict[str, dict[str, Any]]) -> dict[str, int
     result: dict[str, int | bool] = {
         "edge_in_dim": edge_in_dim,
         "add_v_edge_features": bool(edge_in_dim > 2 or any(schema.get("add_v_edge_features") for schema in schemas.values())),
+        "add_relative_speed_edge_features": bool(
+            edge_in_dim > 4 or any(schema.get("add_relative_speed_edge_features") for schema in schemas.values())
+        ),
     }
     if node_dims:
         result["node_in_dim"] = max(node_dims)
@@ -813,6 +903,7 @@ def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
         "node_in_dim": int(model.args.get("node_in_dim", 0)),
         "edge_in_dim": edge_in_dim,
         "add_v_edge_features": bool(model.args.get("add_v_edge_features", edge_in_dim > 2)),
+        "add_relative_speed_edge_features": bool(model.args.get("add_relative_speed_edge_features", edge_in_dim > 4)),
     }
 
 
@@ -823,7 +914,7 @@ def validate_model_graph_schemas(models: dict[str, GNN | None]) -> dict[str, int
         if schema is not None
     }
     if not schemas:
-        return {"edge_in_dim": 2, "add_v_edge_features": False}
+        return {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
     return aggregate_graph_schemas(schemas)
 
 
@@ -843,6 +934,7 @@ def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]
                 "node_in_dim": node_in_dim,
                 "edge_in_dim": edge_in_dim,
                 "add_v_edge_features": bool(edge_in_dim > 2),
+                "add_relative_speed_edge_features": bool(edge_in_dim > 4),
             }
         except Exception:
             continue
@@ -1071,6 +1163,14 @@ def adapt_batch_graphs_for_model(
         possessor_nodes = batch_graphs.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
         incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
         batch_graphs.edge_attr[incident_edges, 2:4] = 0
+    if (
+        should_mask_possessor_relative_speed_edge_features_for_model(model_args)
+        and actual_edge_dim >= 5
+        and actual_node_dim > config.NODE_FEATURE_IS_POSSESSOR
+    ):
+        possessor_nodes = batch_graphs.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
+        incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
+        batch_graphs.edge_attr[incident_edges, 4] = 0
 
     if required_edge_dim and actual_edge_dim > required_edge_dim:
         batch_graphs.edge_attr = batch_graphs.edge_attr[:, :required_edge_dim]
@@ -1084,6 +1184,13 @@ def should_mask_possessor_v_edge_features_for_model(model_args: dict[str, Any]) 
     if mode is not None:
         return normalize_v_edge_feature_mode(str(mode)) == V_EDGE_FEATURE_MODE_NO_POSS
     return bool(model_args.get("mask_possessor_v_edge_features", False))
+
+
+def should_mask_possessor_relative_speed_edge_features_for_model(model_args: dict[str, Any]) -> bool:
+    mode = model_args.get("relative_speed_edge_feature_mode")
+    if mode is not None:
+        return normalize_relative_speed_edge_feature_mode(str(mode)) == RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS
+    return bool(model_args.get("mask_possessor_relative_speed_edge_features", False))
 
 
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:

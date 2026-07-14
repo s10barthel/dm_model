@@ -680,11 +680,15 @@ def runtime_graph_schema_from_args(args: argparse.Namespace) -> dict[str, Any]:
     schema = getattr(args, "_runtime_graph_schema", None)
     if isinstance(schema, dict):
         return schema
-    return {"edge_in_dim": 2, "add_v_edge_features": False}
+    return {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
 
 
 def runtime_add_v_edge_features_from_args(args: argparse.Namespace) -> bool:
     return bool(runtime_graph_schema_from_args(args).get("add_v_edge_features", False))
+
+
+def runtime_add_relative_speed_edge_features_from_args(args: argparse.Namespace) -> bool:
+    return bool(runtime_graph_schema_from_args(args).get("add_relative_speed_edge_features", False))
 
 
 def resolve_num_workers(value: str | int, *, max_auto_workers: int = PHYSICAL_DEFAULT_MAX_AUTO_WORKERS) -> int:
@@ -1734,6 +1738,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     1,
                     int(data["higher_state_id"]),
                     add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                    add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
                 )[0],
                 build_benchmark_state(
                     data["game_state_2"],
@@ -1741,6 +1746,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     2,
                     int(data["higher_state_id"]),
                     add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                    add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
                 )[0],
             ]
             items: list[dict[str, Any]] = []
@@ -1827,6 +1833,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 ball,
                 freeze_ballreceipt=args.freeze_ballreceipt,
                 add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
             )[0]
             graphs, labels, frame_selections = filter_hawkeye_runtime_graphs_by_time_norm(
                 situation,
@@ -1917,6 +1924,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         context,
                         int(event_index),
                         add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                        add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
                         frames_mode=args.skillcorner_frames_mode,
                     )
                     unit = make_runtime_buffer_unit(

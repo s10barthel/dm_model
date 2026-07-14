@@ -22,7 +22,12 @@ from project_config import (
     generate_run_id,
     validate_return_type_for_target_family,
 )
-from models.utils import normalize_v_edge_feature_mode, use_v_edge_features_for_mode
+from models.utils import (
+    normalize_relative_speed_edge_feature_mode,
+    normalize_v_edge_feature_mode,
+    use_relative_speed_edge_features_for_mode,
+    use_v_edge_features_for_mode,
+)
 
 TRAINING_WRAPPER_FEATURE_DEFAULTS = {
     "xy_only": False,
@@ -168,6 +173,28 @@ def parse_args() -> argparse.Namespace:
         const="no_poss",
         help="Use velocity-angle edge features except on edges incident to the ball possessor.",
     )
+    relative_speed_edge_feature_group = parser.add_mutually_exclusive_group()
+    relative_speed_edge_feature_group.add_argument(
+        "--relative-speed-edge-features",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="all",
+        help="Use raw relative-speed edge features after velocity-angle edge features.",
+    )
+    relative_speed_edge_feature_group.add_argument(
+        "--no-relative-speed-edge-features",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="none",
+        help="Ignore raw relative-speed edge features.",
+    )
+    relative_speed_edge_feature_group.add_argument(
+        "--relative-speed-edge-features-no-poss",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="no_poss",
+        help="Use raw relative-speed edge features except on edges incident to the ball possessor.",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -237,10 +264,14 @@ def parse_args() -> argparse.Namespace:
         "Enable the extended handcrafted node features for downstream training.",
         "Disable the extended handcrafted node features for downstream training.",
     )
-    parser.set_defaults(v_edge_feature_mode="all")
+    parser.set_defaults(v_edge_feature_mode="none", relative_speed_edge_feature_mode="none")
     args = parser.parse_args()
     args.v_edge_feature_mode = normalize_v_edge_feature_mode(args.v_edge_feature_mode)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
+    args.relative_speed_edge_feature_mode = normalize_relative_speed_edge_feature_mode(args.relative_speed_edge_feature_mode)
+    args.use_relative_speed_edge_features = use_relative_speed_edge_features_for_mode(args.relative_speed_edge_feature_mode)
+    if args.use_relative_speed_edge_features and not args.use_v_edge_features:
+        parser.error("--relative-speed-edge-features requires --v-edge-features or --v-edge-features-no-poss.")
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
@@ -509,6 +540,35 @@ def append_edge_feature_flag(command: list[str], args: argparse.Namespace) -> li
         command.append("--v-edge-features-no-poss")
     else:
         command.append("--v-edge-features")
+    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
+        getattr(args, "relative_speed_edge_feature_mode", None),
+        use_relative_speed_edge_features=getattr(args, "use_relative_speed_edge_features", None),
+    )
+    if relative_speed_mode == "none":
+        command.append("--no-relative-speed-edge-features")
+    elif relative_speed_mode == "no_poss":
+        command.append("--relative-speed-edge-features-no-poss")
+    else:
+        command.append("--relative-speed-edge-features")
+    return command
+
+
+def append_generation_edge_feature_flag(command: list[str], args: argparse.Namespace) -> list[str]:
+    command = list(command)
+    mode = normalize_v_edge_feature_mode(
+        getattr(args, "v_edge_feature_mode", None),
+        use_v_edge_features=getattr(args, "use_v_edge_features", None),
+    )
+    command.append("--no-v-edge-features" if mode == "none" else "--v-edge-features")
+    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
+        getattr(args, "relative_speed_edge_feature_mode", None),
+        use_relative_speed_edge_features=getattr(args, "use_relative_speed_edge_features", None),
+    )
+    command.append(
+        "--no-relative-speed-edge-features"
+        if relative_speed_mode == "none"
+        else "--relative-speed-edge-features"
+    )
     return command
 
 
@@ -547,6 +607,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         )
         if args.intended_receiver_model_id:
             feature_command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
+        feature_command = append_generation_edge_feature_flag(feature_command, args)
         commands.append(feature_command)
 
     if not args.skip_train:

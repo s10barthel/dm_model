@@ -642,6 +642,47 @@ class WrapperValidationTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main_script.parse_args()
 
+    def test_main_wrapper_uses_generation_edge_flags_for_feature_command(self) -> None:
+        args = SimpleNamespace(
+            skip_preprocess=True,
+            target_family="goal",
+            skip_xt=True,
+            skip_goal_distance=True,
+            skip_epv=True,
+            skip_features=False,
+            feature_run_id="feature_run",
+            bundle_id="bundle",
+            skip_train=False,
+            overwrite=False,
+            return_type="disc_0.9",
+            intended_receiver_mode=None,
+            intended_receiver_model_id=None,
+            v_edge_feature_mode="no_poss",
+            use_v_edge_features=True,
+            relative_speed_edge_feature_mode="no_poss",
+            use_relative_speed_edge_features=True,
+            only_pass_height=False,
+            pass_height=False,
+            pass_height_ipw=None,
+            pass_height_ipw_model_id=None,
+            skip_evaluate=True,
+            skip_run_relevant=True,
+            skip_hawkeye=True,
+            skip_benchmark=True,
+            skip_skillcorner=True,
+        )
+
+        commands = main_script.build_commands(args)
+
+        feature_command = commands[0]
+        train_command = commands[1]
+        self.assertIn("--v-edge-features", feature_command)
+        self.assertIn("--relative-speed-edge-features", feature_command)
+        self.assertNotIn("--v-edge-features-no-poss", feature_command)
+        self.assertNotIn("--relative-speed-edge-features-no-poss", feature_command)
+        self.assertIn("--v-edge-features-no-poss", train_command)
+        self.assertIn("--relative-speed-edge-features-no-poss", train_command)
+
 
 def _source_xt_grid(invert_x: bool = False) -> np.ndarray:
     grid = np.zeros((xt.XT_GRID_W, xt.XT_GRID_L), dtype=float)

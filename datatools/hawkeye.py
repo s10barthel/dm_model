@@ -456,6 +456,7 @@ def _valid_possessor_snapshot(tracking: pd.DataFrame, frame_id: int, possessor_o
 def _build_actions_and_labels(
     situation: HawkeyeSituation,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
@@ -490,6 +491,7 @@ def _build_actions_and_labels(
             extend=True,
             rotate_to_ltr=False,
             add_v_edge_features=add_v_edge_features,
+            add_relative_speed_edge_features=add_relative_speed_edge_features,
         )
         if graph is None:
             stats["skipped_missing_graph"] += 1
@@ -569,6 +571,7 @@ def build_hawkeye_situation(
     ball: pd.DataFrame,
     freeze_ballreceipt: bool = True,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
     build_graphs: bool = True,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
@@ -637,6 +640,7 @@ def build_hawkeye_situation(
     actions, labels, graphs, stats = _build_actions_and_labels(
         situation,
         add_v_edge_features=add_v_edge_features,
+        add_relative_speed_edge_features=add_relative_speed_edge_features,
     )
     situation.actions = actions
     situation.labels = labels

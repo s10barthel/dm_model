@@ -114,6 +114,56 @@ class DummyNodeModel(torch.nn.Module):
         return self._logits[: graphs.x.shape[0]].to(graphs.x.device)
 
 
+class EdgeFeatureConstructionTests(unittest.TestCase):
+    def test_construct_graph_for_frame_appends_relative_speed_after_alignment(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot(
+            include_goals=False,
+            home_positions={"home_1": 10.0, "home_2": 20.0},
+            away_positions={"away_1": 40.0, "away_2": 50.0},
+        )
+        snapshot.loc[:, "home_1_vx"] = 1.0
+        snapshot.loc[:, "home_1_vy"] = 2.0
+        snapshot.loc[:, "home_2_vx"] = 4.0
+        snapshot.loc[:, "home_2_vy"] = 6.0
+        snapshot.loc[:, "home_1_speed"] = float(np.hypot(1.0, 2.0))
+        snapshot.loc[:, "home_2_speed"] = float(np.hypot(4.0, 6.0))
+        match.tracking = snapshot
+        match.max_players = 4
+
+        graph = graph_feature.construct_graph_for_frame(
+            match,
+            frame=10,
+            possessor="home_1",
+            period_tracking=snapshot,
+            feature_dim=graph_feature.infer_node_feature_dim(extend=False),
+            extend=False,
+            add_v_edge_features=True,
+            add_relative_speed_edge_features=True,
+        )
+
+        assert graph is not None
+        edge_mask = (graph.edge_index[0] == 0) & (graph.edge_index[1] == 1)
+        self.assertEqual(graph.edge_attr.shape[1], 5)
+        self.assertTrue(torch.allclose(graph.edge_attr[edge_mask, 4], torch.tensor([5.0])))
+
+    def test_construct_graph_for_frame_rejects_relative_speed_without_alignment(self) -> None:
+        match, snapshot = make_offside_match_and_snapshot(include_goals=False)
+        match.tracking = snapshot
+        match.max_players = 6
+
+        with self.assertRaisesRegex(ValueError, "Relative-speed edge features require"):
+            graph_feature.construct_graph_for_frame(
+                match,
+                frame=10,
+                possessor="home_1",
+                period_tracking=snapshot,
+                feature_dim=graph_feature.infer_node_feature_dim(extend=False),
+                extend=False,
+                add_v_edge_features=False,
+                add_relative_speed_edge_features=True,
+            )
+
+
 def make_inference_graph() -> Data:
     x = torch.zeros((4, 25), dtype=torch.float32)
     x[:3, 0] = 1.0

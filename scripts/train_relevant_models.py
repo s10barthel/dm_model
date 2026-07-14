@@ -18,9 +18,12 @@ from models.utils import (
     infer_training_edge_schema,
     get_model_record,
     get_model_records,
+    mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
+    normalize_relative_speed_edge_feature_mode,
     normalize_v_edge_feature_mode,
     parse_model_id,
+    use_relative_speed_edge_features_for_mode,
     use_v_edge_features_for_mode,
     validate_model_record_consistency,
 )
@@ -287,6 +290,14 @@ def cli_v_edge_feature_mode(args: argparse.Namespace) -> str:
     )
 
 
+def cli_relative_speed_edge_feature_mode(args: argparse.Namespace) -> str:
+    return normalize_relative_speed_edge_feature_mode(
+        getattr(args, "relative_speed_edge_feature_mode", None),
+        use_relative_speed_edge_features=getattr(args, "use_relative_speed_edge_features", None),
+        mask_possessor_relative_speed_edge_features=getattr(args, "mask_possessor_relative_speed_edge_features", None),
+    )
+
+
 def edge_feature_flag_for_mode(v_edge_feature_mode: str) -> str:
     mode = normalize_v_edge_feature_mode(v_edge_feature_mode)
     if mode == "none":
@@ -296,9 +307,23 @@ def edge_feature_flag_for_mode(v_edge_feature_mode: str) -> str:
     return "--v-edge-features"
 
 
-def append_edge_feature_flag(command: list[str], v_edge_feature_mode: str) -> list[str]:
+def relative_speed_edge_feature_flag_for_mode(relative_speed_edge_feature_mode: str) -> str:
+    mode = normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode)
+    if mode == "none":
+        return "--no-relative-speed-edge-features"
+    if mode == "no_poss":
+        return "--relative-speed-edge-features-no-poss"
+    return "--relative-speed-edge-features"
+
+
+def append_edge_feature_flag(
+    command: list[str],
+    v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
+) -> list[str]:
     command = list(command)
     command.append(edge_feature_flag_for_mode(v_edge_feature_mode))
+    command.append(relative_speed_edge_feature_flag_for_mode(relative_speed_edge_feature_mode))
     return command
 
 
@@ -571,6 +596,7 @@ def validate_external_pass_intent_model_id(
         runtime_schema = resolve_pass_success_runtime_schema(
             feature_root,
             cli_v_edge_feature_mode(args),
+            cli_relative_speed_edge_feature_mode(args),
             lane_survival=bool(feature_flags.get("lane_survival", False)),
         )
 
@@ -590,7 +616,9 @@ def validate_external_pass_intent_model_id(
     required_edge_dim = int(required_schema.get("edge_in_dim", 0) or 0)
     if required_edge_dim and runtime_edge_dim < required_edge_dim:
         suggestion = ""
-        if required_edge_dim >= 4 and runtime_edge_dim <= 2:
+        if required_edge_dim >= 5 and runtime_edge_dim <= 4:
+            suggestion = " Use --relative-speed-edge-features or a feature run with relative-speed edge features."
+        elif required_edge_dim >= 4 and runtime_edge_dim <= 2:
             suggestion = " Use --v-edge-features or a feature run with velocity edge features."
         mismatches.append(
             f"requires edge_in_dim={required_edge_dim}, "
@@ -607,6 +635,7 @@ def validate_external_pass_intent_model_id(
 def resolve_pass_success_runtime_schema(
     feature_root: Path,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str = "none",
     lane_survival: bool = False,
 ) -> dict[str, int | bool]:
     action_graph_dir = get_action_graph_dir(feature_root)
@@ -620,8 +649,15 @@ def resolve_pass_success_runtime_schema(
             "node_in_dim": int(metadata_schema.get("node_in_dim", 25) or 25),
             "edge_in_dim": metadata_edge_dim,
             "add_v_edge_features": bool(metadata_schema.get("add_v_edge_features", metadata_edge_dim > 2)),
+            "add_relative_speed_edge_features": bool(
+                metadata_schema.get("add_relative_speed_edge_features", metadata_edge_dim > 4)
+            ),
         }
-    training_edge_schema = infer_training_edge_schema(feature_schema, v_edge_feature_mode=v_edge_feature_mode)
+    training_edge_schema = infer_training_edge_schema(
+        feature_schema,
+        v_edge_feature_mode=v_edge_feature_mode,
+        relative_speed_edge_feature_mode=relative_speed_edge_feature_mode,
+    )
     node_in_dim = int(feature_schema["node_in_dim"]) if feature_schema.get("node_in_dim") is not None else None
     if node_in_dim is not None and bool(lane_survival):
         node_in_dim += 1
@@ -629,6 +665,7 @@ def resolve_pass_success_runtime_schema(
         "node_in_dim": node_in_dim,
         "edge_in_dim": int(training_edge_schema["edge_in_dim"]),
         "add_v_edge_features": bool(training_edge_schema["add_v_edge_features"]),
+        "add_relative_speed_edge_features": bool(training_edge_schema["add_relative_speed_edge_features"]),
     }
 
 
@@ -660,7 +697,18 @@ def derive_bundle_shared_context(
             )
             for record in model_records.values()
         }
+        retained_relative_speed_modes = {
+            normalize_relative_speed_edge_feature_mode(
+                record.get("feature_signature", {}).get("relative_speed_edge_feature_mode"),
+                add_relative_speed_edge_features=record.get("graph_schema", {}).get("add_relative_speed_edge_features"),
+                edge_in_dim=record.get("graph_schema", {}).get("edge_in_dim"),
+            )
+            for record in model_records.values()
+        }
         v_edge_feature_mode = next(iter(retained_modes)) if len(retained_modes) == 1 else "mixed"
+        relative_speed_edge_feature_mode = (
+            next(iter(retained_relative_speed_modes)) if len(retained_relative_speed_modes) == 1 else "mixed"
+        )
         return {
             "feature_run_id": resolved_feature_run_id or shared.get("feature_run_id"),
             "intended_receiver_mode": getattr(cli_args, "intended_receiver_mode", None),
@@ -669,6 +717,8 @@ def derive_bundle_shared_context(
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
             "v_edge_feature_mode": v_edge_feature_mode,
+            "use_relative_speed_edge_features": bool(graph_schema.get("add_relative_speed_edge_features", False)),
+            "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
             "source_feature_run_ids": shared.get("source_feature_run_ids", {}),
             "source_intended_receiver_modes": shared.get("source_intended_receiver_modes", {}),
             "source_return_types": shared.get("source_return_types", {}),
@@ -676,18 +726,23 @@ def derive_bundle_shared_context(
         }
 
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
+    relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(cli_args)
     use_v_edge_features = use_v_edge_features_for_mode(v_edge_feature_mode)
+    use_relative_speed_edge_features = use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode)
     return {
         "feature_run_id": resolved_feature_run_id,
         "intended_receiver_mode": None,
         "return_type": cli_args.return_type,
         "target_family": cli_args.target_family,
         "graph_schema": {
-            "edge_in_dim": 4 if use_v_edge_features else 2,
+            "edge_in_dim": 5 if use_relative_speed_edge_features else 4 if use_v_edge_features else 2,
             "add_v_edge_features": use_v_edge_features,
+            "add_relative_speed_edge_features": use_relative_speed_edge_features,
         },
         "use_v_edge_features": use_v_edge_features,
         "v_edge_feature_mode": v_edge_feature_mode,
+        "use_relative_speed_edge_features": use_relative_speed_edge_features,
+        "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
     }
 
 
@@ -822,7 +877,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         const="no_poss",
         help="Use velocity-angle edge features except on edges incident to the ball possessor.",
     )
-    parser.set_defaults(v_edge_feature_mode="all")
+    parser.set_defaults(v_edge_feature_mode="none")
+    relative_speed_edge_feature_group = parser.add_mutually_exclusive_group()
+    relative_speed_edge_feature_group.add_argument(
+        "--relative-speed-edge-features",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="all",
+        help="Use stored raw relative-speed edge features after velocity-angle edge features.",
+    )
+    relative_speed_edge_feature_group.add_argument(
+        "--no-relative-speed-edge-features",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="none",
+        help="Ignore stored raw relative-speed edge features.",
+    )
+    relative_speed_edge_feature_group.add_argument(
+        "--relative-speed-edge-features-no-poss",
+        dest="relative_speed_edge_feature_mode",
+        action="store_const",
+        const="no_poss",
+        help="Use raw relative-speed edge features except on edges incident to the ball possessor.",
+    )
+    parser.set_defaults(relative_speed_edge_feature_mode="none")
     pin_memory_group = parser.add_mutually_exclusive_group()
     pin_memory_group.add_argument(
         "--pin-memory",
@@ -1051,6 +1129,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
     args.mask_possessor_v_edge_features = mask_possessor_v_edge_features_for_mode(args.v_edge_feature_mode)
+    args.relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(args)
+    args.use_relative_speed_edge_features = use_relative_speed_edge_features_for_mode(args.relative_speed_edge_feature_mode)
+    args.mask_possessor_relative_speed_edge_features = mask_possessor_relative_speed_edge_features_for_mode(
+        args.relative_speed_edge_feature_mode
+    )
+    if args.use_relative_speed_edge_features and not args.use_v_edge_features:
+        parser.error("--relative-speed-edge-features requires --v-edge-features or --v-edge-features-no-poss.")
     if args.early_stopping_patience < 1:
         parser.error("--early-stopping-patience must be at least 1.")
     if args.early_stopping_min_epochs < 1:
@@ -1154,6 +1239,7 @@ def base_gnn_args(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
 ) -> list[str]:
     _, run_id = str(model_id).split("/", 1)
     command = [
@@ -1193,7 +1279,7 @@ def base_gnn_args(
     ]
     if intended_receiver_mode:
         command.extend(["--intended-receiver-mode", intended_receiver_mode])
-    return append_edge_feature_flag(command, v_edge_feature_mode)
+    return append_edge_feature_flag(command, v_edge_feature_mode, relative_speed_edge_feature_mode)
 
 
 def intent_command(
@@ -1207,12 +1293,22 @@ def intent_command(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
+        *base_gnn_args(
+            feature_dir,
+            label_dir,
+            model_id,
+            intended_receiver_mode,
+            return_type,
+            batch_size,
+            v_edge_feature_mode,
+            relative_speed_edge_feature_mode,
+        ),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -1237,12 +1333,22 @@ def success_intent_command(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, None, return_type, batch_size, v_edge_feature_mode),
+        *base_gnn_args(
+            feature_dir,
+            label_dir,
+            model_id,
+            None,
+            return_type,
+            batch_size,
+            v_edge_feature_mode,
+            relative_speed_edge_feature_mode,
+        ),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -1269,13 +1375,23 @@ def pass_success_command(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
     feature_flags: dict[str, bool],
     physical_args: argparse.Namespace | None = None,
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
+        *base_gnn_args(
+            feature_dir,
+            label_dir,
+            model_id,
+            intended_receiver_mode,
+            return_type,
+            batch_size,
+            v_edge_feature_mode,
+            relative_speed_edge_feature_mode,
+        ),
         "--min_pass_dur",
         "0.5",
         "--lambda_l1",
@@ -1302,13 +1418,23 @@ def outcome_command(
     intended_receiver_mode: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
     feature_flags: dict[str, bool],
     diagnostic_feature_run_id: str | None = None,
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
+        *base_gnn_args(
+            feature_dir,
+            label_dir,
+            model_id,
+            intended_receiver_mode,
+            return_type,
+            batch_size,
+            v_edge_feature_mode,
+            relative_speed_edge_feature_mode,
+        ),
         "--lambda_l1",
         "1e-6",
         "--start_lr",
@@ -1338,12 +1464,22 @@ def failure_receiver_command(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
+    relative_speed_edge_feature_mode: str,
     feature_flags: dict[str, bool],
 ) -> list[str]:
     command = [
         "--task",
         task,
-        *base_gnn_args(feature_dir, label_dir, model_id, intended_receiver_mode, return_type, batch_size, v_edge_feature_mode),
+        *base_gnn_args(
+            feature_dir,
+            label_dir,
+            model_id,
+            intended_receiver_mode,
+            return_type,
+            batch_size,
+            v_edge_feature_mode,
+            relative_speed_edge_feature_mode,
+        ),
         "--augment_blocks",
         "--shot_success",
         "unblocked",
@@ -1382,6 +1518,7 @@ def build_training_commands(
     feature_root = resolve_feature_root(resolved_feature_run_id)
     model_ids = build_model_ids(args, args.enabled_tasks)
     v_edge_feature_mode = cli_v_edge_feature_mode(args)
+    relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(args)
     success_intent_feature_dir = str(get_success_intent_graph_dir(feature_root))
     success_intent_label_dir = str(get_success_intent_label_dir(root=feature_root))
     commands = []
@@ -1420,6 +1557,7 @@ def build_training_commands(
                 effective_return_type,
                 batch_sizes["success_intent"],
                 v_edge_feature_mode,
+                relative_speed_edge_feature_mode,
                 feature_flags,
             )
         )
@@ -1454,6 +1592,7 @@ def build_training_commands(
                     effective_return_type,
                     batch_sizes["pass_intent"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1472,6 +1611,7 @@ def build_training_commands(
                     effective_return_type,
                     batch_sizes["action_intent"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1494,6 +1634,7 @@ def build_training_commands(
                     effective_return_type,
                     batch_sizes["pass_success"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                     args,
                 )
@@ -1517,6 +1658,7 @@ def build_training_commands(
                     effective_return_type,
                     batch_sizes["pass_height"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1534,6 +1676,7 @@ def build_training_commands(
                     mode,
                     batch_sizes["outcome_scoring"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
@@ -1552,6 +1695,7 @@ def build_training_commands(
                     mode,
                     batch_sizes["outcome_conceding"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
@@ -1569,6 +1713,7 @@ def build_training_commands(
                     effective_return_type,
                     batch_sizes["failure_receiver"],
                     v_edge_feature_mode,
+                    relative_speed_edge_feature_mode,
                     feature_flags,
                 )
             )
@@ -1586,6 +1731,7 @@ def build_training_commands(
 def main() -> None:
     cli_args = parse_args()
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
+    relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(cli_args)
     python = sys.executable
     bundle_id = cli_args.bundle_id or generate_run_id("model_bundle")
     bundle_root = get_model_bundle_root(bundle_id)
@@ -1644,6 +1790,8 @@ def main() -> None:
                 **wrapper_diagnostic_metadata,
                 "use_v_edge_features": use_v_edge_features_for_mode(v_edge_feature_mode),
                 "v_edge_feature_mode": v_edge_feature_mode,
+                "use_relative_speed_edge_features": use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode),
+                "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
                 "device": getattr(cli_args, "device", None),
                 "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
                 **training_control_settings,
@@ -1735,6 +1883,16 @@ def main() -> None:
         **wrapper_diagnostic_metadata,
         "use_v_edge_features": bool(bundle_shared.get("use_v_edge_features", use_v_edge_features_for_mode(v_edge_feature_mode))),
         "v_edge_feature_mode": bundle_shared.get("v_edge_feature_mode", v_edge_feature_mode),
+        "use_relative_speed_edge_features": bool(
+            bundle_shared.get(
+                "use_relative_speed_edge_features",
+                use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode),
+            )
+        ),
+        "relative_speed_edge_feature_mode": bundle_shared.get(
+            "relative_speed_edge_feature_mode",
+            relative_speed_edge_feature_mode,
+        ),
         "graph_schema": dict(bundle_shared.get("graph_schema", {})),
         "success_intent_only": bool(cli_args.success_intent_only),
         "only_pass_height": bool(getattr(cli_args, "only_pass_height", False)),

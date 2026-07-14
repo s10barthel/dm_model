@@ -8,7 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from project_config import resolve_requested_return_types
+import torch
+from torch_geometric.data import Data
+
+from datatools import config
+from project_config import get_action_graph_dir, resolve_requested_return_types
 from scripts import generate_relevant_features as generator
 
 DEFAULT_METADATA = object()
@@ -46,6 +50,7 @@ def make_args(
     next_action_conditions_enabled: bool = True,
     num_workers: str = "1",
     worker_thread_limit: int = 1,
+    extend_relative_speed_edge_features: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         extend_feature_run_id="base",
@@ -57,6 +62,7 @@ def make_args(
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
         pass_height=pass_height,
+        extend_relative_speed_edge_features=extend_relative_speed_edge_features,
         in_place=in_place,
         overwrite_feature_run=overwrite_feature_run,
         next_action_conditions_enabled=next_action_conditions_enabled,
@@ -477,10 +483,72 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertTrue(all("success_intent/new" in command for command in replacement_commands))
 
     def test_graph_schema_mismatch_is_rejected(self) -> None:
-        metadata = make_metadata(graph_schema={"edge_in_dim": 2, "add_v_edge_features": False})
+        metadata = make_metadata(graph_schema={"edge_in_dim": 3, "add_v_edge_features": True})
 
         with self.assertRaises(ValueError):
             self.build_plan(make_args(["next_5"]), metadata=metadata)
+
+    def test_relative_speed_extension_requires_alignment_schema(self) -> None:
+        metadata = make_metadata(graph_schema={"edge_in_dim": 2, "add_v_edge_features": False})
+
+        with self.assertRaises(ValueError):
+            self.build_plan(make_args(run_id=None, in_place=True, extend_relative_speed_edge_features=True), metadata=metadata)
+
+    def test_in_place_relative_speed_extension_targets_base_and_updates_schema(self) -> None:
+        metadata = make_metadata(
+            graph_schema={
+                "node_in_dim": 25,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            }
+        )
+
+        plan = self.build_plan(
+            make_args(run_id=None, in_place=True, extend_relative_speed_edge_features=True),
+            metadata=metadata,
+        )
+
+        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_IN_PLACE)
+        self.assertEqual(plan.output_run_id, "base")
+        self.assertEqual(plan.graph_schema["edge_in_dim"], 5)
+        self.assertTrue(plan.graph_schema["add_relative_speed_edge_features"])
+
+    def test_extension_commands_preserve_base_edge_schema_flags(self) -> None:
+        metadata = make_metadata(
+            graph_schema={
+                "node_in_dim": 25,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            }
+        )
+
+        plan = self.build_plan(make_args(["next_5"]), metadata=metadata)
+
+        self.assertTrue(plan.commands)
+        self.assertTrue(all("--v-edge-features" in command for command in plan.commands))
+        self.assertTrue(all("--no-relative-speed-edge-features" in command for command in plan.commands))
+        self.assertFalse(any("--no-v-edge-features" in command for command in plan.commands))
+        self.assertFalse(any("--relative-speed-edge-features" in command for command in plan.commands))
+
+    def test_extend_relative_speed_edge_features_appends_expected_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            graph_dir = get_action_graph_dir(root)
+            graph_dir.mkdir(parents=True)
+            x = torch.zeros((2, 25), dtype=torch.float32)
+            x[:, config.NODE_FEATURE_VX] = torch.tensor([1.0, 4.0])
+            x[:, config.NODE_FEATURE_VY] = torch.tensor([2.0, 6.0])
+            edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+            edge_attr = torch.ones((2, 4), dtype=torch.float32)
+            torch.save([Data(x=x, edge_index=edge_index, edge_attr=edge_attr)], graph_dir / "match.pt")
+
+            generator.extend_relative_speed_edge_features(root, ["original"])
+
+            graphs = torch.load(graph_dir / "match.pt", weights_only=False)
+            self.assertEqual(graphs[0].edge_attr.shape[1], 5)
+            self.assertTrue(torch.allclose(graphs[0].edge_attr[:, 4], torch.full((2,), 5.0)))
 
     def test_extension_commands_are_labels_only_and_not_full_generation(self) -> None:
         plan = self.build_plan(make_args(["next_5"], model_id="success_intent/42"))

@@ -351,6 +351,7 @@ def main() -> None:
                     game_state_id=int(game_state_id),
                     higher_state_id=int(modification_data["higher_state_id"]),
                     add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                    add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                 )
                 built_states.append((int(modification_id), int(game_state_id), state, state_rows, stats))
             except Exception as exc:

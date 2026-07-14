@@ -12,6 +12,7 @@ from datatools.utils import (
     drop_goal_nodes,
     drop_non_blocker_nodes,
     drop_opponent_nodes,
+    mask_possessor_relative_speed_edge_features,
     mask_possessor_velocity_edge_features,
     sparsify_edges,
 )
@@ -152,8 +153,10 @@ class ActionDataset(Dataset):
         sparsify="none",
         max_edge_dist=10.0,
         edge_in_dim=None,
-        v_edge_feature_mode="all",
+        v_edge_feature_mode="none",
+        relative_speed_edge_feature_mode="none",
         mask_possessor_v_edge_features=False,
+        mask_possessor_relative_speed_edge_features=False,
         train=True,
         diagnostic_label_dir=None,
         require_goal_next10_diagnostics=None,
@@ -181,7 +184,11 @@ class ActionDataset(Dataset):
         self.physical_xpass_floor = None if physical_xpass_floor is None else float(physical_xpass_floor)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
         self.v_edge_feature_mode = str(v_edge_feature_mode).strip().replace("-", "_")
+        self.relative_speed_edge_feature_mode = str(relative_speed_edge_feature_mode).strip().replace("-", "_")
         self.mask_possessor_v_edge_features = bool(mask_possessor_v_edge_features) or self.v_edge_feature_mode == "no_poss"
+        self.mask_possessor_relative_speed_edge_features = (
+            bool(mask_possessor_relative_speed_edge_features) or self.relative_speed_edge_feature_mode == "no_poss"
+        )
         self.diagnostic_label_dir = str(diagnostic_label_root) if diagnostic_label_root is not None else None
         self.require_goal_next10_diagnostics = (
             requires_goal_next10_diagnostics(task)
@@ -343,6 +350,8 @@ class ActionDataset(Dataset):
                 continue
             if self.mask_possessor_v_edge_features:
                 graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
+            if self.mask_possessor_relative_speed_edge_features:
+                graph = mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
 
             if task == "failure_receiver" and inplay_only:
                 n_teammates = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).sum().item())

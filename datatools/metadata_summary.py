@@ -39,6 +39,7 @@ SUMMARY_COLUMNS = [
     "offside_aware",
     "extend_features",
     "v_edge_feature_mode",
+    "relative_speed_edge_feature_mode",
     "status",
     "model_name",
     "ipw_model_id",
@@ -64,6 +65,7 @@ FEATURE_COLUMNS = [
     "offside_aware",
     "extend_features",
     "v_edge_feature_mode",
+    "relative_speed_edge_feature_mode",
 ]
 
 

@@ -299,6 +299,7 @@ class Match(ABC):
         model, graph_schema = self._get_cached_intended_receiver_model(intended_receiver_model_id)
         expected_edge_dim = int(graph_schema["edge_in_dim"])
         add_v_edge_features = bool(graph_schema["add_v_edge_features"])
+        add_relative_speed_edge_features = bool(graph_schema.get("add_relative_speed_edge_features", False))
 
         graphs = []
         graph_action_indices: list[int] = []
@@ -314,6 +315,7 @@ class Match(ABC):
                     extend=False,
                     post_action=False,
                     add_v_edge_features=add_v_edge_features,
+                    add_relative_speed_edge_features=add_relative_speed_edge_features,
                 )
                 if graph is None:
                     continue

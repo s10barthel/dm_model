@@ -428,6 +428,7 @@ def _build_frame_action_label_graph(
     period_tracking: pd.DataFrame,
     feature_dim: int,
     add_v_edge_features: bool,
+    add_relative_speed_edge_features: bool,
 ) -> tuple[dict[str, Any], list[float], Data, None] | tuple[None, None, None, str]:
     possessor_object_id = str(frame_row["possessor_object_id"])
 
@@ -445,6 +446,7 @@ def _build_frame_action_label_graph(
         extend=True,
         rotate_to_ltr=False,
         add_v_edge_features=add_v_edge_features,
+        add_relative_speed_edge_features=add_relative_speed_edge_features,
     )
     if graph is None:
         return None, None, None, "skipped_missing_graph"
@@ -526,6 +528,7 @@ def _evaluate_skillcorner_frame(
     period_tracking: pd.DataFrame,
     feature_dim: int,
     add_v_edge_features: bool,
+    add_relative_speed_edge_features: bool,
     stats: dict[str, int],
 ) -> tuple[dict[str, Any], list[float], Data] | None:
     stats["evaluated_frames"] += 1
@@ -536,6 +539,7 @@ def _evaluate_skillcorner_frame(
         period_tracking,
         feature_dim,
         add_v_edge_features,
+        add_relative_speed_edge_features,
     )
     if skip_key is not None:
         stats[skip_key] += 1
@@ -546,6 +550,7 @@ def _evaluate_skillcorner_frame(
 def _build_actions_and_labels(
     possession: SkillcornerPossession,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
     frames_mode: str = "first_and_last",
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
@@ -569,6 +574,7 @@ def _build_actions_and_labels(
                 period_tracking,
                 feature_dim,
                 add_v_edge_features,
+                add_relative_speed_edge_features,
                 stats,
             )
             if result is not None:
@@ -584,6 +590,7 @@ def _build_actions_and_labels(
                 period_tracking,
                 feature_dim,
                 add_v_edge_features,
+                add_relative_speed_edge_features,
                 stats,
             )
             if first_result is not None:
@@ -602,6 +609,7 @@ def _build_actions_and_labels(
                     period_tracking,
                     feature_dim,
                     add_v_edge_features,
+                    add_relative_speed_edge_features,
                     stats,
                 )
                 if result is not None:
@@ -621,6 +629,7 @@ def build_skillcorner_possession(
     context: dict[str, Any],
     event_index: int,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
     frames_mode: str = "first_and_last",
 ) -> tuple[SkillcornerPossession, dict[str, int]]:
     events = context["events"]
@@ -660,6 +669,7 @@ def build_skillcorner_possession(
     actions, labels, graphs, stats = _build_actions_and_labels(
         possession,
         add_v_edge_features=add_v_edge_features,
+        add_relative_speed_edge_features=add_relative_speed_edge_features,
         frames_mode=frames_mode,
     )
     possession.actions = actions

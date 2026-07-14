@@ -113,6 +113,15 @@ def make_velocity_edge_graph(node_dim: int = 25) -> Data:
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
 
+def make_relative_speed_edge_graph(node_dim: int = 25) -> Data:
+    graph = make_velocity_edge_graph(node_dim=node_dim)
+    graph.edge_attr = torch.cat(
+        [graph.edge_attr, torch.tensor([[1.0], [2.0], [3.0], [4.0]], dtype=torch.float32)],
+        dim=1,
+    )
+    return graph
+
+
 def make_physical_xpass_graph(node_dim: int = 26) -> Data:
     x = torch.zeros((5, node_dim), dtype=torch.float32)
     x[:, config.NODE_FEATURE_IS_TEAMMATE] = torch.tensor([1, 1, 1, 0, 1], dtype=torch.float32)
@@ -1690,7 +1699,12 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         )
         self.assertEqual(
             shared["graph_schema"],
-            {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True},
+            {
+                "node_in_dim": 25,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            },
         )
 
     def test_validate_model_record_consistency_accepts_all_mixed_metadata_when_relaxed(self) -> None:
@@ -1911,7 +1925,15 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         graph_schema = model_utils.validate_model_graph_schemas({"small": small_model, "large": large_model})
 
-        self.assertEqual(graph_schema, {"node_in_dim": 25, "edge_in_dim": 4, "add_v_edge_features": True})
+        self.assertEqual(
+            graph_schema,
+            {
+                "node_in_dim": 25,
+                "edge_in_dim": 4,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": False,
+            },
+        )
 
     def test_feature_signature_distinguishes_possessor_masked_velocity_edge_mode(self) -> None:
         base_args = {
@@ -1965,7 +1987,35 @@ class BenchmarkNoAccelTests(unittest.TestCase):
             {"edge_in_dim": 4, "add_v_edge_features": True},
             v_edge_feature_mode="no_poss",
         )
-        self.assertEqual(schema, {"edge_in_dim": 4, "add_v_edge_features": True})
+        self.assertEqual(
+            schema,
+            {"edge_in_dim": 4, "add_v_edge_features": True, "add_relative_speed_edge_features": False},
+        )
+
+    def test_relative_speed_edge_mode_requires_alignment_and_five_edge_features(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Relative-speed edge features require"):
+            model_utils.infer_training_edge_schema(
+                {"edge_in_dim": 5, "add_v_edge_features": True, "add_relative_speed_edge_features": True},
+                v_edge_feature_mode="none",
+                relative_speed_edge_feature_mode="all",
+            )
+
+        with self.assertRaisesRegex(ValueError, "required_edge_dim=5"):
+            model_utils.infer_training_edge_schema(
+                {"edge_in_dim": 4, "add_v_edge_features": True, "add_relative_speed_edge_features": False},
+                v_edge_feature_mode="all",
+                relative_speed_edge_feature_mode="all",
+            )
+
+        schema = model_utils.infer_training_edge_schema(
+            {"edge_in_dim": 5, "add_v_edge_features": True, "add_relative_speed_edge_features": True},
+            v_edge_feature_mode="all",
+            relative_speed_edge_feature_mode="all",
+        )
+        self.assertEqual(
+            schema,
+            {"edge_in_dim": 5, "add_v_edge_features": True, "add_relative_speed_edge_features": True},
+        )
 
     def test_pass_success_runtime_schema_adds_lane_survival_node_dim(self) -> None:
         with patch.object(
@@ -2023,6 +2073,22 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertTrue(torch.equal(adapted.edge_attr[:2, 2:4], torch.zeros((2, 2))))
         self.assertTrue(torch.equal(adapted.edge_attr[2:, 2:4], torch.tensor([[0.6, 0.7], [0.8, 0.9]])))
+
+    def test_adapt_batch_graphs_for_model_masks_no_poss_relative_speed_edges(self) -> None:
+        batch = Batch.from_data_list([make_relative_speed_edge_graph()])
+        adapted = model_utils.adapt_batch_graphs_for_model(
+            batch,
+            {
+                "node_in_dim": 25,
+                "edge_in_dim": 5,
+                "v_edge_feature_mode": "all",
+                "relative_speed_edge_feature_mode": "no_poss",
+            },
+            context="IPW model 'pass_intent/old'",
+        )
+
+        self.assertTrue(torch.equal(adapted.edge_attr[:2, 4], torch.zeros(2)))
+        self.assertTrue(torch.equal(adapted.edge_attr[2:, 4], torch.tensor([3.0, 4.0])))
 
     def test_estimate_propensity_adapts_extra_edge_features_before_forward(self) -> None:
         class FakePropensityModel:

@@ -238,6 +238,7 @@ def render_situation(
         ball,
         freeze_ballreceipt=args.freeze_ballreceipt,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
     )
     components: dict[str, pd.DataFrame] = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:

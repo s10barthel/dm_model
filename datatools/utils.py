@@ -1314,11 +1314,30 @@ def mask_possessor_velocity_edge_features(graph: Data, possessor_index: int) -> 
     return graph
 
 
+def mask_possessor_relative_speed_edge_features(graph: Data, possessor_index: int) -> Data:
+    if graph is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
+        return graph
+    if int(graph.edge_attr.shape[1]) < 5:
+        return graph
+
+    edge_index = graph.edge_index
+    incident_edges = (edge_index[0] == int(possessor_index)) | (edge_index[1] == int(possessor_index))
+    graph.edge_attr[incident_edges, 4] = 0
+    return graph
+
+
 def should_mask_possessor_velocity_edge_features(args: Dict[str, Any]) -> bool:
     mode = args.get("v_edge_feature_mode")
     if mode is not None:
         return str(mode).strip().replace("-", "_") == "no_poss"
     return bool(args.get("mask_possessor_v_edge_features", False))
+
+
+def should_mask_possessor_relative_speed_edge_features(args: Dict[str, Any]) -> bool:
+    mode = args.get("relative_speed_edge_feature_mode")
+    if mode is not None:
+        return str(mode).strip().replace("-", "_") == "no_poss"
+    return bool(args.get("mask_possessor_relative_speed_edge_features", False))
 
 
 def zero_extended_node_features(graph: Data) -> None:
@@ -1391,6 +1410,8 @@ def filter_features_and_labels(
             continue
         if should_mask_possessor_velocity_edge_features(args):
             graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
+        if should_mask_possessor_relative_speed_edge_features(args):
+            graph = mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
 
         if args["xy_only"]:
             graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0

@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import torch
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
@@ -20,11 +22,15 @@ from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
     generate_run_id,
     get_action_label_dir,
+    get_action_graph_dir,
+    get_action_graph_intent_train_dir,
     get_augmented_feature_dir,
     get_augmented_label_dir,
     get_feature_run_root,
     get_intent_train_label_dir,
+    get_post_action_graph_dir,
     get_resolved_action_dir,
+    get_success_intent_graph_dir,
     load_feature_run_metadata,
     resolve_generation_intended_receiver_modes,
     resolve_requested_return_types,
@@ -34,8 +40,17 @@ from project_config import (
     write_run_metadata,
 )
 
-EXPECTED_GRAPH_SCHEMA = {"node_in_dim": infer_node_feature_dim(extend=True), "edge_in_dim": 4, "add_v_edge_features": True}
-EXPECTED_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True}
+EXPECTED_GRAPH_SCHEMA = {
+    "node_in_dim": infer_node_feature_dim(extend=True),
+    "edge_in_dim": 2,
+    "add_v_edge_features": False,
+    "add_relative_speed_edge_features": False,
+}
+EXPECTED_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
+BASE_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
+ALIGNMENT_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 4, "add_v_edge_features": True, "add_relative_speed_edge_features": False}
+RELATIVE_SPEED_EDGE_GRAPH_SCHEMA = {"edge_in_dim": 5, "add_v_edge_features": True, "add_relative_speed_edge_features": True}
+SUPPORTED_EDGE_GRAPH_SCHEMAS = (BASE_EDGE_GRAPH_SCHEMA, ALIGNMENT_EDGE_GRAPH_SCHEMA, RELATIVE_SPEED_EDGE_GRAPH_SCHEMA)
 REFRESH_TARGET_FAMILIES = ("xt", "goal_distance", "epv")
 EXTENSION_MODE_DERIVED = "derived"
 EXTENSION_MODE_IN_PLACE = "in_place"
@@ -63,6 +78,7 @@ class FeatureExtensionPlan:
     added_intended_receiver_modes: list[str]
     refresh_target_families: list[str]
     refresh_pass_height_labels: bool
+    extend_relative_speed_edge_features: bool
     refreshed_return_types: list[str]
     refreshed_intended_receiver_modes: list[str]
     intended_receiver_model_id: str | None
@@ -120,6 +136,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--extend-relative-speed-edge-features",
+        action="store_true",
+        default=False,
+        help=(
+            "With --extend-feature-run-id, append raw relative-speed edge features to existing 4-column "
+            "velocity-angle graph tensors."
+        ),
+    )
+    parser.add_argument(
         "--replace-intended-receiver-model",
         action="store_true",
         default=False,
@@ -147,6 +172,34 @@ def parse_args() -> argparse.Namespace:
             "artifacts to be overwritten or regenerated."
         ),
     )
+    edge_feature_group = parser.add_mutually_exclusive_group()
+    edge_feature_group.add_argument(
+        "--v-edge-features",
+        dest="add_v_edge_features",
+        action="store_true",
+        help="Generate velocity-angle edge features.",
+    )
+    edge_feature_group.add_argument(
+        "--no-v-edge-features",
+        dest="add_v_edge_features",
+        action="store_false",
+        help="Generate only base edge features.",
+    )
+    parser.set_defaults(add_v_edge_features=False)
+    relative_speed_edge_feature_group = parser.add_mutually_exclusive_group()
+    relative_speed_edge_feature_group.add_argument(
+        "--relative-speed-edge-features",
+        dest="add_relative_speed_edge_features",
+        action="store_true",
+        help="Generate raw relative-speed edge features after velocity-angle edge features.",
+    )
+    relative_speed_edge_feature_group.add_argument(
+        "--no-relative-speed-edge-features",
+        dest="add_relative_speed_edge_features",
+        action="store_false",
+        help="Do not generate raw relative-speed edge features.",
+    )
+    parser.set_defaults(add_relative_speed_edge_features=False)
     next_action_group = parser.add_mutually_exclusive_group()
     next_action_group.add_argument(
         "--next-action-conditions-on",
@@ -179,6 +232,8 @@ def parse_args() -> argparse.Namespace:
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
+    if args.extend_relative_speed_edge_features and not args.extend_feature_run_id:
+        parser.error("--extend-relative-speed-edge-features requires --extend-feature-run-id.")
     if (args.in_place or args.overwrite_feature_run) and not args.extend_feature_run_id:
         parser.error("--in-place and --overwrite-feature-run require --extend-feature-run-id.")
     if (args.in_place or args.overwrite_feature_run) and args.run_id:
@@ -191,6 +246,8 @@ def parse_args() -> argparse.Namespace:
         parser.error(
             "--in-place only supports additive extensions; use --overwrite-feature-run to replace model-mode artifacts."
         )
+    if args.add_relative_speed_edge_features and not args.add_v_edge_features:
+        parser.error("--relative-speed-edge-features requires --v-edge-features.")
     if args.worker_thread_limit < 1:
         parser.error("--worker-thread-limit must be a positive integer.")
     return args
@@ -219,6 +276,12 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
     command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
     command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
+    command.append("--v-edge-features" if bool(getattr(args, "add_v_edge_features", False)) else "--no-v-edge-features")
+    command.append(
+        "--relative-speed-edge-features"
+        if bool(getattr(args, "add_relative_speed_edge_features", False))
+        else "--no-relative-speed-edge-features"
+    )
     return command
 
 
@@ -301,6 +364,7 @@ def normalize_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     normalized = {
         "edge_in_dim": int(schema.get("edge_in_dim", -1)),
         "add_v_edge_features": bool(schema.get("add_v_edge_features", False)),
+        "add_relative_speed_edge_features": bool(schema.get("add_relative_speed_edge_features", False)),
     }
     if schema.get("node_in_dim") is not None:
         normalized["node_in_dim"] = int(schema["node_in_dim"])
@@ -312,7 +376,40 @@ def normalize_edge_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]
     return {
         "edge_in_dim": int(normalized.get("edge_in_dim", -1)),
         "add_v_edge_features": bool(normalized.get("add_v_edge_features", False)),
+        "add_relative_speed_edge_features": bool(normalized.get("add_relative_speed_edge_features", False)),
     }
+
+
+def is_supported_edge_graph_schema(schema: dict[str, Any]) -> bool:
+    normalized = normalize_edge_graph_schema(schema)
+    return any(normalized == expected for expected in SUPPORTED_EDGE_GRAPH_SCHEMAS)
+
+
+def graph_schema_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    add_v_edge_features = bool(getattr(args, "add_v_edge_features", False))
+    add_relative_speed_edge_features = bool(getattr(args, "add_relative_speed_edge_features", False))
+    edge_in_dim = 5 if add_relative_speed_edge_features else 4 if add_v_edge_features else 2
+    return {
+        "node_in_dim": infer_node_feature_dim(extend=True),
+        "edge_in_dim": edge_in_dim,
+        "add_v_edge_features": add_v_edge_features,
+        "add_relative_speed_edge_features": add_relative_speed_edge_features,
+    }
+
+
+def edge_feature_flags_for_schema(schema: dict[str, Any]) -> list[str]:
+    normalized = normalize_edge_graph_schema(schema)
+    flags = ["--v-edge-features" if normalized["add_v_edge_features"] else "--no-v-edge-features"]
+    flags.append(
+        "--relative-speed-edge-features"
+        if normalized["add_relative_speed_edge_features"]
+        else "--no-relative-speed-edge-features"
+    )
+    return flags
+
+
+def with_edge_schema_flags(command: list[str], schema: dict[str, Any]) -> list[str]:
+    return [*command, *edge_feature_flags_for_schema(schema)]
 
 
 def metadata_return_types(metadata: dict[str, Any]) -> list[str]:
@@ -643,10 +740,10 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         raise ValueError(f"Feature run {base_run_id} is not completed; status={base_metadata.get('status')!r}.")
 
     graph_schema = normalize_graph_schema(base_metadata.get("graph_schema"))
-    if normalize_edge_graph_schema(graph_schema) != EXPECTED_EDGE_GRAPH_SCHEMA:
+    if not is_supported_edge_graph_schema(graph_schema):
         raise ValueError(
-            f"Feature run {base_run_id} has graph_schema={graph_schema!r}; expected edge schema "
-            f"{EXPECTED_EDGE_GRAPH_SCHEMA!r}."
+            f"Feature run {base_run_id} has unsupported graph_schema={graph_schema!r}; expected one of "
+            f"{SUPPORTED_EDGE_GRAPH_SCHEMAS!r}."
         )
 
     base_return_types = metadata_return_types(base_metadata)
@@ -661,6 +758,14 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
     refresh_target_families = args_refresh_target_families(args)
     refresh_pass_height_labels = bool(getattr(args, "pass_height", False))
+    extend_relative_speed_edge_features = bool(getattr(args, "extend_relative_speed_edge_features", False))
+    if extend_relative_speed_edge_features:
+        edge_schema = normalize_edge_graph_schema(graph_schema)
+        if edge_schema != ALIGNMENT_EDGE_GRAPH_SCHEMA:
+            raise ValueError(
+                "--extend-relative-speed-edge-features requires a completed 4-column velocity-angle feature run "
+                f"with graph_schema={ALIGNMENT_EDGE_GRAPH_SCHEMA!r}; got {edge_schema!r}."
+            )
 
     base_model_id = base_metadata.get("intended_receiver_model_id")
     if base_model_id is not None:
@@ -710,11 +815,12 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         and not regenerate_model_mode
         and not refresh_target_families
         and not refresh_pass_height_labels
+        and not extend_relative_speed_edge_features
     ):
         raise ValueError(
             "Extension would not add any return types, intended-receiver modes, or target-label refreshes. "
             "Use a fresh full run or request a new --return_type / --intended-receiver-model-id / "
-            "--refresh-target-family / --pass-height."
+            "--refresh-target-family / --pass-height / --extend-relative-speed-edge-features."
         )
 
     in_place = bool(getattr(args, "in_place", False))
@@ -767,7 +873,16 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         num_workers=getattr(args, "num_workers", "1"),
         worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)),
     )
+    command_steps = [
+        FeatureGenerationStep(step.description, with_edge_schema_flags(step.command, graph_schema))
+        for step in command_steps
+    ]
     commands = [step.command for step in command_steps]
+    final_graph_schema = copy.deepcopy(graph_schema)
+    if extend_relative_speed_edge_features:
+        final_graph_schema["edge_in_dim"] = 5
+        final_graph_schema["add_v_edge_features"] = True
+        final_graph_schema["add_relative_speed_edge_features"] = True
     return FeatureExtensionPlan(
         base_run_id=base_run_id,
         output_run_id=output_run_id,
@@ -782,6 +897,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         added_intended_receiver_modes=added_modes,
         refresh_target_families=refresh_target_families,
         refresh_pass_height_labels=refresh_pass_height_labels,
+        extend_relative_speed_edge_features=extend_relative_speed_edge_features,
         refreshed_return_types=final_return_types if refresh_target_families or refresh_pass_height_labels else [],
         refreshed_intended_receiver_modes=final_modes if refresh_target_families or refresh_pass_height_labels else [],
         intended_receiver_model_id=final_model_id,
@@ -789,7 +905,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         replaced_intended_receiver_model_id=replaced_model_id,
         replaced_intended_receiver_modes=replaced_modes,
         next_action_conditions_enabled=base_next_action_conditions_enabled,
-        graph_schema=copy.deepcopy(graph_schema),
+        graph_schema=copy.deepcopy(final_graph_schema),
         commands=commands,
         command_steps=command_steps,
     )
@@ -806,6 +922,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_added_intended_receiver_modes": plan.added_intended_receiver_modes,
         "extension_refresh_target_families": plan.refresh_target_families,
         "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
+        "extension_relative_speed_edge_features": plan.extend_relative_speed_edge_features,
         "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
         "extension_refreshed_return_types": plan.refreshed_return_types,
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
@@ -845,6 +962,7 @@ def extension_history_entry(
         "added_intended_receiver_modes": plan.added_intended_receiver_modes,
         "refresh_target_families": plan.refresh_target_families,
         "refresh_pass_height_labels": plan.refresh_pass_height_labels,
+        "relative_speed_edge_features": plan.extend_relative_speed_edge_features,
         "refreshed_return_types": plan.refreshed_return_types,
         "refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
@@ -883,6 +1001,7 @@ def mutating_metadata(
         if advertise_final_state
         else plan.base_metadata.get("intended_receiver_model_id")
     )
+    graph_schema = copy.deepcopy(plan.graph_schema if advertise_final_state else plan.base_metadata.get("graph_schema"))
 
     metadata.update(
         {
@@ -896,6 +1015,9 @@ def mutating_metadata(
             ),
             "extension_refresh_target_families": plan.refresh_target_families,
             "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
+            "extension_relative_speed_edge_features": (
+                plan.extend_relative_speed_edge_features if advertise_final_state else False
+            ),
             "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
             "extension_refreshed_return_types": plan.refreshed_return_types if advertise_final_state else [],
             "extension_refreshed_intended_receiver_modes": (
@@ -913,7 +1035,7 @@ def mutating_metadata(
             "extension_commands": plan.commands,
             "intended_receiver_modes": intended_receiver_modes,
             "intended_receiver_model_id": intended_receiver_model_id,
-            "graph_schema": copy.deepcopy(plan.graph_schema),
+            "graph_schema": graph_schema,
             "splits": ["train", "test"],
             "return_types": return_types,
             "return_type": return_types[0] if len(return_types) == 1 else None,
@@ -966,6 +1088,78 @@ def remove_model_mode_artifacts(output_root: Path, return_types: list[str]) -> N
             path.unlink()
 
 
+def relative_speed_graph_dirs(feature_root: Path, intended_receiver_modes: list[str]) -> list[Path]:
+    dirs = [
+        get_action_graph_dir(feature_root),
+        get_post_action_graph_dir(feature_root),
+        get_action_graph_intent_train_dir(feature_root),
+        get_success_intent_graph_dir(feature_root),
+    ]
+    dirs.extend(get_augmented_feature_dir(mode, root=feature_root) for mode in intended_receiver_modes)
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for directory in dirs:
+        resolved = Path(directory)
+        if resolved in seen or not resolved.exists():
+            continue
+        seen.add(resolved)
+        unique.append(resolved)
+    return unique
+
+
+def append_relative_speed_to_graph(graph: object) -> object:
+    if graph is None:
+        raise ValueError("Graph artifact contains a null graph.")
+    if not hasattr(graph, "edge_attr") or graph.edge_attr is None:
+        raise ValueError("Graph artifact is missing edge_attr required for relative-speed extension.")
+    if not hasattr(graph, "edge_index") or graph.edge_index is None:
+        raise ValueError("Graph artifact is missing edge_index required for relative-speed extension.")
+    if not hasattr(graph, "x") or graph.x is None:
+        raise ValueError("Graph artifact is missing node features required for relative-speed extension.")
+    edge_dim = int(graph.edge_attr.shape[1])
+    if edge_dim != 4:
+        raise ValueError(f"Expected 4-column edge_attr before relative-speed extension, got edge_dim={edge_dim}.")
+    if graph.x.shape[1] <= config.NODE_FEATURE_VY:
+        raise ValueError("Graph node features do not contain vx/vy columns required for relative-speed extension.")
+    src_vx = graph.x[graph.edge_index[0], config.NODE_FEATURE_VX]
+    src_vy = graph.x[graph.edge_index[0], config.NODE_FEATURE_VY]
+    dst_vx = graph.x[graph.edge_index[1], config.NODE_FEATURE_VX]
+    dst_vy = graph.x[graph.edge_index[1], config.NODE_FEATURE_VY]
+    relative_speed = torch.sqrt((src_vx - dst_vx).square() + (src_vy - dst_vy).square()).unsqueeze(-1)
+    graph.edge_attr = torch.cat([graph.edge_attr, relative_speed.to(dtype=graph.edge_attr.dtype)], dim=1)
+    return graph
+
+
+def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_modes: list[str]) -> list[Path]:
+    graph_files = [
+        graph_file
+        for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
+        for graph_file in sorted(directory.glob("*.pt"))
+    ]
+    if not graph_files:
+        raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
+
+    temp_files: list[tuple[Path, Path]] = []
+    try:
+        for graph_file in graph_files:
+            graphs = torch.load(graph_file, weights_only=False)
+            if not isinstance(graphs, list):
+                raise TypeError(f"Graph artifact {graph_file} is not a list.")
+            extended_graphs = [append_relative_speed_to_graph(graph) for graph in graphs]
+            temp_file = graph_file.with_name(f"{graph_file.name}.relative_speed.tmp")
+            torch.save(extended_graphs, temp_file)
+            temp_files.append((graph_file, temp_file))
+
+        for graph_file, temp_file in temp_files:
+            temp_file.replace(graph_file)
+    except Exception:
+        for _, temp_file in temp_files:
+            if temp_file.exists():
+                temp_file.unlink()
+        raise
+    return [graph_file for graph_file, _ in temp_files]
+
+
 def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
     if plan.extension_mode == EXTENSION_MODE_DERIVED:
@@ -975,6 +1169,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             if plan.regenerate_model_mode:
                 remove_model_mode_artifacts(output_root, plan.final_return_types)
             run_generation_steps(plan.command_steps)
+            if plan.extend_relative_speed_edge_features:
+                extend_relative_speed_edge_features(output_root, plan.final_intended_receiver_modes)
         except Exception as exc:
             write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
             raise
@@ -993,6 +1189,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
         if plan.regenerate_model_mode:
             remove_model_mode_artifacts(target_root, plan.final_return_types)
         run_generation_steps(plan.command_steps)
+        if plan.extend_relative_speed_edge_features:
+            extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes)
     except Exception as exc:
         if plan.extension_mode == EXTENSION_MODE_IN_PLACE:
             write_run_metadata(
@@ -1031,7 +1229,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "command": subprocess.list2cmdline(sys.argv),
         "intended_receiver_modes": args.intended_receiver_modes,
         "intended_receiver_model_id": args.intended_receiver_model_id,
-        "graph_schema": EXPECTED_GRAPH_SCHEMA.copy(),
+        "graph_schema": graph_schema_from_args(args),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
         "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
         "num_workers": str(getattr(args, "num_workers", "1")),

@@ -269,6 +269,7 @@ def save_export_outputs(
                 return_type=return_type,
                 feature_root=feature_root,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
             )
             epv_action_values = infer_match_epv(match, model_specs, device)
             annotated_events, exported_epv = annotate_match_epv(events, epv_action_values)

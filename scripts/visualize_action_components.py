@@ -213,6 +213,7 @@ def load_match(
     return_type: str | None = None,
     feature_root: Path | None = None,
     add_v_edge_features: bool = False,
+    add_relative_speed_edge_features: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -249,6 +250,7 @@ def load_match(
             extend=True,
             post_action=False,
             add_v_edge_features=add_v_edge_features,
+            add_relative_speed_edge_features=add_relative_speed_edge_features,
         )
 
     return match
@@ -824,6 +826,7 @@ def main() -> None:
         return_type=return_type,
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
     )
     selected_actions = resolve_action_indices(match, args)
     if not selected_actions:
