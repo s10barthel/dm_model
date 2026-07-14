@@ -15,7 +15,12 @@ from datatools.utils import (
     mask_possessor_velocity_edge_features,
     sparsify_edges,
 )
-from physical_pass_model import append_pc_xpass_lane_survival_to_graph, attach_physical_xpass_to_graph, load_physical_xpass_match
+from physical_pass_model import (
+    PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+    append_pc_xpass_lane_survival_to_graph,
+    attach_physical_xpass_to_graph,
+    load_physical_xpass_match,
+)
 from project_config import get_pc_xpass_dir
 
 
@@ -426,7 +431,11 @@ class ActionDataset(Dataset):
             if self.lane_survival:
                 match_id = feature_match_ids[int(i)]
                 if match_id not in lane_survival_rows_by_match:
-                    lane_survival_rows_by_match[match_id] = load_physical_xpass_match(lane_survival_cache_root, match_id)
+                    lane_survival_rows_by_match[match_id] = load_physical_xpass_match(
+                        lane_survival_cache_root,
+                        match_id,
+                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                    )
                 graph = append_pc_xpass_lane_survival_to_graph(
                     graph,
                     graph_labels,
