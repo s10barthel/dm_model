@@ -1109,7 +1109,7 @@ def relative_speed_graph_dirs(feature_root: Path, intended_receiver_modes: list[
 
 def append_relative_speed_to_graph(graph: object) -> object:
     if graph is None:
-        raise ValueError("Graph artifact contains a null graph.")
+        return None
     if not hasattr(graph, "edge_attr") or graph.edge_attr is None:
         raise ValueError("Graph artifact is missing edge_attr required for relative-speed extension.")
     if not hasattr(graph, "edge_index") or graph.edge_index is None:
@@ -1140,11 +1140,15 @@ def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_mo
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
 
     temp_files: list[tuple[Path, Path]] = []
+    graphs_extended = 0
+    null_graphs_preserved = 0
     try:
         for graph_file in graph_files:
             graphs = torch.load(graph_file, weights_only=False)
             if not isinstance(graphs, list):
                 raise TypeError(f"Graph artifact {graph_file} is not a list.")
+            null_graphs_preserved += sum(graph is None for graph in graphs)
+            graphs_extended += sum(graph is not None for graph in graphs)
             extended_graphs = [append_relative_speed_to_graph(graph) for graph in graphs]
             temp_file = graph_file.with_name(f"{graph_file.name}.relative_speed.tmp")
             torch.save(extended_graphs, temp_file)
@@ -1157,6 +1161,11 @@ def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_mo
             if temp_file.exists():
                 temp_file.unlink()
         raise
+    print(
+        "Extended relative-speed edge features for "
+        f"{len(temp_files)} graph files, {graphs_extended} graphs; "
+        f"preserved {null_graphs_preserved} null graph placeholders."
+    )
     return [graph_file for graph_file, _ in temp_files]
 
 
