@@ -409,6 +409,8 @@ python scripts/generate_relevant_features.py --extend-feature-run-id <base_featu
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv --overwrite-feature-run
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height
+python scripts/generate_relevant_features.py --return_type disc_0.9 --pass-height --pass-height-threshold 1.8
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height --pass-height-threshold 1.8
 ```
 
 Inputs:
@@ -437,7 +439,8 @@ Useful options:
 - `--in-place` with `--extend-feature-run-id` to add only missing return-type or model-mode artifacts directly to the existing run; incompatible with `--run-id`, target refreshes, pass-height refreshes, and model replacement
 - `--overwrite-feature-run` with `--extend-feature-run-id` to intentionally mutate the existing run for target refreshes, pass-height backfills, or model-mode replacement; incompatible with `--run-id`
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
-- `--pass-height` with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
+- `--pass-height` to enable pass-height label configuration during a new run, or with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
+- `--pass-height-threshold <meters>` with `--pass-height` to classify a pass as high when its maximum `ball_z` is at least the supplied value; defaults to `2.0` metres and is recorded in run metadata
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
@@ -481,7 +484,7 @@ An `--extend-feature-run-id` run with both new `--return_type` values and `--int
 5. **test split with model mode (labels-only):** prints `"Successfully saved labels-only action labels."`
 6. **train split with model mode intent_train_augmented (labels-only):** prints `"Successfully saved labels-only intent-training labels."`
 
-An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars. `--pass-height` uses the same labels-only extension shape to backfill `pass_max_ball_z` and `pass_high` into older feature runs. With `--overwrite-feature-run`, those regenerated labels are written into the base run instead of a copied derived run.
+An `--extend-feature-run-id` run with `--refresh-target-family` executes the same labels-only shape for the copied run's existing return types and intended-receiver modes, but passes `--overwrite-labels` so copied label tensors are rebuilt from the current xT, goal-distance, and EPV sidecars. `--pass-height` uses the same labels-only extension shape to backfill `pass_max_ball_z` and `pass_high` into older feature runs; combine it with `--pass-height-threshold <meters>` to apply a per-run cutoff. With `--overwrite-feature-run`, those regenerated labels are written into the base run instead of a copied derived run.
 
 This writes, inside the run root:
 
@@ -501,7 +504,7 @@ Every generated action-label tensor also carries canonical outcome diagnostic co
 - `concedes_goal_next10`
 
 These are binary goal labels over `next_10`, generated independently of the selected `--return_type`.
-Action labels also carry pass-height columns. `pass_high` is `1` for passes whose maximum `ball_z` between the pass frame and receive frame is `>= 2.0` meters, and `0` otherwise; `pass_max_ball_z` stores that maximum height.
+Action labels also carry pass-height columns. `pass_high` is `1` for passes whose maximum `ball_z` between the pass frame and receive frame is at least the run's `pass_height_threshold_meters` metadata value (default `2.0` metres), and `0` otherwise; `pass_max_ball_z` stores that maximum height.
 
 ### 4. Train the retained models
 

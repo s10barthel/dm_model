@@ -433,6 +433,18 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertAlmostEqual(max_ball_z, 1.99)
         self.assertEqual(pass_high, 0.0)
 
+    def test_pass_height_label_uses_configured_threshold(self) -> None:
+        match = Match.__new__(Match)
+        match.tracking = pd.DataFrame({"ball_z": [0.0, 1.8]}, index=[10, 11])
+        original_threshold = config.PASS_HEIGHT_THRESHOLD_METERS
+        try:
+            config.PASS_HEIGHT_THRESHOLD_METERS = 1.8
+            _max_ball_z, pass_high = Match.pass_height_labels(match, 10, 11)
+        finally:
+            config.PASS_HEIGHT_THRESHOLD_METERS = original_threshold
+
+        self.assertEqual(pass_high, 1.0)
+
     def test_benchmark_loader_preserves_players_with_blank_pos_z(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             state_path = Path(tmpdir) / "game_state_1.csv"

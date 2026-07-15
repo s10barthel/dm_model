@@ -45,6 +45,7 @@ def make_args(
     replace_model: bool = False,
     refresh_target_families: list[str] | None = None,
     pass_height: bool = False,
+    pass_height_threshold: float | None = None,
     in_place: bool = False,
     overwrite_feature_run: bool = False,
     next_action_conditions_enabled: bool = True,
@@ -62,6 +63,7 @@ def make_args(
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
         pass_height=pass_height,
+        pass_height_threshold=pass_height_threshold,
         extend_relative_speed_edge_features=extend_relative_speed_edge_features,
         in_place=in_place,
         overwrite_feature_run=overwrite_feature_run,
@@ -230,6 +232,22 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertEqual(args.num_workers, "auto")
         self.assertEqual(args.worker_thread_limit, 2)
 
+    def test_parse_accepts_pass_height_threshold_with_pass_height(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["generate_relevant_features.py", "--pass-height", "--pass-height-threshold", "1.8"],
+        ):
+            args = generator.parse_args()
+
+        self.assertTrue(args.pass_height)
+        self.assertEqual(args.pass_height_threshold, 1.8)
+
+    def test_parse_rejects_pass_height_threshold_without_pass_height(self) -> None:
+        with patch.object(sys, "argv", ["generate_relevant_features.py", "--pass-height-threshold", "1.8"]):
+            with self.assertRaises(SystemExit):
+                generator.parse_args()
+
     def test_next_action_conditions_off_propagates_to_full_generation_commands(self) -> None:
         command = generator.with_mode_flags(
             ["python", "datatools/graph_feature.py"],
@@ -263,6 +281,18 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertIn("auto", command)
         self.assertIn("--worker-thread-limit", command)
         self.assertIn("3", command)
+
+    def test_pass_height_threshold_propagates_to_full_generation_commands(self) -> None:
+        command = generator.with_mode_flags(
+            ["python", "datatools/graph_feature.py"],
+            SimpleNamespace(
+                return_types=[], intended_receiver_model_id=None, run_id=None,
+                next_action_conditions_enabled=True, num_workers="1", worker_thread_limit=1,
+                pass_height=True, pass_height_threshold=1.8,
+            ),
+        )
+
+        self.assertEqual(command[-2:], ["--pass-height-threshold", "1.8"])
 
     def test_output_run_must_not_already_exist(self) -> None:
         with self.assertRaises(FileExistsError):
@@ -609,6 +639,14 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertTrue(all("--worker-thread-limit" in command for command in plan.commands))
         self.assertTrue(all("auto" in command for command in plan.commands))
         self.assertTrue(all("2" in command for command in plan.commands))
+
+    def test_pass_height_threshold_propagates_to_backfill_commands_and_metadata(self) -> None:
+        args = make_args(pass_height=True, pass_height_threshold=1.8)
+        plan = self.build_plan(args)
+
+        self.assertTrue(all(command[-2:] == ["--pass-height-threshold", "1.8"] for command in plan.commands))
+        self.assertEqual(generator.derived_metadata(args, plan, "completed")["pass_height_threshold_meters"], 1.8)
+        self.assertEqual(generator.extension_history_entry(args, plan, "completed")["pass_height_threshold_meters"], 1.8)
 
     def test_full_generation_commands_have_documented_step_descriptions(self) -> None:
         steps = generator.full_generation_commands("python")

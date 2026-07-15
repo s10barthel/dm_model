@@ -1260,6 +1260,7 @@ def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
         "augment_blocks_from_existing_graphs": bool(args.augment_blocks_from_existing_graphs),
         "overwrite_labels": bool(args.overwrite_labels),
         "next_action_conditions_enabled": bool(args.next_action_conditions_enabled),
+        "pass_height_threshold": args.pass_height_threshold,
     }
 
 
@@ -1584,6 +1585,8 @@ def _save_non_all_match(
 def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationResult:
     configure_worker_thread_limit(int(task.worker_thread_limit))
     args = SimpleNamespace(**task.args_dict)
+    if args.pass_height_threshold is not None:
+        config.PASS_HEIGHT_THRESHOLD_METERS = float(args.pass_height_threshold)
     feature_root = Path(task.feature_root)
     events = pd.read_csv(f"data/event_synced/{task.match_id}.csv", header=0, parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
@@ -1685,6 +1688,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Overwrite existing label tensors in --labels-only mode.",
+    )
+    parser.add_argument(
+        "--pass-height-threshold",
+        type=float,
+        default=None,
+        help="Maximum-ball-height cutoff in metres used to classify a pass as high.",
     )
     edge_feature_group = parser.add_mutually_exclusive_group()
     edge_feature_group.add_argument(

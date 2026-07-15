@@ -131,8 +131,18 @@ def parse_args() -> argparse.Namespace:
         "--pass-height",
         action="store_true",
         help=(
-            "With --extend-feature-run-id, rebuild copied label tensors so pass-height labels are present. "
+            "Enable pass-height label generation/configuration. With --extend-feature-run-id, rebuild copied "
+            "label tensors so pass-height labels are present. "
             f"High passes use ball_z >= {config.PASS_HEIGHT_THRESHOLD_METERS:g}m between pass and receipt."
+        ),
+    )
+    parser.add_argument(
+        "--pass-height-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Maximum-ball-height cutoff in metres used to classify a pass as high. Requires --pass-height; "
+            f"defaults to {config.PASS_HEIGHT_THRESHOLD_METERS:g}."
         ),
     )
     parser.add_argument(
@@ -232,6 +242,8 @@ def parse_args() -> argparse.Namespace:
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
+    if args.pass_height_threshold is not None and not args.pass_height:
+        parser.error("--pass-height-threshold requires --pass-height.")
     if args.extend_relative_speed_edge_features and not args.extend_feature_run_id:
         parser.error("--extend-relative-speed-edge-features requires --extend-feature-run-id.")
     if (args.in_place or args.overwrite_feature_run) and not args.extend_feature_run_id:
@@ -282,7 +294,14 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         if bool(getattr(args, "add_relative_speed_edge_features", False))
         else "--no-relative-speed-edge-features"
     )
+    if bool(getattr(args, "pass_height", False)):
+        command.extend(["--pass-height-threshold", str(pass_height_threshold_meters(args))])
     return command
+
+
+def pass_height_threshold_meters(args: argparse.Namespace) -> float:
+    value = getattr(args, "pass_height_threshold", None)
+    return config.PASS_HEIGHT_THRESHOLD_METERS if value is None else float(value)
 
 
 def next_action_conditions_flag(enabled: bool) -> str:
@@ -877,6 +896,12 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         FeatureGenerationStep(step.description, with_edge_schema_flags(step.command, graph_schema))
         for step in command_steps
     ]
+    if refresh_pass_height_labels:
+        threshold = str(pass_height_threshold_meters(args))
+        command_steps = [
+            FeatureGenerationStep(step.description, [*step.command, "--pass-height-threshold", threshold])
+            for step in command_steps
+        ]
     commands = [step.command for step in command_steps]
     final_graph_schema = copy.deepcopy(graph_schema)
     if extend_relative_speed_edge_features:
@@ -923,7 +948,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_refresh_target_families": plan.refresh_target_families,
         "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
         "extension_relative_speed_edge_features": plan.extend_relative_speed_edge_features,
-        "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
+        "pass_height_threshold_meters": pass_height_threshold_meters(args),
         "extension_refreshed_return_types": plan.refreshed_return_types,
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
@@ -971,6 +996,7 @@ def extension_history_entry(
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "commands": plan.commands,
+        "pass_height_threshold_meters": pass_height_threshold_meters(args),
     }
     if error:
         entry["error"] = error
@@ -1018,7 +1044,7 @@ def mutating_metadata(
             "extension_relative_speed_edge_features": (
                 plan.extend_relative_speed_edge_features if advertise_final_state else False
             ),
-            "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
+            "pass_height_threshold_meters": pass_height_threshold_meters(args),
             "extension_refreshed_return_types": plan.refreshed_return_types if advertise_final_state else [],
             "extension_refreshed_intended_receiver_modes": (
                 plan.refreshed_intended_receiver_modes if advertise_final_state else []
@@ -1240,7 +1266,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": graph_schema_from_args(args),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
-        "pass_height_threshold_meters": config.PASS_HEIGHT_THRESHOLD_METERS,
+        "pass_height_threshold_meters": pass_height_threshold_meters(args),
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "splits": ["train", "test"],
