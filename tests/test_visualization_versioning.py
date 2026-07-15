@@ -18,6 +18,12 @@ from scripts import visualize_action_components
 from scripts import visualize_benchmark
 from scripts import visualize_hawkeye
 from scripts import visualize_skillcorner
+from scripts.hawkeye_visualization_overlays import (
+    OverlayData,
+    build_situation_overlays,
+    format_selection_label,
+    load_selection_proportions,
+)
 
 
 class FakeImage:
@@ -1389,6 +1395,130 @@ class VisualizationVersioningTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             self.assertNotIn("write_latest_run", source)
             self.assertNotIn("latest.json", source)
+
+
+class HawkeyeVisualizationOverlayTests(unittest.TestCase):
+    def test_selection_labels_handle_missing_settings_and_round_percentages(self) -> None:
+        self.assertEqual(format_selection_label(0.804, 0.535), "80 | 54")
+        self.assertEqual(format_selection_label(0.8, None), "80 | 0")
+        self.assertEqual(format_selection_label(None, 0.54), "0 | 54")
+        self.assertIsNone(format_selection_label(None, None))
+
+    def test_selection_loader_rejects_unexpected_settings_and_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "selections.csv"
+            pd.DataFrame(
+                {
+                    "action_id": ["action-1"],
+                    "setting": ["OTHER"],
+                    "SelectedPlayer": [7],
+                    "proportion": [0.5],
+                }
+            ).to_csv(path, index=False)
+            with self.assertRaisesRegex(ValueError, "unsupported settings"):
+                load_selection_proportions(path)
+
+            pd.DataFrame(
+                {
+                    "action_id": ["action-1", "action-1"],
+                    "setting": ["CAVE", "CAVE"],
+                    "SelectedPlayer": [7, 7],
+                    "proportion": [0.5, 0.5],
+                }
+            ).to_csv(path, index=False)
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                load_selection_proportions(path)
+
+    def test_situation_overlays_use_hawkeye_id_and_uefa_player_id(self) -> None:
+        overlay_data = OverlayData(
+            coach_ratings=pd.DataFrame(
+                {"id": ["action-1"], "uefa_player_id": [7], "team": ["Team A"], "Scores": [5.5]}
+            ),
+            selections=pd.DataFrame(
+                {
+                    "action_id": ["action-1", "action-1", "action-1"],
+                    "SelectedPlayer": [7, 7, 8],
+                    "setting": ["CAVE", "HMD", "CAVE"],
+                    "proportion": [0.8, 0.54, 0.2],
+                }
+            ),
+            metadata={},
+        )
+        situation_tracking = pd.DataFrame(
+            {"team": ["Team A", "Team B"], "uefa_player_id": [7, 8]}
+        )
+        situation = SimpleNamespace(
+            team_map={"Team A": "home", "Team B": "away"},
+            tracking=pd.DataFrame({"home_7_x": [0.0], "away_8_x": [1.0]}),
+        )
+
+        coach_scores, selection_labels, stats = build_situation_overlays(
+            overlay_data, "action-1", situation_tracking, situation
+        )
+
+        self.assertEqual(coach_scores.to_dict(), {"home_7": 5.5})
+        self.assertEqual(selection_labels.to_dict(), {"away_8": "20 | 0", "home_7": "80 | 54"})
+        self.assertEqual(stats["coach_annotations"], 1)
+        self.assertEqual(stats["selection_annotations"], 2)
+
+    def test_overlay_flags_default_off_and_parse_for_both_visualizers(self) -> None:
+        component_args = visualize_hawkeye.parse_args(["--component-run-id", "component-1"])
+        self.assertFalse(component_args.coach_ratings)
+        self.assertFalse(component_args.selections)
+        self.assertEqual(component_args.time_norm, [0.0])
+
+        direct_args = run_and_visualize_hawkeye.parse_args(
+            ["--situation-id", "action-1", "--coach-ratings", "--selections"]
+        )
+        self.assertTrue(direct_args.coach_ratings)
+        self.assertTrue(direct_args.selections)
+
+    def test_component_overlay_gating_limits_coach_and_selection_annotations(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="action-1",
+            tracking=pd.DataFrame(
+                {
+                    "ball_x": [0.0],
+                    "ball_y": [0.0],
+                    "home_7_x": [1.0],
+                    "home_7_y": [2.0],
+                },
+                index=[0],
+            ),
+            frame_meta=pd.DataFrame(
+                {"abs_time": [1.0], "possession_prefix": ["home"], "possessor_object_id": ["home_7"]},
+                index=[0],
+            ),
+        )
+        fig = SimpleNamespace(subplots_adjust=lambda **_kwargs: None)
+        ax = SimpleNamespace(text=lambda *_args, **_kwargs: None, transAxes=object())
+        coach_scores = pd.Series({"home_7": 5.5})
+        selection_labels = pd.Series({"home_7": "80 | 54"})
+
+        with (
+            patch.object(visualize_hawkeye, "SnapshotVisualizer") as mock_visualizer,
+            patch.object(visualize_hawkeye, "figure_to_rgb_image", return_value=Image.new("RGB", (1, 1))),
+            patch.object(visualize_hawkeye.plt, "close"),
+            patch.object(visualize_hawkeye, "add_overlay_annotations") as add_annotations,
+        ):
+            mock_visualizer.return_value.plot.return_value = (fig, ax)
+            for component_name in ["pass_intent", "pass_score", "pass_success"]:
+                visualize_hawkeye.render_frame_image(
+                    situation,
+                    0,
+                    component_name,
+                    pd.Series({"home_7": 0.1}),
+                    coach_scores=coach_scores,
+                    selection_labels=selection_labels,
+                )
+
+        pass_intent_call, pass_score_call, pass_success_call = add_annotations.call_args_list
+        self.assertIsNone(pass_intent_call.kwargs["coach_scores"])
+        self.assertEqual(pass_intent_call.kwargs["selection_labels"].to_dict(), {"home_7": "80 | 54"})
+        self.assertEqual(pass_score_call.kwargs["coach_scores"].to_dict(), {"home_7": 5.5})
+        self.assertEqual(pass_score_call.kwargs["selection_labels"].to_dict(), {"home_7": "80 | 54"})
+        self.assertIsNone(pass_success_call.kwargs["coach_scores"])
+        self.assertIsNone(pass_success_call.kwargs["selection_labels"])
 
 
 if __name__ == "__main__":

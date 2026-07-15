@@ -48,6 +48,12 @@ from project_config import (
     get_runtime_physical_xpass_dir,
     write_run_metadata,
 )
+from scripts.hawkeye_visualization_overlays import (
+    OverlayData,
+    add_overlay_annotations,
+    build_situation_overlays,
+    load_overlay_data,
+)
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualize_hawkeye import (
     output_mode,
@@ -79,6 +85,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument(
+        "--coach-ratings",
+        action="store_true",
+        help="Add coach ratings below player pass-score annotations.",
+    )
+    parser.add_argument(
+        "--selections",
+        action="store_true",
+        help="Add CAVE | HMD selection proportions below pass-intent and pass-score annotations.",
+    )
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
     parser.add_argument(
@@ -166,6 +182,8 @@ def render_frame_image(
     component_name: str,
     probs: pd.Series | None,
     show_trajectories: bool = False,
+    coach_scores: pd.Series | None = None,
+    selection_labels: pd.Series | None = None,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -210,6 +228,13 @@ def render_frame_image(
         fontsize=12,
         color="black",
     )
+    add_overlay_annotations(
+        ax,
+        snapshot,
+        attacking_prefix,
+        coach_scores=coach_scores if component_name == "pass_score" else None,
+        selection_labels=selection_labels if component_name in {"pass_intent", "pass_score"} else None,
+    )
 
     image = figure_to_rgb_image(fig, dpi=150, tight=False)
     plt.close(fig)
@@ -226,6 +251,7 @@ def render_situation(
     device: str,
     output_root: Path,
     rendered_components: list[str],
+    overlay_data: OverlayData | None = None,
 ) -> tuple[Path, dict[str, object], dict[str, object]]:
     output_dir = output_root / str(situation_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,6 +266,22 @@ def render_situation(
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
     )
+    if overlay_data is None:
+        coach_scores = pd.Series(dtype=float)
+        selection_labels = pd.Series(dtype="string")
+        overlay_stats = {
+            "coach_rows_for_situation": 0,
+            "coach_annotations": 0,
+            "selection_rows_for_situation": 0,
+            "selection_annotations": 0,
+        }
+    else:
+        coach_scores, selection_labels, overlay_stats = build_situation_overlays(
+            overlay_data,
+            str(situation_id),
+            situation_tracking,
+            situation,
+        )
     components: dict[str, pd.DataFrame] = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
         if "action_intent" in model_specs:
@@ -364,6 +406,8 @@ def render_situation(
                     component_name,
                     frame_probs,
                     show_trajectories=args.show_trajectories,
+                    coach_scores=coach_scores,
+                    selection_labels=selection_labels,
                 )
                 output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
                 image.save(output_path)
@@ -381,6 +425,8 @@ def render_situation(
                         component_name,
                         frame_probs,
                         show_trajectories=args.show_trajectories,
+                        coach_scores=coach_scores,
+                        selection_labels=selection_labels,
                     )
 
             output_path = output_dir / f"{component_name}.{selected_output_mode}"
@@ -393,6 +439,7 @@ def render_situation(
         "selected_frame_ids": animation_frame_ids if selected_output_mode != "png" else [int(item["frame_id"]) for item in selected_frames],
         "selected_time_norm_range": selected_range,
         "output_paths": output_paths,
+        "overlay_annotations": overlay_stats,
     }
     render_info["physical_xpass_skipped_actions"] = getattr(situation, "physical_xpass_skipped_actions", {})
     return output_dir, getattr(situation, "physical_xpass_runtime_stats", {}), render_info
@@ -460,6 +507,21 @@ def main() -> None:
     )
     args.physical_cache_dir = physical_cache_dir
     selected_physical_xpass_metric = physical_xpass_metric(args)
+    coach_ratings_enabled = bool(getattr(args, "coach_ratings", False))
+    selections_enabled = bool(getattr(args, "selections", False))
+    overlay_data = (
+        load_overlay_data(
+            include_coach_ratings=coach_ratings_enabled,
+            include_selections=selections_enabled,
+        )
+        if coach_ratings_enabled or selections_enabled
+        else None
+    )
+    overlay_metadata = (
+        overlay_data.metadata
+        if overlay_data is not None
+        else {"coach_ratings_enabled": False, "selections_enabled": False}
+    )
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -490,7 +552,7 @@ def main() -> None:
     resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
     for situation_id in situation_ids:
-        output_dir, runtime_physical_stats, render_info = render_situation(
+        render_kwargs = dict(
             situation_id=situation_id,
             tracking=tracking,
             ball=ball,
@@ -501,6 +563,9 @@ def main() -> None:
             output_root=output_root,
             rendered_components=component_selection.rendered_components,
         )
+        if overlay_data is not None:
+            render_kwargs["overlay_data"] = overlay_data
+        output_dir, runtime_physical_stats, render_info = render_situation(**render_kwargs)
         if runtime_physical_stats:
             physical_xpass_runtime_stats[str(situation_id)] = runtime_physical_stats
         physical_skip_stats = render_info.get("physical_xpass_skipped_actions")
@@ -519,6 +584,7 @@ def main() -> None:
                 "selected_time_norm_range": selected_range,
                 "output_dir": str(output_dir.resolve()),
                 "output_paths": render_info["output_paths"],
+                "overlay_annotations": render_info.get("overlay_annotations", {}),
             }
         )
         print(f"Saved Hawkeye {selected_output_mode} visualizations to {output_dir}")
@@ -593,6 +659,9 @@ def main() -> None:
         "time_norm_end": requested_time_norm_range(args)[1] if selected_output_mode != "png" else None,
         "resolved_time_norm_ranges": resolved_time_norm_ranges,
         "show_trajectories": bool(args.show_trajectories),
+        "coach_ratings": bool(getattr(args, "coach_ratings", False)),
+        "selections": bool(getattr(args, "selections", False)),
+        "overlay_sources": overlay_metadata,
         "graph_schema": graph_schema,
     }
     metadata_path = write_run_metadata(output_root, metadata)
