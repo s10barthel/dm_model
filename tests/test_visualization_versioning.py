@@ -21,6 +21,7 @@ from scripts import visualize_skillcorner
 from scripts.hawkeye_visualization_overlays import (
     OverlayData,
     build_situation_overlays,
+    filter_coach_rated_situation_ids,
     format_selection_label,
     load_selection_proportions,
 )
@@ -1398,6 +1399,54 @@ class VisualizationVersioningTests(unittest.TestCase):
 
 
 class HawkeyeVisualizationOverlayTests(unittest.TestCase):
+    def test_coach_rating_filter_preserves_order_and_skips_unrated_ids(self) -> None:
+        coach_ratings = pd.DataFrame({"id": ["rated-2", "rated-1", "rated-1"]})
+
+        eligible, skipped = filter_coach_rated_situation_ids(
+            ["unrated", "rated-1", "rated-2", "rated-1", "unrated-2"],
+            coach_ratings,
+        )
+
+        self.assertEqual(eligible, ["rated-1", "rated-2"])
+        self.assertEqual(skipped, ["unrated", "unrated-2"])
+
+    def test_direct_visualizer_fails_before_model_loading_when_no_ids_are_coach_rated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = SimpleNamespace(
+                situation_id=["unrated"],
+                action_id=None,
+                tracking_csv=str(root / "tracking.csv"),
+                ball_csv=str(root / "ball.csv"),
+                coach_ratings=True,
+                selections=False,
+                device="cpu",
+                run_id="coach_filter_empty",
+                output_dir=str(root),
+            )
+            overlay_data = OverlayData(
+                coach_ratings=pd.DataFrame(
+                    {"id": ["rated"], "uefa_player_id": [7], "team": ["Team A"], "Scores": [5.0]}
+                ),
+                selections=pd.DataFrame(),
+                metadata={"coach_ratings_enabled": True, "selections_enabled": False},
+            )
+            with (
+                patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args),
+                patch.object(run_and_visualize_hawkeye.torch.cuda, "is_available", return_value=False),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_tracking", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "clean_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(run_and_visualize_hawkeye, "resolve_hawkeye_situation_ids", return_value=["unrated"]),
+                patch.object(run_and_visualize_hawkeye, "load_overlay_data", return_value=overlay_data),
+                patch.object(run_and_visualize_hawkeye, "resolve_model_selection") as resolve_models,
+            ):
+                with self.assertRaisesRegex(ValueError, "No coach-rated Hawkeye situations"):
+                    run_and_visualize_hawkeye.main()
+
+            resolve_models.assert_not_called()
+
     def test_selection_labels_handle_missing_settings_and_round_percentages(self) -> None:
         self.assertEqual(format_selection_label(0.804, 0.535), "80 | 54")
         self.assertEqual(format_selection_label(0.8, None), "80 | 0")

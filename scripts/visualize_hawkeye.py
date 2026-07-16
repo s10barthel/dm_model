@@ -48,6 +48,7 @@ from project_config import (
 from scripts.hawkeye_visualization_overlays import (
     add_overlay_annotations,
     build_situation_overlays,
+    filter_coach_rated_situation_ids,
     load_overlay_data,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
@@ -394,6 +395,23 @@ def main() -> None:
         include_coach_ratings=bool(getattr(args, "coach_ratings", False)),
         include_selections=bool(getattr(args, "selections", False)),
     )
+    coach_rating_filter: dict[str, object] | None = None
+    if bool(getattr(args, "coach_ratings", False)):
+        candidate_situation_ids = list(situation_ids)
+        situation_ids, skipped_situation_ids = filter_coach_rated_situation_ids(
+            candidate_situation_ids,
+            overlay_data.coach_ratings,
+        )
+        coach_rating_filter = {
+            "candidate_situation_ids": candidate_situation_ids,
+            "eligible_situation_ids": situation_ids,
+            "skipped_situation_ids": skipped_situation_ids,
+            "candidate_count": len(candidate_situation_ids),
+            "eligible_count": len(situation_ids),
+            "skipped_count": len(skipped_situation_ids),
+        }
+        if not situation_ids:
+            raise ValueError("No coach-rated Hawkeye situations were found among the selected component situations.")
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
@@ -534,6 +552,7 @@ def main() -> None:
         "resolved_time_norm_ranges": resolved_time_norm_ranges,
         "show_trajectories": bool(args.show_trajectories),
         "coach_ratings": bool(getattr(args, "coach_ratings", False)),
+        "coach_rating_situation_filter": coach_rating_filter,
         "selections": bool(getattr(args, "selections", False)),
         "overlay_sources": overlay_data.metadata,
         "freeze_ballreceipt": freeze_ballreceipt,

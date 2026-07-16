@@ -127,6 +127,17 @@ def load_overlay_data(*, include_coach_ratings: bool, include_selections: bool) 
     return OverlayData(coach_ratings=coach_ratings, selections=selections, metadata=metadata)
 
 
+def filter_coach_rated_situation_ids(
+    candidate_situation_ids: list[str], coach_ratings: pd.DataFrame
+) -> tuple[list[str], list[str]]:
+    """Return stable, de-duplicated coach-rated and skipped Hawkeye situation IDs."""
+    candidates = list(dict.fromkeys(str(situation_id) for situation_id in candidate_situation_ids))
+    scored_ids = set(coach_ratings["id"].dropna().astype(str).tolist())
+    eligible_ids = [situation_id for situation_id in candidates if situation_id in scored_ids]
+    skipped_ids = [situation_id for situation_id in candidates if situation_id not in scored_ids]
+    return eligible_ids, skipped_ids
+
+
 def format_coach_score(value: float) -> str:
     text = f"{float(value):.2f}"
     return text.rstrip("0").rstrip(".")

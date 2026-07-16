@@ -52,6 +52,7 @@ from scripts.hawkeye_visualization_overlays import (
     OverlayData,
     add_overlay_annotations,
     build_situation_overlays,
+    filter_coach_rated_situation_ids,
     load_overlay_data,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
@@ -462,6 +463,38 @@ def main() -> None:
         tracking,
         requested_ids=requested_situation_ids + requested_action_ids,
     )
+    coach_ratings_enabled = bool(getattr(args, "coach_ratings", False))
+    selections_enabled = bool(getattr(args, "selections", False))
+    overlay_data = (
+        load_overlay_data(
+            include_coach_ratings=coach_ratings_enabled,
+            include_selections=selections_enabled,
+        )
+        if coach_ratings_enabled or selections_enabled
+        else None
+    )
+    overlay_metadata = (
+        overlay_data.metadata
+        if overlay_data is not None
+        else {"coach_ratings_enabled": False, "selections_enabled": False}
+    )
+    coach_rating_filter: dict[str, object] | None = None
+    if coach_ratings_enabled:
+        candidate_situation_ids = list(situation_ids)
+        situation_ids, skipped_situation_ids = filter_coach_rated_situation_ids(
+            candidate_situation_ids,
+            overlay_data.coach_ratings,
+        )
+        coach_rating_filter = {
+            "candidate_situation_ids": candidate_situation_ids,
+            "eligible_situation_ids": situation_ids,
+            "skipped_situation_ids": skipped_situation_ids,
+            "candidate_count": len(candidate_situation_ids),
+            "eligible_count": len(situation_ids),
+            "skipped_count": len(skipped_situation_ids),
+        }
+        if not situation_ids:
+            raise ValueError("No coach-rated Hawkeye situations were found among the selected situations.")
     explicit_model_ids = {
         "action_intent": getattr(args, "action_intent_model_id", None),
         "pass_intent": getattr(args, "pass_intent_model_id", None),
@@ -507,21 +540,6 @@ def main() -> None:
     )
     args.physical_cache_dir = physical_cache_dir
     selected_physical_xpass_metric = physical_xpass_metric(args)
-    coach_ratings_enabled = bool(getattr(args, "coach_ratings", False))
-    selections_enabled = bool(getattr(args, "selections", False))
-    overlay_data = (
-        load_overlay_data(
-            include_coach_ratings=coach_ratings_enabled,
-            include_selections=selections_enabled,
-        )
-        if coach_ratings_enabled or selections_enabled
-        else None
-    )
-    overlay_metadata = (
-        overlay_data.metadata
-        if overlay_data is not None
-        else {"coach_ratings_enabled": False, "selections_enabled": False}
-    )
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -660,6 +678,7 @@ def main() -> None:
         "resolved_time_norm_ranges": resolved_time_norm_ranges,
         "show_trajectories": bool(args.show_trajectories),
         "coach_ratings": bool(getattr(args, "coach_ratings", False)),
+        "coach_rating_situation_filter": coach_rating_filter,
         "selections": bool(getattr(args, "selections", False)),
         "overlay_sources": overlay_metadata,
         "graph_schema": graph_schema,

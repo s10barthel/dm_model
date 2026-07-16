@@ -1547,7 +1547,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--component-run-id <component_run_id>`: versioned Hawkeye component run to visualize. Default: latest successful Hawkeye component run.
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--coach-ratings`: add scored coach ratings from `validation/coach_ratings/output/coach_ratings.csv` below player annotations in `pass_score` outputs. Default: off.
+- `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
 - `--selections`: add rounded `CAVE | HMD` selection proportions from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
@@ -1588,7 +1588,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--coach-ratings`: add scored coach ratings from `validation/coach_ratings/output/coach_ratings.csv` below player annotations in `pass_score` outputs. Default: off.
+- `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
 - `--selections`: add rounded `CAVE | HMD` selection proportions from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
