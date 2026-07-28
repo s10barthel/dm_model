@@ -8,7 +8,13 @@ import pandas as pd
 from project_config import PROJECT_ROOT
 
 
-COACH_RATINGS_PATH = PROJECT_ROOT / "validation" / "coach_ratings" / "output" / "coach_ratings.csv"
+COACH_RATINGS_PATH = (
+    PROJECT_ROOT
+    / "validation"
+    / "coach_ratings"
+    / "output"
+    / "preprocessed_coach_ratings.csv"
+)
 SELECTIONS_PATH = PROJECT_ROOT / "validation" / "selections" / "per_action_option_counts.csv"
 SELECTION_SETTINGS = ("CAVE", "HMD")
 

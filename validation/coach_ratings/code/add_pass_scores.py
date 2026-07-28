@@ -17,7 +17,7 @@ from hawkeye import load_hawkeye_component_run
 
 COACH_RATINGS_PATH = COACH_RATINGS_ROOT / "output" / "preprocessed_coach_ratings.csv"
 HAWKEYE_COMPONENT_RUNS_DIR = DM_MODEL_ROOT / "data" / "component_runs" / "hawkeye"
-OUTPUT_PATH = COACH_RATINGS_ROOT / "output" / "coach_ratings.csv"
+OUTPUT_DIR = COACH_RATINGS_ROOT / "output"
 
 KEY_COLUMNS = ["id", "uefa_player_id"]
 HAWKEYE_OUTPUT_COLUMNS = [
@@ -70,6 +70,10 @@ def resolve_component_dir(component_id: str) -> Path:
     return component_dir
 
 
+def resolve_output_path(component_id: str) -> Path:
+    return OUTPUT_DIR / f"{component_id}_coach_ratings.csv"
+
+
 def validate_required_columns(df: pd.DataFrame, required_columns: list[str], label: str) -> None:
     missing_columns = [column for column in required_columns if column not in df.columns]
     if missing_columns:
@@ -113,12 +117,12 @@ def read_pass_scores(component_dir: Path) -> pd.DataFrame:
     return pass_scores_df
 
 
-def get_scored_row_mask(df: pd.DataFrame) -> tuple[pd.Series, int]:
+def filter_scored_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     validate_required_columns(df, ["Scores"], "Coach ratings")
     scores_text = df["Scores"].astype("string").str.strip()
     scored_mask = df["Scores"].notna() & scores_text.ne("")
-    ignored_rows = int((~scored_mask).sum())
-    return scored_mask, ignored_rows
+    dropped_rows = int((~scored_mask).sum())
+    return df.loc[scored_mask].copy(), dropped_rows
 
 
 def prepare_pass_score_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
@@ -202,11 +206,7 @@ def prepare_pass_score_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[st
 def merge_pass_scores(
     coach_ratings_df: pd.DataFrame,
     pass_features_df: pd.DataFrame,
-    scored_mask: pd.Series,
 ) -> pd.DataFrame:
-    coach_ratings_with_row_id = coach_ratings_df.copy()
-    coach_ratings_with_row_id["__row_id"] = range(len(coach_ratings_with_row_id))
-    eligible_rows_df = coach_ratings_with_row_id.loc[scored_mask].copy()
     coach_base_columns = coach_ratings_df.columns.tolist()
     pass_columns_to_merge = KEY_COLUMNS + [
         "pass_score_max",
@@ -224,19 +224,11 @@ def merge_pass_scores(
     pass_merge_df = pass_features_df[pass_columns_to_merge].rename(
         columns={"abs_time": "pass_abs_time"}
     )
-    eligible_rows_df = eligible_rows_df.merge(pass_merge_df, on=KEY_COLUMNS, how="left")
-    eligible_rows_df["abs_time"] = eligible_rows_df["pass_abs_time"].combine_first(
-        eligible_rows_df["abs_time"]
+    merged_df = coach_ratings_df.merge(pass_merge_df, on=KEY_COLUMNS, how="left")
+    merged_df["abs_time"] = merged_df["pass_abs_time"].combine_first(
+        merged_df["abs_time"]
     )
-    eligible_rows_df = eligible_rows_df.drop(columns=["pass_abs_time"])
-
-    merged_df = coach_ratings_with_row_id.merge(
-        eligible_rows_df[["__row_id"] + HAWKEYE_OUTPUT_COLUMNS],
-        on="__row_id",
-        how="left",
-        suffixes=("", "_enriched"),
-    )
-    merged_df = merged_df.drop(columns=["__row_id"])
+    merged_df = merged_df.drop(columns=["pass_abs_time"])
 
     ordered_columns = coach_base_columns.copy()
     for column in HAWKEYE_OUTPUT_COLUMNS:
@@ -298,23 +290,24 @@ def print_summary(summary: dict[str, int]) -> None:
 def main() -> int:
     args = parse_args()
     component_dir = resolve_component_dir(args.component_id)
+    output_path = resolve_output_path(args.component_id)
 
     coach_ratings_df = read_csv(COACH_RATINGS_PATH, "Coach ratings")
     coach_ratings_df = normalize_key_columns(coach_ratings_df, "Coach ratings")
     coach_ratings_df = coach_ratings_df.dropna(subset=KEY_COLUMNS).copy()
-    scored_mask, ignored_unscored_rows = get_scored_row_mask(coach_ratings_df)
+    coach_ratings_df, dropped_unscored_rows = filter_scored_rows(coach_ratings_df)
 
     pass_scores_df = read_pass_scores(component_dir)
     pass_features_df, pass_stats = prepare_pass_score_features(pass_scores_df)
 
-    output_df = merge_pass_scores(coach_ratings_df, pass_features_df, scored_mask)
+    output_df = merge_pass_scores(coach_ratings_df, pass_features_df)
     output_df = add_rankings(output_df)
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    output_df.to_csv(OUTPUT_PATH, index=False)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_df.to_csv(output_path, index=False)
 
     summary = {
         "coach_rows_total": len(coach_ratings_df),
-        "coach_rows_ignored_missing_scores": ignored_unscored_rows,
+        "coach_rows_dropped_missing_scores": dropped_unscored_rows,
         "pass_rows_total": pass_stats["pass_rows_total"],
         "pass_rows_in_time_window": pass_stats["pass_rows_in_time_window"],
         "pass_key_matches_available": pass_stats["pass_key_matches_available"],
@@ -339,7 +332,7 @@ def main() -> int:
             output_df["model_ranking_br"].notna().sum()
         ),
     }
-    print(f"Saved output to: {OUTPUT_PATH}")
+    print(f"Saved output to: {output_path}")
     print_summary(summary)
     return 0
 
