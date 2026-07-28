@@ -12,7 +12,7 @@ from datatools.utils import (
     drop_goal_nodes,
     drop_non_blocker_nodes,
     drop_opponent_nodes,
-    mask_possessor_relative_speed_edge_features,
+    mask_possessor_relative_speed_edge_features as _mask_possessor_relative_speed_edge_features,
     mask_possessor_velocity_edge_features,
     sparsify_edges,
 )
@@ -351,7 +351,7 @@ class ActionDataset(Dataset):
             if self.mask_possessor_v_edge_features:
                 graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
             if self.mask_possessor_relative_speed_edge_features:
-                graph = mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
+                graph = _mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
 
             if task == "failure_receiver" and inplay_only:
                 n_teammates = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).sum().item())

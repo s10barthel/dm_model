@@ -3250,6 +3250,44 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(hasattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR))
         self.assertAlmostEqual(float(getattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.2)
 
+    def test_action_dataset_masks_possessor_relative_speed_edges_for_no_poss_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_dir = root / "features"
+            label_dir = root / "labels"
+            feature_dir.mkdir()
+            label_dir.mkdir()
+
+            graph = make_graph(edge_dim=5)
+            graph.edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
+            graph.edge_attr = torch.tensor(
+                [
+                    [1.0, 1.0, 1.0, 11.0, 11.0],
+                    [1.0, 1.0, 1.0, 12.0, 12.0],
+                    [1.0, 1.0, 1.0, 13.0, 13.0],
+                    [1.0, 1.0, 1.0, 14.0, 14.0],
+                ],
+                dtype=torch.float32,
+            )
+            torch.save([graph], feature_dir / "match_1.pt")
+            torch.save(
+                torch.stack([make_label(action_index=7, intent_index=1)]),
+                label_dir / "match_1.pt",
+            )
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=feature_dir,
+                label_dir=label_dir,
+                task="pass_success",
+                relative_speed_edge_feature_mode="no_poss",
+            )
+
+        self.assertEqual(len(dataset), 1)
+        self.assertTrue(
+            torch.equal(dataset.features[0].edge_attr[:, 4], torch.tensor([0.0, 0.0, 13.0, 14.0]))
+        )
+
     def test_missing_sidecar_failure_mentions_precompute_script(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaisesRegex(FileNotFoundError, "generate_physical_xpass.py"):
