@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
+from inference import configure_lane_survival_runtime_cache
 from datatools.benchmark import (
     build_benchmark_export,
     build_benchmark_state,
@@ -79,6 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id")
     parser.add_argument("--output-dir")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass sidecar directory override.")
+    parser.add_argument("--lane-survival-cache-dir", help="Runtime pc-xPass lane-survival cache directory override.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for physical xPass inference blending.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
@@ -294,6 +296,8 @@ def main() -> None:
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
         get_pc_xpass_dir("benchmark") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
     )
+    lane_survival_cache_dir = getattr(args, "lane_survival_cache_dir", None) or str(get_pc_xpass_dir("benchmark"))
+    configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
@@ -455,6 +459,7 @@ def main() -> None:
         "source_return_types": shared_context.get("source_return_types", {}),
         "source_target_families": shared_context.get("source_target_families", {}),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "lane_survival_cache_dir": lane_survival_cache_dir,
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": physical_xpass_source(pass_success_model.args) if pass_success_model is not None else None,

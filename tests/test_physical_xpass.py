@@ -557,6 +557,24 @@ def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -
     ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
 
 
+def write_lane_survival_inference_cache(cache_dir: Path, action_indexes: list[int]) -> None:
+    (cache_dir / "matches").mkdir(parents=True)
+    (cache_dir / "metadata.json").write_text(
+        json.dumps(pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "match_id": "match_1",
+                "action_index": int(action_index),
+                pc_xpass_lane_survival_column("home_2"): 0.42,
+            }
+            for action_index in action_indexes
+        ]
+    ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+
+
 def write_runtime_visualization_xpass_cache(cache_dir: Path, match_id: str = "match_1", action_indexes: list[int] | None = None) -> None:
     action_indexes = action_indexes or [0]
     (cache_dir / "matches").mkdir(parents=True)
@@ -638,6 +656,46 @@ class PhysicalXPassTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-finite lane_survival"):
             append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
+    def test_lane_survival_checkpoint_attaches_cache_without_mutating_match_graphs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            write_lane_survival_inference_cache(cache_dir, [7])
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_cache_dir=str(cache_dir),
+                    use_physical_xpass=False,
+                )
+            )
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+        self.assertEqual(match.graph_features_0[0].x.shape[1], 25)
+
+    def test_lane_survival_checkpoint_reports_precompute_instruction_for_missing_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_cache_dir=str(Path(tmpdir) / "missing"),
+                    use_physical_xpass=False,
+                )
+            )
+
+            with self.assertRaisesRegex(inference.LaneSurvivalCacheError, "generate_physical_xpass.py --pc-xpass"):
+                inference.inference_gnn(match, model, device="cpu", post_action=False)
 
     def test_inference_physical_xpass_blend_formula(self) -> None:
         self.assertAlmostEqual(

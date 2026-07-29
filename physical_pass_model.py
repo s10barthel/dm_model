@@ -487,6 +487,46 @@ def pc_xpass_metadata(
     }
 
 
+PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS = (
+    "source",
+    "teammate_policy",
+    "ignore_teammates_lane_survival",
+    "ignore_teammates_control",
+    "reaction_time_mode",
+    "reaction_time",
+    "dist_pass_div",
+    "dist_pass_min",
+    "dist_pass_max",
+    "max_player_speed",
+    "max_player_speed_off",
+    "max_player_speed_def",
+    "lane_function",
+    "lane_power",
+    "lane_inflection_point",
+    "control_function",
+    "control_power",
+    "control_inflection_point",
+    "endpoint_normalization",
+    "boost_def_endpoint_control",
+    "lane_survival_aggregation",
+    "lane_survival_policy",
+    "position_discount_function",
+    "position_discount_power",
+    "position_discount_distance",
+    "max_speed",
+    "min_speed",
+    "speed_step",
+    "angle_step",
+    "radial_gridsize",
+)
+
+
+def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> str:
+    """Fingerprint only pc-xPass settings that determine the lane-survival feature."""
+    payload = {key: metadata.get(key) for key in PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def as_default_v0_values(
     max_speed: float | None = None,
     *,

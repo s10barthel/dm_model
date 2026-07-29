@@ -20,7 +20,7 @@ from datatools.graph_feature import construct_graph_features, summarize_ball_tra
 from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
-from inference import inference_gnn, load_success_intent_labels, resolve_match_id
+from inference import configure_lane_survival_runtime_cache, inference_gnn, load_success_intent_labels, resolve_match_id
 from models.utils import (
     aggregate_graph_schemas,
     get_model_record,
@@ -113,6 +113,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Render max_player_cum_prob.png from physical xPass sidecars.",
     )
     parser.add_argument("--physical-cache-dir", help="Physical xPass sidecar directory override.")
+    parser.add_argument("--lane-survival-cache-dir", help="Runtime pc-xPass lane-survival cache directory override.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for inference blending and physical xPass rendering.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
@@ -797,6 +798,8 @@ def main() -> None:
     physical_cache_dir = args.physical_cache_dir or str(
         get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     )
+    lane_survival_cache_dir = args.lane_survival_cache_dir or str(get_pc_xpass_dir("sportec"))
+    configure_lane_survival_runtime_cache(loaded_models, lane_survival_cache_dir)
     selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = loaded_models.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
@@ -920,6 +923,7 @@ def main() -> None:
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": str(physical_cache_dir),
+        "lane_survival_cache_dir": lane_survival_cache_dir,
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "physical_xpass_requested": bool(getattr(args, "use_physical_xpass", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,

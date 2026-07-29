@@ -42,6 +42,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_SOURCE,
     model_uses_physical_xpass,
     normalize_physical_xpass_speed_aggregation,
+    pc_xpass_lane_survival_metadata_fingerprint,
     validate_physical_xpass_args,
     validate_physical_xpass_cache_metadata,
 )
@@ -612,6 +613,16 @@ if __name__ == "__main__":
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
     args.lane_survival_cache_dir = str(get_pc_xpass_dir("sportec")) if args.lane_survival else None
+    args.lane_survival_cache_fingerprint = None
+    if args.lane_survival:
+        lane_metadata_path = Path(args.lane_survival_cache_dir) / "metadata.json"
+        if not lane_metadata_path.exists():
+            raise FileNotFoundError(
+                f"Lane-survival training requires pc-xPass metadata at {lane_metadata_path}. "
+                "Run scripts/generate_physical_xpass.py --pc-xpass first."
+            )
+        lane_metadata = json.loads(lane_metadata_path.read_text(encoding="utf-8"))
+        args.lane_survival_cache_fingerprint = pc_xpass_lane_survival_metadata_fingerprint(lane_metadata)
     label_intended_receiver_mode = (
         args.intended_receiver_mode
         if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
@@ -769,6 +780,7 @@ if __name__ == "__main__":
         "lane_survival": {
             "enabled": bool(args.lane_survival),
             "cache_dir": args.lane_survival_cache_dir,
+            "cache_fingerprint": args.lane_survival_cache_fingerprint,
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
@@ -838,6 +850,7 @@ if __name__ == "__main__":
         "physical_xpass_floor": args.physical_xpass_floor,
         "lane_survival": args.lane_survival,
         "lane_survival_cache_dir": args.lane_survival_cache_dir,
+        "lane_survival_cache_fingerprint": args.lane_survival_cache_fingerprint,
     }
     train_dataset = ActionDataset(
         train_match_ids,

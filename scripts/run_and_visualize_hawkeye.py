@@ -23,7 +23,7 @@ from datatools.hawkeye import (
     load_hawkeye_tracking,
     resolve_situation_ids as resolve_hawkeye_situation_ids,
 )
-from inference import inference_gnn
+from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -136,6 +136,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--discount", dest="v4_discount", type=parse_physical_xpass_bool, default=None, help="For --xpass-weight v4, enable/disable the distance cosine discount. Default: true.")
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
+    parser.add_argument("--lane-survival-cache-dir", help="Runtime pc-xPass lane-survival cache directory override.")
     parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
     parser.add_argument("--refresh-physical-cache", action="store_true", help="Deprecated during inference; run scripts/generate_physical_xpass.py to refresh/fill caches.")
     parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
@@ -538,6 +539,8 @@ def main() -> None:
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
         get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     )
+    lane_survival_cache_dir = getattr(args, "lane_survival_cache_dir", None) or str(get_pc_xpass_dir("hawkeye"))
+    configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     args.physical_cache_dir = physical_cache_dir
     selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = model_specs.get("pass_success")
@@ -665,6 +668,7 @@ def main() -> None:
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
+        "lane_survival_cache_dir": lane_survival_cache_dir,
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,

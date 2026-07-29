@@ -291,6 +291,11 @@ def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, An
             args["physical_xpass_speed_aggregation"] = str(speed_aggregation)
         if floor is not None:
             args["physical_xpass_floor"] = float(floor)
+    lane_metadata = (metadata or {}).get("lane_survival")
+    if isinstance(lane_metadata, dict):
+        fingerprint = lane_metadata.get("cache_fingerprint")
+        if fingerprint and not args.get("lane_survival_cache_fingerprint"):
+            args["lane_survival_cache_fingerprint"] = str(fingerprint)
     return args
 
 
