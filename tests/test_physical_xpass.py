@@ -2496,6 +2496,149 @@ class PhysicalXPassTests(unittest.TestCase):
             x_pass_version="top10",
         )
 
+    def _assert_hawkeye_render_inference_frames(
+        self,
+        args: SimpleNamespace,
+        expected_frame_ids: list[int],
+        *,
+        selected_frames: list[dict[str, object]] | None = None,
+        selected_range: tuple[list[int], dict[str, object] | None] | None = None,
+    ) -> None:
+        frame_ids = [0, 300, 325]
+        frame_meta = pd.DataFrame(
+            [
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": float(index)}
+                for index in range(len(frame_ids))
+            ],
+            index=pd.Index(frame_ids, name="frame_id"),
+        )
+        tracking = pd.DataFrame(
+            {"id": ["s1"] * len(frame_ids), "BallReceipt": [0.0] * len(frame_ids)},
+            index=pd.Index(frame_ids, name="frame_id"),
+        )
+        situation = SimpleNamespace(
+            situation_id="s1",
+            match_id="s1",
+            tracking=tracking,
+            frame_meta=frame_meta,
+            labels=torch.stack([make_label(action_index=frame_id) for frame_id in frame_ids]),
+            graph_features_0=[object()] * len(frame_ids),
+        )
+        model_specs = {
+            "action_intent": "action_intent",
+            "pass_intent": "pass_intent",
+            "pass_success": "pass_success",
+            "pass_height": "pass_height",
+            "outcome_scoring": "outcome_scoring",
+            "outcome_conceding": "outcome_conceding",
+        }
+        inference_calls: list[tuple[str, list[int]]] = []
+
+        def fake_inference(_situation, model, **kwargs):
+            inference_calls.append((str(model), list(kwargs["event_indices"])))
+            empty = pd.DataFrame()
+            return empty, empty
+
+        with patch.object(run_and_visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, {}, {})):
+            with patch.object(run_and_visualize_hawkeye, "inference_gnn", side_effect=fake_inference):
+                if selected_frames is not None:
+                    with patch.object(
+                        run_and_visualize_hawkeye,
+                        "resolve_hawkeye_png_frames",
+                        return_value=selected_frames,
+                    ):
+                        run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=tracking,
+                            ball=pd.DataFrame(),
+                            model_specs=model_specs,
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+                elif selected_range is not None:
+                    with patch.object(
+                        run_and_visualize_hawkeye,
+                        "resolve_hawkeye_time_norm_range",
+                        return_value=selected_range,
+                    ):
+                        run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=tracking,
+                            ball=pd.DataFrame(),
+                            model_specs=model_specs,
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+                else:
+                    run_and_visualize_hawkeye.render_situation(
+                        situation_id="s1",
+                        tracking=tracking,
+                        ball=pd.DataFrame(),
+                        model_specs=model_specs,
+                        graph_schema={"add_v_edge_features": False},
+                        args=args,
+                        device="cpu",
+                        output_root=Path("out"),
+                        rendered_components=[],
+                    )
+
+        self.assertEqual(len(inference_calls), len(model_specs))
+        self.assertEqual({tuple(frame_ids) for _model, frame_ids in inference_calls}, {tuple(expected_frame_ids)})
+
+    def test_run_and_visualize_hawkeye_inference_uses_png_selected_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="png",
+                time_norm=[0.0, 1.0],
+                show_trajectories=False,
+            ),
+            [300, 325],
+            selected_frames=[
+                {"label": "time_norm_0", "frame_id": 300},
+                {"label": "time_norm_1", "frame_id": 325},
+            ],
+        )
+
+    def test_run_and_visualize_hawkeye_inference_uses_animation_range_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="gif",
+                time_norm=None,
+                time_norm_start=0.1,
+                time_norm_end=0.7,
+                show_trajectories=False,
+            ),
+            [300, 325],
+            selected_range=([300, 325], {"selected_frame_count": 2}),
+        )
+
+    def test_run_and_visualize_hawkeye_inference_uses_all_unrestricted_animation_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="mp4",
+                time_norm=None,
+                time_norm_start=None,
+                time_norm_end=None,
+                show_trajectories=False,
+            ),
+            [0, 300, 325],
+        )
+
     def test_run_and_visualize_hawkeye_animation_time_norm_range_limits_frames_and_xpass(self) -> None:
         frame_meta = pd.DataFrame(
             [

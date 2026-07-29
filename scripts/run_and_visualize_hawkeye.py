@@ -284,6 +284,34 @@ def render_situation(
             situation_tracking,
             situation,
         )
+
+    # Resolve this before inference so model evaluation requires exactly the
+    # same cached sidecar rows as the frames that will be rendered below.
+    frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
+    selected_output_mode = output_mode(args)
+    selected_frames: list[dict[str, object]] = []
+    selected_range: dict[str, object] | None = None
+    if selected_output_mode == "png":
+        selected_frames = resolve_hawkeye_png_frames(
+            situation,
+            resolve_ballreceipt(situation_tracking),
+            requested_time_norms(args),
+        )
+        animation_frame_ids = frame_ids
+        inference_frame_ids = [int(frame_selection["frame_id"]) for frame_selection in selected_frames]
+    else:
+        time_norm_start, time_norm_end = requested_time_norm_range(args)
+        if time_norm_start is None and time_norm_end is None:
+            animation_frame_ids = frame_ids
+        else:
+            animation_frame_ids, selected_range = resolve_hawkeye_time_norm_range(
+                situation,
+                resolve_ballreceipt(situation_tracking),
+                time_norm_start,
+                time_norm_end,
+            )
+        inference_frame_ids = animation_frame_ids
+
     components: dict[str, pd.DataFrame] = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
         if "action_intent" in model_specs:
@@ -292,6 +320,7 @@ def render_situation(
                 model_specs["action_intent"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
         if "pass_intent" in model_specs:
             components["pass_intent"], _ = inference_gnn(
@@ -299,6 +328,7 @@ def render_situation(
                 model_specs["pass_intent"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
         if "pass_success" in model_specs:
             components["pass_success"], _ = inference_gnn(
@@ -306,6 +336,7 @@ def render_situation(
                 model_specs["pass_success"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
         if "pass_height" in model_specs:
             components["pass_height"], _ = inference_gnn(
@@ -313,6 +344,7 @@ def render_situation(
                 model_specs["pass_height"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
         if "outcome_scoring" in model_specs:
             scoring_failure, scoring_success = inference_gnn(
@@ -320,6 +352,7 @@ def render_situation(
                 model_specs["outcome_scoring"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
             components["outcome_scoring_success"] = scoring_success
             components["outcome_scoring_failure"] = scoring_failure
@@ -329,6 +362,7 @@ def render_situation(
                 model_specs["outcome_conceding"],
                 device=device,
                 post_action=False,
+                event_indices=inference_frame_ids,
             )
             components["outcome_conceding_success"] = conceding_success
             components["outcome_conceding_failure"] = conceding_failure
@@ -356,42 +390,16 @@ def render_situation(
             outcome_conceding_failure=component_frames["outcome_conceding_failure"],
         )
 
-    frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
     component_names = list(rendered_components)
     if bool(getattr(args, "show_physical_xpass", False)):
         component_names.append("physical_xpass")
-    selected_output_mode = output_mode(args)
     output_paths: list[str] = []
-    selected_frames: list[dict[str, object]] = []
-    selected_range: dict[str, object] | None = None
-    if selected_output_mode == "png":
-        selected_frames = resolve_hawkeye_png_frames(
-            situation,
-            resolve_ballreceipt(situation_tracking),
-            requested_time_norms(args),
-        )
-        animation_frame_ids = frame_ids
-    else:
-        time_norm_start, time_norm_end = requested_time_norm_range(args)
-        if time_norm_start is None and time_norm_end is None:
-            animation_frame_ids = frame_ids
-        else:
-            animation_frame_ids, selected_range = resolve_hawkeye_time_norm_range(
-                situation,
-                resolve_ballreceipt(situation_tracking),
-                time_norm_start,
-                time_norm_end,
-            )
 
     if bool(getattr(args, "show_physical_xpass", False)):
-        if selected_output_mode == "png":
-            physical_frame_ids = [int(frame_selection["frame_id"]) for frame_selection in selected_frames]
-        else:
-            physical_frame_ids = animation_frame_ids
         component_frames["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
             args.physical_cache_dir,
             str(situation.match_id),
-            physical_frame_ids,
+            inference_frame_ids,
             metric=physical_xpass_metric(args),
             x_pass_version=getattr(args, "x_pass_version", "top10"),
         )
