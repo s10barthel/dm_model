@@ -1006,6 +1006,8 @@ Endpoint receiver control defaults to `--endpoint-normalization normal`, which k
 
 pc-xPass also applies a target-position discount by default for pass end locations that move the receiver farther from the opponent goal than the receiver's current position. Disable it with `--use-position-discount false`. The default discount uses `--position-discount-power 2.0` and `--position-discount-distance 20.0`: no backward goal-distance change gives discount `1`, a `10m` backward goal-distance change gives `0.5`, and `20m` or more gives `0`.
 
+Use `--pc-xpass --top-xt` to rank max and top-N target locations by `xPass × xT`, using the bilinearly interpolated canonical surface at `data/xT/xT_xy_surface.csv`. This changes only location selection: `__max_xpass`, `__top<N>_xpass`, and the unsuffixed top-N column still contain xPass values, not xPass×xT. The selected detail columns describe the highest xT-ranked location. xT-ranked and normal pc-xPass caches are incompatible, so rerun generation when switching this flag.
+
 ### Inference-time blending
 
 Use physical xPass at inference by adding `--use-physical-xpass` to the inference script. The pass-success model still runs normally, then each receiver probability is blended with cached physical xPass:

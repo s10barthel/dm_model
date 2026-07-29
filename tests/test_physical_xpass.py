@@ -1478,6 +1478,70 @@ class PhysicalXPassTests(unittest.TestCase):
         np.testing.assert_allclose(discount, np.asarray([1.0, 0.9, 0.5, 0.1, 0.0, 0.0]), atol=1e-12)
         self.assertAlmostEqual(float(custom[0]), 0.5)
 
+    def test_pc_xpass_xt_surface_lookup_interpolates_and_clamps_boundaries(self) -> None:
+        surface = pd.read_csv(physical_pass_model.PC_XPASS_XT_SURFACE_PATH)
+        grid = surface.pivot(index="y", columns="x", values="xT")
+        at_cell = physical_pass_model._pc_xpass_xt_values(np.asarray([-42.0]), np.asarray([-23.5]))
+        midpoint = physical_pass_model._pc_xpass_xt_values(np.asarray([-41.5]), np.asarray([-23.0]))
+        boundary = physical_pass_model._pc_xpass_xt_values(np.asarray([-52.5]), np.asarray([-34.0]))
+
+        self.assertAlmostEqual(float(at_cell[0]), float(grid.loc[10.5, 10.5]))
+        self.assertAlmostEqual(
+            float(midpoint[0]),
+            float(grid.loc[[10.5, 11.5], [10.5, 11.5]].to_numpy(dtype=float).mean()),
+        )
+        self.assertAlmostEqual(float(boundary[0]), float(grid.loc[0.5, 0.5]))
+
+    def test_pc_xpass_top_xt_ranks_locations_but_exports_raw_xpass(self) -> None:
+        graph = make_graph()
+
+        def uniform_raw_control(margins, **kwargs):
+            del kwargs
+            return np.full_like(margins, 0.5, dtype=float)
+
+        def favour_forward_targets(target_x, target_y):
+            del target_y
+            return np.where(np.asarray(target_x) > 0.0, 1e6, 1e-6)
+
+        with patch("physical_pass_model.pc_xpass_raw_control_with_params", side_effect=uniform_raw_control):
+            normal = compute_graph_pc_xpass_metrics(
+                graph,
+                eps=1e-12,
+                max_speed=3.0,
+                min_speed=3.0,
+                speed_step=1.0,
+                angle_step=90.0,
+                radial_gridsize=20.0,
+                top_n=2,
+                use_position_discount=False,
+            )
+            with patch("physical_pass_model._pc_xpass_xt_values", side_effect=favour_forward_targets):
+                ranked = compute_graph_pc_xpass_metrics(
+                    graph,
+                    eps=1e-12,
+                    max_speed=3.0,
+                    min_speed=3.0,
+                    speed_step=1.0,
+                    angle_step=90.0,
+                    radial_gridsize=20.0,
+                    top_n=2,
+                    use_position_discount=False,
+                    top_xt=True,
+                )
+
+        self.assertNotEqual(float(normal["home_2__target_x"]), float(ranked["home_2__target_x"]))
+        self.assertGreater(float(ranked["home_2__target_x"]), 0.0)
+        self.assertAlmostEqual(
+            float(ranked["home_2__max_xpass"]),
+            float(ranked["home_2__lane_survival"] * ranked["home_2__control_prob"]),
+        )
+        self.assertAlmostEqual(
+            physical_pass_model._pc_xpass_top_mean_by_ranking(
+                np.asarray([0.9, 0.7, 0.2]), np.asarray([0.01, 0.8, 0.9]), 2
+            ),
+            0.45,
+        )
+
     def test_compute_graph_pc_xpass_applies_position_discount_before_aggregation(self) -> None:
         graph = make_graph()
 
@@ -1741,6 +1805,31 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["dist_pass_div"], 40.0)
         self.assertEqual(metadata["dist_pass_min"], 0.1)
         self.assertEqual(metadata["dist_pass_max"], 0.6)
+
+    def test_pc_xpass_metadata_records_xt_ranking_surface(self) -> None:
+        metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, top_xt=True)
+
+        self.assertTrue(metadata["top_xt"])
+        self.assertEqual(metadata["ranking_mode"], "xpass_times_xt")
+        self.assertEqual(metadata["xt_surface"]["interpolation"], "bilinear_clamped_to_surface_extent")
+        self.assertTrue(metadata["xt_surface"]["sha256"])
+
+    def test_pc_xpass_cache_rejects_changed_xt_ranking_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "ranking_mode"):
+                physical_pass_model._ensure_runtime_physical_xpass_cache(
+                    cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+                    top_xt=True,
+                    create_if_missing=False,
+                )
 
     def test_pc_xpass_metadata_defaults_split_speeds_to_overall_speed(self) -> None:
         metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, max_player_speed=6.0)
@@ -6177,6 +6266,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.use_position_discount, PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT)
         self.assertEqual(args.position_discount_power, PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
         self.assertEqual(args.position_discount_distance, PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
+        self.assertFalse(args.top_xt)
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
@@ -6265,6 +6355,13 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(defense_args.max_player_speed, PC_XPASS_DEFAULT_MAX_PLAYER_SPEED)
         self.assertIsNone(defense_args.max_player_speed_off)
         self.assertEqual(defense_args.max_player_speed_def, 4)
+
+    def test_generate_physical_xpass_cli_accepts_top_xt_for_pc_xpass_only(self) -> None:
+        args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-xt"])
+
+        self.assertTrue(args.top_xt)
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--top-xt"])
 
     def test_generate_physical_xpass_cli_pc_xpass_accepts_split_teammate_ignoring(self) -> None:
         lane_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-lane-survival"])

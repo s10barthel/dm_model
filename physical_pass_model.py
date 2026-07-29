@@ -22,6 +22,11 @@ from datatools.config import FIELD_SIZE, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
 from project_config import get_physical_xpass_match_path
 
+PC_XPASS_XT_SURFACE_PATH = Path(__file__).resolve().parent / "data" / "xT" / "xT_xy_surface.csv"
+PC_XPASS_XT_RANKING_MODE = "xpass_times_xt"
+PC_XPASS_DEFAULT_RANKING_MODE = "xpass"
+_PC_XPASS_XT_SURFACE_CACHE: dict[Path, dict[str, Any]] = {}
+
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
 PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
 PC_XPASS_SOURCE = "pc_xpass"
@@ -288,6 +293,66 @@ def physical_xpass_as_default_metadata(
     }
 
 
+def _load_pc_xpass_xt_surface() -> dict[str, Any]:
+    """Load the canonical xT surface once per process and validate its grid."""
+    path = PC_XPASS_XT_SURFACE_PATH
+    cached = _PC_XPASS_XT_SURFACE_CACHE.get(path)
+    if cached is not None:
+        return cached
+    if not path.is_file():
+        raise FileNotFoundError(f"pc-xPass xT ranking requires xT surface at {path}.")
+
+    surface = pd.read_csv(path)
+    required = {"x", "y", "xT"}
+    if not required.issubset(surface.columns):
+        raise ValueError(f"pc-xPass xT surface at {path} must contain columns {sorted(required)}.")
+    surface = surface.loc[:, ["x", "y", "xT"]].apply(pd.to_numeric, errors="coerce")
+    if surface.isna().any().any() or not np.isfinite(surface.to_numpy(dtype=float)).all():
+        raise ValueError(f"pc-xPass xT surface at {path} contains non-finite x, y, or xT values.")
+    if surface.duplicated(["x", "y"]).any():
+        raise ValueError(f"pc-xPass xT surface at {path} contains duplicate x/y cells.")
+
+    x_values = np.sort(surface["x"].unique().astype(float))
+    y_values = np.sort(surface["y"].unique().astype(float))
+    if x_values.size < 2 or y_values.size < 2:
+        raise ValueError(f"pc-xPass xT surface at {path} must contain at least a 2x2 grid.")
+    if not (np.allclose(np.diff(x_values), np.diff(x_values)[0]) and np.allclose(np.diff(y_values), np.diff(y_values)[0])):
+        raise ValueError(f"pc-xPass xT surface at {path} must use a regular x/y grid.")
+    values = surface.pivot(index="y", columns="x", values="xT").reindex(index=y_values, columns=x_values).to_numpy(dtype=float)
+    if values.shape != (y_values.size, x_values.size) or not np.isfinite(values).all():
+        raise ValueError(f"pc-xPass xT surface at {path} must contain every regular-grid cell exactly once.")
+
+    cached = {
+        "x": x_values,
+        "y": y_values,
+        "values": values,
+        "path": str(path),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+    _PC_XPASS_XT_SURFACE_CACHE[path] = cached
+    return cached
+
+
+def _pc_xpass_xt_values(target_x: np.ndarray, target_y: np.ndarray) -> np.ndarray:
+    """Bilinearly interpolate xT at centred pc-xPass target coordinates."""
+    surface = _load_pc_xpass_xt_surface()
+    x_grid = surface["x"]
+    y_grid = surface["y"]
+    values = surface["values"]
+    x = np.clip(np.asarray(target_x, dtype=float) + FIELD_SIZE[0] / 2.0, x_grid[0], x_grid[-1])
+    y = np.clip(np.asarray(target_y, dtype=float) + FIELD_SIZE[1] / 2.0, y_grid[0], y_grid[-1])
+
+    x_upper = np.clip(np.searchsorted(x_grid, x, side="right"), 1, len(x_grid) - 1)
+    y_upper = np.clip(np.searchsorted(y_grid, y, side="right"), 1, len(y_grid) - 1)
+    x_lower = x_upper - 1
+    y_lower = y_upper - 1
+    x_weight = (x - x_grid[x_lower]) / (x_grid[x_upper] - x_grid[x_lower])
+    y_weight = (y - y_grid[y_lower]) / (y_grid[y_upper] - y_grid[y_lower])
+    lower = values[y_lower, x_lower] * (1.0 - x_weight) + values[y_lower, x_upper] * x_weight
+    upper = values[y_upper, x_lower] * (1.0 - x_weight) + values[y_upper, x_upper] * x_weight
+    return lower * (1.0 - y_weight) + upper * y_weight
+
+
 def pc_xpass_metadata(
     teammate_policy: str,
     *,
@@ -318,6 +383,7 @@ def pc_xpass_metadata(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -363,6 +429,8 @@ def pc_xpass_metadata(
         raise ValueError("boost_def_endpoint_control must be a non-negative finite float.")
     reaction_time_value = None if reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_DIST_PASS else float(reaction_time)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value, min_speed=min_speed_value)
+    ranking_mode = PC_XPASS_XT_RANKING_MODE if bool(top_xt) else PC_XPASS_DEFAULT_RANKING_MODE
+    xt_surface = _load_pc_xpass_xt_surface() if bool(top_xt) else None
     return {
         "metric": top_metric,
         "metric_family": PC_XPASS_SOURCE,
@@ -377,6 +445,14 @@ def pc_xpass_metadata(
         "disabled_metrics": disabled_physical_xpass_metrics(metrics),
         "top_n": int(top_n),
         "top_n_values": resolved_top_n_values,
+        "ranking_mode": ranking_mode,
+        "top_xt": bool(top_xt),
+        "xt_surface": None if xt_surface is None else {
+            "path": xt_surface["path"],
+            "sha256": xt_surface["sha256"],
+            "interpolation": "bilinear_clamped_to_surface_extent",
+            "coordinate_system": "pc_xpass_centered_to_spadl_0_105_x_0_68",
+        },
         "reaction_time_mode": reaction_time_mode,
         "reaction_time": reaction_time_value,
         "dist_pass_div": float(dist_pass_div),
@@ -2602,6 +2678,17 @@ def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
     return float(np.mean(np.partition(finite, -k)[-k:]))
 
 
+def _pc_xpass_top_mean_by_ranking(values: np.ndarray, ranking: np.ndarray, n: int) -> float:
+    finite = np.isfinite(values) & np.isfinite(ranking)
+    if not np.any(finite):
+        return float("nan")
+    selected_values = np.asarray(values[finite], dtype=float)
+    selected_ranking = np.asarray(ranking[finite], dtype=float)
+    k = min(int(n), int(selected_values.size))
+    order = np.argsort(-selected_ranking, kind="stable")[:k]
+    return float(np.mean(selected_values[order]))
+
+
 def _pc_xpass_r_grid(ball_pos: np.ndarray, *, radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE) -> np.ndarray:
     radial_gridsize = float(radial_gridsize)
     if radial_gridsize <= 0:
@@ -2704,6 +2791,7 @@ def compute_graph_pc_xpass_metrics(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
 ) -> pd.Series:
     ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
         consider_teammates=consider_teammates,
@@ -2839,11 +2927,16 @@ def compute_graph_pc_xpass_metrics(
         if not np.isfinite(score).any():
             continue
 
-        flat = int(np.nanargmax(score))
+        ranking = score * _pc_xpass_xt_values(target_x, target_y) if bool(top_xt) else score
+        flat = int(np.nanargmax(ranking))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
         top_values = {
-            int(value): _pc_xpass_top_mean(score, int(value))
+            int(value): (
+                _pc_xpass_top_mean_by_ranking(score, ranking, int(value))
+                if bool(top_xt)
+                else _pc_xpass_top_mean(score, int(value))
+            )
             for value in resolved_top_n_values
             if pc_xpass_top_metric(value) in enabled_metrics
         }
@@ -2899,6 +2992,7 @@ def compute_graphs_pc_xpass_metrics(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -2932,6 +3026,7 @@ def compute_graphs_pc_xpass_metrics(
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
+            top_xt=top_xt,
         )
         for graph in graphs
     ]
@@ -3775,6 +3870,7 @@ def _runtime_cache_metadata(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
 ) -> dict[str, Any]:
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
@@ -3806,6 +3902,7 @@ def _runtime_cache_metadata(
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
+            top_xt=top_xt,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -3893,6 +3990,7 @@ def _ensure_runtime_physical_xpass_cache(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -3934,6 +4032,7 @@ def _ensure_runtime_physical_xpass_cache(
         use_position_discount=use_position_discount,
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
+        top_xt=top_xt,
     )
     if metadata_path.exists():
         if source == PC_XPASS_SOURCE:
@@ -3954,6 +4053,11 @@ def _ensure_runtime_physical_xpass_cache(
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            actual_ranking_mode = metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
+            if actual_ranking_mode != expected_metadata.get("ranking_mode"):
+                mismatches.append(
+                    f"ranking_mode: expected {expected_metadata.get('ranking_mode')!r}, got {actual_ranking_mode!r}"
+                )
             actual_ignore_lane, actual_ignore_control = _pc_xpass_metadata_ignore_flags(metadata)
             expected_ignore_lane, expected_ignore_control = _pc_xpass_metadata_ignore_flags(expected_metadata)
             if actual_ignore_lane != expected_ignore_lane:
@@ -4016,6 +4120,10 @@ def _ensure_runtime_physical_xpass_cache(
                 mismatches.append(
                     "use_position_discount: "
                     f"expected {expected_metadata.get('use_position_discount')!r}, got {metadata.get('use_position_discount')!r}"
+                )
+            if metadata.get("xt_surface") != expected_metadata.get("xt_surface"):
+                mismatches.append(
+                    f"xt_surface: expected {expected_metadata.get('xt_surface')!r}, got {metadata.get('xt_surface')!r}"
                 )
             if sorted(int(value) for value in (metadata.get("top_n_values") or [metadata.get("top_n")])) != sorted(
                 int(value) for value in expected_metadata.get("top_n_values", [])
@@ -4560,6 +4668,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     use_position_discount = bool(task.get("use_position_discount", PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT))
     position_discount_power = float(task.get("position_discount_power", PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER))
     position_discount_distance = float(task.get("position_discount_distance", PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE))
+    top_xt = bool(task.get("top_xt", False))
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -4614,6 +4723,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             use_position_discount=use_position_discount,
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
+            top_xt=top_xt,
         )
     else:
         computed_probs = [
@@ -4763,6 +4873,7 @@ def prewarm_physical_xpass_runtime_cache(
     use_position_discount: bool = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
+    top_xt: bool = False,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
@@ -4822,9 +4933,19 @@ def prewarm_physical_xpass_runtime_cache(
         use_position_discount=use_position_discount,
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
+        top_xt=top_xt,
         create_if_missing=not bool(dry_run),
     )
     refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
+    if source == PC_XPASS_SOURCE and reuse_cache_dir is not None:
+        reuse_metadata_path = Path(reuse_cache_dir) / "metadata.json"
+        if reuse_metadata_path.is_file():
+            reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
+            reuse_ranking_mode = reuse_metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
+            if reuse_ranking_mode != cache_metadata.get("ranking_mode") or reuse_metadata.get("xt_surface") != cache_metadata.get("xt_surface"):
+                raise ValueError(
+                    f"pc-xPass reuse cache at {reuse_cache_dir} is incompatible with the requested xT ranking mode."
+                )
     pass_height_enabled = pass_height_model is not None
     pass_height_model_id_text = None if pass_height_model_id is None else str(pass_height_model_id)
     pass_height_refresh_required = bool(
@@ -5130,6 +5251,7 @@ def prewarm_physical_xpass_runtime_cache(
             "use_position_discount": bool(use_position_discount),
             "position_discount_power": float(position_discount_power),
             "position_discount_distance": float(position_discount_distance),
+            "top_xt": bool(top_xt),
         }
         progress = tqdm(
             total=len(misses),
