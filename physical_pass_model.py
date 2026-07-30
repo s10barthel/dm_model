@@ -4628,16 +4628,35 @@ def _pass_height_predictions_for_graphs(
     model: Any,
     *,
     device: str,
+    labels: list[torch.Tensor] | torch.Tensor | None = None,
+    pc_xpass_rows: list[Mapping[str, Any] | pd.Series] | None = None,
+    match_id: str | None = None,
 ) -> list[dict[str, float]]:
     if not graphs:
         return []
     model_args = getattr(model, "args", None)
     if not isinstance(model_args, dict) or model_args.get("task") != "pass_height":
         raise ValueError("Pass-height cache enrichment requires a loaded model with args['task'] == 'pass_height'.")
+    prediction_graphs = graphs
+    if bool(model_args.get("lane_survival", False)):
+        if labels is None or pc_xpass_rows is None or len(labels) != len(graphs) or len(pc_xpass_rows) != len(graphs):
+            raise ValueError(
+                "Lane-survival pass-height cache enrichment requires one label and resolved pc-xPass row per graph."
+            )
+        prediction_graphs = [
+            append_pc_xpass_lane_survival_row_to_graph(
+                graph.clone(),
+                label,
+                pc_xpass_row,
+                match_id=str(match_id or "runtime"),
+                require_observed_target=False,
+            )
+            for graph, label, pc_xpass_row in zip(graphs, labels, pc_xpass_rows)
+        ]
     was_training = bool(getattr(model, "training", False))
     try:
         model.eval()
-        batch = Batch.from_data_list(graphs).to(device)
+        batch = Batch.from_data_list(prediction_graphs).to(device)
         from models.utils import adapt_batch_graphs_for_model
 
         batch = adapt_batch_graphs_for_model(batch, model_args, context="Pass-height model")
@@ -4645,7 +4664,7 @@ def _pass_height_predictions_for_graphs(
             out = torch.sigmoid(model(batch)).reshape(-1).detach().cpu()
         predictions: list[dict[str, float]] = []
         offset = 0
-        for graph in graphs:
+        for graph in prediction_graphs:
             node_count = int(graph.x.shape[0])
             graph_probs = out[offset : offset + node_count]
             mask = _pass_height_output_mask(graph).detach().cpu().bool()
@@ -4987,6 +5006,15 @@ def prewarm_physical_xpass_runtime_cache(
                     f"pc-xPass reuse cache at {reuse_cache_dir} is incompatible with the requested xT ranking mode."
                 )
     pass_height_enabled = pass_height_model is not None
+    if (
+        pass_height_enabled
+        and bool(getattr(pass_height_model, "args", {}).get("lane_survival", False))
+        and source != PC_XPASS_SOURCE
+    ):
+        raise ValueError(
+            "A lane-survival pass-height model requires source='pc_xpass'. "
+            "Run scripts/generate_physical_xpass.py with --pc-xpass."
+        )
     pass_height_model_id_text = None if pass_height_model_id is None else str(pass_height_model_id)
     pass_height_refresh_required = bool(
         pass_height_enabled and str(cache_metadata.get("pass_height_model_id")) != str(pass_height_model_id_text)
@@ -5008,6 +5036,23 @@ def prewarm_physical_xpass_runtime_cache(
     seen_miss_keys: set[tuple[str, int, str | None]] = set()
     cache_by_match_scope: dict[tuple[str, str | None], pd.DataFrame | None] = {}
     reuse_by_match_scope: dict[tuple[str, str | None], pd.DataFrame | None] = {}
+
+    def pass_height_values_for(
+        graph: Data,
+        label: torch.Tensor,
+        pc_xpass_row: Mapping[str, Any] | pd.Series,
+        row_match_id: str,
+    ) -> dict[str, float] | None:
+        if not pass_height_enabled or bool(dry_run):
+            return None
+        return _pass_height_predictions_for_graphs(
+            [graph],
+            pass_height_model,
+            device=str(pass_height_device),
+            labels=[label],
+            pc_xpass_rows=[pc_xpass_row],
+            match_id=row_match_id,
+        )[0]
 
     for item in items:
         match_id = str(item["match_id"])
@@ -5053,20 +5098,6 @@ def prewarm_physical_xpass_runtime_cache(
         stats["pass_rows"] = int(stats["pass_rows"]) + pass_count
         match_stats["rows_scanned"] += row_count
         match_stats["pass_rows"] += pass_count
-        pass_height_prediction_cache: dict[int, dict[str, float] | None] = {}
-
-        def pass_height_values_for(graph: Data) -> dict[str, float] | None:
-            if not pass_height_enabled or bool(dry_run):
-                return None
-            cache_key = id(graph)
-            if cache_key not in pass_height_prediction_cache:
-                pass_height_prediction_cache[cache_key] = _pass_height_predictions_for_graphs(
-                    [graph],
-                    pass_height_model,
-                    device=str(pass_height_device),
-                )[0]
-            return pass_height_prediction_cache[cache_key]
-
         for graph, label, state_frame_id in zip(graphs, labels, state_frame_ids):
             action_index = int(label[LABEL_INDEX["action_index"]].item())
             state_hash = physical_state_hash(graph)
@@ -5100,7 +5131,6 @@ def prewarm_physical_xpass_runtime_cache(
                     match_stats["hash_mismatch_recomputed"] += 1
                 if hash_matches and _physical_xpass_row_has_finite_metric(cached_row.to_dict(), available_metrics):
                     had_pass_height = _has_finite_pass_height_predictions(cached_row, graph) if pass_height_enabled else True
-                    pass_height_values = pass_height_values_for(graph)
                     copied_row = cached_row.to_dict()
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
@@ -5112,6 +5142,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
+                    pass_height_values = pass_height_values_for(graph, label, copied_row, match_id)
                     _apply_pass_height_predictions(copied_row, pass_height_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
@@ -5143,7 +5174,6 @@ def prewarm_physical_xpass_runtime_cache(
                 hash_matches, _missing_hash = _physical_row_hash_matches_or_missing(reuse_row, state_hash)
                 if hash_matches and _physical_xpass_row_has_finite_metric(reuse_row.to_dict(), available_metrics):
                     had_pass_height = _has_finite_pass_height_predictions(reuse_row, graph) if pass_height_enabled else True
-                    pass_height_values = pass_height_values_for(graph)
                     copied_row = reuse_row.to_dict()
                     copied_row["match_id"] = match_id
                     copied_row["action_index"] = action_index
@@ -5155,6 +5185,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row[PHYSICAL_XPASS_PASS_DISTANCE_COLUMN] = pass_distance
                     copied_row[PHYSICAL_XPASS_BALL_Z_COLUMN] = ball_z
                     copied_row.update(nearest_opponent_values)
+                    pass_height_values = pass_height_values_for(graph, label, copied_row, match_id)
                     _apply_pass_height_predictions(copied_row, pass_height_values)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
@@ -5194,12 +5225,8 @@ def prewarm_physical_xpass_runtime_cache(
                 PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: pass_distance,
                 PHYSICAL_XPASS_BALL_Z_COLUMN: ball_z,
                 "graph": graph,
+                "label": label,
             }
-            pass_height_values = pass_height_values_for(graph)
-            _apply_pass_height_predictions(miss, pass_height_values)
-            if pass_height_enabled:
-                stats["pass_height_filled"] = int(stats["pass_height_filled"]) + 1
-                match_stats["pass_height_filled"] += 1
             if frame_scope is not None:
                 miss[PHYSICAL_XPASS_FRAME_SCOPE_COLUMN] = frame_scope
             if state_frame_id is not None:
@@ -5252,6 +5279,13 @@ def prewarm_physical_xpass_runtime_cache(
     if misses:
         worker_count = min(int(resolved_workers), len(misses))
         chunks = _chunk_items_by_size(misses, int(physical_batch_size))
+
+        def miss_key(row: Mapping[str, Any]) -> tuple[str, int, str | None]:
+            frame_scope = row.get(PHYSICAL_XPASS_FRAME_SCOPE_COLUMN)
+            normalized_scope = None if frame_scope is None or pd.isna(frame_scope) else str(frame_scope)
+            return str(row["match_id"]), int(row["action_index"]), normalized_scope
+
+        misses_by_key = {miss_key(miss): miss for miss in misses}
         task_template = {
             "source": source,
             "eps": float(eps),
@@ -5308,6 +5342,22 @@ def prewarm_physical_xpass_runtime_cache(
             if not rows:
                 return
             skipped_all_nan = int(result.get("skipped_all_nan", 0) or 0)
+            if pass_height_enabled:
+                for row in rows:
+                    context = misses_by_key.get(miss_key(row))
+                    if context is None:
+                        raise ValueError(
+                            "Could not match a computed pc-xPass row to its graph while enriching pass-height predictions."
+                        )
+                    pass_height_values = pass_height_values_for(
+                        context["graph"],
+                        context["label"],
+                        row,
+                        str(row["match_id"]),
+                    )
+                    _apply_pass_height_predictions(row, pass_height_values)
+                    stats["pass_height_filled"] = int(stats["pass_height_filled"]) + 1
+                    match_stats_by_id[str(row["match_id"])]["pass_height_filled"] += 1
             rows_by_match: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
                 rows_by_match.setdefault(str(row["match_id"]), []).append(row)
@@ -5568,7 +5618,28 @@ def append_pc_xpass_lane_survival_to_graph(
             "Run scripts/generate_physical_xpass.py --pc-xpass before training with --lane-survival."
         )
 
-    row = pc_xpass_rows.loc[action_index]
+    return append_pc_xpass_lane_survival_row_to_graph(
+        graph,
+        labels,
+        pc_xpass_rows.loc[action_index],
+        match_id=match_id,
+        require_observed_target=require_observed_target,
+        possessor_index=possessor_index,
+    )
+
+
+def append_pc_xpass_lane_survival_row_to_graph(
+    graph: Data,
+    labels: torch.Tensor,
+    pc_xpass_row: Mapping[str, Any] | pd.Series,
+    *,
+    match_id: str,
+    require_observed_target: bool = True,
+    possessor_index: int | None = None,
+) -> Data:
+    """Append lane-survival values from one already-resolved pc-xPass row."""
+    action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    row = pd.Series(pc_xpass_row)
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
     if possessor_index is not None:
