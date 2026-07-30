@@ -38,6 +38,7 @@ SUMMARY_COLUMNS = [
     "accel_aware",
     "offside_aware",
     "extend_features",
+    "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
     "status",
@@ -64,6 +65,7 @@ FEATURE_COLUMNS = [
     "accel_aware",
     "offside_aware",
     "extend_features",
+    "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
 ]

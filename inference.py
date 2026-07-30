@@ -23,6 +23,7 @@ from datatools.utils import (
 from models.gnn import GNN
 from models.utils import adapt_batch_graphs_for_model
 from physical_pass_model import (
+    PC_XPASS_SOURCE,
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_BALL_Z_COLUMN,
     PHYSICAL_XPASS_DISTANCE_ATTR,
@@ -36,6 +37,7 @@ from physical_pass_model import (
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
     attach_physical_xpass_to_graphs,
+    append_pc_xpass_lane_survival_to_graph,
     blend_physical_xpass_predictions,
     inference_uses_physical_xpass,
     load_physical_xpass_match,
@@ -54,6 +56,9 @@ from physical_pass_model import (
     physical_xpass_teammate_policy,
     requires_physical_xpass_for_inference,
     pc_xpass_enabled,
+    pc_xpass_lane_survival_metadata_fingerprint,
+    normalize_pc_xpass_lane_survival_mode,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
     validate_x_pass_version_available,
     validate_physical_xpass_cache_metadata,
 )
@@ -64,6 +69,29 @@ PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent
 
 class PhysicalXPassNoUsableRowsError(ValueError):
     pass
+
+
+class LaneSurvivalCacheError(ValueError):
+    """Raised when a lane-survival checkpoint cannot be supplied its sidecar feature."""
+
+
+def model_requires_lane_survival(model: GNN) -> bool:
+    """Return whether this checkpoint was trained with the appended lane-survival input."""
+    return bool(model.args.get("lane_survival", False))
+
+
+def model_lane_survival_mode(model: GNN) -> str:
+    """Return the selected pc-xPass field, preserving max behavior for old checkpoints."""
+    return normalize_pc_xpass_lane_survival_mode(model.args.get("lane_survival_mode"))
+
+
+def configure_lane_survival_runtime_cache(models: dict[str, GNN], cache_dir: str | Path | None) -> None:
+    """Apply an explicit runtime pc-xPass cache override to lane-survival checkpoints only."""
+    if cache_dir is None:
+        return
+    for model in models.values():
+        if model is not None and model_requires_lane_survival(model):
+            model.args["lane_survival_runtime_cache_dir"] = str(cache_dir)
 
 
 def _exclude_possessor_from_pass_only_intent(
@@ -258,6 +286,77 @@ def _runtime_physical_xpass_source_name(match: Match) -> str | None:
     if match_type.__module__ == "datatools.skillcorner" and match_type.__name__ == "SkillcornerPossession":
         return "skillcorner"
     return None
+
+
+def _lane_survival_cache_dir_for_inference(match: Match, model: GNN) -> str:
+    """Choose the pc-xPass sidecar location for the current runtime source."""
+    explicit_cache_dir = model.args.get("lane_survival_runtime_cache_dir")
+    if explicit_cache_dir:
+        return str(explicit_cache_dir)
+
+    runtime_source_name = _runtime_physical_xpass_source_name(match)
+    if runtime_source_name is not None:
+        return str(get_pc_xpass_dir(runtime_source_name))
+
+    checkpoint_cache_dir = model.args.get("lane_survival_cache_dir")
+    if checkpoint_cache_dir:
+        return str(checkpoint_cache_dir)
+    return str(get_pc_xpass_dir("sportec"))
+
+
+def attach_lane_survival_for_inference(
+    match: Match,
+    graphs: list[Data],
+    labels: torch.Tensor,
+    model: GNN,
+) -> list[Data]:
+    """Append cached pc-xPass lane-survival values for a compatible checkpoint.
+
+    ``filter_features_and_labels`` already clones graphs, so this modifies only the
+    model-local inference copies and permits 26- and 27-input checkpoints to run
+    over the same match object.
+    """
+    if not model_requires_lane_survival(model):
+        return graphs
+
+    cache_dir = _lane_survival_cache_dir_for_inference(match, model)
+    match_id = resolve_match_id(match)
+    model_id = str(model.args.get("model_id", model.args.get("task", "unknown model")))
+    try:
+        cache_metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+        lane_survival_mode = validate_pc_xpass_lane_survival_mode_cache_metadata(
+            cache_metadata,
+            model_lane_survival_mode(model),
+        )
+        expected_fingerprint = model.args.get("lane_survival_cache_fingerprint")
+        if expected_fingerprint:
+            actual_fingerprint = pc_xpass_lane_survival_metadata_fingerprint(cache_metadata)
+            if str(expected_fingerprint) != actual_fingerprint:
+                raise ValueError(
+                    "pc-xPass cache metadata fingerprint does not match the cache used for lane-survival training."
+                )
+        rows = load_physical_xpass_match(
+            cache_dir,
+            match_id,
+            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+        )
+        return [
+            append_pc_xpass_lane_survival_to_graph(
+                graph,
+                label,
+                rows,
+                match_id=match_id,
+                require_observed_target=False,
+                mode=lane_survival_mode,
+            )
+            for graph, label in zip(graphs, labels)
+        ]
+    except (FileNotFoundError, ValueError) as exc:
+        raise LaneSurvivalCacheError(
+            f"Model {model_id!r} requires cached pc-xPass lane_survival, but it could not be attached "
+            f"for match {match_id!r} from {cache_dir!r}: {exc} "
+            "Precompute compatible rows with scripts/generate_physical_xpass.py --pc-xpass."
+        ) from exc
 
 
 def attach_physical_xpass_for_inference(
@@ -646,6 +745,7 @@ def inference_gnn(
         )
     if requires_physical_xpass_for_inference(model.args):
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
+    graphs = attach_lane_survival_for_inference(match, graphs, labels, model)
 
     graphs = Batch.from_data_list(graphs).to(device)
     graphs = adapt_batch_graphs_for_model(graphs, model.args, context=f"{model.args['task']} model")

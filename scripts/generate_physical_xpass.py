@@ -240,6 +240,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
     parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
     parser.add_argument(
+        "--top-xt",
+        dest="top_xt",
+        action="store_true",
+        help="pc-xPass only: rank max/top-N target locations by xPass times interpolated xT, while exporting xPass values.",
+    )
+    parser.add_argument(
         "--reaction-time",
         "--reaction_time",
         dest="reaction_time",
@@ -525,6 +531,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-n-values must contain only positive integers.")
     if not bool(args.pc_xpass) and args.top_n_values is not None:
         parser.error("--top-n-values is only supported with --pc-xpass.")
+    if bool(args.top_xt) and not bool(args.pc_xpass):
+        parser.error("--top-xt requires --pc-xpass.")
     for attr_name, flag_name in [
         ("lane_power", "--lane-power"),
         ("lane_inflection_point", "--lane-inflection-point"),
@@ -1209,6 +1217,7 @@ def prewarm_runtime_items(
         use_position_discount=bool(args.use_position_discount),
         position_discount_power=float(args.position_discount_power),
         position_discount_distance=float(args.position_discount_distance),
+        top_xt=bool(getattr(args, "top_xt", False)),
         pass_height_model=getattr(args, "_pass_height_model", None),
         pass_height_model_id=getattr(args, "pass_height_model_id", None),
         pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
@@ -1349,6 +1358,7 @@ def write_runtime_dataset_metadata(
             use_position_discount=bool(args.use_position_discount),
             position_discount_power=float(args.position_discount_power),
             position_discount_distance=float(args.position_discount_distance),
+            top_xt=bool(getattr(args, "top_xt", False)),
         )
         if bool(getattr(args, "pc_xpass", False))
         else physical_xpass_as_default_metadata(

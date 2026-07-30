@@ -329,7 +329,11 @@ def test_run_skillcorner_main_prints_match_centered_progress(
     monkeypatch.setattr(run_skillcorner.torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(run_skillcorner, "resolve_model_selection", lambda **kwargs: (model_ids, shared_context, None))
     monkeypatch.setattr(run_skillcorner, "discover_skillcorner_matches", lambda *args, **kwargs: (["m1", "m2"], {}))
-    monkeypatch.setattr(run_skillcorner, "load_skillcorner_models", lambda **kwargs: {"models": object()})
+    monkeypatch.setattr(
+        run_skillcorner,
+        "load_skillcorner_models",
+        lambda **kwargs: {"models": SimpleNamespace(args={})},
+    )
     monkeypatch.setattr(run_skillcorner, "validate_model_graph_schemas", lambda model_specs: {"add_v_edge_features": False})
     monkeypatch.setattr(
         run_skillcorner,

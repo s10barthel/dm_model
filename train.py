@@ -42,8 +42,11 @@ from physical_pass_model import (
     PHYSICAL_XPASS_SOURCE,
     model_uses_physical_xpass,
     normalize_physical_xpass_speed_aggregation,
+    normalize_pc_xpass_lane_survival_mode,
+    pc_xpass_lane_survival_metadata_fingerprint,
     validate_physical_xpass_args,
     validate_physical_xpass_cache_metadata,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -65,6 +68,13 @@ from project_config import (
 )
 
 parser = argparse.ArgumentParser()
+
+
+def parse_lane_survival_mode(value: str) -> str:
+    try:
+        return normalize_pc_xpass_lane_survival_mode(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--trial", type=int, required=False, default=None)
@@ -142,17 +152,21 @@ parser.add_argument("--extend_features", action="store_true", default=False, hel
 lane_survival_group = parser.add_mutually_exclusive_group()
 lane_survival_group.add_argument(
     "--lane-survival",
-    dest="lane_survival",
-    action="store_true",
-    help="Append cached pc-xPass lane_survival as a node feature for node-level tasks.",
+    dest="lane_survival_mode",
+    nargs="?",
+    const="max",
+    type=parse_lane_survival_mode,
+    metavar="{max,top_N}",
+    help="Append cached pc-xPass lane survival: max (default) or top_N such as top_10.",
 )
 lane_survival_group.add_argument(
     "--no-lane-survival",
-    dest="lane_survival",
-    action="store_false",
+    dest="lane_survival_mode",
+    action="store_const",
+    const=None,
     help="Do not append cached pc-xPass lane_survival node features.",
 )
-parser.set_defaults(lane_survival=False)
+parser.set_defaults(lane_survival_mode=None)
 
 parser.add_argument("--more_dest_features", action="store_true", default=False, help="handcraft more dest features")
 parser.add_argument("--adjust_dest", action="store_true", default=False, help="adjust destinations of failed actions")
@@ -406,6 +420,7 @@ parser.add_argument("--training-step-total", type=int, default=None, help=argpar
 args, _ = parser.parse_known_args()
 normalize_v_edge_feature_args(vars(args))
 args.learn_physical_scale = not bool(args.freeze_beta1)
+args.lane_survival = args.lane_survival_mode is not None
 
 
 def infer_node_in_dim(feature_dir: str, task: str, lane_survival: bool = False) -> int:
@@ -612,6 +627,20 @@ if __name__ == "__main__":
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
     args.lane_survival_cache_dir = str(get_pc_xpass_dir("sportec")) if args.lane_survival else None
+    args.lane_survival_cache_fingerprint = None
+    if args.lane_survival:
+        lane_metadata_path = Path(args.lane_survival_cache_dir) / "metadata.json"
+        if not lane_metadata_path.exists():
+            raise FileNotFoundError(
+                f"Lane-survival training requires pc-xPass metadata at {lane_metadata_path}. "
+                "Run scripts/generate_physical_xpass.py --pc-xpass first."
+            )
+        lane_metadata = json.loads(lane_metadata_path.read_text(encoding="utf-8"))
+        args.lane_survival_mode = validate_pc_xpass_lane_survival_mode_cache_metadata(
+            lane_metadata,
+            args.lane_survival_mode,
+        )
+        args.lane_survival_cache_fingerprint = pc_xpass_lane_survival_metadata_fingerprint(lane_metadata)
     label_intended_receiver_mode = (
         args.intended_receiver_mode
         if args.intended_receiver_mode and args.intended_receiver_mode != "unknown"
@@ -768,7 +797,9 @@ if __name__ == "__main__":
         },
         "lane_survival": {
             "enabled": bool(args.lane_survival),
+            "mode": args.lane_survival_mode,
             "cache_dir": args.lane_survival_cache_dir,
+            "cache_fingerprint": args.lane_survival_cache_fingerprint,
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
@@ -837,7 +868,9 @@ if __name__ == "__main__":
         "physical_eps": args.physical_eps,
         "physical_xpass_floor": args.physical_xpass_floor,
         "lane_survival": args.lane_survival,
+        "lane_survival_mode": args.lane_survival_mode,
         "lane_survival_cache_dir": args.lane_survival_cache_dir,
+        "lane_survival_cache_fingerprint": args.lane_survival_cache_fingerprint,
     }
     train_dataset = ActionDataset(
         train_match_ids,

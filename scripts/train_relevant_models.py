@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
-from physical_pass_model import PHYSICAL_XPASS_SOURCE
+from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
     infer_feature_graph_schema,
     infer_training_edge_schema,
@@ -89,7 +89,6 @@ LOW_LEVEL_FALSE_FLAGS = {
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
     "accel_aware": ("--accel", "--no-accel"),
     "offside_aware": ("--offside", "--no-offside"),
-    "lane_survival": ("--lane-survival", "--no-lane-survival"),
 }
 
 MODEL_TOGGLE_SPECS = (
@@ -195,6 +194,13 @@ def add_bool_override(
     parser.set_defaults(**{dest: None})
 
 
+def parse_lane_survival_mode(value: str) -> str:
+    try:
+        return normalize_pc_xpass_lane_survival_mode(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
     resolved_flags = {
         name: WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
@@ -204,6 +210,13 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
         raise ValueError(
             "--extend-features requires possessor-aware features; remove --extend-features or enable --possessor-aware."
         )
+    lane_survival_mode = getattr(args, "lane_survival_mode", None)
+    if lane_survival_mode is None and bool(getattr(args, "lane_survival", False)):
+        lane_survival_mode = "max"
+    if lane_survival_mode is not None:
+        lane_survival_mode = normalize_pc_xpass_lane_survival_mode(lane_survival_mode)
+    resolved_flags["lane_survival"] = lane_survival_mode is not None
+    resolved_flags["lane_survival_mode"] = lane_survival_mode
     return resolved_flags
 
 
@@ -217,6 +230,11 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
             command.append(cli_flag)
     for name, (enabled_flag, disabled_flag) in LOW_LEVEL_BOOL_OVERRIDE_FLAGS.items():
         command.append(enabled_flag if feature_flags[name] else disabled_flag)
+    lane_survival_mode = feature_flags.get("lane_survival_mode")
+    if lane_survival_mode is None:
+        command.append("--no-lane-survival")
+    else:
+        command.extend(["--lane-survival", str(lane_survival_mode)])
     return command
 
 
@@ -1024,13 +1042,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Enable the extended handcrafted node features during training.",
         "Disable the extended handcrafted node features during training.",
     )
-    add_bool_override(
-        parser,
-        "lane-survival",
-        "lane_survival",
-        "Append cached pc-xPass lane_survival as a node feature during training.",
-        "Disable cached pc-xPass lane_survival node features.",
+    lane_survival_group = parser.add_mutually_exclusive_group()
+    lane_survival_group.add_argument(
+        "--lane-survival",
+        dest="lane_survival_mode",
+        nargs="?",
+        const="max",
+        type=parse_lane_survival_mode,
+        metavar="{max,top_N}",
+        help="Append cached pc-xPass lane survival: max (default) or top_N such as top_10.",
     )
+    lane_survival_group.add_argument(
+        "--no-lane-survival",
+        dest="lane_survival_mode",
+        action="store_const",
+        const=None,
+        help="Disable cached pc-xPass lane-survival node features.",
+    )
+    parser.set_defaults(lane_survival_mode=None)
     parser.add_argument(
         "--use_physical_xpass",
         "--use-physical-xpass",
@@ -1798,6 +1827,7 @@ def main() -> None:
                 "physical_xpass": physical_xpass_settings(cli_args),
                 "lane_survival": {
                     "enabled": bool(feature_flags.get("lane_survival", False)),
+                    "mode": feature_flags.get("lane_survival_mode"),
                     "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
                 },
                 "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
@@ -1867,6 +1897,7 @@ def main() -> None:
         "physical_xpass": physical_xpass_settings(cli_args),
         "lane_survival": {
             "enabled": bool(feature_flags.get("lane_survival", False)),
+            "mode": feature_flags.get("lane_survival_mode"),
             "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
         },
         "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),

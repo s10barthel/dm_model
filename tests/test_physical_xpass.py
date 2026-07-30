@@ -557,6 +557,29 @@ def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -
     ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
 
 
+def write_lane_survival_inference_cache(
+    cache_dir: Path,
+    action_indexes: list[int],
+    *,
+    mode: str = "max",
+) -> None:
+    (cache_dir / "matches").mkdir(parents=True)
+    (cache_dir / "metadata.json").write_text(
+        json.dumps(pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        [
+            {
+                "match_id": "match_1",
+                "action_index": int(action_index),
+                physical_pass_model.pc_xpass_lane_survival_column_for_mode("home_2", mode): 0.42,
+            }
+            for action_index in action_indexes
+        ]
+    ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
+
+
 def write_runtime_visualization_xpass_cache(cache_dir: Path, match_id: str = "match_1", action_indexes: list[int] | None = None) -> None:
     action_indexes = action_indexes or [0]
     (cache_dir / "matches").mkdir(parents=True)
@@ -605,6 +628,39 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(torch.equal(appended.x[:, -1], torch.tensor([0.0, 0.42, 0.0])))
         self.assertEqual(appended.node_ids, ["home_1", "home_2", "away_3"])
 
+    def test_append_pc_xpass_lane_survival_uses_selected_top_n_column(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [
+                {
+                    "action_index": 7,
+                    pc_xpass_lane_survival_column("home_2"): 0.42,
+                    physical_pass_model.pc_xpass_top_lane_survival_column("home_2", 25): 0.73,
+                }
+            ]
+        ).set_index("action_index", drop=False)
+
+        appended = append_pc_xpass_lane_survival_to_graph(
+            graph,
+            labels,
+            rows,
+            match_id="match_1",
+            mode="top_25",
+        )
+
+        self.assertTrue(torch.equal(appended.x[:, -1], torch.tensor([0.0, 0.73, 0.0])))
+
+    def test_append_pc_xpass_lane_survival_reports_missing_selected_top_n_column(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [{"action_index": 7, pc_xpass_lane_survival_column("home_2"): 0.42}]
+        ).set_index("action_index", drop=False)
+
+        with self.assertRaisesRegex(ValueError, "mode 'top_10'"):
+            append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1", mode="top_10")
+
     def test_append_pc_xpass_lane_survival_raises_on_missing_row(self) -> None:
         graph = make_graph()
         labels = make_label(action_index=7, intent_index=1)
@@ -638,6 +694,91 @@ class PhysicalXPassTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "non-finite lane_survival"):
             append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1")
+
+    def test_lane_survival_checkpoint_attaches_cache_without_mutating_match_graphs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            write_lane_survival_inference_cache(cache_dir, [7])
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_cache_dir=str(cache_dir),
+                    use_physical_xpass=False,
+                )
+            )
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+        self.assertEqual(match.graph_features_0[0].x.shape[1], 25)
+
+    def test_lane_survival_checkpoint_attaches_selected_top_n_cache_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            write_lane_survival_inference_cache(cache_dir, [7], mode="top_10")
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival-top10",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_mode="top_10",
+                    lane_survival_cache_dir=str(cache_dir),
+                    use_physical_xpass=False,
+                )
+            )
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+
+    def test_top_n_lane_survival_mode_requires_advertised_xpass_metric(self) -> None:
+        metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+
+        with self.assertRaisesRegex(ValueError, "top25_xpass"):
+            physical_pass_model.validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, "top_25")
+
+    def test_runtime_cache_adds_selected_top_n_only_for_lane_survival_model(self) -> None:
+        top_n_model = SimpleNamespace(args={"lane_survival": True, "lane_survival_mode": "top_25"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            prewarm_physical_xpass_runtime_cache(
+                [],
+                cache_dir=cache_dir,
+                source=PC_XPASS_SOURCE,
+                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                pass_height_model=top_n_model,
+                dry_run=False,
+            )
+            metadata = json.loads((cache_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertIn("top25_xpass", metadata["available_metrics"])
+        self.assertIn(25, metadata["top_n_values"])
+
+    def test_lane_survival_checkpoint_reports_precompute_instruction_for_missing_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_cache_dir=str(Path(tmpdir) / "missing"),
+                    use_physical_xpass=False,
+                )
+            )
+
+            with self.assertRaisesRegex(inference.LaneSurvivalCacheError, "generate_physical_xpass.py --pc-xpass"):
+                inference.inference_gnn(match, model, device="cpu", post_action=False)
 
     def test_inference_physical_xpass_blend_formula(self) -> None:
         self.assertAlmostEqual(
@@ -1478,6 +1619,85 @@ class PhysicalXPassTests(unittest.TestCase):
         np.testing.assert_allclose(discount, np.asarray([1.0, 0.9, 0.5, 0.1, 0.0, 0.0]), atol=1e-12)
         self.assertAlmostEqual(float(custom[0]), 0.5)
 
+    def test_pc_xpass_xt_surface_lookup_interpolates_and_clamps_boundaries(self) -> None:
+        surface = pd.read_csv(physical_pass_model.PC_XPASS_XT_SURFACE_PATH)
+        grid = surface.pivot(index="y", columns="x", values="xT")
+        at_cell = physical_pass_model._pc_xpass_xt_values(np.asarray([-42.0]), np.asarray([-23.5]))
+        midpoint = physical_pass_model._pc_xpass_xt_values(np.asarray([-41.5]), np.asarray([-23.0]))
+        boundary = physical_pass_model._pc_xpass_xt_values(np.asarray([-52.5]), np.asarray([-34.0]))
+
+        self.assertAlmostEqual(float(at_cell[0]), float(grid.loc[10.5, 10.5]))
+        self.assertAlmostEqual(
+            float(midpoint[0]),
+            float(grid.loc[[10.5, 11.5], [10.5, 11.5]].to_numpy(dtype=float).mean()),
+        )
+        self.assertAlmostEqual(float(boundary[0]), float(grid.loc[0.5, 0.5]))
+
+    def test_pc_xpass_top_xt_ranks_locations_but_exports_raw_xpass(self) -> None:
+        graph = make_graph()
+
+        def uniform_raw_control(margins, **kwargs):
+            del kwargs
+            return np.full_like(margins, 0.5, dtype=float)
+
+        def favour_forward_targets(target_x, target_y):
+            del target_y
+            return np.where(np.asarray(target_x) > 0.0, 1e6, 1e-6)
+
+        with patch("physical_pass_model.pc_xpass_raw_control_with_params", side_effect=uniform_raw_control):
+            normal = compute_graph_pc_xpass_metrics(
+                graph,
+                eps=1e-12,
+                max_speed=3.0,
+                min_speed=3.0,
+                speed_step=1.0,
+                angle_step=90.0,
+                radial_gridsize=20.0,
+                top_n=2,
+                use_position_discount=False,
+            )
+            with patch("physical_pass_model._pc_xpass_xt_values", side_effect=favour_forward_targets):
+                ranked = compute_graph_pc_xpass_metrics(
+                    graph,
+                    eps=1e-12,
+                    max_speed=3.0,
+                    min_speed=3.0,
+                    speed_step=1.0,
+                    angle_step=90.0,
+                    radial_gridsize=20.0,
+                    top_n=2,
+                    use_position_discount=False,
+                    top_xt=True,
+                )
+
+        self.assertNotEqual(float(normal["home_2__target_x"]), float(ranked["home_2__target_x"]))
+        self.assertGreater(float(ranked["home_2__target_x"]), 0.0)
+        self.assertAlmostEqual(
+            float(ranked["home_2__max_xpass"]),
+            float(ranked["home_2__lane_survival"] * ranked["home_2__control_prob"]),
+        )
+        self.assertAlmostEqual(
+            physical_pass_model._pc_xpass_top_mean_by_ranking(
+                np.asarray([0.9, 0.7, 0.2]), np.asarray([0.01, 0.8, 0.9]), 2
+            ),
+            0.45,
+        )
+        self.assertIn("home_2__top2_lane_survival", ranked.index)
+        self.assertIn("home_2__top2_control_prob", ranked.index)
+
+    def test_pc_xpass_top_option_indices_are_stable_and_ignore_nonfinite_cells(self) -> None:
+        score = np.asarray([[0.8, np.nan], [0.9, 0.9]], dtype=float)
+        ranking = np.asarray([[0.5, 1.0], [0.7, 0.7]], dtype=float)
+        lane_survival = np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        control_prob = np.asarray([[0.5, 0.6], [0.7, 0.8]], dtype=float)
+
+        indices = physical_pass_model._pc_xpass_top_option_indices(score, ranking, 5)
+
+        np.testing.assert_array_equal(indices, np.asarray([2, 3, 0]))
+        self.assertAlmostEqual(float(np.mean(score.ravel()[indices])), (0.9 + 0.9 + 0.8) / 3.0)
+        self.assertAlmostEqual(float(np.mean(lane_survival.ravel()[indices])), (0.3 + 0.4 + 0.1) / 3.0)
+        self.assertAlmostEqual(float(np.mean(control_prob.ravel()[indices])), (0.7 + 0.8 + 0.5) / 3.0)
+
     def test_compute_graph_pc_xpass_applies_position_discount_before_aggregation(self) -> None:
         graph = make_graph()
 
@@ -1582,6 +1802,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertNotIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25), row.index)
         self.assertIn("home_2__lane_survival", row.index)
         self.assertIn("home_2__control_prob", row.index)
+        self.assertIn("home_2__top10_lane_survival", row.index)
+        self.assertIn("home_2__top10_control_prob", row.index)
         self.assertIn("home_2__target_x", row.index)
         self.assertAlmostEqual(
             float(row["home_2"]),
@@ -1618,6 +1840,12 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn(physical_xpass_metric_column("home_2", "top5_xpass"), row.index)
         self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10), row.index)
         self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25), row.index)
+        self.assertIn("home_2__top5_lane_survival", row.index)
+        self.assertIn("home_2__top5_control_prob", row.index)
+        self.assertIn("home_2__top10_lane_survival", row.index)
+        self.assertIn("home_2__top10_control_prob", row.index)
+        self.assertIn("home_2__top25_lane_survival", row.index)
+        self.assertIn("home_2__top25_control_prob", row.index)
         self.assertAlmostEqual(
             float(row["home_2"]),
             float(row[physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10)]),
@@ -1741,6 +1969,31 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["dist_pass_div"], 40.0)
         self.assertEqual(metadata["dist_pass_min"], 0.1)
         self.assertEqual(metadata["dist_pass_max"], 0.6)
+
+    def test_pc_xpass_metadata_records_xt_ranking_surface(self) -> None:
+        metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, top_xt=True)
+
+        self.assertTrue(metadata["top_xt"])
+        self.assertEqual(metadata["ranking_mode"], "xpass_times_xt")
+        self.assertEqual(metadata["xt_surface"]["interpolation"], "bilinear_clamped_to_surface_extent")
+        self.assertTrue(metadata["xt_surface"]["sha256"])
+
+    def test_pc_xpass_cache_rejects_changed_xt_ranking_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+            (cache_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "ranking_mode"):
+                physical_pass_model._ensure_runtime_physical_xpass_cache(
+                    cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
+                    top_xt=True,
+                    create_if_missing=False,
+                )
 
     def test_pc_xpass_metadata_defaults_split_speeds_to_overall_speed(self) -> None:
         metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, max_player_speed=6.0)
@@ -2347,6 +2600,149 @@ class PhysicalXPassTests(unittest.TestCase):
             [300, 325],
             metric=PHYSICAL_XPASS_METRIC_TOPMEAN,
             x_pass_version="top10",
+        )
+
+    def _assert_hawkeye_render_inference_frames(
+        self,
+        args: SimpleNamespace,
+        expected_frame_ids: list[int],
+        *,
+        selected_frames: list[dict[str, object]] | None = None,
+        selected_range: tuple[list[int], dict[str, object] | None] | None = None,
+    ) -> None:
+        frame_ids = [0, 300, 325]
+        frame_meta = pd.DataFrame(
+            [
+                {"possession_prefix": "home", "possessor_object_id": "home_1", "abs_time": float(index)}
+                for index in range(len(frame_ids))
+            ],
+            index=pd.Index(frame_ids, name="frame_id"),
+        )
+        tracking = pd.DataFrame(
+            {"id": ["s1"] * len(frame_ids), "BallReceipt": [0.0] * len(frame_ids)},
+            index=pd.Index(frame_ids, name="frame_id"),
+        )
+        situation = SimpleNamespace(
+            situation_id="s1",
+            match_id="s1",
+            tracking=tracking,
+            frame_meta=frame_meta,
+            labels=torch.stack([make_label(action_index=frame_id) for frame_id in frame_ids]),
+            graph_features_0=[object()] * len(frame_ids),
+        )
+        model_specs = {
+            "action_intent": "action_intent",
+            "pass_intent": "pass_intent",
+            "pass_success": "pass_success",
+            "pass_height": "pass_height",
+            "outcome_scoring": "outcome_scoring",
+            "outcome_conceding": "outcome_conceding",
+        }
+        inference_calls: list[tuple[str, list[int]]] = []
+
+        def fake_inference(_situation, model, **kwargs):
+            inference_calls.append((str(model), list(kwargs["event_indices"])))
+            empty = pd.DataFrame()
+            return empty, empty
+
+        with patch.object(run_and_visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, {}, {})):
+            with patch.object(run_and_visualize_hawkeye, "inference_gnn", side_effect=fake_inference):
+                if selected_frames is not None:
+                    with patch.object(
+                        run_and_visualize_hawkeye,
+                        "resolve_hawkeye_png_frames",
+                        return_value=selected_frames,
+                    ):
+                        run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=tracking,
+                            ball=pd.DataFrame(),
+                            model_specs=model_specs,
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+                elif selected_range is not None:
+                    with patch.object(
+                        run_and_visualize_hawkeye,
+                        "resolve_hawkeye_time_norm_range",
+                        return_value=selected_range,
+                    ):
+                        run_and_visualize_hawkeye.render_situation(
+                            situation_id="s1",
+                            tracking=tracking,
+                            ball=pd.DataFrame(),
+                            model_specs=model_specs,
+                            graph_schema={"add_v_edge_features": False},
+                            args=args,
+                            device="cpu",
+                            output_root=Path("out"),
+                            rendered_components=[],
+                        )
+                else:
+                    run_and_visualize_hawkeye.render_situation(
+                        situation_id="s1",
+                        tracking=tracking,
+                        ball=pd.DataFrame(),
+                        model_specs=model_specs,
+                        graph_schema={"add_v_edge_features": False},
+                        args=args,
+                        device="cpu",
+                        output_root=Path("out"),
+                        rendered_components=[],
+                    )
+
+        self.assertEqual(len(inference_calls), len(model_specs))
+        self.assertEqual({tuple(frame_ids) for _model, frame_ids in inference_calls}, {tuple(expected_frame_ids)})
+
+    def test_run_and_visualize_hawkeye_inference_uses_png_selected_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="png",
+                time_norm=[0.0, 1.0],
+                show_trajectories=False,
+            ),
+            [300, 325],
+            selected_frames=[
+                {"label": "time_norm_0", "frame_id": 300},
+                {"label": "time_norm_1", "frame_id": 325},
+            ],
+        )
+
+    def test_run_and_visualize_hawkeye_inference_uses_animation_range_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="gif",
+                time_norm=None,
+                time_norm_start=0.1,
+                time_norm_end=0.7,
+                show_trajectories=False,
+            ),
+            [300, 325],
+            selected_range=([300, 325], {"selected_frame_count": 2}),
+        )
+
+    def test_run_and_visualize_hawkeye_inference_uses_all_unrestricted_animation_frames(self) -> None:
+        self._assert_hawkeye_render_inference_frames(
+            SimpleNamespace(
+                tracking_csv="tracking.csv",
+                freeze_ballreceipt=True,
+                show_physical_xpass=False,
+                output="mp4",
+                time_norm=None,
+                time_norm_start=None,
+                time_norm_end=None,
+                show_trajectories=False,
+            ),
+            [0, 300, 325],
         )
 
     def test_run_and_visualize_hawkeye_animation_time_norm_range_limits_frames_and_xpass(self) -> None:
@@ -3896,6 +4292,112 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, "home_2"]), 0.61)
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_1")]), 0.7, places=6)
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.7, places=6)
+
+    def test_runtime_pc_xpass_cache_miss_supplies_lane_survival_to_pass_height_model(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        pass_height_model = ConstantPassHeightModel(probability=0.7, node_in_dim=26)
+        pass_height_model.args["lane_survival"] = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            with patch(
+                "physical_pass_model.compute_graphs_pc_xpass_metrics",
+                return_value=[
+                    pd.Series(
+                        {
+                            "home_2__max_xpass": 0.61,
+                            pc_xpass_lane_survival_column("home_2"): 0.42,
+                        },
+                        dtype=float,
+                    )
+                ],
+            ) as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    pass_height_model=pass_height_model,
+                    pass_height_model_id="pass_height/lane-model",
+                    pass_height_device="cpu",
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        compute.assert_called_once()
+        self.assertEqual(graph.x.shape[1], 25)
+        self.assertEqual(stats["pass_height_filled"], 1)
+        self.assertAlmostEqual(float(rows.loc[5, pc_xpass_lane_survival_column("home_2")]), 0.42)
+        self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.7, places=6)
+
+    def test_runtime_pc_xpass_refreshes_lane_model_pass_height_without_recomputing_xpass(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        graph = make_graph()
+        pass_height_model = ConstantPassHeightModel(probability=0.8, node_in_dim=26)
+        pass_height_model.args["lane_survival"] = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            (cache_dir / "matches").mkdir(parents=True)
+            (cache_dir / "metadata.json").write_text(
+                json.dumps(pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER) | {"pass_height_model_id": "pass_height/old-model"}),
+                encoding="utf-8",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "runtime_match",
+                        "action_index": 5,
+                        "physical_state_hash": physical_state_hash(graph),
+                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: observed_pass_distance(graph, labels[0]),
+                        PHYSICAL_XPASS_BALL_Z_COLUMN: graph_ball_z(graph),
+                        **graph_nearest_opponent_distance_row_values(graph),
+                        "home_2__max_xpass": 0.77,
+                        pc_xpass_lane_survival_column("home_2"): 0.42,
+                        physical_xpass_pass_height_column("home_1"): 0.1,
+                        physical_xpass_pass_height_column("home_2"): 0.2,
+                    }
+                ]
+            ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
+
+            with patch("physical_pass_model.compute_graphs_pc_xpass_metrics") as compute:
+                stats = prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
+                    cache_dir=cache_dir,
+                    source=PC_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    pass_height_model=pass_height_model,
+                    pass_height_model_id="pass_height/new-model",
+                    pass_height_device="cpu",
+                )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        compute.assert_not_called()
+        self.assertEqual(stats["cache_misses"], 0)
+        self.assertEqual(stats["copied_from_reuse"], 1)
+        self.assertEqual(stats["pass_height_refreshed"], 1)
+        self.assertAlmostEqual(float(rows.loc[5, "home_2__max_xpass"]), 0.77)
+        self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.8, places=6)
+
+    def test_lane_survival_pass_height_model_requires_pc_xpass_generation(self) -> None:
+        labels = torch.stack([make_label(action_index=5)])
+        pass_height_model = ConstantPassHeightModel(node_in_dim=26)
+        pass_height_model.args["lane_survival"] = True
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "--pc-xpass"):
+                prewarm_physical_xpass_runtime_cache(
+                    [{"match_id": "runtime_match", "graphs": [make_graph()], "labels": labels}],
+                    cache_dir=Path(tmpdir) / "physical_xpass",
+                    source=PHYSICAL_XPASS_SOURCE,
+                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                    num_workers=1,
+                    pass_height_model=pass_height_model,
+                    pass_height_model_id="pass_height/lane-model",
+                    pass_height_device="cpu",
+                )
 
     def test_pass_height_predictions_accept_matching_four_edge_schema(self) -> None:
         graph = make_graph(edge_dim=4)
@@ -6177,6 +6679,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.use_position_discount, PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT)
         self.assertEqual(args.position_discount_power, PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
         self.assertEqual(args.position_discount_distance, PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
+        self.assertFalse(args.top_xt)
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
@@ -6265,6 +6768,13 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(defense_args.max_player_speed, PC_XPASS_DEFAULT_MAX_PLAYER_SPEED)
         self.assertIsNone(defense_args.max_player_speed_off)
         self.assertEqual(defense_args.max_player_speed_def, 4)
+
+    def test_generate_physical_xpass_cli_accepts_top_xt_for_pc_xpass_only(self) -> None:
+        args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-xt"])
+
+        self.assertTrue(args.top_xt)
+        with self.assertRaises(SystemExit):
+            generate_physical_xpass.parse_args(["--top-xt"])
 
     def test_generate_physical_xpass_cli_pc_xpass_accepts_split_teammate_ignoring(self) -> None:
         lane_args = generate_physical_xpass.parse_args(["--pc-xpass", "--ignore-teammates-lane-survival"])

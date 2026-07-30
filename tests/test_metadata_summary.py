@@ -57,6 +57,7 @@ def model_metadata(**overrides: object) -> dict[str, object]:
             "accel_aware": True,
             "offside_aware": True,
             "extend_features": False,
+            "lane_survival": True,
             "v_edge_feature_mode": "all",
         },
         "training_args": {
@@ -92,6 +93,7 @@ def test_saved_model_summary_includes_training_metrics_and_feature_flags(tmp_pat
     assert row["poss_geometry_aware"] == "true"
     assert row["goal_features_aware"] == "false"
     assert row["goal_nodes_aware"] == "true"
+    assert row["lane_survival"] == "true"
     assert row["v_edge_feature_mode"] == "all"
     assert row["model_name"] == "gat"
     assert row["ipw_model_id"] == "pass_intent/pass_intent_1"
@@ -151,6 +153,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
                         "poss_geometry_aware": False,
                         "goal_features_aware": True,
                         "goal_nodes_aware": False,
+                        "lane_survival": True,
                         "v_edge_feature_mode": "no_poss",
                     },
                     "status": "running",
@@ -172,6 +175,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
     assert row["poss_geometry_aware"] == "false"
     assert row["goal_features_aware"] == "true"
     assert row["goal_nodes_aware"] == "false"
+    assert row["lane_survival"] == "true"
     assert row["v_edge_feature_mode"] == "no_poss"
     assert row["status"] == "running"
     assert row["xpass_metric"] == "None"

@@ -28,7 +28,11 @@ from xgboost import XGBClassifier
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
-from physical_pass_model import residual_distance_threshold, resolved_residual_regularization_lambdas
+from physical_pass_model import (
+    normalize_pc_xpass_lane_survival_mode,
+    residual_distance_threshold,
+    resolved_residual_regularization_lambdas,
+)
 from project_config import (
     FEATURE_RUNS_DIR,
     SAVED_DIR,
@@ -60,6 +64,7 @@ FEATURE_SIGNATURE_KEYS = (
     "offside_aware",
     "extend_features",
     "lane_survival",
+    "lane_survival_mode",
     "filter_blockers",
     "sparsify",
     "max_edge_dist",
@@ -240,6 +245,11 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "offside_aware": True if args.get("offside_aware") is None else bool(args.get("offside_aware")),
         "extend_features": bool(args.get("extend_features", False)),
         "lane_survival": bool(args.get("lane_survival", False)),
+        "lane_survival_mode": (
+            normalize_pc_xpass_lane_survival_mode(args.get("lane_survival_mode"))
+            if bool(args.get("lane_survival", False))
+            else None
+        ),
         "filter_blockers": bool(args.get("filter_blockers", False)),
         "sparsify": args.get("sparsify", "none"),
         "max_edge_dist": args.get("max_edge_dist", 10),
@@ -291,6 +301,14 @@ def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, An
             args["physical_xpass_speed_aggregation"] = str(speed_aggregation)
         if floor is not None:
             args["physical_xpass_floor"] = float(floor)
+    lane_metadata = (metadata or {}).get("lane_survival")
+    if isinstance(lane_metadata, dict):
+        mode = lane_metadata.get("mode")
+        if mode and not args.get("lane_survival_mode"):
+            args["lane_survival_mode"] = normalize_pc_xpass_lane_survival_mode(str(mode))
+        fingerprint = lane_metadata.get("cache_fingerprint")
+        if fingerprint and not args.get("lane_survival_cache_fingerprint"):
+            args["lane_survival_cache_fingerprint"] = str(fingerprint)
     return args
 
 

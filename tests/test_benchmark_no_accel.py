@@ -1005,7 +1005,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertNotIn("--no-goal-nodes", commands[0])
         self.assertIn("--no-lane-survival", commands[0])
 
-    def test_build_training_commands_emit_lane_survival_flag(self) -> None:
+    def test_build_training_commands_emit_selected_lane_survival_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)
             args = SimpleNamespace(
@@ -1038,7 +1038,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 accel_aware=None,
                 offside_aware=None,
                 extend_features=None,
-                lane_survival=True,
+                lane_survival_mode="top_25",
             )
 
             with (
@@ -1048,8 +1048,18 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 commands, _, _, _, feature_flags = train_wrapper.build_training_commands(args)
 
         self.assertTrue(feature_flags["lane_survival"])
+        self.assertEqual(feature_flags["lane_survival_mode"], "top_25")
         self.assertIn("--lane-survival", commands[0])
+        self.assertEqual(commands[0][commands[0].index("--lane-survival") + 1], "top_25")
         self.assertNotIn("--no-lane-survival", commands[0])
+
+    def test_lane_survival_mode_parser_accepts_max_and_top_n_only(self) -> None:
+        self.assertEqual(train_wrapper.parse_lane_survival_mode("max"), "max")
+        self.assertEqual(train_wrapper.parse_lane_survival_mode("top_10"), "top_10")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            train_wrapper.parse_lane_survival_mode("top_0")
+        with self.assertRaises(argparse.ArgumentTypeError):
+            train_wrapper.parse_lane_survival_mode("top10")
 
     def test_build_training_commands_emit_feature_ablation_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1986,7 +1996,20 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         )
 
         self.assertTrue(signature["lane_survival"])
+        self.assertEqual(signature["lane_survival_mode"], "max")
         self.assertEqual(signature["node_in_dim"], 26)
+
+    def test_feature_signature_records_top_n_lane_survival_mode(self) -> None:
+        signature = model_utils.extract_model_feature_signature(
+            {
+                "node_in_dim": 26,
+                "edge_in_dim": 4,
+                "lane_survival": True,
+                "lane_survival_mode": "top_10",
+            }
+        )
+
+        self.assertEqual(signature["lane_survival_mode"], "top_10")
 
     def test_no_poss_velocity_edge_mode_requires_four_edge_features(self) -> None:
         with self.assertRaises(ValueError):
