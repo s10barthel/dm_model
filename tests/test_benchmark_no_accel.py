@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import math
 import argparse
@@ -2010,6 +2011,27 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         )
 
         self.assertEqual(signature["lane_survival_mode"], "top_10")
+
+    def test_train_common_dataset_args_do_not_include_lane_survival_fingerprint(self) -> None:
+        train_source = (Path(__file__).resolve().parents[1] / "train.py").read_text(encoding="utf-8")
+        tree = ast.parse(train_source)
+        common_dataset_args = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(isinstance(target, ast.Name) and target.id == "common_dataset_args" for target in node.targets):
+                continue
+            self.assertIsInstance(node.value, ast.Dict)
+            common_dataset_args = {
+                key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            break
+
+        self.assertIsNotNone(common_dataset_args)
+        self.assertNotIn("lane_survival_cache_fingerprint", common_dataset_args)
+        self.assertIn("lane_survival", common_dataset_args)
+        self.assertIn("lane_survival_mode", common_dataset_args)
+        self.assertIn("lane_survival_cache_dir", common_dataset_args)
 
     def test_no_poss_velocity_edge_mode_requires_four_edge_features(self) -> None:
         with self.assertRaises(ValueError):

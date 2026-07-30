@@ -870,7 +870,6 @@ if __name__ == "__main__":
         "lane_survival": args.lane_survival,
         "lane_survival_mode": args.lane_survival_mode,
         "lane_survival_cache_dir": args.lane_survival_cache_dir,
-        "lane_survival_cache_fingerprint": args.lane_survival_cache_fingerprint,
     }
     train_dataset = ActionDataset(
         train_match_ids,
