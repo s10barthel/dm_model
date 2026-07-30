@@ -57,6 +57,8 @@ from physical_pass_model import (
     requires_physical_xpass_for_inference,
     pc_xpass_enabled,
     pc_xpass_lane_survival_metadata_fingerprint,
+    normalize_pc_xpass_lane_survival_mode,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
     validate_x_pass_version_available,
     validate_physical_xpass_cache_metadata,
 )
@@ -76,6 +78,11 @@ class LaneSurvivalCacheError(ValueError):
 def model_requires_lane_survival(model: GNN) -> bool:
     """Return whether this checkpoint was trained with the appended lane-survival input."""
     return bool(model.args.get("lane_survival", False))
+
+
+def model_lane_survival_mode(model: GNN) -> str:
+    """Return the selected pc-xPass field, preserving max behavior for old checkpoints."""
+    return normalize_pc_xpass_lane_survival_mode(model.args.get("lane_survival_mode"))
 
 
 def configure_lane_survival_runtime_cache(models: dict[str, GNN], cache_dir: str | Path | None) -> None:
@@ -317,6 +324,10 @@ def attach_lane_survival_for_inference(
     model_id = str(model.args.get("model_id", model.args.get("task", "unknown model")))
     try:
         cache_metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+        lane_survival_mode = validate_pc_xpass_lane_survival_mode_cache_metadata(
+            cache_metadata,
+            model_lane_survival_mode(model),
+        )
         expected_fingerprint = model.args.get("lane_survival_cache_fingerprint")
         if expected_fingerprint:
             actual_fingerprint = pc_xpass_lane_survival_metadata_fingerprint(cache_metadata)
@@ -336,6 +347,7 @@ def attach_lane_survival_for_inference(
                 rows,
                 match_id=match_id,
                 require_observed_target=False,
+                mode=lane_survival_mode,
             )
             for graph, label in zip(graphs, labels)
         ]

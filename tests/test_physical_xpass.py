@@ -557,7 +557,12 @@ def write_physical_inference_cache(cache_dir: Path, action_indexes: list[int]) -
     ).to_parquet(cache_dir / "matches" / "match_1.parquet", index=False)
 
 
-def write_lane_survival_inference_cache(cache_dir: Path, action_indexes: list[int]) -> None:
+def write_lane_survival_inference_cache(
+    cache_dir: Path,
+    action_indexes: list[int],
+    *,
+    mode: str = "max",
+) -> None:
     (cache_dir / "matches").mkdir(parents=True)
     (cache_dir / "metadata.json").write_text(
         json.dumps(pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)),
@@ -568,7 +573,7 @@ def write_lane_survival_inference_cache(cache_dir: Path, action_indexes: list[in
             {
                 "match_id": "match_1",
                 "action_index": int(action_index),
-                pc_xpass_lane_survival_column("home_2"): 0.42,
+                physical_pass_model.pc_xpass_lane_survival_column_for_mode("home_2", mode): 0.42,
             }
             for action_index in action_indexes
         ]
@@ -622,6 +627,39 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(tuple(appended.x.shape), (3, 26))
         self.assertTrue(torch.equal(appended.x[:, -1], torch.tensor([0.0, 0.42, 0.0])))
         self.assertEqual(appended.node_ids, ["home_1", "home_2", "away_3"])
+
+    def test_append_pc_xpass_lane_survival_uses_selected_top_n_column(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [
+                {
+                    "action_index": 7,
+                    pc_xpass_lane_survival_column("home_2"): 0.42,
+                    physical_pass_model.pc_xpass_top_lane_survival_column("home_2", 25): 0.73,
+                }
+            ]
+        ).set_index("action_index", drop=False)
+
+        appended = append_pc_xpass_lane_survival_to_graph(
+            graph,
+            labels,
+            rows,
+            match_id="match_1",
+            mode="top_25",
+        )
+
+        self.assertTrue(torch.equal(appended.x[:, -1], torch.tensor([0.0, 0.73, 0.0])))
+
+    def test_append_pc_xpass_lane_survival_reports_missing_selected_top_n_column(self) -> None:
+        graph = make_graph()
+        labels = make_label(action_index=7, intent_index=1)
+        rows = pd.DataFrame(
+            [{"action_index": 7, pc_xpass_lane_survival_column("home_2"): 0.42}]
+        ).set_index("action_index", drop=False)
+
+        with self.assertRaisesRegex(ValueError, "mode 'top_10'"):
+            append_pc_xpass_lane_survival_to_graph(graph, labels, rows, match_id="match_1", mode="top_10")
 
     def test_append_pc_xpass_lane_survival_raises_on_missing_row(self) -> None:
         graph = make_graph()
@@ -678,6 +716,51 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertEqual(probs.index.tolist(), [7])
         self.assertEqual(match.graph_features_0[0].x.shape[1], 25)
+
+    def test_lane_survival_checkpoint_attaches_selected_top_n_cache_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            write_lane_survival_inference_cache(cache_dir, [7], mode="top_10")
+            match = make_physical_inference_match([7], [1])
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    task="pass_height",
+                    model_id="pass_height/lane-survival-top10",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_mode="top_10",
+                    lane_survival_cache_dir=str(cache_dir),
+                    use_physical_xpass=False,
+                )
+            )
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+
+    def test_top_n_lane_survival_mode_requires_advertised_xpass_metric(self) -> None:
+        metadata = pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER)
+
+        with self.assertRaisesRegex(ValueError, "top25_xpass"):
+            physical_pass_model.validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, "top_25")
+
+    def test_runtime_cache_adds_selected_top_n_only_for_lane_survival_model(self) -> None:
+        top_n_model = SimpleNamespace(args={"lane_survival": True, "lane_survival_mode": "top_25"})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            prewarm_physical_xpass_runtime_cache(
+                [],
+                cache_dir=cache_dir,
+                source=PC_XPASS_SOURCE,
+                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                pass_height_model=top_n_model,
+                dry_run=False,
+            )
+            metadata = json.loads((cache_dir / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertIn("top25_xpass", metadata["available_metrics"])
+        self.assertIn(25, metadata["top_n_values"])
 
     def test_lane_survival_checkpoint_reports_precompute_instruction_for_missing_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1599,6 +1682,21 @@ class PhysicalXPassTests(unittest.TestCase):
             ),
             0.45,
         )
+        self.assertIn("home_2__top2_lane_survival", ranked.index)
+        self.assertIn("home_2__top2_control_prob", ranked.index)
+
+    def test_pc_xpass_top_option_indices_are_stable_and_ignore_nonfinite_cells(self) -> None:
+        score = np.asarray([[0.8, np.nan], [0.9, 0.9]], dtype=float)
+        ranking = np.asarray([[0.5, 1.0], [0.7, 0.7]], dtype=float)
+        lane_survival = np.asarray([[0.1, 0.2], [0.3, 0.4]], dtype=float)
+        control_prob = np.asarray([[0.5, 0.6], [0.7, 0.8]], dtype=float)
+
+        indices = physical_pass_model._pc_xpass_top_option_indices(score, ranking, 5)
+
+        np.testing.assert_array_equal(indices, np.asarray([2, 3, 0]))
+        self.assertAlmostEqual(float(np.mean(score.ravel()[indices])), (0.9 + 0.9 + 0.8) / 3.0)
+        self.assertAlmostEqual(float(np.mean(lane_survival.ravel()[indices])), (0.3 + 0.4 + 0.1) / 3.0)
+        self.assertAlmostEqual(float(np.mean(control_prob.ravel()[indices])), (0.7 + 0.8 + 0.5) / 3.0)
 
     def test_compute_graph_pc_xpass_applies_position_discount_before_aggregation(self) -> None:
         graph = make_graph()
@@ -1704,6 +1802,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertNotIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25), row.index)
         self.assertIn("home_2__lane_survival", row.index)
         self.assertIn("home_2__control_prob", row.index)
+        self.assertIn("home_2__top10_lane_survival", row.index)
+        self.assertIn("home_2__top10_control_prob", row.index)
         self.assertIn("home_2__target_x", row.index)
         self.assertAlmostEqual(
             float(row["home_2"]),
@@ -1740,6 +1840,12 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertIn(physical_xpass_metric_column("home_2", "top5_xpass"), row.index)
         self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10), row.index)
         self.assertIn(physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP25), row.index)
+        self.assertIn("home_2__top5_lane_survival", row.index)
+        self.assertIn("home_2__top5_control_prob", row.index)
+        self.assertIn("home_2__top10_lane_survival", row.index)
+        self.assertIn("home_2__top10_control_prob", row.index)
+        self.assertIn("home_2__top25_lane_survival", row.index)
+        self.assertIn("home_2__top25_control_prob", row.index)
         self.assertAlmostEqual(
             float(row["home_2"]),
             float(row[physical_xpass_metric_column("home_2", PC_XPASS_METRIC_TOP10)]),

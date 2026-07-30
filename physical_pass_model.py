@@ -4,6 +4,7 @@ import hashlib
 import math
 import json
 import os
+import re
 import time
 import warnings
 from collections.abc import Callable, Mapping
@@ -146,6 +147,8 @@ PC_XPASS_SIGMOID_OFFSET = PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT
 PC_XPASS_DEFAULT_MAX_SPEED = 25.0
 PC_XPASS_DEFAULT_SPEED_STEP = 2.0
 PC_XPASS_LANE_SURVIVAL_SUFFIX = "__lane_survival"
+PC_XPASS_LANE_SURVIVAL_MODE_MAX = "max"
+PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN = re.compile(r"^top_(?P<n>[1-9][0-9]*)$")
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
@@ -2535,6 +2538,48 @@ def pc_xpass_lane_survival_column(player_id: str) -> str:
     return f"{player_id}{PC_XPASS_LANE_SURVIVAL_SUFFIX}"
 
 
+def normalize_pc_xpass_lane_survival_mode(mode: str | None) -> str:
+    """Normalize an enabled lane-survival feature mode, defaulting old checkpoints to max."""
+    normalized = PC_XPASS_LANE_SURVIVAL_MODE_MAX if mode is None else str(mode).strip().lower().replace("-", "_")
+    if normalized == PC_XPASS_LANE_SURVIVAL_MODE_MAX or PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN.fullmatch(normalized):
+        return normalized
+    raise ValueError(
+        f"Invalid lane_survival_mode={mode!r}. Expected 'max' or 'top_<positive integer>', such as 'top_10'."
+    )
+
+
+def pc_xpass_lane_survival_column_for_mode(player_id: str, mode: str | None = None) -> str:
+    normalized = normalize_pc_xpass_lane_survival_mode(mode)
+    if normalized == PC_XPASS_LANE_SURVIVAL_MODE_MAX:
+        return pc_xpass_lane_survival_column(player_id)
+    top_n = int(PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN.fullmatch(normalized).group("n"))
+    return pc_xpass_top_lane_survival_column(player_id, top_n)
+
+
+def validate_pc_xpass_lane_survival_mode_cache_metadata(metadata: Mapping[str, Any], mode: str | None = None) -> str:
+    """Validate metadata needed by an enabled lane-survival mode and return its normalized name."""
+    normalized = normalize_pc_xpass_lane_survival_mode(mode)
+    if normalized == PC_XPASS_LANE_SURVIVAL_MODE_MAX:
+        return normalized
+    top_n = int(PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN.fullmatch(normalized).group("n"))
+    metric = pc_xpass_top_metric(top_n)
+    available_metrics = set(metadata.get("available_metrics") or [])
+    if metric not in available_metrics:
+        raise ValueError(
+            f"pc-xPass cache does not advertise {metric!r}, required for lane_survival_mode={normalized!r}. "
+            f"Regenerate it with scripts/generate_physical_xpass.py --pc-xpass --top-n-values {top_n}."
+        )
+    return normalized
+
+
+def pc_xpass_top_lane_survival_column(player_id: str, n: int) -> str:
+    return f"{player_id}__top{int(n)}_lane_survival"
+
+
+def pc_xpass_top_control_prob_column(player_id: str, n: int) -> str:
+    return f"{player_id}__top{int(n)}_control_prob"
+
+
 def pc_xpass_output_columns(
     player_ids: list[str] | tuple[str, ...],
     *,
@@ -2554,6 +2599,14 @@ def pc_xpass_output_columns(
             columns.append(player)
         for metric in metrics:
             columns.append(physical_xpass_metric_column(player, metric))
+        for value in resolved_top_n_values:
+            if pc_xpass_top_metric(value) in metrics:
+                columns.extend(
+                    [
+                        pc_xpass_top_lane_survival_column(player, value),
+                        pc_xpass_top_control_prob_column(player, value),
+                    ]
+                )
         columns.extend(f"{player}{suffix}" for suffix in PC_XPASS_DETAIL_SUFFIXES)
     return columns
 
@@ -2710,23 +2763,30 @@ def _resolve_pc_xpass_ignore_teammate_flags(
     return ignore_lane, ignore_control
 
 
+def _pc_xpass_top_option_indices(values: np.ndarray, ranking: np.ndarray, n: int) -> np.ndarray:
+    """Return stable flat indices for the finite cells with the largest ranking values."""
+    finite = np.isfinite(values) & np.isfinite(ranking)
+    flat_indices = np.flatnonzero(finite)
+    if flat_indices.size == 0:
+        return np.asarray([], dtype=int)
+    k = min(int(n), int(flat_indices.size))
+    flat_ranking = np.asarray(ranking, dtype=float).ravel()
+    order = np.argsort(-flat_ranking[flat_indices], kind="stable")[:k]
+    return flat_indices[order]
+
+
 def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
-    finite = np.asarray(values[np.isfinite(values)], dtype=float)
-    if finite.size == 0:
+    indices = _pc_xpass_top_option_indices(values, values, n)
+    if indices.size == 0:
         return float("nan")
-    k = min(int(n), int(finite.size))
-    return float(np.mean(np.partition(finite, -k)[-k:]))
+    return float(np.mean(np.asarray(values, dtype=float).ravel()[indices]))
 
 
 def _pc_xpass_top_mean_by_ranking(values: np.ndarray, ranking: np.ndarray, n: int) -> float:
-    finite = np.isfinite(values) & np.isfinite(ranking)
-    if not np.any(finite):
+    indices = _pc_xpass_top_option_indices(values, ranking, n)
+    if indices.size == 0:
         return float("nan")
-    selected_values = np.asarray(values[finite], dtype=float)
-    selected_ranking = np.asarray(ranking[finite], dtype=float)
-    k = min(int(n), int(selected_values.size))
-    order = np.argsort(-selected_ranking, kind="stable")[:k]
-    return float(np.mean(selected_values[order]))
+    return float(np.mean(np.asarray(values, dtype=float).ravel()[indices]))
 
 
 def _pc_xpass_r_grid(ball_pos: np.ndarray, *, radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE) -> np.ndarray:
@@ -2971,14 +3031,14 @@ def compute_graph_pc_xpass_metrics(
         flat = int(np.nanargmax(ranking))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
-        top_values = {
-            int(value): (
-                _pc_xpass_top_mean_by_ranking(score, ranking, int(value))
-                if bool(top_xt)
-                else _pc_xpass_top_mean(score, int(value))
-            )
+        top_option_indices = {
+            int(value): _pc_xpass_top_option_indices(score, ranking if bool(top_xt) else score, int(value))
             for value in resolved_top_n_values
             if pc_xpass_top_metric(value) in enabled_metrics
+        }
+        top_values = {
+            value: float(np.mean(score.ravel()[indices])) if indices.size else float("nan")
+            for value, indices in top_option_indices.items()
         }
         default_top_value = top_values.get(int(top_n), float("nan"))
         if top_metric in enabled_metrics:
@@ -2989,6 +3049,14 @@ def compute_graph_pc_xpass_metrics(
             metric = pc_xpass_top_metric(value)
             if math.isfinite(top_value):
                 result.loc[physical_xpass_metric_column(node_id, metric)] = float(np.clip(top_value, eps, 1.0 - eps))
+            indices = top_option_indices[value]
+            if indices.size:
+                result.loc[pc_xpass_top_lane_survival_column(node_id, value)] = float(
+                    np.mean(lane_survival.ravel()[indices])
+                )
+                result.loc[pc_xpass_top_control_prob_column(node_id, value)] = float(
+                    np.mean(receiver_control.ravel()[indices])
+                )
         result.loc[f"{node_id}__lane_survival"] = float(lane_survival[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__control_prob"] = float(receiver_control[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__speed"] = float(speeds[speed_i])
@@ -4650,6 +4718,7 @@ def _pass_height_predictions_for_graphs(
                 pc_xpass_row,
                 match_id=str(match_id or "runtime"),
                 require_observed_target=False,
+                mode=model_args.get("lane_survival_mode"),
             )
             for graph, label, pc_xpass_row in zip(graphs, labels, pc_xpass_rows)
         ]
@@ -4938,6 +5007,17 @@ def prewarm_physical_xpass_runtime_cache(
     progress_desc: str | None = None,
     verbose_status: bool = False,
 ) -> dict[str, object]:
+    pass_height_lane_survival_mode = None
+    if pass_height_model is not None and bool(getattr(pass_height_model, "args", {}).get("lane_survival", False)):
+        pass_height_lane_survival_mode = normalize_pc_xpass_lane_survival_mode(
+            getattr(pass_height_model, "args", {}).get("lane_survival_mode")
+        )
+        top_match = PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN.fullmatch(pass_height_lane_survival_mode)
+        if top_match is not None:
+            requested_top_n = int(top_match.group("n"))
+            top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or [])), requested_top_n})
+            if available_metrics is not None:
+                available_metrics = [*available_metrics, pc_xpass_top_metric(requested_top_n)]
     if available_metrics is None and source == PC_XPASS_SOURCE:
         resolved_top_n_values = sorted({int(top_n), *(int(value) for value in (top_n_values or []))})
         available_metrics = [PHYSICAL_XPASS_METRIC_MAX, *(pc_xpass_top_metric(value) for value in resolved_top_n_values)]
@@ -5608,6 +5688,7 @@ def append_pc_xpass_lane_survival_to_graph(
     match_id: str,
     require_observed_target: bool = True,
     possessor_index: int | None = None,
+    mode: str | None = None,
 ) -> Data:
     if pc_xpass_rows is None:
         raise ValueError("pc_xpass_rows must be provided when attaching lane_survival.")
@@ -5625,6 +5706,7 @@ def append_pc_xpass_lane_survival_to_graph(
         match_id=match_id,
         require_observed_target=require_observed_target,
         possessor_index=possessor_index,
+        mode=mode,
     )
 
 
@@ -5636,9 +5718,11 @@ def append_pc_xpass_lane_survival_row_to_graph(
     match_id: str,
     require_observed_target: bool = True,
     possessor_index: int | None = None,
+    mode: str | None = None,
 ) -> Data:
     """Append lane-survival values from one already-resolved pc-xPass row."""
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    normalized_mode = normalize_pc_xpass_lane_survival_mode(mode)
     row = pd.Series(pc_xpass_row)
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
@@ -5650,7 +5734,7 @@ def append_pc_xpass_lane_survival_row_to_graph(
     nonfinite_columns = []
     for node_index in candidate_indices:
         node_id = str(node_ids[int(node_index)])
-        column = pc_xpass_lane_survival_column(node_id)
+        column = pc_xpass_lane_survival_column_for_mode(node_id, normalized_mode)
         if column not in row.index:
             missing_columns.append(node_id)
             continue
@@ -5663,12 +5747,13 @@ def append_pc_xpass_lane_survival_row_to_graph(
     if missing_columns:
         raise ValueError(
             f"pc-xPass cache for match {match_id}, action_index={action_index} is missing "
-            f"lane_survival columns for candidate nodes: {missing_columns[:5]}."
+            f"lane_survival columns for mode {normalized_mode!r} and candidate nodes: {missing_columns[:5]}. "
+            "Regenerate the pc-xPass cache with the requested top-N metric when applicable."
         )
     if nonfinite_columns:
         raise ValueError(
             f"pc-xPass cache for match {match_id}, action_index={action_index} has non-finite "
-            f"lane_survival values for candidate nodes: {nonfinite_columns[:5]}."
+            f"lane_survival values for mode {normalized_mode!r} and candidate nodes: {nonfinite_columns[:5]}."
         )
 
     if require_observed_target:

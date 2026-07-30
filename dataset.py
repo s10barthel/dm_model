@@ -165,6 +165,7 @@ class ActionDataset(Dataset):
         physical_eps=1e-4,
         physical_xpass_floor=None,
         lane_survival=False,
+        lane_survival_mode=None,
         lane_survival_cache_dir=None,
     ):
         feature_root = Path(feature_dir)
@@ -178,6 +179,7 @@ class ActionDataset(Dataset):
         self.skipped_rows: dict[str, int] = {}
         self.use_physical_xpass = bool(use_physical_xpass)
         self.lane_survival = bool(lane_survival) and str(TASK_CONFIG.at[task, "gnn_task"]).startswith("node")
+        self.lane_survival_mode = lane_survival_mode
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
         self.lane_survival_cache_dir = str(lane_survival_cache_root)
         self.physical_eps = float(physical_eps)
@@ -452,6 +454,7 @@ class ActionDataset(Dataset):
                     match_id=match_id,
                     require_observed_target=True,
                     possessor_index=int(possessor_index),
+                    mode=self.lane_survival_mode,
                 )
 
             if task == "failure_receiver":
