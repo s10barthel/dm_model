@@ -26,7 +26,7 @@ HAWKEYE_OUTPUT_COLUMNS = [
     "pass_score_med",
     "pass_score_br",
     "abs_time",
-    "action_intent",
+    "pass_intent",
     "pass_success",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -128,7 +128,7 @@ def filter_scored_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 def prepare_pass_score_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
     validate_required_columns(
         df,
-        KEY_COLUMNS + ["action_intent"] + HAWKEYE_NUMERIC_COLUMNS,
+        KEY_COLUMNS + ["pass_intent"] + HAWKEYE_NUMERIC_COLUMNS,
         "Pass scores",
     )
     pass_scores_df = normalize_key_columns(df, "Pass scores")
@@ -173,7 +173,7 @@ def prepare_pass_score_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[st
         KEY_COLUMNS
         + [
             "abs_time",
-            "action_intent",
+            "pass_intent",
             "pass_success",
             "outcome_scoring_success",
             "outcome_scoring_failure",
@@ -214,7 +214,7 @@ def merge_pass_scores(
         "pass_score_med",
         "pass_score_br",
         "abs_time",
-        "action_intent",
+        "pass_intent",
         "pass_success",
         "outcome_scoring_success",
         "outcome_scoring_failure",
