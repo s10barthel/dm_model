@@ -1569,6 +1569,34 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
         self.assertIsNone(pass_success_call.kwargs["coach_scores"])
         self.assertIsNone(pass_success_call.kwargs["selection_labels"])
 
+    def test_hawkeye_pass_score_title_includes_selection_legend_only_when_enabled(self) -> None:
+        situation = SimpleNamespace(
+            situation_id="action-1",
+            tracking=pd.DataFrame({"ball_x": [0.0], "ball_y": [0.0], "home_7_x": [1.0], "home_7_y": [2.0]}, index=[0]),
+            frame_meta=pd.DataFrame(
+                {"abs_time": [1.0], "possession_prefix": ["home"], "possessor_object_id": ["home_7"]}, index=[0]
+            ),
+        )
+
+        for module in [visualize_hawkeye, run_and_visualize_hawkeye]:
+            fig = SimpleNamespace(subplots_adjust=lambda **_kwargs: None)
+            titles: list[str] = []
+            ax = SimpleNamespace(text=lambda *_args, **_kwargs: titles.append(_args[2]), transAxes=object())
+            with (
+                patch.object(module, "SnapshotVisualizer") as mock_visualizer,
+                patch.object(module, "figure_to_rgb_image", return_value=Image.new("RGB", (1, 1))),
+                patch.object(module.plt, "close"),
+                patch.object(module, "add_overlay_annotations"),
+            ):
+                mock_visualizer.return_value.plot.return_value = (fig, ax)
+                module.render_frame_image(situation, 0, "pass_score", pd.Series({"home_7": 0.1}), selections_enabled=True)
+                module.render_frame_image(situation, 0, "pass_score", pd.Series({"home_7": 0.1}), selections_enabled=False)
+                module.render_frame_image(situation, 0, "pass_intent", pd.Series({"home_7": 0.1}), selections_enabled=True)
+
+            self.assertEqual(titles[0], "action-1 | 1.000 | Pass Score | Selections (CAVE | HMD)")
+            self.assertEqual(titles[1], "action-1 | 1.000 | Pass Score")
+            self.assertEqual(titles[2], "action-1 | 1.000 | Pass Intent")
+
 
 if __name__ == "__main__":
     unittest.main()

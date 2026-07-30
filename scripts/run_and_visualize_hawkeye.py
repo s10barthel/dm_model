@@ -186,6 +186,7 @@ def render_frame_image(
     show_trajectories: bool = False,
     coach_scores: pd.Series | None = None,
     selection_labels: pd.Series | None = None,
+    selections_enabled: bool = False,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -218,6 +219,8 @@ def render_frame_image(
     )
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
+    if component_name == "pass_score" and selections_enabled:
+        title += " | Selections (CAVE | HMD)"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     ax.text(
@@ -418,6 +421,7 @@ def render_situation(
                     show_trajectories=args.show_trajectories,
                     coach_scores=coach_scores,
                     selection_labels=selection_labels,
+                    selections_enabled=bool(getattr(args, "selections", False)),
                 )
                 output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
                 image.save(output_path)
@@ -437,6 +441,7 @@ def render_situation(
                         show_trajectories=args.show_trajectories,
                         coach_scores=coach_scores,
                         selection_labels=selection_labels,
+                        selections_enabled=bool(getattr(args, "selections", False)),
                     )
 
             output_path = output_dir / f"{component_name}.{selected_output_mode}"
