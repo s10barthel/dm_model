@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -12,9 +13,26 @@ from torch_geometric.loader import DataLoader
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from models import utils
-from models.utils import get_losses_str, infer_feature_graph_schema, load_splits, run_epoch
+from models.dataset_config import build_action_dataset_kwargs
+from models.utils import get_losses_str, infer_feature_graph_schema, infer_training_edge_schema, load_splits, run_epoch
 from models.utils import validate_feature_graph_schema
-from project_config import DEFAULT_INTENDED_RECEIVER_MODE, get_action_label_dir, resolve_feature_root, resolve_feature_run_id
+from physical_pass_model import (
+    PHYSICAL_XPASS_SOURCE,
+    model_uses_physical_xpass,
+    normalize_physical_xpass_speed_aggregation,
+    pc_xpass_lane_survival_metadata_fingerprint,
+    validate_physical_xpass_args,
+    validate_physical_xpass_cache_metadata,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
+)
+from project_config import (
+    DEFAULT_INTENDED_RECEIVER_MODE,
+    get_action_label_dir,
+    get_pc_xpass_dir,
+    get_physical_xpass_dir,
+    resolve_feature_root,
+    resolve_feature_run_id,
+)
 
 
 def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
@@ -71,6 +89,101 @@ def resolve_goal_next10_diagnostic_context(
     return getattr(model_args, "feature_run_id", None), None
 
 
+def resolve_physical_xpass_context(
+    model_args: argparse.Namespace,
+    feature_root: Path,
+    *,
+    prefer_feature_root: bool = False,
+) -> str | None:
+    if not model_uses_physical_xpass(model_args):
+        return None
+
+    canonical_cache_dir = get_physical_xpass_dir(feature_root)
+    recorded_cache_value = getattr(model_args, "physical_cache_dir", None)
+    recorded_cache_dir = Path(recorded_cache_value) if recorded_cache_value else None
+    if prefer_feature_root and canonical_cache_dir.exists():
+        cache_dir = canonical_cache_dir
+    elif recorded_cache_dir is not None and recorded_cache_dir.exists():
+        cache_dir = recorded_cache_dir
+    elif canonical_cache_dir.exists():
+        cache_dir = canonical_cache_dir
+    else:
+        cache_dir = canonical_cache_dir
+
+    model_args.physical_cache_dir = str(cache_dir)
+    validate_physical_xpass_args(model_args)
+    expected_source = getattr(model_args, "physical_xpass_source", PHYSICAL_XPASS_SOURCE)
+    expected_speed_aggregation = getattr(model_args, "physical_xpass_speed_aggregation", None)
+    metadata = validate_physical_xpass_cache_metadata(
+        cache_dir,
+        expected_source=expected_source,
+        expected_speed_aggregation=expected_speed_aggregation,
+    )
+    recorded_teammate_policy = getattr(model_args, "physical_xpass_teammate_policy", None)
+    actual_teammate_policy = metadata.get("teammate_policy")
+    if recorded_teammate_policy is not None and actual_teammate_policy != recorded_teammate_policy:
+        raise ValueError(
+            "Physical xPass cache teammate_policy does not match the checkpoint: "
+            f"cache={actual_teammate_policy!r}, checkpoint={recorded_teammate_policy!r}."
+        )
+    model_args.physical_xpass_source = str(metadata.get("source", expected_source))
+    if actual_teammate_policy is not None:
+        model_args.physical_xpass_teammate_policy = str(actual_teammate_policy)
+    model_args.physical_xpass_speed_aggregation = normalize_physical_xpass_speed_aggregation(
+        metadata.get("speed_aggregation")
+    )
+    return str(cache_dir)
+
+
+def resolve_lane_survival_context(model_args: argparse.Namespace) -> str | None:
+    if not bool(getattr(model_args, "lane_survival", False)):
+        return None
+
+    recorded_cache_value = getattr(model_args, "lane_survival_cache_dir", None)
+    recorded_cache_dir = Path(recorded_cache_value) if recorded_cache_value else None
+    canonical_cache_dir = get_pc_xpass_dir("sportec")
+    cache_dir = canonical_cache_dir if canonical_cache_dir.exists() else recorded_cache_dir or canonical_cache_dir
+    metadata_path = cache_dir / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Lane-survival evaluation requires pc-xPass metadata at {metadata_path}. "
+            "Run scripts/generate_physical_xpass.py --pc-xpass first."
+        )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    model_args.lane_survival_mode = validate_pc_xpass_lane_survival_mode_cache_metadata(
+        metadata,
+        getattr(model_args, "lane_survival_mode", None),
+    )
+    actual_fingerprint = pc_xpass_lane_survival_metadata_fingerprint(metadata)
+    expected_fingerprint = getattr(model_args, "lane_survival_cache_fingerprint", None)
+    if expected_fingerprint is not None and actual_fingerprint != expected_fingerprint:
+        raise ValueError(
+            "Lane-survival pc-xPass cache does not match the checkpoint metadata fingerprint: "
+            f"cache={actual_fingerprint}, checkpoint={expected_fingerprint}."
+        )
+    model_args.lane_survival_cache_dir = str(cache_dir)
+    return str(cache_dir)
+
+
+def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: argparse.Namespace) -> None:
+    if not test_dataset.features:
+        return
+    graph = test_dataset.features[0]
+    actual_node_dim = int(graph.x.shape[1])
+    expected_node_dim = int(getattr(model_args, "node_in_dim", actual_node_dim))
+    if actual_node_dim != expected_node_dim:
+        raise ValueError(
+            f"Test dataset node feature width {actual_node_dim} does not match checkpoint node_in_dim={expected_node_dim}."
+        )
+    edge_attr = getattr(graph, "edge_attr", None)
+    actual_edge_dim = int(edge_attr.shape[1]) if edge_attr is not None else 0
+    expected_edge_dim = int(getattr(model_args, "edge_in_dim", actual_edge_dim))
+    if actual_edge_dim != expected_edge_dim:
+        raise ValueError(
+            f"Test dataset edge feature width {actual_edge_dim} does not match checkpoint edge_in_dim={expected_edge_dim}."
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
@@ -99,47 +212,64 @@ if __name__ == "__main__":
         label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
         feature_root = Path(feature_dir).parent
     diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
+    physical_cache_dir = resolve_physical_xpass_context(
+        model_args,
+        feature_root,
+        prefer_feature_root=bool(
+            args.feature_run_id and args.feature_run_id != getattr(model_args, "feature_run_id", None)
+        ),
+    )
+    lane_survival_cache_dir = resolve_lane_survival_context(model_args)
     feature_schema = infer_feature_graph_schema(feature_dir)
     model_schema = {
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
         "add_v_edge_features": bool(getattr(model_args, "add_v_edge_features", getattr(model_args, "edge_in_dim", 2) > 2)),
+        "add_relative_speed_edge_features": bool(
+            getattr(model_args, "add_relative_speed_edge_features", getattr(model_args, "edge_in_dim", 2) > 4)
+        ),
     }
+    reconstructed_schema = infer_training_edge_schema(
+        feature_schema,
+        v_edge_feature_mode=getattr(model_args, "v_edge_feature_mode", None),
+        relative_speed_edge_feature_mode=getattr(model_args, "relative_speed_edge_feature_mode", None),
+    )
+    if reconstructed_schema != model_schema:
+        raise ValueError(
+            "Checkpoint edge-feature settings do not reconstruct its recorded graph schema: "
+            f"reconstructed={reconstructed_schema}, checkpoint={model_schema}."
+        )
     validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
 
     _, _, test_match_ids = load_splits(feature_dir=feature_dir)
 
-    dataset_args = {
-        "feature_dir": feature_dir,
-        "label_dir": label_dir,
-        "task": model_args.task,
-        "inplay_only": model_args.task.split("_")[1] == "receiver" and not model_args.include_out,
-        "min_pass_dur": model_args.min_pass_dur,
-        "shot_success_type": getattr(model_args, "shot_success", "unblocked"),
-        "xy_only": model_args.xy_only,
-        "possessor_aware": model_args.possessor_aware,
-        "keeper_aware": model_args.keeper_aware,
-        "ball_z_aware": model_args.ball_z_aware,
-        "poss_vel_aware": model_args.poss_vel_aware,
-        "extend_features": model_args.extend_features,
-        "drop_non_blockers": model_args.filter_blockers,
-        "sparsify": model_args.sparsify,
-        "max_edge_dist": model_args.max_edge_dist,
-        "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
-        "v_edge_feature_mode": getattr(model_args, "v_edge_feature_mode", "all"),
-        "mask_possessor_v_edge_features": bool(getattr(model_args, "mask_possessor_v_edge_features", False)),
-        "train": False,
-        "diagnostic_label_dir": diagnostic_label_dir,
-        "require_goal_next10_diagnostics": requires_goal_next10_diagnostics(model_args.task),
-    }
-    test_dataset = ActionDataset(test_match_ids, **dataset_args)
+    dataset_args = build_action_dataset_kwargs(
+        model_args,
+        train=False,
+        diagnostic_label_dir=diagnostic_label_dir,
+        physical_cache_dir=physical_cache_dir,
+        lane_survival_cache_dir=lane_survival_cache_dir,
+    )
+    test_dataset = ActionDataset(
+        test_match_ids,
+        feature_dir=feature_dir,
+        label_dir=label_dir,
+        **dataset_args,
+    )
     print_skipped_matches("test", test_dataset)
     if len(test_dataset) == 0:
         raise ValueError("No usable test samples remained after loading graph and label artifacts.")
+    validate_test_dataset_dimensions(test_dataset, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
     #Adjust as needed for your environment.
     #test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
-    test_loader = DataLoader(test_dataset, model_args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    test_loader = DataLoader(
+        test_dataset,
+        model_args.batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=bool(getattr(model_args, "pin_memory", False)),
+    )
     print(f"Evaluating {args.model_id} on {len(test_match_ids)} matches with {len(test_dataset)} samples")
     test_metrics = run_epoch(model_args, model, test_loader, device=device, train=False)
     print("Test:\t" + get_losses_str(test_metrics))

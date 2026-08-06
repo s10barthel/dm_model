@@ -576,6 +576,19 @@ Outputs:
 
 `test.py` uses the target configuration, graph schema, and diagnostic-label metadata saved inside each checkpoint. Pass `--diagnostic-feature-run-id <feature_run_id>` when evaluating older checkpoints whose selected feature run lacks canonical `goal next_10` diagnostics. The wrapper now prefers `--bundle-id` for the main retained-model set. `success_intent` is optional and can be supplied explicitly if you want it evaluated too.
 
+Test dataset construction is checkpoint-driven and uses the same shared feature configuration as training, including node-feature ablations, velocity and relative-speed edge modes, physical-xPass inputs, and pc-xPass lane-survival inputs. Evaluation validates the reconstructed node/edge widths against the checkpoint. Physical-xPass cache metadata and lane-survival mode/fingerprint must also match; missing or incompatible caches stop evaluation with an error instead of silently changing the model inputs.
+
+Evaluation loads each checkpoint's `best_weights.pt` (selected during training by validation loss) and evaluates it on the held-out 2024/25 test matches. It uses the same evaluation routine as validation, but the test metrics are not training-set or validation-set metrics. Use validation loss for checkpoint selection and early stopping; use this held-out test evaluation for final performance reporting. Avoid repeatedly changing the model based on test results, since that would turn the test set into another validation set.
+
+For `outcome_scoring` and `outcome_conceding`, the reported quantities have two target definitions:
+
+- `ce_loss` is computed against the selected outcome target family and `--return_type`: binary goal, xG, xT, goal distance, or EPV.
+- `f1`, `roc_auc`, and `brier` are computed against the canonical binary `next_10` goal diagnostics: `scores_goal_next10` for scoring and `concedes_goal_next10` for conceding. A non-zero diagnostic label is positive.
+
+Consequently, do not compare outcome-model `ce_loss` across target families. On the same held-out matches and canonical diagnostic labels, `roc_auc` is the clearest cross-family comparison because it measures ranking of actual next-10-action goals/concessions without a threshold. `f1` is less robust for that purpose because evaluation applies a fixed score threshold of `0.1`, and output scales can differ by target family. `brier` uses the same binary event ground truth, but its probability-calibration interpretation is strongest for models whose output is itself a goal probability; for xT, goal-distance, and EPV models it is a goal-event proxy diagnostic.
+
+Dataset-feature parity does not imply loss-weighting parity. Test evaluation currently does not reconstruct training/validation class weights or inverse-propensity weights, so a weighted training/validation `ce_loss` is not directly comparable with the unweighted test `ce_loss`.
+
 ### 6. Export per-match component predictions
 
 ```powershell
@@ -1361,6 +1374,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--pass-height-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
+- `--lane-survival [{max,top_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects the `max` cache, while `--lane-survival top_25` selects the top-25 cache.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
 - `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
 - `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.

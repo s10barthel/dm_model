@@ -20,6 +20,7 @@ from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
+from models.dataset_config import build_action_dataset_kwargs
 from models.utils import (
     extract_model_feature_signature,
     get_args_str,
@@ -836,41 +837,14 @@ if __name__ == "__main__":
     train_match_ids, valid_match_ids, _ = load_splits(feature_dir=feature_dir)
 
     print("Generating datasets...")
-    common_dataset_args = {
-        "task": args.task,
-        "inplay_only": args.task.split("_")[1] == "receiver" and not args.include_out,
-        "min_pass_dur": args.min_pass_dur,
-        "shot_success_type": args.shot_success,
-        "xy_only": args.xy_only,
-        "possessor_aware": args.possessor_aware,
-        "keeper_aware": args.keeper_aware,
-        "ball_z_aware": args.ball_z_aware,
-        "poss_vel_aware": args.poss_vel_aware,
-        "poss_rel_vel_aware": args.poss_rel_vel_aware,
-        "poss_geometry_aware": args.poss_geometry_aware,
-        "goal_features_aware": args.goal_features_aware,
-        "goal_nodes_aware": args.goal_nodes_aware,
-        "accel_aware": args.accel_aware,
-        "offside_aware": args.offside_aware,
-        "extend_features": args.extend_features,
-        "drop_non_blockers": args.filter_blockers,
-        "sparsify": args.sparsify,
-        "max_edge_dist": args.max_edge_dist,
-        "edge_in_dim": args.edge_in_dim,
-        "v_edge_feature_mode": args.v_edge_feature_mode,
-        "mask_possessor_v_edge_features": args.mask_possessor_v_edge_features,
-        "relative_speed_edge_feature_mode": args.relative_speed_edge_feature_mode,
-        "mask_possessor_relative_speed_edge_features": args.mask_possessor_relative_speed_edge_features,
-        "diagnostic_label_dir": args.diagnostic_label_dir,
-        "require_goal_next10_diagnostics": args.require_goal_next10_diagnostics,
-        "use_physical_xpass": model_uses_physical_xpass(args),
-        "physical_cache_dir": args.physical_cache_dir,
-        "physical_eps": args.physical_eps,
-        "physical_xpass_floor": args.physical_xpass_floor,
-        "lane_survival": args.lane_survival,
-        "lane_survival_mode": args.lane_survival_mode,
-        "lane_survival_cache_dir": args.lane_survival_cache_dir,
-    }
+    common_dataset_args = build_action_dataset_kwargs(
+        args,
+        train=True,
+        diagnostic_label_dir=args.diagnostic_label_dir,
+        require_goal_next10_diagnostics=args.require_goal_next10_diagnostics,
+        physical_cache_dir=args.physical_cache_dir,
+        lane_survival_cache_dir=args.lane_survival_cache_dir,
+    )
     train_dataset = ActionDataset(
         train_match_ids,
         feature_dir=args.train_feature_dir,
