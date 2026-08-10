@@ -9,12 +9,16 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import numpy as np
+from sklearn.metrics import brier_score_loss, roc_auc_score
 from torch_geometric.data import Data
 
 import test as evaluation_script
 from dataset import ActionDataset
 from models.dataset_config import build_action_dataset_kwargs
-from physical_pass_model import pc_xpass_lane_survival_metadata_fingerprint
+from models.utils import calc_weighted_binary_probability_metrics
+from physical_pass_model import pc_xpass_lane_survival_metadata_fingerprint, physical_xpass_blend_weight_v4
+from scripts import evaluate_relevant_models
 
 
 class EvaluationDatasetConfigTests(unittest.TestCase):
@@ -239,6 +243,121 @@ class EvaluationDatasetConfigTests(unittest.TestCase):
                 dataset,
                 SimpleNamespace(node_in_dim=8, edge_in_dim=5),
             )
+
+
+class WeightedPassSuccessEvaluationTests(unittest.TestCase):
+    def test_wrapper_cli_parsing_and_pass_success_propagation(self) -> None:
+        args = evaluate_relevant_models.parse_args(
+            [
+                "--weighted-pass-success-metrics",
+                "--pass-height-model-id",
+                "pass_height/run_1",
+                "--discount",
+                "false",
+                "--v4-power",
+                "3.5",
+                "--v4-zero",
+                "0.65",
+                "--pc-xpass-cache-dir",
+                "cache-dir",
+            ]
+        )
+        self.assertTrue(args.weighted_pass_success_metrics)
+        self.assertFalse(args.discount)
+        self.assertEqual(args.v4_power, 3.5)
+        self.assertEqual(args.v4_zero, 0.65)
+
+        command = evaluate_relevant_models.add_weighted_pass_success_options(
+            ["python", "test.py", "--model_id", "pass_success/run_1"], args, args.pass_height_model_id
+        )
+        self.assertEqual(
+            command[-11:],
+            [
+                "--weighted-pass-success-metrics",
+                "--pass-height-model-id",
+                "pass_height/run_1",
+                "--discount",
+                "false",
+                "--v4-power",
+                "3.5",
+                "--v4-zero",
+                "0.65",
+                "--pc-xpass-cache-dir",
+                "cache-dir",
+            ],
+        )
+
+    def test_effective_v4_weights_cover_discount_and_custom_parameters(self) -> None:
+        distances = np.array([0.0, 35.0, 70.0, 80.0])
+        heights = np.array([0.0, 0.8, 0.6, 0.9])
+        discounted = physical_xpass_blend_weight_v4(distances, heights, power=4.0, zero_point=0.7)
+        expected_partial = 0.8 * np.cos((np.pi / 2.0) * (0.5**4))
+        np.testing.assert_allclose(discounted, [0.0, expected_partial, 0.0, 0.0], rtol=1e-7, atol=1e-12)
+        np.testing.assert_allclose(
+            physical_xpass_blend_weight_v4(distances, heights, power=2.0, zero_point=1.0),
+            heights * np.cos((np.pi / 2.0) * (distances / 100.0) ** 2),
+            rtol=1e-7,
+        )
+        np.testing.assert_allclose(
+            physical_xpass_blend_weight_v4(distances, heights, power=2.0, zero_point=0.2, use_discount=False),
+            heights,
+            rtol=1e-7,
+        )
+
+    def test_weighted_metrics_match_sklearn_and_fail_for_invalid_subsets(self) -> None:
+        target = np.array([0, 1, 0, 1])
+        prediction = np.array([0.05, 0.70, 0.80, 0.55])
+        weight = np.array([0.2, 0.9, 0.5, 0.4])
+        metrics = calc_weighted_binary_probability_metrics(target, prediction, weight)
+        self.assertAlmostEqual(metrics["high_pass_weighted_roc_auc"], roc_auc_score(target, prediction, sample_weight=weight))
+        self.assertAlmostEqual(
+            metrics["high_pass_weighted_brier"], brier_score_loss(target, prediction, sample_weight=weight)
+        )
+        with self.assertRaisesRegex(ValueError, "zero total effective weight"):
+            calc_weighted_binary_probability_metrics([0, 1], [0.2, 0.8], [0.0, 0.0])
+        with self.assertRaisesRegex(ValueError, "both successful and unsuccessful"):
+            calc_weighted_binary_probability_metrics([0, 1], [0.2, 0.8], [1.0, 0.0])
+
+    def test_weighted_cache_requires_pc_xpass_and_matching_pass_height_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_args = SimpleNamespace(
+                weighted_pass_success_metrics=True,
+                pass_height_model_id="pass_height/run_1",
+                pc_xpass_cache_dir=str(Path(tmpdir) / "missing"),
+                v4_power=4.0,
+                v4_zero=0.7,
+            )
+            with self.assertRaises(FileNotFoundError):
+                evaluation_script.resolve_weighted_pass_success_cache(missing_args, SimpleNamespace(task="pass_success"))
+
+            cache_dir = Path(tmpdir) / "pc_xpass"
+            cache_dir.mkdir()
+            (cache_dir / "metadata.json").write_text(
+                json.dumps({"source": "pc_xpass", "pass_height_model_id": "pass_height/run_1"}), encoding="utf-8"
+            )
+            args = SimpleNamespace(
+                weighted_pass_success_metrics=True,
+                pass_height_model_id="pass_height/run_1",
+                pc_xpass_cache_dir=str(cache_dir),
+                v4_power=4.0,
+                v4_zero=0.7,
+            )
+            model_args = SimpleNamespace(task="pass_success")
+            self.assertEqual(evaluation_script.resolve_weighted_pass_success_cache(args, model_args), str(cache_dir))
+
+            args.pass_height_model_id = "pass_height/other"
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                evaluation_script.resolve_weighted_pass_success_cache(args, model_args)
+
+            args.pass_height_model_id = "pass_height/run_1"
+            args.v4_zero = 0.0
+            with self.assertRaisesRegex(ValueError, "positive finite"):
+                evaluation_script.resolve_weighted_pass_success_cache(args, model_args)
+
+            args.v4_zero = 0.7
+            (cache_dir / "metadata.json").write_text(json.dumps({"source": "physical_xpass"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incompatible source"):
+                evaluation_script.resolve_weighted_pass_success_cache(args, model_args)
 
 
 if __name__ == "__main__":

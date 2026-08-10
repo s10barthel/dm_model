@@ -71,6 +71,7 @@ from physical_pass_model import (
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_LEGACY_SOURCE,
     PHYSICAL_XPASS_LOGIT_ATTR,
+    PHYSICAL_XPASS_DISTANCE_ATTR,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_SUFFIX,
     PHYSICAL_XPASS_PASS_DISTANCE_COLUMN,
@@ -109,6 +110,7 @@ from physical_pass_model import (
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
+    attach_pass_height_to_graph,
     attach_physical_xpass_to_graph,
     append_pc_xpass_lane_survival_to_graph,
     blend_physical_xpass_predictions,
@@ -3555,6 +3557,21 @@ class PhysicalXPassTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "observed target"):
             attach_physical_xpass_to_graph(graph, label, sidecar, match_id="m1")
 
+    def test_sidecar_attach_requires_observed_pass_height_when_requested(self) -> None:
+        graph = make_graph(["home_1", "home_2"])
+        label = make_label()
+        sidecar = pd.DataFrame(
+            [{"match_id": "m1", "action_index": 7, "home_1": 0.5, "home_2": 0.8}]
+        ).set_index("action_index", drop=False)
+
+        with self.assertRaisesRegex(ValueError, "pass-height probability for observed target"):
+            attach_pass_height_to_graph(
+                graph,
+                label,
+                sidecar,
+                match_id="m1",
+            )
+
     def test_sidecar_attach_fails_when_observed_target_is_nan(self) -> None:
         graph = make_graph(["home_1", "home_2"])
         label = make_label()
@@ -5916,6 +5933,70 @@ class PhysicalXPassTests(unittest.TestCase):
         expected_penalty = (0.25 * 2.0**2 + 0.5 * 3.0**2) / 2.0
         self.assertAlmostEqual(metrics["residual_l2"], (2.0**2 + 3.0**2) / 2.0, places=6)
         self.assertAlmostEqual(metrics["ce_loss"], expected_bce + expected_penalty, places=6)
+
+    def test_run_epoch_reports_opt_in_high_pass_weighted_metrics_only(self) -> None:
+        first_graph = make_graph(["home_1", "home_2"])
+        second_graph = make_graph(["home_1", "home_2"])
+        setattr(first_graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, torch.tensor([float("nan"), 0.8]))
+        setattr(second_graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, torch.tensor([float("nan"), 0.5]))
+        setattr(first_graph, PHYSICAL_XPASS_DISTANCE_ATTR, torch.tensor([0.0, 20.0]))
+        setattr(second_graph, PHYSICAL_XPASS_DISTANCE_ATTR, torch.tensor([0.0, 40.0]))
+        first_label = make_label(action_index=1)
+        second_label = make_label(action_index=2)
+        second_label[LABEL_INDEX["success"]] = 0.0
+        loader = DataLoader(
+            [
+                (first_graph, first_label, torch.tensor(1.0, dtype=torch.float32)),
+                (second_graph, second_label, torch.tensor(1.0, dtype=torch.float32)),
+            ],
+            batch_size=2,
+        )
+        args = SimpleNamespace(
+            gnn_task="node_binary",
+            task="pass_success",
+            include_out=False,
+            lambda_l1=0.0,
+            residual_regularization_lambda=0.0,
+            use_physical_xpass=False,
+            model_variant="gat_baseline",
+            use_xg=False,
+            use_xt=False,
+            use_goal_distance=False,
+            use_epv=False,
+            print_freq=99,
+            clip=10,
+            weighted_pass_success_metrics=True,
+            discount=True,
+            v4_power=4.0,
+            v4_zero=0.7,
+        )
+
+        metrics = run_epoch(
+            args,
+            DummyOffsetModel(output_values=[0.0, 1.0, 0.0, -1.0]),
+            loader,
+            device="cpu",
+            train=False,
+        )
+        weights = physical_xpass_blend_weight_v4(np.array([20.0, 40.0]), np.array([0.8, 0.5]))
+        expected = model_utils.calc_weighted_binary_probability_metrics(
+            np.array([1.0, 0.0]),
+            torch.sigmoid(torch.tensor([1.0, -1.0])).numpy(),
+            weights,
+        )
+        self.assertAlmostEqual(metrics["high_pass_weighted_roc_auc"], expected["high_pass_weighted_roc_auc"])
+        self.assertAlmostEqual(metrics["high_pass_weighted_brier"], expected["high_pass_weighted_brier"])
+
+        args.weighted_pass_success_metrics = False
+        unweighted_metrics = run_epoch(
+            args,
+            DummyOffsetModel(output_values=[0.0, 1.0, 0.0, -1.0]),
+            loader,
+            device="cpu",
+            train=False,
+        )
+        self.assertNotIn("high_pass_weighted_roc_auc", unweighted_metrics)
+        self.assertNotIn("high_pass_weighted_brier", unweighted_metrics)
 
     def test_run_epoch_node_selection_accepts_singleton_column_logits(self) -> None:
         graph = make_graph(["home_1", "home_2", "away_3"])

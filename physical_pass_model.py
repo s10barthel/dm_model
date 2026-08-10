@@ -5670,12 +5670,55 @@ def attach_physical_xpass_to_graph(
                     f"Physical xPass sidecar has no finite probability for observed target {node_ids[target_index]!r} "
                     f"in match {match_id}, action_index={action_index}."
                 )
-
     setattr(graph, PHYSICAL_XPASS_PROB_ATTR, probs)
     setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, logits)
     setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, pass_distances)
     setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
     setattr(graph, PHYSICAL_XPASS_BALL_Z_ATTR, ball_z)
+    setattr(graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, pass_heights)
+    return graph
+
+
+def attach_pass_height_to_graph(
+    graph: Data,
+    labels: torch.Tensor,
+    physical_rows: pd.DataFrame,
+    *,
+    match_id: str,
+    require_observed_target: bool = True,
+) -> Data:
+    """Attach pass-height sidecar values without replacing a model's physical xPass inputs."""
+    if physical_rows is None:
+        raise ValueError("physical_rows must be provided when attaching pass-height probabilities.")
+    action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    if action_index not in physical_rows.index:
+        raise FileNotFoundError(
+            f"Physical xPass sidecar for match {match_id} has no row for action_index={action_index}. "
+            "Run scripts/generate_physical_xpass.py for the full feature run."
+        )
+    row = physical_rows.loc[action_index]
+    node_ids = _node_ids(graph)
+    pass_heights = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
+    for node_index, node_id in enumerate(node_ids):
+        pass_height_column = physical_xpass_pass_height_column(str(node_id))
+        if pass_height_column in row.index and not pd.isna(row[pass_height_column]):
+            value = float(row[pass_height_column])
+            if math.isfinite(value):
+                pass_heights[node_index] = value
+
+    if require_observed_target:
+        target_index = int(labels[LABEL_INDEX["intent_index"]].item())
+        if not 0 <= target_index < len(node_ids):
+            raise ValueError(
+                f"Observed target index {target_index} is out of bounds for match {match_id}, action_index={action_index}."
+            )
+        if not bool(torch.isfinite(pass_heights[target_index]).item()):
+            raise ValueError(
+                f"Physical xPass sidecar has no finite pass-height probability for observed target "
+                f"{node_ids[target_index]!r} in match {match_id}, action_index={action_index}."
+            )
+
+    setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
     setattr(graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, pass_heights)
     return graph
 
