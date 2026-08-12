@@ -1,0 +1,110 @@
+{
+  "model_id": "pass_success/pass_success_20260731T093836_316735_fae491e8",
+  "feature_dir": "data\\features\\runs\\feature_20260628T024614_842494_f7e03958\\action_graphs",
+  "label_dir": "data\\features\\runs\\feature_20260628T024614_842494_f7e03958\\action_labels_next_10",
+  "threshold_m": 60.0,
+  "observed_pass_length_definition": "Pre-pass possessor-to-assigned-intended-receiver distance (NODE_FEATURE_POSS_DIST).",
+  "device": "cuda",
+  "offside_policy": "Exclude offside receiver options; standard inference would assign them probability zero.",
+  "splits": [
+    {
+      "split": "train",
+      "observed_selected_onside_long_passes": {
+        "n": 18,
+        "successful": 11,
+        "empirical_success_rate": 0.6111111111111112,
+        "wilson_95_ci": [
+          0.3861904160223791,
+          0.7969475342783638
+        ],
+        "model_probability": {
+          "n": 18,
+          "mean": 0.5030022412538528,
+          "median": 0.48794320225715637,
+          "p10": 0.30545138716697695,
+          "p90": 0.7159915149211884
+        },
+        "calibration_gap_model_minus_observed": -0.10810886985725832,
+        "offside_excluded": 5
+      },
+      "all_onside_long_options": {
+        "n": 128715,
+        "mean": 0.15270394447064933,
+        "median": 0.09463619440793991,
+        "p10": 0.05691657140851021,
+        "p90": 0.4247721254825593
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 129857,
+        "offside_excluded": 1142,
+        "onside": 128715
+      }
+    },
+    {
+      "split": "validation",
+      "observed_selected_onside_long_passes": {
+        "n": 7,
+        "successful": 2,
+        "empirical_success_rate": 0.2857142857142857,
+        "wilson_95_ci": [
+          0.08221892400405678,
+          0.6410655481673808
+        ],
+        "model_probability": {
+          "n": 7,
+          "mean": 0.4796838547502245,
+          "median": 0.4440758526325226,
+          "p10": 0.3563476622104645,
+          "p90": 0.6003807067871094
+        },
+        "calibration_gap_model_minus_observed": 0.19396956903593882,
+        "offside_excluded": 1
+      },
+      "all_onside_long_options": {
+        "n": 33108,
+        "mean": 0.15493534599467204,
+        "median": 0.0955059565603733,
+        "p10": 0.057470353320240974,
+        "p90": 0.4280515164136886
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 33348,
+        "offside_excluded": 240,
+        "onside": 33108
+      }
+    },
+    {
+      "split": "test",
+      "observed_selected_onside_long_passes": {
+        "n": 23,
+        "successful": 9,
+        "empirical_success_rate": 0.391304347826087,
+        "wilson_95_ci": [
+          0.22157622792477952,
+          0.592144776086183
+        ],
+        "model_probability": {
+          "n": 23,
+          "mean": 0.4838015385296034,
+          "median": 0.423215389251709,
+          "p10": 0.2849867522716522,
+          "p90": 0.7569518089294434
+        },
+        "calibration_gap_model_minus_observed": 0.09249719070351642,
+        "offside_excluded": 8
+      },
+      "all_onside_long_options": {
+        "n": 152036,
+        "mean": 0.1562618553394436,
+        "median": 0.09492447227239609,
+        "p10": 0.05749484710395336,
+        "p90": 0.4352923035621643
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 153198,
+        "offside_excluded": 1162,
+        "onside": 152036
+      }
+    }
+  ]
+}

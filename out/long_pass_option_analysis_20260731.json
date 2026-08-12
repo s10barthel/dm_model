@@ -1,0 +1,109 @@
+{
+  "model_id": "pass_success/pass_success_20260731T093836_316735_fae491e8",
+  "feature_dir": "data\\features\\runs\\feature_20260628T024614_842494_f7e03958\\action_graphs",
+  "label_dir": "data\\features\\runs\\feature_20260628T024614_842494_f7e03958\\action_labels_next_10",
+  "threshold_m": 60.0,
+  "device": "cuda",
+  "offside_policy": "Exclude offside receiver options; standard inference would assign them probability zero.",
+  "splits": [
+    {
+      "split": "train",
+      "observed_selected_onside_long_passes": {
+        "n": 1556,
+        "successful": 1549,
+        "empirical_success_rate": 0.9955012853470437,
+        "wilson_95_ci": [
+          0.9907428757876671,
+          0.9978191292034151
+        ],
+        "model_probability": {
+          "n": 1556,
+          "mean": 0.7252617894951973,
+          "median": 0.8276183605194092,
+          "p10": 0.31547829508781433,
+          "p90": 0.9972856044769287
+        },
+        "calibration_gap_model_minus_observed": -0.2702394958518465,
+        "offside_excluded": 13
+      },
+      "all_onside_long_options": {
+        "n": 128715,
+        "mean": 0.15270394461598238,
+        "median": 0.09463619440793991,
+        "p10": 0.056916582584381106,
+        "p90": 0.4247721254825593
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 129857,
+        "offside_excluded": 1142,
+        "onside": 128715
+      }
+    },
+    {
+      "split": "validation",
+      "observed_selected_onside_long_passes": {
+        "n": 476,
+        "successful": 474,
+        "empirical_success_rate": 0.9957983193277311,
+        "wilson_95_ci": [
+          0.9848112394993226,
+          0.9988469903669212
+        ],
+        "model_probability": {
+          "n": 476,
+          "mean": 0.732392247234072,
+          "median": 0.8309819996356964,
+          "p10": 0.3299703598022461,
+          "p90": 0.9972231388092041
+        },
+        "calibration_gap_model_minus_observed": -0.26340607209365907,
+        "offside_excluded": 2
+      },
+      "all_onside_long_options": {
+        "n": 33108,
+        "mean": 0.15493534593655578,
+        "median": 0.0955059565603733,
+        "p10": 0.057470353320240974,
+        "p90": 0.42805150747299187
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 33348,
+        "offside_excluded": 240,
+        "onside": 33108
+      }
+    },
+    {
+      "split": "test",
+      "observed_selected_onside_long_passes": {
+        "n": 2159,
+        "successful": 2158,
+        "empirical_success_rate": 0.999536822603057,
+        "wilson_95_ci": [
+          0.9973809406901069,
+          0.9999182331365875
+        ],
+        "model_probability": {
+          "n": 2159,
+          "mean": 0.7295531730662347,
+          "median": 0.8203506469726562,
+          "p10": 0.33616849184036257,
+          "p90": 0.9956981897354126
+        },
+        "calibration_gap_model_minus_observed": -0.2699836495368223,
+        "offside_excluded": 27
+      },
+      "all_onside_long_options": {
+        "n": 152036,
+        "mean": 0.15626185536524492,
+        "median": 0.09492447227239609,
+        "p10": 0.057494837790727615,
+        "p90": 0.4352923035621643
+      },
+      "candidate_options": {
+        "long_before_offside_filter": 153198,
+        "offside_excluded": 1162,
+        "onside": 152036
+      }
+    }
+  ]
+}
