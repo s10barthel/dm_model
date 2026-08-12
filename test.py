@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from models.dataset_config import build_action_dataset_kwargs
 from models.utils import get_losses_str, infer_feature_graph_schema, infer_training_edge_schema, load_splits, run_epoch
 from models.utils import validate_feature_graph_schema
 from physical_pass_model import (
+    PC_XPASS_SOURCE,
     PHYSICAL_XPASS_SOURCE,
     model_uses_physical_xpass,
     normalize_physical_xpass_speed_aggregation,
@@ -45,6 +47,39 @@ def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10
         print(f"  {match_id}: {reason}")
     if len(skipped) > max_items:
         print(f"  ... and {len(skipped) - max_items} more")
+
+
+def parse_bool_text(value: str) -> bool:
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def resolve_weighted_pass_success_cache(args: argparse.Namespace, model_args: argparse.Namespace) -> str | None:
+    """Validate and return the pc-xPass cache for weighted pass-success evaluation."""
+    if not bool(args.weighted_pass_success_metrics):
+        return None
+    if str(getattr(model_args, "task", "")) != "pass_success":
+        raise ValueError("--weighted-pass-success-metrics requires a pass_success checkpoint.")
+    if not args.pass_height_model_id:
+        raise ValueError("--weighted-pass-success-metrics requires --pass-height-model-id.")
+    if not math.isfinite(float(args.v4_power)) or float(args.v4_power) <= 0.0:
+        raise ValueError("--v4-power must be a positive finite float.")
+    if not math.isfinite(float(args.v4_zero)) or float(args.v4_zero) <= 0.0:
+        raise ValueError("--v4-zero must be a positive finite float.")
+
+    cache_dir = Path(args.pc_xpass_cache_dir)
+    metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+    cached_model_id = metadata.get("pass_height_model_id")
+    if str(cached_model_id) != str(args.pass_height_model_id):
+        raise ValueError(
+            "pc-xPass cache pass_height_model_id does not match --pass-height-model-id: "
+            f"cache={cached_model_id!r}, requested={args.pass_height_model_id!r}."
+        )
+    return str(cache_dir)
 
 
 def resolve_goal_next10_diagnostic_context(
@@ -191,11 +226,22 @@ if __name__ == "__main__":
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
     parser.add_argument("--feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
+    parser.add_argument("--weighted-pass-success-metrics", action="store_true")
+    parser.add_argument("--pass-height-model-id", type=str, default=None)
+    parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
+    parser.add_argument("--discount", type=parse_bool_text, default=True)
+    parser.add_argument("--v4-power", type=float, default=4.0)
+    parser.add_argument("--v4-zero", type=float, default=0.7)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    weighted_pc_xpass_cache_dir = resolve_weighted_pass_success_cache(args, model_args)
+    model_args.weighted_pass_success_metrics = bool(args.weighted_pass_success_metrics)
+    model_args.discount = bool(args.discount)
+    model_args.v4_power = float(args.v4_power)
+    model_args.v4_zero = float(args.v4_zero)
 
     print("\nGenerating test datasets...")
     resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
@@ -249,6 +295,10 @@ if __name__ == "__main__":
         physical_cache_dir=physical_cache_dir,
         lane_survival_cache_dir=lane_survival_cache_dir,
     )
+    if weighted_pc_xpass_cache_dir is not None:
+        # These attributes are evaluation sidecars; they do not modify node or edge features.
+        dataset_args["pass_height_cache_dir"] = weighted_pc_xpass_cache_dir
+        dataset_args["require_observed_pass_height"] = True
     test_dataset = ActionDataset(
         test_match_ids,
         feature_dir=feature_dir,

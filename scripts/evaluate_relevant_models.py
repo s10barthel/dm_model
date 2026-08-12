@@ -12,7 +12,16 @@ if str(ROOT) not in sys.path:
 from models.utils import resolve_model_selection
 
 
-def parse_args() -> argparse.Namespace:
+def parse_bool_text(value: str) -> bool:
+    text = str(value).strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
@@ -24,7 +33,34 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--diagnostic-feature-run-id")
     parser.add_argument("--device", default="cuda:0")
-    return parser.parse_args()
+    parser.add_argument("--weighted-pass-success-metrics", action="store_true")
+    parser.add_argument("--pc-xpass-cache-dir", default=None)
+    parser.add_argument("--discount", type=parse_bool_text, default=True)
+    parser.add_argument("--v4-power", type=float, default=4.0)
+    parser.add_argument("--v4-zero", type=float, default=0.7)
+    return parser.parse_args(argv)
+
+
+def add_weighted_pass_success_options(
+    command: list[str], args: argparse.Namespace, pass_height_model_id: str,
+) -> list[str]:
+    """Append the evaluation-only v4 options to a pass-success test command."""
+    command.extend(
+        [
+            "--weighted-pass-success-metrics",
+            "--pass-height-model-id",
+            str(pass_height_model_id),
+            "--discount",
+            str(bool(args.discount)).lower(),
+            "--v4-power",
+            str(args.v4_power),
+            "--v4-zero",
+            str(args.v4_zero),
+        ]
+    )
+    if args.pc_xpass_cache_dir:
+        command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
+    return command
 
 
 def main() -> None:
@@ -69,11 +105,17 @@ def main() -> None:
         pass_height_model_id = bundle.get("model_ids", {}).get("pass_height")
     if pass_height_model_id:
         model_ids.insert(4 if success_intent_model_id else 3, str(pass_height_model_id))
+    if args.weighted_pass_success_metrics and not pass_height_model_id:
+        raise ValueError(
+            "--weighted-pass-success-metrics requires --pass-height-model-id or a bundle containing pass_height."
+        )
 
     for model_id in model_ids:
         command = [python, "test.py", "--model_id", model_id, "--device", args.device]
         if args.diagnostic_feature_run_id:
             command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+        if args.weighted_pass_success_metrics and model_id == resolved_model_ids["pass_success"]:
+            add_weighted_pass_success_options(command, args, str(pass_height_model_id))
         print("Running:", " ".join(command))
         subprocess.run(command, cwd=ROOT, check=True)
 

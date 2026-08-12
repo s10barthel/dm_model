@@ -99,6 +99,8 @@ def build_action_dataset_kwargs(
         "physical_cache_dir": physical_cache_dir,
         "physical_eps": float(_get_arg(args, "physical_eps", 1e-4)),
         "physical_xpass_floor": _get_arg(args, "physical_xpass_floor", None),
+        "require_observed_pass_height": _bool_arg(args, "require_observed_pass_height", False),
+        "pass_height_cache_dir": None,
         "lane_survival": lane_survival,
         "lane_survival_mode": lane_survival_mode,
         "lane_survival_cache_dir": lane_survival_cache_dir,

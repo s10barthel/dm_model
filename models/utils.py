@@ -29,6 +29,9 @@ from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from physical_pass_model import (
+    PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+    physical_xpass_blend_weight_v4,
     normalize_pc_xpass_lane_survival_mode,
     residual_distance_threshold,
     resolved_residual_regularization_lambdas,
@@ -1269,6 +1272,25 @@ def calc_binary_metrics(y, y_hat, threshold=0.5):
     return {k: round(v, 4) for k, v in metrics.items()}
 
 
+def calc_weighted_binary_probability_metrics(y, y_hat, sample_weight) -> dict[str, float]:
+    """Calculate probability metrics for a non-empty, two-class weighted sample."""
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    weights = np.asarray(sample_weight, dtype=float).reshape(-1)
+    if not (len(y_true) == len(y_score) == len(weights)):
+        raise ValueError("Weighted metric inputs must have identical lengths.")
+    if not np.isfinite(y_score).all() or not np.isfinite(weights).all() or np.any(weights < 0):
+        raise ValueError("Weighted metric predictions and weights must be finite, with non-negative weights.")
+    if float(weights.sum()) <= 0.0:
+        raise ValueError("Weighted pass-success evaluation has zero total effective weight.")
+    if np.unique(y_true[weights > 0.0]).size < 2:
+        raise ValueError("Weighted pass-success evaluation requires both successful and unsuccessful passes.")
+    return {
+        "high_pass_weighted_roc_auc": float(roc_auc_score(y_true, y_score, sample_weight=weights)),
+        "high_pass_weighted_brier": float(brier_score_loss(y_true, y_score, sample_weight=weights)),
+    }
+
+
 def validate_target_flags(args) -> None:
     enabled_flags = sum(
         int(
@@ -1439,6 +1461,13 @@ def run_epoch(
     elif args.gnn_task in ["node_regression", "graph_regression"]:
         metrics = {"count": 0, "mse_loss": 0, "l1_loss": 0}
 
+    weighted_pass_success_eval = bool(getattr(args, "weighted_pass_success_metrics", False))
+    if weighted_pass_success_eval and args.task != "pass_success":
+        raise ValueError("weighted_pass_success_metrics is only supported for task='pass_success'.")
+    weighted_predictions: list[np.ndarray] = []
+    weighted_targets: list[np.ndarray] = []
+    weighted_effective_weights: list[np.ndarray] = []
+
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
         batch_graphs: Batch = batch_graphs.to(device)
         batch_ipw: torch.Tensor = batch_ipw.to(device)
@@ -1603,6 +1632,30 @@ def run_epoch(
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()
+                if weighted_pass_success_eval:
+                    pass_heights = getattr(batch_graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
+                    pass_distances = getattr(batch_graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
+                    if pass_heights is None or pass_distances is None:
+                        raise ValueError(
+                            "Weighted pass-success evaluation requires cached pass-height probabilities and pass distances."
+                        )
+                    observed_heights = []
+                    observed_distances = []
+                    for graph_index in index_range:
+                        graph_mask = batch == graph_index
+                        target_index = intent[graph_index]
+                        observed_heights.append(pass_heights[graph_mask][target_index])
+                        observed_distances.append(pass_distances[graph_mask][target_index])
+                    effective_weights = physical_xpass_blend_weight_v4(
+                        torch.stack(observed_distances),
+                        torch.stack(observed_heights),
+                        power=float(getattr(args, "v4_power", 4.0)),
+                        zero_point=float(getattr(args, "v4_zero", 0.7)),
+                        use_discount=bool(getattr(args, "discount", True)),
+                    )
+                    weighted_predictions.append(np.asarray(y_hat, dtype=float))
+                    weighted_targets.append(np.asarray(y, dtype=float))
+                    weighted_effective_weights.append(effective_weights.detach().cpu().numpy().astype(float))
                 threshold = 0.5 if args.task.endswith("success") or args.task == "pass_height" else 0.1
                 batch_metrics = calc_binary_metrics(y, y_hat, threshold)
 
@@ -1740,5 +1793,14 @@ def run_epoch(
         if key == "count":
             continue
         metrics[key] = value / metrics["count"]
+
+    if weighted_pass_success_eval:
+        metrics.update(
+            calc_weighted_binary_probability_metrics(
+                np.concatenate(weighted_targets),
+                np.concatenate(weighted_predictions),
+                np.concatenate(weighted_effective_weights),
+            )
+        )
 
     return metrics

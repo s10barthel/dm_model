@@ -19,6 +19,7 @@ from datatools.utils import (
 from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     append_pc_xpass_lane_survival_to_graph,
+    attach_pass_height_to_graph,
     attach_physical_xpass_to_graph,
     load_physical_xpass_match,
 )
@@ -164,6 +165,8 @@ class ActionDataset(Dataset):
         physical_cache_dir=None,
         physical_eps=1e-4,
         physical_xpass_floor=None,
+        require_observed_pass_height=False,
+        pass_height_cache_dir=None,
         lane_survival=False,
         lane_survival_mode=None,
         lane_survival_cache_dir=None,
@@ -172,6 +175,7 @@ class ActionDataset(Dataset):
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
         physical_cache_root = Path(physical_cache_dir) if physical_cache_dir else None
+        pass_height_cache_root = Path(pass_height_cache_dir) if pass_height_cache_dir else None
         lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else get_pc_xpass_dir("sportec")
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
@@ -181,9 +185,11 @@ class ActionDataset(Dataset):
         self.lane_survival = bool(lane_survival) and str(TASK_CONFIG.at[task, "gnn_task"]).startswith("node")
         self.lane_survival_mode = lane_survival_mode
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
+        self.pass_height_cache_dir = str(pass_height_cache_root) if pass_height_cache_root is not None else None
         self.lane_survival_cache_dir = str(lane_survival_cache_root)
         self.physical_eps = float(physical_eps)
         self.physical_xpass_floor = None if physical_xpass_floor is None else float(physical_xpass_floor)
+        self.require_observed_pass_height = bool(require_observed_pass_height)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
         self.v_edge_feature_mode = str(v_edge_feature_mode).strip().replace("-", "_")
         self.relative_speed_edge_feature_mode = str(relative_speed_edge_feature_mode).strip().replace("-", "_")
@@ -199,6 +205,8 @@ class ActionDataset(Dataset):
         )
         if self.use_physical_xpass and physical_cache_root is None:
             raise ValueError("physical_cache_dir is required when use_physical_xpass=True.")
+        if self.require_observed_pass_height and pass_height_cache_root is None:
+            raise ValueError("pass_height_cache_dir is required when require_observed_pass_height=True.")
 
         features = []
         feature_match_ids: list[str] = []
@@ -334,6 +342,7 @@ class ActionDataset(Dataset):
         self.features = []
         self.labels = []
         physical_rows_by_match: dict[str, object] = {}
+        pass_height_rows_by_match: dict[str, object] = {}
         lane_survival_rows_by_match: dict[str, object] = {}
 
         for i in tqdm(condition.nonzero()[:, 0].numpy()):
@@ -474,6 +483,18 @@ class ActionDataset(Dataset):
                     eps=self.physical_eps,
                     floor=self.physical_xpass_floor,
                     require_observed_target=True,
+                )
+
+            if pass_height_cache_root is not None:
+                match_id = feature_match_ids[int(i)]
+                if match_id not in pass_height_rows_by_match:
+                    pass_height_rows_by_match[match_id] = load_physical_xpass_match(pass_height_cache_root, match_id)
+                graph = attach_pass_height_to_graph(
+                    graph,
+                    graph_labels,
+                    pass_height_rows_by_match[match_id],
+                    match_id=match_id,
+                    require_observed_target=self.require_observed_pass_height,
                 )
 
             self.features.append(graph)

@@ -1405,6 +1405,13 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
 - `--device <device>`: device passed to `test.py`. Default: `cuda:0`.
+- `--weighted-pass-success-metrics`: additionally report high-pass-weighted ROC-AUC and Brier score for the
+  learning-based `pass_success` checkpoint. Requires `--pass-height-model-id` (or a bundle containing it) and a
+  compatible, enriched pc-xPass cache.
+- `--pc-xpass-cache-dir <path>`: optional enriched pc-xPass cache directory for weighted pass-success evaluation;
+  default: the Sportec pc-xPass cache.
+- `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
+  weighted pass-success evaluation. Defaults: `true`, `4`, and `0.7`.
 
 ### `scripts/run_relevant_models.py`
 
