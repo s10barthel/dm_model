@@ -623,10 +623,16 @@ def validate_external_pass_intent_model_id(
     required_node_dim = required_schema.get("node_in_dim")
     if required_node_dim is not None and runtime_node_dim is not None:
         if int(runtime_node_dim) < int(required_node_dim):
-            mismatches.append(
-                f"requires node_in_dim={int(required_node_dim)}, "
-                f"but {runtime_context} runtime provides node_in_dim={int(runtime_node_dim)}"
+            checkpoint_lane_survival = bool(
+                (record.get("feature_signature") or {}).get("lane_survival", False)
+                or ((record.get("metadata") or {}).get("lane_survival") or {}).get("enabled", False)
             )
+            lane_survival_delta = int(required_node_dim) == int(runtime_node_dim) + 1
+            if not (checkpoint_lane_survival and lane_survival_delta):
+                mismatches.append(
+                    f"requires node_in_dim={int(required_node_dim)}, "
+                    f"but {runtime_context} runtime provides node_in_dim={int(runtime_node_dim)}"
+                )
     elif required_node_dim is not None:
         mismatches.append(f"requires node_in_dim={int(required_node_dim)}, but {runtime_context} runtime node schema is unknown")
 
@@ -1404,10 +1410,17 @@ def pass_success_command(
     return_type: str,
     batch_size: int,
     v_edge_feature_mode: str,
-    relative_speed_edge_feature_mode: str,
-    feature_flags: dict[str, bool],
+    relative_speed_edge_feature_mode: str | dict[str, bool],
+    feature_flags: dict[str, bool] | argparse.Namespace,
     physical_args: argparse.Namespace | None = None,
 ) -> list[str]:
+    # Keep the helper compatible with callers from before relative-speed edge
+    # modes were added as a separate positional argument.
+    if isinstance(relative_speed_edge_feature_mode, dict):
+        if physical_args is None and not isinstance(feature_flags, dict):
+            physical_args = feature_flags
+        feature_flags = relative_speed_edge_feature_mode
+        relative_speed_edge_feature_mode = "none"
     command = [
         "--task",
         task,
@@ -1447,10 +1460,15 @@ def outcome_command(
     intended_receiver_mode: str,
     batch_size: int,
     v_edge_feature_mode: str,
-    relative_speed_edge_feature_mode: str,
-    feature_flags: dict[str, bool],
+    relative_speed_edge_feature_mode: str | dict[str, bool],
+    feature_flags: dict[str, bool] | None = None,
     diagnostic_feature_run_id: str | None = None,
 ) -> list[str]:
+    if isinstance(relative_speed_edge_feature_mode, dict):
+        feature_flags = relative_speed_edge_feature_mode
+        relative_speed_edge_feature_mode = "none"
+    if feature_flags is None:
+        raise ValueError("feature_flags are required for outcome training commands.")
     command = [
         "--task",
         task,

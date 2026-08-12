@@ -75,6 +75,7 @@ def make_pass_intent_record(
     edge_in_dim: int = 4,
     add_v_edge_features: bool = True,
     feature_signature: dict[str, object] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "task": task,
@@ -89,6 +90,7 @@ def make_pass_intent_record(
             "add_v_edge_features": add_v_edge_features,
         },
         "feature_signature": feature_signature or train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+        "metadata": metadata or {},
     }
 
 
@@ -902,6 +904,92 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
                     "feature_run",
                     runtime_schema=runtime_schema,
                 )
+
+    def test_external_lane_survival_pass_intent_accepts_one_node_ipw_delta(self) -> None:
+        args = make_training_args("feature_run", pass_intent_model_id="pass_intent/lane")
+        runtime_schema = {"node_in_dim": 26, "edge_in_dim": 5, "add_v_edge_features": True}
+        lane_signature = {**train_wrapper.WRAPPER_FEATURE_DEFAULTS, "lane_survival": True}
+
+        with patch.object(
+            train_wrapper,
+            "get_model_record",
+            return_value=make_pass_intent_record(
+                node_in_dim=27,
+                edge_in_dim=5,
+                feature_signature=lane_signature,
+                metadata={"lane_survival": {"enabled": True, "mode": "max"}},
+            ),
+        ):
+            resolved = train_wrapper.validate_external_pass_intent_model_id(
+                args,
+                train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+                "feature_run",
+                runtime_schema=runtime_schema,
+            )
+
+        self.assertEqual(resolved, "pass_intent/lane")
+
+    def test_external_non_lane_pass_intent_rejects_one_node_ipw_delta(self) -> None:
+        args = make_training_args("feature_run", pass_intent_model_id="pass_intent/not-lane")
+        runtime_schema = {"node_in_dim": 26, "edge_in_dim": 5, "add_v_edge_features": True}
+
+        with patch.object(
+            train_wrapper,
+            "get_model_record",
+            return_value=make_pass_intent_record(node_in_dim=27, edge_in_dim=5),
+        ):
+            with self.assertRaisesRegex(ValueError, "requires node_in_dim=27"):
+                train_wrapper.validate_external_pass_intent_model_id(
+                    args,
+                    train_wrapper.WRAPPER_FEATURE_DEFAULTS.copy(),
+                    "feature_run",
+                    runtime_schema=runtime_schema,
+                )
+
+    def test_mixed_lane_survival_ipw_keeps_target_commands_without_lane_survival(self) -> None:
+        lane_record = make_pass_intent_record(
+            node_in_dim=27,
+            edge_in_dim=5,
+            feature_signature={**train_wrapper.WRAPPER_FEATURE_DEFAULTS, "lane_survival": True},
+            metadata={"lane_survival": {"enabled": True, "mode": "max"}},
+        )
+        runtime_schema = {"node_in_dim": 26, "edge_in_dim": 5, "add_v_edge_features": True}
+        cases = [
+            ("pass_success", "pass_intent_model_id"),
+            ("pass_height", "pass_height_ipw_model_id"),
+        ]
+        for task, model_id_attr in cases:
+            enabled_tasks = make_enabled_tasks(
+                action_intent=False,
+                pass_intent=False,
+                success_intent=False,
+                pass_success=task == "pass_success",
+                pass_height=task == "pass_height",
+                outcome_scoring=False,
+                outcome_conceding=False,
+                failure_receiver=False,
+            )
+            args = make_training_args(
+                "feature_run",
+                enabled_tasks=enabled_tasks,
+                trained_tasks=[task],
+                target_family=None,
+                return_type="disc_0.9",
+                intended_receiver_mode="original",
+                pass_success_ipw=task == "pass_success",
+                pass_height_ipw=task == "pass_height",
+                **{model_id_attr: "pass_intent/lane"},
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with (
+                    patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                    patch.object(train_wrapper, "resolve_feature_root", return_value=Path(tmpdir)),
+                    patch.object(train_wrapper, "resolve_pass_success_runtime_schema", return_value=runtime_schema),
+                    patch.object(train_wrapper, "get_model_record", return_value=lane_record),
+                ):
+                    commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+            self.assertIn("--no-lane-survival", commands[0])
+            self.assertEqual(commands[0][commands[0].index("--ipw_model_id") + 1], "pass_intent/lane")
 
     def test_external_pass_intent_accepts_matching_possessor_masked_velocity_edge_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

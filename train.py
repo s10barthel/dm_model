@@ -20,9 +20,10 @@ from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
-from models.dataset_config import build_action_dataset_kwargs
+from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
 from models.utils import (
     extract_model_feature_signature,
+    get_model_record,
     get_args_str,
     get_losses_str,
     infer_training_edge_schema,
@@ -879,9 +880,14 @@ if __name__ == "__main__":
     loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": args.pin_memory}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
-        ipw_dataset_args = dict(common_dataset_args)
-        ipw_dataset_args["use_physical_xpass"] = False
-        ipw_dataset_args["physical_cache_dir"] = None
+        ipw_model_record = get_model_record(args.ipw_model_id)
+        ipw_dataset_args = build_ipw_dataset_kwargs(
+            common_dataset_args,
+            ipw_model_record["args"],
+            ipw_model_record.get("metadata"),
+            diagnostic_label_dir=args.diagnostic_label_dir,
+            require_goal_next10_diagnostics=args.require_goal_next10_diagnostics,
+        )
         ipw_train_dataset = ActionDataset(
             train_match_ids,
             feature_dir=args.ipw_feature_dir,

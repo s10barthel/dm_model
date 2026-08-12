@@ -11,7 +11,14 @@ from models.utils import (
     normalize_v_edge_feature_mode,
     validate_relative_speed_edge_feature_mode,
 )
-from physical_pass_model import model_uses_physical_xpass, normalize_pc_xpass_lane_survival_mode
+from physical_pass_model import (
+    PC_XPASS_SOURCE,
+    model_uses_physical_xpass,
+    normalize_pc_xpass_lane_survival_mode,
+    pc_xpass_lane_survival_metadata_fingerprint,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
+    validate_physical_xpass_cache_metadata,
+)
 
 
 def _get_arg(args: Any, name: str, default: Any = None) -> Any:
@@ -105,3 +112,86 @@ def build_action_dataset_kwargs(
         "lane_survival_mode": lane_survival_mode,
         "lane_survival_cache_dir": lane_survival_cache_dir,
     }
+
+
+_IPW_CHECKPOINT_FEATURE_KEYS = (
+    "xy_only",
+    "possessor_aware",
+    "keeper_aware",
+    "ball_z_aware",
+    "poss_vel_aware",
+    "poss_rel_vel_aware",
+    "poss_geometry_aware",
+    "goal_features_aware",
+    "goal_nodes_aware",
+    "accel_aware",
+    "offside_aware",
+    "extend_features",
+    "drop_non_blockers",
+    "sparsify",
+    "max_edge_dist",
+    "edge_in_dim",
+    "v_edge_feature_mode",
+    "relative_speed_edge_feature_mode",
+    "mask_possessor_v_edge_features",
+    "mask_possessor_relative_speed_edge_features",
+    "lane_survival",
+    "lane_survival_mode",
+    "lane_survival_cache_dir",
+)
+
+
+def build_ipw_dataset_kwargs(
+    target_dataset_kwargs: dict[str, Any],
+    ipw_model_args: dict[str, Any],
+    ipw_model_metadata: dict[str, Any] | None,
+    *,
+    diagnostic_label_dir: str | None,
+    require_goal_next10_diagnostics: bool,
+) -> dict[str, Any]:
+    """Configure an IPW dataset for its checkpoint without changing target eligibility.
+
+    The target model determines the task, labels, and row eligibility.  Feature
+    transforms are reconstructed from the IPW checkpoint because it may require
+    lane-survival even when the target model does not.
+    """
+    checkpoint_args = dict(ipw_model_args)
+    checkpoint_args["task"] = target_dataset_kwargs["task"]
+    lane_metadata = dict((ipw_model_metadata or {}).get("lane_survival") or {})
+    checkpoint_args["lane_survival"] = bool(
+        lane_metadata.get("enabled", checkpoint_args.get("lane_survival", False))
+    )
+    if checkpoint_args["lane_survival"]:
+        checkpoint_args["lane_survival_mode"] = (
+            lane_metadata.get("mode") or checkpoint_args.get("lane_survival_mode")
+        )
+        cache_dir = lane_metadata.get("cache_dir") or checkpoint_args.get("lane_survival_cache_dir")
+        if not cache_dir:
+            raise ValueError("IPW checkpoint requires lane_survival but does not record a pc-xPass cache directory.")
+        cache_metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+        checkpoint_args["lane_survival_mode"] = validate_pc_xpass_lane_survival_mode_cache_metadata(
+            cache_metadata,
+            checkpoint_args["lane_survival_mode"],
+        )
+        expected_fingerprint = lane_metadata.get("cache_fingerprint") or checkpoint_args.get(
+            "lane_survival_cache_fingerprint"
+        )
+        if expected_fingerprint and str(expected_fingerprint) != pc_xpass_lane_survival_metadata_fingerprint(cache_metadata):
+            raise ValueError("IPW checkpoint lane-survival pc-xPass cache fingerprint does not match its training cache.")
+    else:
+        cache_dir = None
+
+    checkpoint_kwargs = build_action_dataset_kwargs(
+        checkpoint_args,
+        train=bool(target_dataset_kwargs["train"]),
+        diagnostic_label_dir=diagnostic_label_dir,
+        require_goal_next10_diagnostics=require_goal_next10_diagnostics,
+        physical_cache_dir=None,
+        lane_survival_cache_dir=cache_dir,
+    )
+    result = dict(target_dataset_kwargs)
+    for key in _IPW_CHECKPOINT_FEATURE_KEYS:
+        result[key] = checkpoint_kwargs[key]
+    result["use_physical_xpass"] = False
+    result["physical_cache_dir"] = None
+    return result

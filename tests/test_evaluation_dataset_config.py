@@ -15,7 +15,8 @@ from torch_geometric.data import Data
 
 import test as evaluation_script
 from dataset import ActionDataset
-from models.dataset_config import build_action_dataset_kwargs
+from models import dataset_config
+from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
 from models.utils import calc_weighted_binary_probability_metrics
 from physical_pass_model import pc_xpass_lane_survival_metadata_fingerprint, physical_xpass_blend_weight_v4
 from scripts import evaluate_relevant_models
@@ -230,6 +231,73 @@ class EvaluationDatasetConfigTests(unittest.TestCase):
             with patch.object(evaluation_script, "get_pc_xpass_dir", return_value=cache_dir):
                 with self.assertRaisesRegex(ValueError, "fingerprint"):
                     evaluation_script.resolve_lane_survival_context(args)
+
+    def test_ipw_dataset_uses_lane_survival_checkpoint_features_only(self) -> None:
+        target_kwargs = build_action_dataset_kwargs(
+            {"task": "pass_success", "edge_in_dim": 5, "lane_survival": False},
+            train=True,
+            diagnostic_label_dir=None,
+        )
+        checkpoint_args = {
+            "task": "pass_intent",
+            "edge_in_dim": 5,
+            "v_edge_feature_mode": "no_poss",
+            "relative_speed_edge_feature_mode": "no_poss",
+            "lane_survival": True,
+            "lane_survival_mode": "max",
+        }
+        lane_metadata = {"enabled": True, "mode": "max", "cache_dir": "lane-cache", "cache_fingerprint": "fingerprint"}
+
+        with (
+            patch.object(dataset_config, "validate_physical_xpass_cache_metadata", return_value={"source": "pc_xpass"}),
+            patch.object(dataset_config, "validate_pc_xpass_lane_survival_mode_cache_metadata", return_value="max"),
+            patch.object(dataset_config, "pc_xpass_lane_survival_metadata_fingerprint", return_value="fingerprint"),
+        ):
+            ipw_kwargs = build_ipw_dataset_kwargs(
+                target_kwargs,
+                checkpoint_args,
+                {"lane_survival": lane_metadata},
+                diagnostic_label_dir=None,
+                require_goal_next10_diagnostics=False,
+            )
+
+        self.assertFalse(target_kwargs["lane_survival"])
+        self.assertEqual(target_kwargs["task"], "pass_success")
+        self.assertTrue(ipw_kwargs["lane_survival"])
+        self.assertEqual(ipw_kwargs["lane_survival_mode"], "max")
+        self.assertEqual(ipw_kwargs["lane_survival_cache_dir"], "lane-cache")
+        self.assertEqual(ipw_kwargs["task"], "pass_success")
+        self.assertTrue(ipw_kwargs["mask_possessor_v_edge_features"])
+        self.assertFalse(ipw_kwargs["use_physical_xpass"])
+
+    def test_ipw_lane_survival_checkpoint_rejects_missing_cache_and_fingerprint_mismatch(self) -> None:
+        target_kwargs = build_action_dataset_kwargs(
+            {"task": "pass_height", "edge_in_dim": 5}, train=True, diagnostic_label_dir=None
+        )
+        checkpoint_args = {"task": "pass_intent", "edge_in_dim": 5, "lane_survival": True, "lane_survival_mode": "max"}
+
+        with self.assertRaisesRegex(ValueError, "does not record a pc-xPass cache"):
+            build_ipw_dataset_kwargs(
+                target_kwargs,
+                checkpoint_args,
+                {"lane_survival": {"enabled": True}},
+                diagnostic_label_dir=None,
+                require_goal_next10_diagnostics=False,
+            )
+
+        with (
+            patch.object(dataset_config, "validate_physical_xpass_cache_metadata", return_value={"source": "pc_xpass"}),
+            patch.object(dataset_config, "validate_pc_xpass_lane_survival_mode_cache_metadata", return_value="max"),
+            patch.object(dataset_config, "pc_xpass_lane_survival_metadata_fingerprint", return_value="different"),
+        ):
+            with self.assertRaisesRegex(ValueError, "fingerprint"):
+                build_ipw_dataset_kwargs(
+                    target_kwargs,
+                    checkpoint_args,
+                    {"lane_survival": {"enabled": True, "cache_dir": "lane-cache", "cache_fingerprint": "expected"}},
+                    diagnostic_label_dir=None,
+                    require_goal_next10_diagnostics=False,
+                )
 
     def test_dimension_validation_checks_checkpoint_widths(self) -> None:
         dataset = SimpleNamespace(features=[Data(x=torch.zeros((3, 7)), edge_attr=torch.zeros((2, 5)))])
