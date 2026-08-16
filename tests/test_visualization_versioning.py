@@ -1447,10 +1447,16 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
 
             resolve_models.assert_not_called()
 
-    def test_selection_labels_handle_missing_settings_and_round_percentages(self) -> None:
-        self.assertEqual(format_selection_label(0.804, 0.535), "80 | 54")
-        self.assertEqual(format_selection_label(0.8, None), "80 | 0")
-        self.assertEqual(format_selection_label(None, 0.54), "0 | 54")
+    def test_selection_labels_support_counts_and_percentages(self) -> None:
+        self.assertEqual(format_selection_label(10, 14), "10 | 14")
+        self.assertEqual(format_selection_label(8, None), "8 | 0")
+        self.assertEqual(format_selection_label(None, 5), "0 | 5")
+        self.assertEqual(
+            format_selection_label(0.804, 0.535, selection_format="percentages"), "80% | 54%"
+        )
+        self.assertEqual(
+            format_selection_label(0.8, None, selection_format="percentages"), "80% | 0%"
+        )
         self.assertIsNone(format_selection_label(None, None))
 
     def test_selection_loader_rejects_unexpected_settings_and_duplicates(self) -> None:
@@ -1461,6 +1467,7 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
                     "action_id": ["action-1"],
                     "setting": ["OTHER"],
                     "SelectedPlayer": [7],
+                    "n": [1],
                     "proportion": [0.5],
                 }
             ).to_csv(path, index=False)
@@ -1472,6 +1479,7 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
                     "action_id": ["action-1", "action-1"],
                     "setting": ["CAVE", "CAVE"],
                     "SelectedPlayer": [7, 7],
+                    "n": [1, 1],
                     "proportion": [0.5, 0.5],
                 }
             ).to_csv(path, index=False)
@@ -1488,6 +1496,7 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
                     "action_id": ["action-1", "action-1", "action-1"],
                     "SelectedPlayer": [7, 7, 8],
                     "setting": ["CAVE", "HMD", "CAVE"],
+                    "n": [8, 5, 2],
                     "proportion": [0.8, 0.54, 0.2],
                 }
             ),
@@ -1506,14 +1515,21 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
         )
 
         self.assertEqual(coach_scores.to_dict(), {"home_7": 5.5})
-        self.assertEqual(selection_labels.to_dict(), {"away_8": "20 | 0", "home_7": "80 | 54"})
+        self.assertEqual(selection_labels.to_dict(), {"away_8": "2 | 0", "home_7": "8 | 5"})
         self.assertEqual(stats["coach_annotations"], 1)
         self.assertEqual(stats["selection_annotations"], 2)
+        self.assertEqual(stats["selection_denominators"], {"CAVE": 10, "HMD": 5})
+
+        _, percentage_labels, _ = build_situation_overlays(
+            overlay_data, "action-1", situation_tracking, situation, selection_format="percentages"
+        )
+        self.assertEqual(percentage_labels.to_dict(), {"away_8": "20% | 0%", "home_7": "80% | 54%"})
 
     def test_overlay_flags_default_off_and_parse_for_both_visualizers(self) -> None:
         component_args = visualize_hawkeye.parse_args(["--component-run-id", "component-1"])
         self.assertFalse(component_args.coach_ratings)
         self.assertFalse(component_args.selections)
+        self.assertEqual(component_args.selection_format, "counts")
         self.assertEqual(component_args.time_norm, [0.0])
 
         direct_args = run_and_visualize_hawkeye.parse_args(
@@ -1521,6 +1537,19 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
         )
         self.assertTrue(direct_args.coach_ratings)
         self.assertTrue(direct_args.selections)
+        self.assertEqual(direct_args.selection_format, "counts")
+        self.assertEqual(
+            visualize_hawkeye.parse_args(["--selection-format", "percentages"]).selection_format,
+            "percentages",
+        )
+        self.assertEqual(
+            run_and_visualize_hawkeye.parse_args(["--selection-format", "percentages"]).selection_format,
+            "percentages",
+        )
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--selection-format", "invalid"])
+        with self.assertRaises(SystemExit):
+            run_and_visualize_hawkeye.parse_args(["--selection-format", "invalid"])
 
     def test_component_overlay_gating_limits_coach_and_selection_annotations(self) -> None:
         situation = SimpleNamespace(
@@ -1589,11 +1618,18 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
                 patch.object(module, "add_overlay_annotations"),
             ):
                 mock_visualizer.return_value.plot.return_value = (fig, ax)
-                module.render_frame_image(situation, 0, "pass_score", pd.Series({"home_7": 0.1}), selections_enabled=True)
+                module.render_frame_image(
+                    situation,
+                    0,
+                    "pass_score",
+                    pd.Series({"home_7": 0.1}),
+                    selections_enabled=True,
+                    selection_denominators={"CAVE": 22, "HMD": 22},
+                )
                 module.render_frame_image(situation, 0, "pass_score", pd.Series({"home_7": 0.1}), selections_enabled=False)
                 module.render_frame_image(situation, 0, "pass_intent", pd.Series({"home_7": 0.1}), selections_enabled=True)
 
-            self.assertEqual(titles[0], "action-1 | 1.000 | Pass Score | Selections (CAVE | HMD)")
+            self.assertEqual(titles[0], "action-1 | 1.000 | Pass Score | Selections (CAVE n=22 | HMD n=22)")
             self.assertEqual(titles[1], "action-1 | 1.000 | Pass Score")
             self.assertEqual(titles[2], "action-1 | 1.000 | Pass Intent")
 

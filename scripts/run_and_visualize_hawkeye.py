@@ -94,7 +94,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--selections",
         action="store_true",
-        help="Add CAVE | HMD selection proportions below pass-intent and pass-score annotations.",
+        help="Add CAVE | HMD selection labels below pass-intent and pass-score annotations.",
+    )
+    parser.add_argument(
+        "--selection-format",
+        choices=["counts", "percentages"],
+        default="counts",
+        help="Format selection labels as raw counts (default) or percentages.",
     )
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
@@ -187,6 +193,7 @@ def render_frame_image(
     coach_scores: pd.Series | None = None,
     selection_labels: pd.Series | None = None,
     selections_enabled: bool = False,
+    selection_denominators: dict[str, int] | None = None,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -220,7 +227,8 @@ def render_frame_image(
 
     title = f"{situation.situation_id} | {frame_info['abs_time']:.3f} | {component_name.replace('_', ' ').title()}"
     if component_name == "pass_score" and selections_enabled:
-        title += " | Selections (CAVE | HMD)"
+        denominators = selection_denominators or {}
+        title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     ax.text(
@@ -279,6 +287,7 @@ def render_situation(
             "coach_annotations": 0,
             "selection_rows_for_situation": 0,
             "selection_annotations": 0,
+            "selection_denominators": {"CAVE": 0, "HMD": 0},
         }
     else:
         coach_scores, selection_labels, overlay_stats = build_situation_overlays(
@@ -286,6 +295,7 @@ def render_situation(
             str(situation_id),
             situation_tracking,
             situation,
+            selection_format=getattr(args, "selection_format", "counts"),
         )
 
     # Resolve this before inference so model evaluation requires exactly the
@@ -422,6 +432,7 @@ def render_situation(
                     coach_scores=coach_scores,
                     selection_labels=selection_labels,
                     selections_enabled=bool(getattr(args, "selections", False)),
+                    selection_denominators=overlay_stats["selection_denominators"],
                 )
                 output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
                 image.save(output_path)
@@ -442,6 +453,7 @@ def render_situation(
                         coach_scores=coach_scores,
                         selection_labels=selection_labels,
                         selections_enabled=bool(getattr(args, "selections", False)),
+                        selection_denominators=overlay_stats["selection_denominators"],
                     )
 
             output_path = output_dir / f"{component_name}.{selected_output_mode}"
@@ -697,6 +709,7 @@ def main() -> None:
         "coach_ratings": bool(getattr(args, "coach_ratings", False)),
         "coach_rating_situation_filter": coach_rating_filter,
         "selections": bool(getattr(args, "selections", False)),
+        "selection_format": getattr(args, "selection_format", "counts"),
         "overlay_sources": overlay_metadata,
         "graph_schema": graph_schema,
     }

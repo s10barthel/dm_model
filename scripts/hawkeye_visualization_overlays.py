@@ -17,6 +17,7 @@ COACH_RATINGS_PATH = (
 )
 SELECTIONS_PATH = PROJECT_ROOT / "validation" / "selections" / "per_action_option_counts.csv"
 SELECTION_SETTINGS = ("CAVE", "HMD")
+SELECTION_FORMATS = ("counts", "percentages")
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,18 @@ def _normalize_proportions(series: pd.Series) -> pd.Series:
     return normalized.astype(float)
 
 
+def _normalize_counts(series: pd.Series) -> pd.Series:
+    raw = series.astype("string").str.strip()
+    normalized = pd.to_numeric(raw, errors="coerce")
+    invalid = raw.notna() & raw.ne("") & (normalized.isna() | (normalized % 1 != 0) | (normalized < 0))
+    if invalid.any():
+        values = ", ".join(raw.loc[invalid].head(5).tolist())
+        raise ValueError(f"Selection counts must be non-negative integers: {values}")
+    if normalized.isna().any():
+        raise ValueError("Selection counts contain an empty value.")
+    return normalized.astype(int)
+
+
 def load_coach_ratings(path: str | Path = COACH_RATINGS_PATH) -> tuple[pd.DataFrame, dict[str, object]]:
     resolved_path = Path(path).expanduser().resolve()
     coach_ratings = pd.read_csv(resolved_path, low_memory=False)
@@ -85,14 +98,15 @@ def load_coach_ratings(path: str | Path = COACH_RATINGS_PATH) -> tuple[pd.DataFr
 def load_selection_proportions(path: str | Path = SELECTIONS_PATH) -> tuple[pd.DataFrame, dict[str, object]]:
     resolved_path = Path(path).expanduser().resolve()
     selections = pd.read_csv(resolved_path, low_memory=False)
-    _validate_columns(selections, ["action_id", "setting", "SelectedPlayer", "proportion"], "Selections")
+    _validate_columns(selections, ["action_id", "setting", "SelectedPlayer", "n", "proportion"], "Selections")
 
-    normalized = selections[["action_id", "setting", "SelectedPlayer", "proportion"]].copy()
+    normalized = selections[["action_id", "setting", "SelectedPlayer", "n", "proportion"]].copy()
     normalized["action_id"] = _normalize_text_id(normalized["action_id"])
     normalized["SelectedPlayer"] = _normalize_player_id(
         normalized["SelectedPlayer"], label="Selections"
     )
     normalized["setting"] = _normalize_text_id(normalized["setting"]).str.upper()
+    normalized["n"] = _normalize_counts(normalized["n"])
     normalized["proportion"] = _normalize_proportions(normalized["proportion"])
     if normalized[["action_id", "SelectedPlayer", "setting"]].isna().any().any():
         raise ValueError("Selections contain an empty action_id, SelectedPlayer, or setting.")
@@ -119,7 +133,7 @@ def load_selection_proportions(path: str | Path = SELECTIONS_PATH) -> tuple[pd.D
 
 def load_overlay_data(*, include_coach_ratings: bool, include_selections: bool) -> OverlayData:
     coach_ratings = pd.DataFrame(columns=["id", "uefa_player_id", "team", "Scores"])
-    selections = pd.DataFrame(columns=["action_id", "SelectedPlayer", "setting", "proportion"])
+    selections = pd.DataFrame(columns=["action_id", "SelectedPlayer", "setting", "n", "proportion"])
     metadata: dict[str, object] = {
         "coach_ratings_enabled": bool(include_coach_ratings),
         "selections_enabled": bool(include_selections),
@@ -149,12 +163,23 @@ def format_coach_score(value: float) -> str:
     return text.rstrip("0").rstrip(".")
 
 
-def format_selection_label(cave: float | None, hmd: float | None) -> str | None:
+def format_selection_label(
+    cave: float | None,
+    hmd: float | None,
+    *,
+    selection_format: str = "counts",
+) -> str | None:
+    if selection_format not in SELECTION_FORMATS:
+        raise ValueError(f"Unsupported selection format: {selection_format}")
     if pd.isna(cave) and pd.isna(hmd):
         return None
+    if selection_format == "counts":
+        cave_count = 0 if pd.isna(cave) else int(cave)
+        hmd_count = 0 if pd.isna(hmd) else int(hmd)
+        return f"{cave_count} | {hmd_count}"
     cave_percent = 0.0 if pd.isna(cave) else float(cave) * 100.0
     hmd_percent = 0.0 if pd.isna(hmd) else float(hmd) * 100.0
-    return f"{cave_percent:.0f} | {hmd_percent:.0f}"
+    return f"{cave_percent:.0f}% | {hmd_percent:.0f}%"
 
 
 def add_overlay_annotations(
@@ -230,7 +255,10 @@ def build_situation_overlays(
     situation_id: str,
     situation_tracking: pd.DataFrame,
     situation,
-) -> tuple[pd.Series, pd.Series, dict[str, int]]:
+    selection_format: str = "counts",
+) -> tuple[pd.Series, pd.Series, dict[str, object]]:
+    if selection_format not in SELECTION_FORMATS:
+        raise ValueError(f"Unsupported selection format: {selection_format}")
     situation_id = str(situation_id)
     coach_rows = overlay_data.coach_ratings.loc[
         overlay_data.coach_ratings.get("id", pd.Series(dtype="string")).eq(situation_id)
@@ -253,8 +281,13 @@ def build_situation_overlays(
 
     selection_labels: dict[str, str] = {}
     for player_id, player_rows in selection_rows.groupby("SelectedPlayer", sort=False):
-        by_setting = player_rows.set_index("setting")["proportion"]
-        label = format_selection_label(by_setting.get("CAVE"), by_setting.get("HMD"))
+        value_column = "n" if selection_format == "counts" else "proportion"
+        by_setting = player_rows.set_index("setting")[value_column]
+        label = format_selection_label(
+            by_setting.get("CAVE"),
+            by_setting.get("HMD"),
+            selection_format=selection_format,
+        )
         if label is None:
             continue
         for object_id in object_ids.get(int(player_id), []):
@@ -268,5 +301,9 @@ def build_situation_overlays(
             "coach_annotations": len(coach_scores),
             "selection_rows_for_situation": len(selection_rows),
             "selection_annotations": len(selection_labels),
+            "selection_denominators": {
+                setting: int(selection_rows.loc[selection_rows["setting"].eq(setting), "n"].sum())
+                for setting in SELECTION_SETTINGS
+            },
         },
     )

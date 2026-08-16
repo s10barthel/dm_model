@@ -717,6 +717,7 @@ To visualize one HawkEye situation as MP4s:
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --show-physical-xpass
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --coach-ratings --selections
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --selections --selection-format percentages
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --only-pass-success --only-outcome-scoring --only-outcome-conceding --only-pass-score
@@ -728,6 +729,7 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --coach-ratings --selections
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --selections --selection-format percentages
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2> --bundle-id <bundle_id>
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --only-outcome-scoring
@@ -1571,7 +1573,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
-- `--selections`: add rounded `CAVE | HMD` selection proportions from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off.
+- `--selections`: add `CAVE | HMD` selection labels from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off. The `pass_score` title shows the per-setting denominators as `Selections (CAVE n=<count> | HMD n=<count>)`.
+- `--selection-format {counts,percentages}`: format `--selections` labels as raw counts such as `10 | 14` (default), or rounded percentages such as `45% | 64%`.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
 - `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: in `mp4`/`gif` mode, render the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: render all frames.
@@ -1612,7 +1615,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
-- `--selections`: add rounded `CAVE | HMD` selection proportions from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off.
+- `--selections`: add `CAVE | HMD` selection labels from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off. The `pass_score` title shows the per-setting denominators as `Selections (CAVE n=<count> | HMD n=<count>)`.
+- `--selection-format {counts,percentages}`: format `--selections` labels as raw counts such as `10 | 14` (default), or rounded percentages such as `45% | 64%`.
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--time-norm <seconds>` / `--time_norm <seconds>`: in PNG mode, export the frame nearest to `abs_time - BallReceipt`; repeat to export multiple stills. Default: `0`.
 - `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: in `mp4`/`gif` mode, render the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: render all frames.
