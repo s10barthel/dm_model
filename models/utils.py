@@ -1253,23 +1253,95 @@ def calc_class_accuracy(y, y_hat, aggfunc="mean"):
 
 def calc_binary_metrics(y, y_hat, threshold=0.5):
     y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
-    y_score = np.asarray(y_hat).reshape(-1)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    if len(y_true) != len(y_score) or len(y_true) == 0:
+        raise ValueError("Binary metric inputs must be non-empty and have identical lengths.")
     y_pred = y_score > threshold
     has_positive = np.sum(y_true) > 0
     has_negative = np.sum(y_true == 0) > 0
 
-    precision = precision_score(y_true, y_pred) if np.sum(y_pred) > 0 else 0
+    precision = precision_score(y_true, y_pred, zero_division=0)
     recall = recall_score(y_true, y_pred) if has_positive else 0
 
     metrics = {
         "precision": precision,
         "recall": recall,
         "f1": f1_score(y_true, y_pred) if precision > 0 and recall > 0 else 0,
-        "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else 0.5,
+        "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else np.nan,
         "brier": brier_score_loss(y_true, y_score),
         "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
     }
-    return {k: round(v, 4) for k, v in metrics.items()}
+    return metrics
+
+
+def calc_continuous_target_metrics(y, y_hat) -> dict[str, float]:
+    """Summarize fidelity and linear calibration for a continuous [0, 1] target."""
+    y_true = np.asarray(y, dtype=float).reshape(-1)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    if len(y_true) != len(y_score) or len(y_true) == 0:
+        raise ValueError("Continuous metric inputs must be non-empty and have identical lengths.")
+    if not np.isfinite(y_true).all() or not np.isfinite(y_score).all():
+        raise ValueError("Continuous metric inputs must be finite.")
+
+    error = y_score - y_true
+    has_variation = len(y_true) >= 2 and np.ptp(y_true) > 0 and np.ptp(y_score) > 0
+    if has_variation:
+        pearson_r = float(np.corrcoef(y_true, y_score)[0, 1])
+        target_ranks = pd.Series(y_true).rank(method="average").to_numpy()
+        prediction_ranks = pd.Series(y_score).rank(method="average").to_numpy()
+        spearman_rho = float(np.corrcoef(target_ranks, prediction_ranks)[0, 1])
+        calibration_slope, calibration_intercept = np.polyfit(y_score, y_true, deg=1)
+    else:
+        pearson_r = np.nan
+        spearman_rho = np.nan
+        calibration_intercept = np.nan
+        calibration_slope = np.nan
+
+    clipped_scores = np.clip(y_score, np.finfo(float).eps, 1.0 - np.finfo(float).eps)
+    soft_bce = -np.mean(y_true * np.log(clipped_scores) + (1.0 - y_true) * np.log(1.0 - clipped_scores))
+    return {
+        "mae": float(np.mean(np.abs(error))),
+        "rmse": float(np.sqrt(np.mean(error**2))),
+        "pearson_r": pearson_r,
+        "spearman_rho": spearman_rho,
+        "soft_bce": float(soft_bce),
+        "mean_prediction": float(np.mean(y_score)),
+        "mean_target": float(np.mean(y_true)),
+        "mean_prediction_minus_target": float(np.mean(error)),
+        "calibration_intercept": float(calibration_intercept),
+        "calibration_slope": float(calibration_slope),
+    }
+
+
+def calc_equal_frequency_bins(y, y_hat, n_bins: int = 10) -> pd.DataFrame:
+    """Return stable equal-frequency prediction bins for calibration-style plots."""
+    y_true = np.asarray(y, dtype=float).reshape(-1)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    if len(y_true) != len(y_score):
+        raise ValueError("Binned metric inputs must have identical lengths.")
+    if n_bins < 1:
+        raise ValueError("n_bins must be at least one.")
+    columns = ["bin", "sample_count", "mean_prediction", "mean_observed", "prediction_minus_observed"]
+    if len(y_true) == 0:
+        return pd.DataFrame(columns=columns)
+
+    order = np.argsort(y_score, kind="stable")
+    rows = []
+    for bin_index, indices in enumerate(np.array_split(order, min(int(n_bins), len(order))), start=1):
+        predictions = y_score[indices]
+        observations = y_true[indices]
+        mean_prediction = float(np.mean(predictions))
+        mean_observed = float(np.mean(observations))
+        rows.append(
+            {
+                "bin": bin_index,
+                "sample_count": int(len(indices)),
+                "mean_prediction": mean_prediction,
+                "mean_observed": mean_observed,
+                "prediction_minus_observed": mean_prediction - mean_observed,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
 
 
 def calc_weighted_binary_probability_metrics(y, y_hat, sample_weight) -> dict[str, float]:
@@ -1448,6 +1520,7 @@ def run_epoch(
     device: str = "cuda",
     pos_weight: float = 1.0,
     train: bool = False,
+    return_outcome_evaluation: bool = False,
 ):
     # torch.autograd.set_detect_anomaly(True)
     model.train() if train else model.eval()
@@ -1467,6 +1540,13 @@ def run_epoch(
     weighted_predictions: list[np.ndarray] = []
     weighted_targets: list[np.ndarray] = []
     weighted_effective_weights: list[np.ndarray] = []
+    binary_predictions: list[np.ndarray] = []
+    binary_targets: list[np.ndarray] = []
+    binary_threshold: float | None = None
+    outcome_predictions: list[np.ndarray] = []
+    outcome_targets: list[np.ndarray] = []
+    outcome_diagnostics: list[np.ndarray] = []
+    outcome_execution_branches: list[np.ndarray] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
         batch_graphs: Batch = batch_graphs.to(device)
@@ -1657,7 +1737,9 @@ def run_epoch(
                     weighted_targets.append(np.asarray(y, dtype=float))
                     weighted_effective_weights.append(effective_weights.detach().cpu().numpy().astype(float))
                 threshold = 0.5 if args.task.endswith("success") or args.task == "pass_height" else 0.1
-                batch_metrics = calc_binary_metrics(y, y_hat, threshold)
+                binary_predictions.append(np.asarray(y_hat, dtype=float))
+                binary_targets.append(np.asarray(y, dtype=float))
+                binary_threshold = threshold
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
                 outcome = get_label_slice(batch_labels, "success").clone().long()
@@ -1672,7 +1754,13 @@ def run_epoch(
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
-                batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
+                binary_predictions.append(np.asarray(y_hat, dtype=float))
+                binary_targets.append(np.asarray(y, dtype=float))
+                binary_threshold = 0.1
+                outcome_predictions.append(np.asarray(y_hat, dtype=float))
+                outcome_targets.append(target.cpu().detach().numpy().astype(float))
+                outcome_diagnostics.append(np.asarray(y, dtype=float))
+                outcome_execution_branches.append(outcome.cpu().detach().numpy().astype(int))
 
             elif args.task in ["intent_return", "intent_return_oppo_agn"]:
                 pred_s = []
@@ -1690,11 +1778,9 @@ def run_epoch(
                 # Calculate performance metrics only for goal-scoring prediction for simplicity
                 y_hat = torch.sigmoid(pred_s).cpu().detach().numpy()
                 y = diagnostic_scoring.cpu().detach().numpy()
-                batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
-
-            metrics["f1"] += batch_metrics["f1"] * batch_graphs.num_graphs
-            metrics["roc_auc"] += batch_metrics["roc_auc"] * batch_graphs.num_graphs
-            metrics["brier"] += batch_metrics["brier"] * batch_graphs.num_graphs
+                binary_predictions.append(np.asarray(y_hat, dtype=float))
+                binary_targets.append(np.asarray(y, dtype=float))
+                binary_threshold = 0.1
 
         elif args.gnn_task == "node_regression":  # outcome_return
             intent = batch_labels[:, 5].clone().long()
@@ -1721,7 +1807,9 @@ def run_epoch(
 
                 y_hat = torch.sigmoid(out).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()
-                batch_metrics = calc_binary_metrics(y, y_hat, 0.5)
+                binary_predictions.append(np.asarray(y_hat, dtype=float))
+                binary_targets.append(np.asarray(y, dtype=float))
+                binary_threshold = 0.5
 
             elif args.task.split("_")[0] in ["overall", "dest"]:  # {overall/dest}_{scoring/conceding}
                 if args.task.startswith("dest"):
@@ -1736,11 +1824,9 @@ def run_epoch(
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
-                batch_metrics = calc_binary_metrics(y, y_hat, 0.1)
-
-            metrics["f1"] += batch_metrics["f1"] * batch_graphs.num_graphs
-            metrics["roc_auc"] += batch_metrics["roc_auc"] * batch_graphs.num_graphs
-            metrics["brier"] += batch_metrics["brier"] * batch_graphs.num_graphs
+                binary_predictions.append(np.asarray(y_hat, dtype=float))
+                binary_targets.append(np.asarray(y, dtype=float))
+                binary_threshold = 0.1
 
         elif args.gnn_task == "graph_multiclass":  # pass_dest
             if args.task == "pass_dest":
@@ -1787,12 +1873,44 @@ def run_epoch(
                 if key == "count":
                     continue
                 interim_metrics[key] = value / metrics["count"]
+            if binary_predictions:
+                interim_metrics.update(
+                    calc_binary_metrics(
+                        np.concatenate(binary_targets),
+                        np.concatenate(binary_predictions),
+                        threshold=float(binary_threshold),
+                    )
+                )
             print(f"[{batch_index:>{len(str(n_batches))}d}/{n_batches}]  {get_losses_str(interim_metrics)}")
 
     for key, value in metrics.items():
         if key == "count":
             continue
         metrics[key] = value / metrics["count"]
+
+    if binary_predictions:
+        if binary_threshold is None:
+            raise RuntimeError("Binary evaluation predictions were collected without a threshold.")
+        metrics.update(
+            calc_binary_metrics(
+                np.concatenate(binary_targets),
+                np.concatenate(binary_predictions),
+                threshold=binary_threshold,
+            )
+        )
+
+    outcome_evaluation = None
+    if outcome_predictions:
+        outcome_evaluation = {
+            "prediction": np.concatenate(outcome_predictions),
+            "target": np.concatenate(outcome_targets),
+            "diagnostic": np.concatenate(outcome_diagnostics),
+            "execution_branch": np.concatenate(outcome_execution_branches),
+        }
+        target_metrics = calc_continuous_target_metrics(
+            outcome_evaluation["target"], outcome_evaluation["prediction"]
+        )
+        metrics.update({f"xt_target_{key}": value for key, value in target_metrics.items()})
 
     if weighted_pass_success_eval:
         metrics.update(
@@ -1803,4 +1921,6 @@ def run_epoch(
             )
         )
 
+    if return_outcome_evaluation:
+        return metrics, outcome_evaluation
     return metrics

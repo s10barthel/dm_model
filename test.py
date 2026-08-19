@@ -15,7 +15,16 @@ from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from models import utils
 from models.dataset_config import build_action_dataset_kwargs
-from models.utils import get_losses_str, infer_feature_graph_schema, infer_training_edge_schema, load_splits, run_epoch
+from models.utils import (
+    calc_binary_metrics,
+    calc_continuous_target_metrics,
+    calc_equal_frequency_bins,
+    get_losses_str,
+    infer_feature_graph_schema,
+    infer_training_edge_schema,
+    load_splits,
+    run_epoch,
+)
 from models.utils import validate_feature_graph_schema
 from physical_pass_model import (
     PC_XPASS_SOURCE,
@@ -219,6 +228,152 @@ def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: ar
         )
 
 
+def _safe_model_directory_name(model_id: str) -> str:
+    return str(model_id).replace("/", "__").replace("\\", "__")
+
+
+def _outcome_strata(execution_branch: np.ndarray) -> list[tuple[str, np.ndarray]]:
+    branches = np.asarray(execution_branch, dtype=int).reshape(-1)
+    return [
+        ("pooled_factual", np.ones(len(branches), dtype=bool)),
+        ("observed_success", branches == 1),
+        ("observed_failure", branches == 0),
+    ]
+
+
+def _save_binned_relationship_plot(
+    binned: pd.DataFrame,
+    *,
+    evaluation_target: str,
+    title: str,
+    y_label: str,
+    output_path: Path,
+    show_identity: bool,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    strata = ["pooled_factual", "observed_success", "observed_failure"]
+    fig, axes = plt.subplots(1, len(strata), figsize=(14, 4.5), sharex=True, sharey=True)
+    for axis, stratum in zip(axes, strata):
+        rows = binned.loc[
+            (binned["evaluation_target"] == evaluation_target) & (binned["stratum"] == stratum)
+        ]
+        axis.set_title(stratum.replace("_", " "))
+        if rows.empty:
+            axis.text(0.5, 0.5, "No samples", ha="center", va="center", transform=axis.transAxes)
+        else:
+            axis.plot(rows["mean_prediction"], rows["mean_observed"], marker="o")
+        if show_identity:
+            axis.plot([0, 1], [0, 1], "--", color="0.5", linewidth=1, label="identity")
+        axis.set_xlabel("Mean model prediction")
+        axis.set_xlim(0, 1)
+        axis.set_ylim(0, 1)
+        axis.grid(alpha=0.25)
+    axes[0].set_ylabel(y_label)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_outcome_evaluation_artifacts(
+    output_root: str | Path,
+    *,
+    model_id: str,
+    task: str,
+    outcome_evaluation: dict[str, np.ndarray],
+    n_bins: int = 10,
+) -> Path:
+    """Write factual outcome-model target-fidelity and external-validity artifacts."""
+    output_dir = Path(output_root) / _safe_model_directory_name(model_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    predictions = np.asarray(outcome_evaluation["prediction"], dtype=float).reshape(-1)
+    targets = np.asarray(outcome_evaluation["target"], dtype=float).reshape(-1)
+    diagnostics = np.asarray(outcome_evaluation["diagnostic"], dtype=float).reshape(-1)
+    branches = np.asarray(outcome_evaluation["execution_branch"], dtype=int).reshape(-1)
+    if not (len(predictions) == len(targets) == len(diagnostics) == len(branches)):
+        raise ValueError("Outcome evaluation arrays must have identical lengths.")
+
+    metric_rows: list[dict] = []
+    bin_frames: list[pd.DataFrame] = []
+    targets_by_name = {
+        "xt_training_target": targets,
+        "goal_next10_diagnostic": diagnostics,
+    }
+    for stratum, mask in _outcome_strata(branches):
+        stratum_predictions = predictions[mask]
+        for evaluation_target, observed in targets_by_name.items():
+            stratum_observed = observed[mask]
+            row = {
+                "model_id": model_id,
+                "task": task,
+                "evaluation_target": evaluation_target,
+                "stratum": stratum,
+                "sample_count": int(len(stratum_predictions)),
+                "positive_count": int(np.sum(stratum_observed > 0)) if evaluation_target == "goal_next10_diagnostic" else np.nan,
+            }
+            if len(stratum_predictions):
+                if evaluation_target == "xt_training_target":
+                    row.update(calc_continuous_target_metrics(stratum_observed, stratum_predictions))
+                else:
+                    row.update(calc_binary_metrics(stratum_observed, stratum_predictions, threshold=0.1))
+                binned = calc_equal_frequency_bins(stratum_observed, stratum_predictions, n_bins=n_bins)
+                binned.insert(0, "stratum", stratum)
+                binned.insert(0, "evaluation_target", evaluation_target)
+                binned.insert(0, "task", task)
+                binned.insert(0, "model_id", model_id)
+                bin_frames.append(binned)
+            metric_rows.append(row)
+
+    metrics = pd.DataFrame(metric_rows)
+    metrics.to_csv(output_dir / "metrics.csv", index=False)
+    binned = pd.concat(bin_frames, ignore_index=True) if bin_frames else pd.DataFrame(
+        columns=[
+            "model_id", "task", "evaluation_target", "stratum", "bin", "sample_count",
+            "mean_prediction", "mean_observed", "prediction_minus_observed",
+        ]
+    )
+    binned.to_csv(output_dir / "calibration_bins.csv", index=False)
+    _save_binned_relationship_plot(
+        binned,
+        evaluation_target="xt_training_target",
+        title=f"Direct held-out xT-target calibration: {model_id}",
+        y_label="Mean held-out xT-derived target",
+        output_path=output_dir / "xt_target_calibration.png",
+        show_identity=True,
+    )
+    _save_binned_relationship_plot(
+        binned,
+        evaluation_target="goal_next10_diagnostic",
+        title=f"External validity: next-10-action goal association: {model_id}",
+        y_label="Mean next-10-action goal indicator",
+        output_path=output_dir / "goal_next10_association.png",
+        show_identity=False,
+    )
+    return output_dir
+
+
+def update_evaluation_run_metadata(
+    output_root: str | Path,
+    *,
+    model_id: str,
+    task: str,
+    feature_run_id: str | None,
+    diagnostic_feature_run_id: str | None,
+) -> None:
+    """Record the checkpoint-specific feature contexts in the wrapper's run metadata."""
+    metadata_path = Path(output_root) / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    contexts = metadata.setdefault("model_evaluation_contexts", {})
+    contexts[str(model_id)] = {
+        "task": task,
+        "feature_run_id": feature_run_id,
+        "diagnostic_feature_run_id": diagnostic_feature_run_id,
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
@@ -226,6 +381,7 @@ if __name__ == "__main__":
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
     parser.add_argument("--feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
+    parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
     parser.add_argument("--weighted-pass-success-metrics", action="store_true")
     parser.add_argument("--pass-height-model-id", type=str, default=None)
     parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
@@ -321,5 +477,35 @@ if __name__ == "__main__":
         pin_memory=bool(getattr(model_args, "pin_memory", False)),
     )
     print(f"Evaluating {args.model_id} on {len(test_match_ids)} matches with {len(test_dataset)} samples")
-    test_metrics = run_epoch(model_args, model, test_loader, device=device, train=False)
+    collect_outcome_evaluation = bool(
+        args.evaluation_output_dir and getattr(model_args, "task", None) in {"outcome_scoring", "outcome_conceding"}
+    )
+    result = run_epoch(
+        model_args,
+        model,
+        test_loader,
+        device=device,
+        train=False,
+        return_outcome_evaluation=collect_outcome_evaluation,
+    )
+    if collect_outcome_evaluation:
+        test_metrics, outcome_evaluation = result
+        if outcome_evaluation is None:
+            raise RuntimeError("Outcome evaluation artifacts were requested, but no outcome predictions were collected.")
+        artifact_dir = write_outcome_evaluation_artifacts(
+            args.evaluation_output_dir,
+            model_id=args.model_id,
+            task=model_args.task,
+            outcome_evaluation=outcome_evaluation,
+        )
+        update_evaluation_run_metadata(
+            args.evaluation_output_dir,
+            model_id=args.model_id,
+            task=model_args.task,
+            feature_run_id=resolved_feature_run_id,
+            diagnostic_feature_run_id=diagnostic_feature_run_id,
+        )
+        print(f"Saved outcome evaluation artifacts to {artifact_dir}")
+    else:
+        test_metrics = result
     print("Test:\t" + get_losses_str(test_metrics))

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import torch
 import numpy as np
+import pandas as pd
 from sklearn.metrics import brier_score_loss, roc_auc_score
 from torch_geometric.data import Data
 
@@ -17,7 +18,12 @@ import test as evaluation_script
 from dataset import ActionDataset
 from models import dataset_config
 from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
-from models.utils import calc_weighted_binary_probability_metrics
+from models.utils import (
+    calc_binary_metrics,
+    calc_continuous_target_metrics,
+    calc_equal_frequency_bins,
+    calc_weighted_binary_probability_metrics,
+)
 from physical_pass_model import pc_xpass_lane_survival_metadata_fingerprint, physical_xpass_blend_weight_v4
 from scripts import evaluate_relevant_models
 
@@ -328,12 +334,15 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
                 "0.65",
                 "--pc-xpass-cache-dir",
                 "cache-dir",
+                "--evaluation-output-dir",
+                "evaluation-output",
             ]
         )
         self.assertTrue(args.weighted_pass_success_metrics)
         self.assertFalse(args.discount)
         self.assertEqual(args.v4_power, 3.5)
         self.assertEqual(args.v4_zero, 0.65)
+        self.assertEqual(args.evaluation_output_dir, "evaluation-output")
 
         command = evaluate_relevant_models.add_weighted_pass_success_options(
             ["python", "test.py", "--model_id", "pass_success/run_1"], args, args.pass_height_model_id
@@ -426,6 +435,78 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             (cache_dir / "metadata.json").write_text(json.dumps({"source": "physical_xpass"}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "incompatible source"):
                 evaluation_script.resolve_weighted_pass_success_cache(args, model_args)
+
+
+class OutcomeEvaluationArtifactTests(unittest.TestCase):
+    def test_binary_metrics_are_computed_from_the_pooled_sample(self) -> None:
+        first_target, first_prediction = np.array([0, 1]), np.array([0.7, 0.8])
+        second_target, second_prediction = np.array([0, 1]), np.array([0.1, 0.2])
+        pooled = calc_binary_metrics(
+            np.concatenate([first_target, second_target]),
+            np.concatenate([first_prediction, second_prediction]),
+            threshold=0.5,
+        )
+        batch_average_auc = np.nanmean(
+            [
+                calc_binary_metrics(first_target, first_prediction, threshold=0.5)["roc_auc"],
+                calc_binary_metrics(second_target, second_prediction, threshold=0.5)["roc_auc"],
+            ]
+        )
+        self.assertAlmostEqual(pooled["roc_auc"], roc_auc_score([0, 1, 0, 1], [0.7, 0.8, 0.1, 0.2]))
+        self.assertNotAlmostEqual(pooled["roc_auc"], batch_average_auc)
+
+    def test_continuous_metrics_and_equal_frequency_bins(self) -> None:
+        target = np.array([0.1, 0.2, 0.6, 0.9])
+        prediction = np.array([0.2, 0.1, 0.5, 0.8])
+        metrics = calc_continuous_target_metrics(target, prediction)
+
+        self.assertAlmostEqual(metrics["mae"], 0.1)
+        self.assertAlmostEqual(metrics["rmse"], 0.1)
+        self.assertAlmostEqual(metrics["mean_prediction_minus_target"], -0.05)
+        self.assertGreater(metrics["pearson_r"], 0.9)
+        self.assertGreater(metrics["spearman_rho"], 0.7)
+
+        binned = calc_equal_frequency_bins(target, prediction, n_bins=10)
+        self.assertEqual(len(binned), len(target))
+        self.assertEqual(int(binned["sample_count"].sum()), len(target))
+        self.assertListEqual(binned["bin"].tolist(), [1, 2, 3, 4])
+
+    def test_outcome_artifacts_include_pooled_and_factual_strata(self) -> None:
+        evaluation = {
+            "prediction": np.array([0.1, 0.3, 0.7, 0.9]),
+            "target": np.array([0.2, 0.2, 0.8, 0.9]),
+            "diagnostic": np.array([0, 0, 1, 1]),
+            "execution_branch": np.array([0, 1, 0, 1]),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = evaluation_script.write_outcome_evaluation_artifacts(
+                tmpdir,
+                model_id="outcome_scoring/31",
+                task="outcome_scoring",
+                outcome_evaluation=evaluation,
+            )
+            evaluation_script.update_evaluation_run_metadata(
+                tmpdir,
+                model_id="outcome_scoring/31",
+                task="outcome_scoring",
+                feature_run_id="features_24_25",
+                diagnostic_feature_run_id="diagnostics_24_25",
+            )
+
+            self.assertTrue((output_dir / "metrics.csv").exists())
+            self.assertTrue((output_dir / "calibration_bins.csv").exists())
+            self.assertTrue((output_dir / "xt_target_calibration.png").exists())
+            self.assertTrue((output_dir / "goal_next10_association.png").exists())
+            metrics = pd.read_csv(output_dir / "metrics.csv")
+            self.assertEqual(len(metrics), 6)
+            self.assertSetEqual(set(metrics["stratum"]), {"pooled_factual", "observed_success", "observed_failure"})
+            diagnostic_rows = metrics.loc[metrics["evaluation_target"] == "goal_next10_diagnostic"]
+            self.assertEqual(int(diagnostic_rows.loc[diagnostic_rows["stratum"] == "pooled_factual", "positive_count"].iloc[0]), 2)
+            run_metadata = json.loads((Path(tmpdir) / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                run_metadata["model_evaluation_contexts"]["outcome_scoring/31"]["feature_run_id"],
+                "features_24_25",
+            )
 
 
 if __name__ == "__main__":

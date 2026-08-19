@@ -502,10 +502,10 @@ class BinaryMetricsTests(unittest.TestCase):
             threshold=0.1,
         )
 
-        self.assertEqual(metrics["precision"], 0.6667)
-        self.assertEqual(metrics["recall"], 0.6667)
-        self.assertEqual(metrics["f1"], 0.6667)
-        self.assertEqual(metrics["roc_auc"], 0.6667)
+        self.assertAlmostEqual(metrics["precision"], 2 / 3)
+        self.assertAlmostEqual(metrics["recall"], 2 / 3)
+        self.assertAlmostEqual(metrics["f1"], 2 / 3)
+        self.assertAlmostEqual(metrics["roc_auc"], 2 / 3)
 
     def test_all_zero_labels_use_safe_fallbacks(self) -> None:
         metrics = calc_binary_metrics(
@@ -517,7 +517,7 @@ class BinaryMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["precision"], 0)
         self.assertEqual(metrics["recall"], 0)
         self.assertEqual(metrics["f1"], 0)
-        self.assertEqual(metrics["roc_auc"], 0.5)
+        self.assertTrue(math.isnan(metrics["roc_auc"]))
         self.assertFalse(math.isnan(metrics["brier"]))
         self.assertTrue(math.isnan(metrics["log_loss"]))
 
