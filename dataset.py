@@ -488,7 +488,11 @@ class ActionDataset(Dataset):
             if pass_height_cache_root is not None:
                 match_id = feature_match_ids[int(i)]
                 if match_id not in pass_height_rows_by_match:
-                    pass_height_rows_by_match[match_id] = load_physical_xpass_match(pass_height_cache_root, match_id)
+                    pass_height_rows_by_match[match_id] = load_physical_xpass_match(
+                        pass_height_cache_root,
+                        match_id,
+                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                    )
                 graph = attach_pass_height_to_graph(
                     graph,
                     graph_labels,

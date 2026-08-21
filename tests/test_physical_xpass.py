@@ -3663,6 +3663,52 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertTrue(hasattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR))
         self.assertAlmostEqual(float(getattr(physical.features[0], PHYSICAL_XPASS_PROB_ATTR)[1]), 0.2)
 
+    def test_action_dataset_loads_action_scope_pass_height_from_scoped_runtime_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_dir = root / "features"
+            label_dir = root / "labels"
+            pass_height_cache = root / "pc_xpass"
+            match_dir = pass_height_cache / "matches"
+            feature_dir.mkdir()
+            label_dir.mkdir()
+            match_dir.mkdir(parents=True)
+
+            torch.save([make_graph(["home_1", "home_2", "away_3"])], feature_dir / "match_1.pt")
+            torch.save(
+                torch.stack([make_label(action_index=7, intent_index=1)]),
+                label_dir / "match_1.pt",
+            )
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 7,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        physical_xpass_pass_height_column("home_2"): 0.2,
+                    },
+                    {
+                        "match_id": "match_1",
+                        "action_index": 7,
+                        PHYSICAL_XPASS_FRAME_SCOPE_COLUMN: PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
+                        physical_xpass_pass_height_column("home_2"): 0.9,
+                    },
+                ]
+            ).to_parquet(match_dir / "match_1.parquet", index=False)
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=feature_dir,
+                label_dir=label_dir,
+                task="pass_success",
+                pass_height_cache_dir=pass_height_cache,
+                require_observed_pass_height=True,
+            )
+
+        self.assertEqual(len(dataset), 1)
+        pass_heights = getattr(dataset.features[0], PHYSICAL_XPASS_PASS_HEIGHT_ATTR)
+        self.assertAlmostEqual(float(pass_heights[1]), 0.2)
+
     def test_action_dataset_masks_possessor_relative_speed_edges_for_no_poss_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
