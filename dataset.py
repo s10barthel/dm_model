@@ -19,6 +19,7 @@ from datatools.utils import (
 from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     append_pc_xpass_lane_survival_to_graph,
+    attach_evaluation_xpass_to_graph,
     attach_pass_height_to_graph,
     attach_physical_xpass_to_graph,
     load_physical_xpass_match,
@@ -128,6 +129,33 @@ def _copy_goal_next10_diagnostics(selected_labels: torch.Tensor, diagnostic_labe
     return labels
 
 
+def _copy_pass_height_diagnostics(
+    match_id: str,
+    selected_labels: torch.Tensor,
+    diagnostic_labels: torch.Tensor,
+) -> torch.Tensor:
+    _validate_diagnostic_labels(match_id, selected_labels, diagnostic_labels)
+    if not _has_label_columns(diagnostic_labels, PASS_HEIGHT_LABEL_COLUMNS):
+        raise ValueError(f"Pass-height diagnostic labels for match {match_id} are missing pass-height columns.")
+    pass_max_ball_z = diagnostic_labels[:, LABEL_INDEX["pass_max_ball_z"]]
+    pass_high = diagnostic_labels[:, LABEL_INDEX["pass_high"]]
+    pass_rows = diagnostic_labels[:, LABEL_INDEX["is_pass"]] == 1
+    if not bool(torch.isfinite(pass_max_ball_z[pass_rows]).all().item()) or not bool(
+        torch.isfinite(pass_high[pass_rows]).all().item()
+    ):
+        raise ValueError(f"Pass-height diagnostic labels for match {match_id} contain non-finite pass-row values.")
+    if not bool(((pass_high[pass_rows] == 0) | (pass_high[pass_rows] == 1)).all().item()):
+        raise ValueError(f"Pass-height diagnostic labels for match {match_id} contain non-binary pass-row pass_high values.")
+    labels = _normalize_label_width(selected_labels)
+    labels[pass_rows, LABEL_INDEX["pass_max_ball_z"]] = pass_max_ball_z[pass_rows].to(
+        dtype=labels.dtype, device=labels.device
+    )
+    labels[pass_rows, LABEL_INDEX["pass_high"]] = pass_high[pass_rows].to(
+        dtype=labels.dtype, device=labels.device
+    )
+    return labels
+
+
 class ActionDataset(Dataset):
     def __init__(
         self,
@@ -160,13 +188,19 @@ class ActionDataset(Dataset):
         mask_possessor_relative_speed_edge_features=False,
         train=True,
         diagnostic_label_dir=None,
+        pass_height_diagnostic_label_dir=None,
         require_goal_next10_diagnostics=None,
         use_physical_xpass=False,
         physical_cache_dir=None,
         physical_eps=1e-4,
         physical_xpass_floor=None,
         require_observed_pass_height=False,
+        require_pass_height_labels=False,
         pass_height_cache_dir=None,
+        evaluation_xpass_cache_dir=None,
+        evaluation_xpass_metric=None,
+        evaluation_xpass_require_nearest=False,
+        evaluation_xpass_require_height=False,
         lane_survival=False,
         lane_survival_mode=None,
         lane_survival_cache_dir=None,
@@ -174,8 +208,12 @@ class ActionDataset(Dataset):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
+        pass_height_diagnostic_label_root = (
+            Path(pass_height_diagnostic_label_dir) if pass_height_diagnostic_label_dir else None
+        )
         physical_cache_root = Path(physical_cache_dir) if physical_cache_dir else None
         pass_height_cache_root = Path(pass_height_cache_dir) if pass_height_cache_dir else None
+        evaluation_xpass_cache_root = Path(evaluation_xpass_cache_dir) if evaluation_xpass_cache_dir else None
         lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else get_pc_xpass_dir("sportec")
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
@@ -186,10 +224,17 @@ class ActionDataset(Dataset):
         self.lane_survival_mode = lane_survival_mode
         self.physical_cache_dir = str(physical_cache_root) if physical_cache_root is not None else None
         self.pass_height_cache_dir = str(pass_height_cache_root) if pass_height_cache_root is not None else None
+        self.evaluation_xpass_cache_dir = (
+            str(evaluation_xpass_cache_root) if evaluation_xpass_cache_root is not None else None
+        )
+        self.evaluation_xpass_metric = evaluation_xpass_metric
+        self.evaluation_xpass_require_nearest = bool(evaluation_xpass_require_nearest)
+        self.evaluation_xpass_require_height = bool(evaluation_xpass_require_height)
         self.lane_survival_cache_dir = str(lane_survival_cache_root)
         self.physical_eps = float(physical_eps)
         self.physical_xpass_floor = None if physical_xpass_floor is None else float(physical_xpass_floor)
         self.require_observed_pass_height = bool(require_observed_pass_height)
+        self.require_pass_height_labels = bool(require_pass_height_labels)
         self.edge_in_dim = None if edge_in_dim is None else int(edge_in_dim)
         self.v_edge_feature_mode = str(v_edge_feature_mode).strip().replace("-", "_")
         self.relative_speed_edge_feature_mode = str(relative_speed_edge_feature_mode).strip().replace("-", "_")
@@ -198,6 +243,9 @@ class ActionDataset(Dataset):
             bool(mask_possessor_relative_speed_edge_features) or self.relative_speed_edge_feature_mode == "no_poss"
         )
         self.diagnostic_label_dir = str(diagnostic_label_root) if diagnostic_label_root is not None else None
+        self.pass_height_diagnostic_label_dir = (
+            str(pass_height_diagnostic_label_root) if pass_height_diagnostic_label_root is not None else None
+        )
         self.require_goal_next10_diagnostics = (
             requires_goal_next10_diagnostics(task)
             if require_goal_next10_diagnostics is None
@@ -242,10 +290,26 @@ class ActionDataset(Dataset):
                     f"feature_label_length_mismatch:{len(match_features)}!={int(match_labels.shape[0])}"
                 )
                 continue
-            if task == "pass_height" and not _has_label_columns(match_labels, PASS_HEIGHT_LABEL_COLUMNS):
+            if pass_height_diagnostic_label_root is not None:
+                pass_height_diagnostic_path = pass_height_diagnostic_label_root / f"{match_id}.pt"
+                if not pass_height_diagnostic_path.exists():
+                    raise FileNotFoundError(
+                        f"Pass-height diagnostic labels for match {match_id} not found at "
+                        f"{pass_height_diagnostic_path}."
+                    )
+                pass_height_diagnostic_labels = torch.load(pass_height_diagnostic_path, weights_only=False)
+                match_labels = _copy_pass_height_diagnostics(
+                    match_id,
+                    match_labels,
+                    pass_height_diagnostic_labels,
+                )
+            elif (task == "pass_height" or self.require_pass_height_labels) and not _has_label_columns(
+                match_labels, PASS_HEIGHT_LABEL_COLUMNS
+            ):
                 raise ValueError(
                     f"Labels for match {match_id} do not contain pass-height columns. "
-                    "Regenerate or backfill this feature run with pass-height labels before training task='pass_height'."
+                    "Regenerate or backfill this feature run with pass-height labels, or supply a compatible "
+                    "--diagnostic-feature-run-id for evaluation."
                 )
 
             has_diagnostics = _has_goal_next10_diagnostic_columns(match_labels)
@@ -343,6 +407,7 @@ class ActionDataset(Dataset):
         self.labels = []
         physical_rows_by_match: dict[str, object] = {}
         pass_height_rows_by_match: dict[str, object] = {}
+        evaluation_xpass_rows_by_match: dict[str, object] = {}
         lane_survival_rows_by_match: dict[str, object] = {}
 
         for i in tqdm(condition.nonzero()[:, 0].numpy()):
@@ -499,6 +564,25 @@ class ActionDataset(Dataset):
                     pass_height_rows_by_match[match_id],
                     match_id=match_id,
                     require_observed_target=self.require_observed_pass_height,
+                )
+
+            if evaluation_xpass_cache_root is not None:
+                match_id = feature_match_ids[int(i)]
+                if match_id not in evaluation_xpass_rows_by_match:
+                    evaluation_xpass_rows_by_match[match_id] = load_physical_xpass_match(
+                        evaluation_xpass_cache_root,
+                        match_id,
+                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                    )
+                graph = attach_evaluation_xpass_to_graph(
+                    graph,
+                    graph_labels,
+                    evaluation_xpass_rows_by_match[match_id],
+                    match_id=match_id,
+                    metric=evaluation_xpass_metric,
+                    frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                    require_nearest_opponent_distance=self.evaluation_xpass_require_nearest,
+                    require_pass_height=self.evaluation_xpass_require_height,
                 )
 
             self.features.append(graph)

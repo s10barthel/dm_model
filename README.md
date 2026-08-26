@@ -561,6 +561,8 @@ In the intended-receiver workflow, `success_intent` is the learned intended-rece
 ```powershell
 python scripts/evaluate_relevant_models.py --bundle-id <bundle_id>
 python scripts/evaluate_relevant_models.py --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
+python scripts/evaluate_relevant_models.py --action-intent-model-id action_intent/<model_run_id>
+python scripts/evaluate_relevant_models.py --pass-success-model-id pass_success/<model_run_id> --diagnostic-feature-run-id <derived_feature_run_id> --evaluate-xpass --xpass-version top25
 python scripts/evaluate_relevant_models.py --action-intent-model-id action_intent/<model_run_id> --pass-intent-model-id pass_intent/<model_run_id> --pass-success-model-id pass_success/<model_run_id> --outcome-scoring-model-id outcome_scoring/<model_run_id> --outcome-conceding-model-id outcome_conceding/<model_run_id>
 ```
 
@@ -571,21 +573,26 @@ Inputs:
 
 Outputs:
 
-- no dedicated output files
-- metrics are printed to stdout by `test.py`
+- metrics printed to stdout by `test.py`
+- per-model JSON/CSV evaluation artifacts and the cross-run metrics summary
+- `pass_success_height_metrics.csv` for pass success, containing counts, success prevalence, ROC-AUC, and Brier score for observed-high and observed-non-high passes
 
-`test.py` uses the target configuration, graph schema, and diagnostic-label metadata saved inside each checkpoint. Pass `--diagnostic-feature-run-id <feature_run_id>` when evaluating older checkpoints whose selected feature run lacks canonical `goal next_10` diagnostics. The wrapper now prefers `--bundle-id` for the main retained-model set. `success_intent` is optional and can be supplied explicitly if you want it evaluated too.
+`test.py` uses the target configuration, graph schema, and diagnostic-label metadata saved inside each checkpoint. Pass `--diagnostic-feature-run-id <feature_run_id>` when evaluating older outcome checkpoints whose selected feature run lacks canonical `goal next_10` diagnostics, or older pass-success checkpoints that need observed pass-height labels. A pass-height diagnostic run must equal or descend from the checkpoint feature run; only its aligned `pass_high` and `pass_max_ball_z` columns are used, while model inputs and success targets remain checkpoint-driven. The diagnostic run's recorded pass-height threshold is exported with the evaluation metadata. Without a bundle, supply at least one model ID and the wrapper evaluates exactly the explicitly selected subset. With a bundle, it evaluates every supported task present in the bundle; explicit IDs add missing tasks or override matching bundle entries. This includes independently selected `success_intent` and `pass_height` checkpoints.
 
 Test dataset construction is checkpoint-driven and uses the same shared feature configuration as training, including node-feature ablations, velocity and relative-speed edge modes, physical-xPass inputs, and pc-xPass lane-survival inputs. Evaluation validates the reconstructed node/edge widths against the checkpoint. Physical-xPass cache metadata and lane-survival mode/fingerprint must also match; missing or incompatible caches stop evaluation with an error instead of silently changing the model inputs.
 
 Evaluation loads each checkpoint's `best_weights.pt` (selected during training by validation loss) and evaluates it on the held-out 2024/25 test matches. It uses the same evaluation routine as validation, but the test metrics are not training-set or validation-set metrics. Use validation loss for checkpoint selection and early stopping; use this held-out test evaluation for final performance reporting. Avoid repeatedly changing the model based on test results, since that would turn the test set into another validation set.
 
+Pass-success evaluation is stratified by the observed binary `pass_high` label by default. Use `--no-observed-pass-height-stratification` to disable this analysis. Feature runs without genuine pass-height label columns must be backfilled before stratification; they are rejected rather than interpreting padded labels as non-high passes.
+
+Use `--evaluate-xpass --xpass-version <max|topN>` to compare the learning predictor with receiver-specific probabilities already stored in the read-only pc-xPass cache. Use `--evaluate-combined-success` with an explicit `--xpass-weight`; v4 additionally requires explicit `--discount`, `--v4-power`, and `--v4-zero`. Missing match, action, receiver, or blend-input cache data aborts evaluation and is never generated or skipped. Comparable pooled and observed-height results are written to `pass_success_predictor_metrics.csv`.
+
 For `outcome_scoring` and `outcome_conceding`, the reported quantities have two target definitions:
 
 - `ce_loss` is computed against the selected outcome target family and `--return_type`: binary goal, xG, xT, goal distance, or EPV.
-- `f1`, `roc_auc`, and `brier` are computed against the canonical binary `next_10` goal diagnostics: `scores_goal_next10` for scoring and `concedes_goal_next10` for conceding. A non-zero diagnostic label is positive.
+- `roc_auc`, `brier`, and `log_loss` are computed against the canonical binary `next_10` goal diagnostics: `scores_goal_next10` for scoring and `concedes_goal_next10` for conceding. A non-zero diagnostic label is positive. Precision, recall, and F1 are omitted by default; pass `--f1-outcome-threshold <0..1>` to report them at an explicitly prespecified operating point. Classification uses `prediction > threshold`.
 
-Consequently, do not compare outcome-model `ce_loss` across target families. On the same held-out matches and canonical diagnostic labels, `roc_auc` is the clearest cross-family comparison because it measures ranking of actual next-10-action goals/concessions without a threshold. `f1` is less robust for that purpose because evaluation applies a fixed score threshold of `0.1`, and output scales can differ by target family. `brier` uses the same binary event ground truth, but its probability-calibration interpretation is strongest for models whose output is itself a goal probability; for xT, goal-distance, and EPV models it is a goal-event proxy diagnostic.
+Consequently, do not compare outcome-model `ce_loss` across target families. On the same held-out matches and canonical diagnostic labels, `roc_auc` is the clearest cross-family comparison because it measures ranking of actual next-10-action goals/concessions without a threshold. Threshold-dependent metrics are reported only when `--f1-outcome-threshold` is supplied because output scales can differ by target family. `brier` uses the same binary event ground truth, but its probability-calibration interpretation is strongest for models whose output is itself a goal probability; for xT, goal-distance, and EPV models it is a goal-event proxy diagnostic.
 
 Dataset-feature parity does not imply loss-weighting parity. Test evaluation currently does not reconstruct training/validation class weights or inverse-propensity weights, so a weighted training/validation `ce_loss` is not directly comparable with the unweighted test `ce_loss`.
 
@@ -1398,6 +1405,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/evaluate_relevant_models.py`
 
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to evaluate.
+- At least one explicit model ID is required when `--bundle-id` is omitted. Bundle evaluation includes every supported task present in the bundle, while explicit IDs supplement or override its entries.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id.
@@ -1405,15 +1413,26 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
-- `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
+- `--diagnostic-feature-run-id <feature_run_id>`: evaluation-only label source. Outcome models read canonical
+  `goal next_10` diagnostics; pass success reads aligned observed pass-height labels from an equal or descendant
+  feature run. It never changes checkpoint model inputs or primary success targets.
 - `--device <device>`: device passed to `test.py`. Default: `cuda:0`.
 - `--weighted-pass-success-metrics`: additionally report high-pass-weighted ROC-AUC and Brier score for the
-  learning-based `pass_success` checkpoint. Requires `--pass-height-model-id` (or a bundle containing it) and a
-  compatible, enriched pc-xPass cache.
+  learning-based `pass_success` checkpoint. Requires a compatible, enriched pc-xPass cache whose metadata records
+  the cached pass-height provenance. An explicitly selected `pass_height` checkpoint is evaluated independently and
+  is not used or compared with the cache provenance.
+- `--evaluate-xpass`: evaluate cached receiver-specific physical pc-xPass probabilities with the same pooled and
+  observed-pass-height-stratified pass-success metrics. Requires a selected `pass_success` model and `--xpass-version`.
+- `--evaluate-combined-success`: evaluate the deployed blend of the learning-based pass-success prediction and cached
+  physical pc-xPass. Requires a selected `pass_success` model, `--xpass-version`, and `--xpass-weight`.
+- `--xpass-version <max|topN>`: cached pc-xPass metric to evaluate, for example `top25`. Required by
+  `--evaluate-xpass` and `--evaluate-combined-success`; the requested metric must be present in the read-only cache.
+- `--xpass-weight {v1,v2,v3,v4}`: blend weighting rule for `--evaluate-combined-success`. For `v4`, supply explicit
+  `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`; these arguments are rejected for other
+  combined-weight versions. The same v4 settings are optional for `--weighted-pass-success-metrics`, which defaults
+  to `discount=true`, `power=4`, and `zero=0.7`.
 - `--pc-xpass-cache-dir <path>`: optional enriched pc-xPass cache directory for weighted pass-success evaluation;
-  default: the Sportec pc-xPass cache.
-- `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
-  weighted pass-success evaluation. Defaults: `true`, `4`, and `0.7`.
+  physical-xPass evaluation, or combined pass-success evaluation; default: the Sportec pc-xPass cache.
 
 ### `scripts/run_relevant_models.py`
 

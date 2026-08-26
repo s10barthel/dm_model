@@ -39,6 +39,10 @@ PHYSICAL_XPASS_DISTANCE_ATTR = "physical_xpass_pass_distance"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "physical_xpass_nearest_opponent_distance"
 PHYSICAL_XPASS_BALL_Z_ATTR = "physical_xpass_ball_z"
 PHYSICAL_XPASS_PASS_HEIGHT_ATTR = "physical_xpass_pass_height"
+EVALUATION_XPASS_PROB_ATTR = "evaluation_physical_xpass"
+EVALUATION_XPASS_DISTANCE_ATTR = "evaluation_physical_xpass_pass_distance"
+EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "evaluation_physical_xpass_nearest_opponent_distance"
+EVALUATION_XPASS_PASS_HEIGHT_ATTR = "evaluation_physical_xpass_pass_height"
 DEFAULT_RESIDUAL_DISTANCE_THRESHOLD = 30.0
 PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE = "ignore_teammates"
 PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER = "consider_teammates"
@@ -5676,6 +5680,57 @@ def attach_physical_xpass_to_graph(
     setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
     setattr(graph, PHYSICAL_XPASS_BALL_Z_ATTR, ball_z)
     setattr(graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, pass_heights)
+    return graph
+
+
+def attach_evaluation_xpass_to_graph(
+    graph: Data,
+    labels: torch.Tensor,
+    physical_rows: pd.DataFrame,
+    *,
+    match_id: str,
+    metric: str,
+    frame_scope: str | None = None,
+    require_nearest_opponent_distance: bool = False,
+    require_pass_height: bool = False,
+) -> Data:
+    """Attach strict read-only evaluation sidecars without replacing model input attributes."""
+    sidecar_graph = attach_physical_xpass_to_graph(
+        graph.clone(),
+        labels,
+        physical_rows,
+        match_id=match_id,
+        require_observed_target=True,
+        metric=metric,
+        missing_player_value=None,
+        frame_scope=frame_scope,
+    )
+    setattr(graph, EVALUATION_XPASS_PROB_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_PROB_ATTR))
+    setattr(graph, EVALUATION_XPASS_DISTANCE_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_DISTANCE_ATTR))
+    setattr(
+        graph,
+        EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+        getattr(sidecar_graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR),
+    )
+    setattr(graph, EVALUATION_XPASS_PASS_HEIGHT_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR))
+    target_index = int(labels[LABEL_INDEX["intent_index"]].item())
+    node_ids = _node_ids(graph)
+    action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    receiver_id = node_ids[target_index] if 0 <= target_index < len(node_ids) else f"index={target_index}"
+    if require_nearest_opponent_distance and not bool(
+        torch.isfinite(getattr(graph, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR)[target_index]).item()
+    ):
+        raise ValueError(
+            f"pc-xPass evaluation is missing finite nearest-opponent distance for match {match_id}, "
+            f"action_index={action_index}, receiver={receiver_id!r}."
+        )
+    if require_pass_height and not bool(
+        torch.isfinite(getattr(graph, EVALUATION_XPASS_PASS_HEIGHT_ATTR)[target_index]).item()
+    ):
+        raise ValueError(
+            f"pc-xPass evaluation is missing finite pass-height probability for match {match_id}, "
+            f"action_index={action_index}, receiver={receiver_id!r}."
+        )
     return graph
 
 

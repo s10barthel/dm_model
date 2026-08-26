@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -32,15 +33,18 @@ from physical_pass_model import (
     model_uses_physical_xpass,
     normalize_physical_xpass_speed_aggregation,
     pc_xpass_lane_survival_metadata_fingerprint,
+    physical_xpass_metric_for_version,
     validate_physical_xpass_args,
     validate_physical_xpass_cache_metadata,
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
+    EVALUATION_RUNS_DIR,
     get_action_label_dir,
     get_pc_xpass_dir,
     get_physical_xpass_dir,
+    load_feature_run_metadata,
     resolve_feature_root,
     resolve_feature_run_id,
 )
@@ -67,28 +71,77 @@ def parse_bool_text(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected true or false")
 
 
+def probability_threshold(value: str) -> float:
+    threshold = float(value)
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise argparse.ArgumentTypeError("threshold must be finite and between 0 and 1")
+    return threshold
+
+
 def resolve_weighted_pass_success_cache(args: argparse.Namespace, model_args: argparse.Namespace) -> str | None:
     """Validate and return the pc-xPass cache for weighted pass-success evaluation."""
     if not bool(args.weighted_pass_success_metrics):
         return None
     if str(getattr(model_args, "task", "")) != "pass_success":
         raise ValueError("--weighted-pass-success-metrics requires a pass_success checkpoint.")
-    if not args.pass_height_model_id:
-        raise ValueError("--weighted-pass-success-metrics requires --pass-height-model-id.")
-    if not math.isfinite(float(args.v4_power)) or float(args.v4_power) <= 0.0:
+    v4_power = 4.0 if args.v4_power is None else float(args.v4_power)
+    v4_zero = 0.7 if args.v4_zero is None else float(args.v4_zero)
+    if not math.isfinite(v4_power) or v4_power <= 0.0:
         raise ValueError("--v4-power must be a positive finite float.")
-    if not math.isfinite(float(args.v4_zero)) or float(args.v4_zero) <= 0.0:
+    if not math.isfinite(v4_zero) or v4_zero <= 0.0:
         raise ValueError("--v4-zero must be a positive finite float.")
 
     cache_dir = Path(args.pc_xpass_cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
     cached_model_id = metadata.get("pass_height_model_id")
-    if str(cached_model_id) != str(args.pass_height_model_id):
-        raise ValueError(
-            "pc-xPass cache pass_height_model_id does not match --pass-height-model-id: "
-            f"cache={cached_model_id!r}, requested={args.pass_height_model_id!r}."
-        )
+    if not cached_model_id:
+        raise ValueError("Weighted pass-success evaluation requires pass-height provenance in cache metadata pass_height_model_id.")
     return str(cache_dir)
+
+
+def resolve_evaluation_xpass_cache(
+    args: argparse.Namespace, model_args: argparse.Namespace,
+) -> tuple[str | None, str | None, dict | None]:
+    """Resolve and strictly validate the read-only pc-xPass evaluation cache."""
+    enabled = bool(args.evaluate_xpass or args.evaluate_combined_success)
+    if not enabled:
+        return None, None, None
+    if str(getattr(model_args, "task", "")) != "pass_success":
+        raise ValueError("Physical xPass evaluation requires a pass_success checkpoint.")
+    if not args.evaluation_output_dir:
+        raise ValueError("Physical xPass evaluation requires --evaluation-output-dir.")
+    if not args.xpass_version:
+        raise ValueError("Physical xPass evaluation requires --xpass-version.")
+    if args.xpass_weight and not args.evaluate_combined_success:
+        raise ValueError("--xpass-weight requires --evaluate-combined-success.")
+    if args.evaluate_combined_success and not args.xpass_weight:
+        raise ValueError("--evaluate-combined-success requires --xpass-weight.")
+    if args.evaluate_combined_success and args.xpass_weight == "v4":
+        if args.discount is None or args.v4_power is None or args.v4_zero is None:
+            raise ValueError("Combined v4 evaluation requires explicit --discount, --v4-power, and --v4-zero.")
+        if not math.isfinite(float(args.v4_power)) or float(args.v4_power) <= 0.0:
+            raise ValueError("--v4-power must be a positive finite float.")
+        if not math.isfinite(float(args.v4_zero)) or float(args.v4_zero) <= 0.0:
+            raise ValueError("--v4-zero must be a positive finite float.")
+    elif args.evaluate_combined_success and any(
+        value is not None for value in (args.discount, args.v4_power, args.v4_zero)
+    ):
+        raise ValueError("v4 options are only valid with combined --xpass-weight v4.")
+
+    cache_dir = Path(args.pc_xpass_cache_dir)
+    metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+    metric = physical_xpass_metric_for_version(args.xpass_version, pc_xpass=True)
+    available = {str(value) for value in metadata.get("available_metrics", [])}
+    if metric not in available:
+        raise ValueError(
+            f"Requested pc-xPass metric {metric!r} is not available in {cache_dir}; available={sorted(available)}."
+        )
+    if args.evaluate_combined_success and args.xpass_weight == "v4" and not metadata.get("pass_height_model_id"):
+        raise ValueError("Combined v4 evaluation requires cache metadata pass_height_model_id provenance.")
+    metadata_path = cache_dir / "metadata.json"
+    metadata = dict(metadata)
+    metadata["metadata_sha256"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+    return str(cache_dir), metric, metadata
 
 
 def resolve_goal_next10_diagnostic_context(
@@ -131,6 +184,73 @@ def resolve_goal_next10_diagnostic_context(
     if selected_label_dir.exists():
         return getattr(model_args, "feature_run_id", None), str(selected_label_dir)
     return getattr(model_args, "feature_run_id", None), None
+
+
+def validate_diagnostic_feature_run_ancestry(
+    diagnostic_feature_run_id: str,
+    selected_feature_run_id: str,
+) -> list[str]:
+    """Return the diagnostic lineage after proving it reaches the selected feature run."""
+    current = str(diagnostic_feature_run_id)
+    expected = str(selected_feature_run_id)
+    lineage: list[str] = []
+    seen: set[str] = set()
+    while current:
+        if current in seen:
+            raise ValueError(f"Feature-run ancestry contains a cycle at {current!r}.")
+        seen.add(current)
+        lineage.append(current)
+        if current == expected:
+            return lineage
+        metadata = load_feature_run_metadata(current, required=True) or {}
+        current = str(metadata.get("derived_from_feature_run_id") or "")
+    raise ValueError(
+        f"Diagnostic feature run {diagnostic_feature_run_id!r} is not equal to or derived from "
+        f"checkpoint feature run {selected_feature_run_id!r}."
+    )
+
+
+def resolve_pass_height_diagnostic_context(
+    cli_args: argparse.Namespace,
+    model_args: argparse.Namespace,
+    selected_feature_run_id: str | None,
+    *,
+    required: bool,
+) -> tuple[str | None, str | None, float | None, list[str] | None]:
+    if not cli_args.diagnostic_feature_run_id or str(getattr(model_args, "task", "")) != "pass_success":
+        return None, None, None, None
+    if not required:
+        raise ValueError(
+            "--diagnostic-feature-run-id is unused for pass_success when no pass-height evaluation is enabled."
+        )
+    if not selected_feature_run_id:
+        raise ValueError("Pass-height diagnostic evaluation requires a checkpoint feature_run_id.")
+
+    diagnostic_run_id = resolve_feature_run_id(
+        cli_args.diagnostic_feature_run_id,
+        required=True,
+        allow_latest=False,
+    )
+    lineage = validate_diagnostic_feature_run_ancestry(diagnostic_run_id, str(selected_feature_run_id))
+    metadata = load_feature_run_metadata(diagnostic_run_id, required=True) or {}
+    threshold = metadata.get("pass_height_threshold_meters")
+    if threshold is None or not math.isfinite(float(threshold)) or float(threshold) <= 0.0:
+        raise ValueError(
+            f"Diagnostic feature run {diagnostic_run_id!r} must record a positive finite "
+            "pass_height_threshold_meters value."
+        )
+
+    mode = getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE
+    if mode == "unknown":
+        mode = DEFAULT_INTENDED_RECEIVER_MODE
+    return_type = getattr(model_args, "return_type", None)
+    if not return_type:
+        raise ValueError("Pass-success checkpoint does not record return_type for diagnostic-label resolution.")
+    diagnostic_root = resolve_feature_root(diagnostic_run_id)
+    label_dir = get_action_label_dir(str(return_type), intended_receiver_mode=mode, root=diagnostic_root)
+    if not label_dir.exists():
+        raise FileNotFoundError(f"Pass-height diagnostic labels not found at {label_dir}.")
+    return diagnostic_run_id, str(label_dir), float(threshold), lineage
 
 
 def resolve_physical_xpass_context(
@@ -228,10 +348,6 @@ def validate_test_dataset_dimensions(test_dataset: ActionDataset, model_args: ar
         )
 
 
-def _safe_model_directory_name(model_id: str) -> str:
-    return str(model_id).replace("/", "__").replace("\\", "__")
-
-
 def _outcome_strata(execution_branch: np.ndarray) -> list[tuple[str, np.ndarray]]:
     branches = np.asarray(execution_branch, dtype=int).reshape(-1)
     return [
@@ -239,6 +355,36 @@ def _outcome_strata(execution_branch: np.ndarray) -> list[tuple[str, np.ndarray]
         ("observed_success", branches == 1),
         ("observed_failure", branches == 0),
     ]
+
+
+def _rounded_axis_upper(value: float) -> float:
+    if not math.isfinite(value) or value <= 0.0:
+        return 1.0
+    scaled = float(value) * 1.1
+    magnitude = 10.0 ** math.floor(math.log10(scaled))
+    return math.ceil(scaled / magnitude) * magnitude
+
+
+def binned_relationship_axis_limits(
+    binned: pd.DataFrame,
+    *,
+    evaluation_target: str,
+    show_identity: bool,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return readable plot limits from all finite binned values for one target."""
+    rows = binned.loc[binned["evaluation_target"] == evaluation_target]
+    prediction = pd.to_numeric(rows.get("mean_prediction", pd.Series(dtype=float)), errors="coerce").to_numpy()
+    observed = pd.to_numeric(rows.get("mean_observed", pd.Series(dtype=float)), errors="coerce").to_numpy()
+    finite_prediction = prediction[np.isfinite(prediction)]
+    finite_observed = observed[np.isfinite(observed)]
+    if not len(finite_prediction) and not len(finite_observed):
+        return (0.0, 1.0), (0.0, 1.0)
+    if show_identity:
+        upper = _rounded_axis_upper(float(np.max(np.concatenate([finite_prediction, finite_observed]))))
+        return (0.0, upper), (0.0, upper)
+    x_upper = _rounded_axis_upper(float(np.max(finite_prediction))) if len(finite_prediction) else 1.0
+    y_upper = _rounded_axis_upper(float(np.max(finite_observed))) if len(finite_observed) else 1.0
+    return (0.0, x_upper), (0.0, y_upper)
 
 
 def _save_binned_relationship_plot(
@@ -250,9 +396,18 @@ def _save_binned_relationship_plot(
     output_path: Path,
     show_identity: bool,
 ) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FormatStrFormatter
 
     strata = ["pooled_factual", "observed_success", "observed_failure"]
+    x_limits, y_limits = binned_relationship_axis_limits(
+        binned,
+        evaluation_target=evaluation_target,
+        show_identity=show_identity,
+    )
     fig, axes = plt.subplots(1, len(strata), figsize=(14, 4.5), sharex=True, sharey=True)
     for axis, stratum in zip(axes, strata):
         rows = binned.loc[
@@ -264,10 +419,12 @@ def _save_binned_relationship_plot(
         else:
             axis.plot(rows["mean_prediction"], rows["mean_observed"], marker="o")
         if show_identity:
-            axis.plot([0, 1], [0, 1], "--", color="0.5", linewidth=1, label="identity")
+            axis.plot(x_limits, y_limits, "--", color="0.5", linewidth=1, label="identity")
         axis.set_xlabel("Mean model prediction")
-        axis.set_xlim(0, 1)
-        axis.set_ylim(0, 1)
+        axis.set_xlim(*x_limits)
+        axis.set_ylim(*y_limits)
+        axis.xaxis.set_major_formatter(FormatStrFormatter("%.3f"))
+        axis.yaxis.set_major_formatter(FormatStrFormatter("%.3f"))
         axis.grid(alpha=0.25)
     axes[0].set_ylabel(y_label)
     fig.suptitle(title)
@@ -282,10 +439,11 @@ def write_outcome_evaluation_artifacts(
     model_id: str,
     task: str,
     outcome_evaluation: dict[str, np.ndarray],
+    f1_outcome_threshold: float | None = None,
     n_bins: int = 10,
-) -> Path:
+) -> tuple[Path, pd.DataFrame]:
     """Write factual outcome-model target-fidelity and external-validity artifacts."""
-    output_dir = Path(output_root) / _safe_model_directory_name(model_id)
+    output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     predictions = np.asarray(outcome_evaluation["prediction"], dtype=float).reshape(-1)
@@ -317,7 +475,13 @@ def write_outcome_evaluation_artifacts(
                 if evaluation_target == "xt_training_target":
                     row.update(calc_continuous_target_metrics(stratum_observed, stratum_predictions))
                 else:
-                    row.update(calc_binary_metrics(stratum_observed, stratum_predictions, threshold=0.1))
+                    row.update(
+                        calc_binary_metrics(
+                            stratum_observed,
+                            stratum_predictions,
+                            threshold=f1_outcome_threshold,
+                        )
+                    )
                 binned = calc_equal_frequency_bins(stratum_observed, stratum_predictions, n_bins=n_bins)
                 binned.insert(0, "stratum", stratum)
                 binned.insert(0, "evaluation_target", evaluation_target)
@@ -327,7 +491,7 @@ def write_outcome_evaluation_artifacts(
             metric_rows.append(row)
 
     metrics = pd.DataFrame(metric_rows)
-    metrics.to_csv(output_dir / "metrics.csv", index=False)
+    metrics.to_csv(output_dir / "outcome_metrics.csv", index=False)
     binned = pd.concat(bin_frames, ignore_index=True) if bin_frames else pd.DataFrame(
         columns=[
             "model_id", "task", "evaluation_target", "stratum", "bin", "sample_count",
@@ -351,27 +515,133 @@ def write_outcome_evaluation_artifacts(
         output_path=output_dir / "goal_next10_association.png",
         show_identity=False,
     )
-    return output_dir
+    return output_dir, metrics
 
 
-def update_evaluation_run_metadata(
-    output_root: str | Path,
+def write_pass_success_height_metrics(output_root: str | Path, model_id: str, rows: list[dict]) -> Path:
+    """Write observed-pass-height pass-success metrics as a portable table."""
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "model_id", "stratum", "sample_count", "positive_count", "success_prevalence", "roc_auc", "brier"
+    ]
+    records = [{"model_id": model_id, **row} for row in rows]
+    pd.DataFrame(records, columns=columns).to_csv(output_dir / "pass_success_height_metrics.csv", index=False)
+    return output_dir / "pass_success_height_metrics.csv"
+
+
+def write_pass_success_predictor_metrics(output_root: str | Path, model_id: str, rows: list[dict]) -> Path:
+    """Write comparable learning, physical, and combined pass-success metrics."""
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "model_id", "predictor", "stratum", "sample_count", "positive_count",
+        "success_prevalence", "roc_auc", "brier", "log_loss", "f1",
+    ]
+    pd.DataFrame([{"model_id": model_id, **row} for row in rows], columns=columns).to_csv(
+        output_dir / "pass_success_predictor_metrics.csv", index=False
+    )
+    return output_dir / "pass_success_predictor_metrics.csv"
+
+
+def _json_compatible(value):
+    if isinstance(value, dict):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _pooled_outcome_summary_metrics(metrics: pd.DataFrame) -> dict[str, float | int | None]:
+    pooled = metrics.loc[metrics["stratum"] == "pooled_factual"]
+    summary: dict[str, float | int | None] = {}
+    for _, row in pooled.iterrows():
+        prefix = f"outcome_{row['evaluation_target']}"
+        for column, value in row.items():
+            if column in {"model_id", "task", "evaluation_target", "stratum"} or pd.isna(value):
+                continue
+            summary[f"{prefix}_{column}"] = value.item() if isinstance(value, np.generic) else value
+    return summary
+
+
+def write_model_evaluation_artifacts(
+    output_dir: str | Path,
     *,
     model_id: str,
     task: str,
     feature_run_id: str | None,
     diagnostic_feature_run_id: str | None,
+    evaluation_timestamp: str | None,
+    evaluation_options: dict,
+    test_metrics: dict,
+    outcome_metrics: pd.DataFrame | None = None,
+    pass_height_diagnostic_feature_run_id: str | None = None,
+    pass_height_diagnostic_label_dir: str | None = None,
+    observed_pass_height_threshold_meters: float | None = None,
+    pass_height_diagnostic_ancestry_validated: bool = False,
 ) -> None:
-    """Record the checkpoint-specific feature contexts in the wrapper's run metadata."""
-    metadata_path = Path(output_root) / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-    contexts = metadata.setdefault("model_evaluation_contexts", {})
-    contexts[str(model_id)] = {
+    """Write portable per-model results and update the cross-run comparison table."""
+    artifact_dir = Path(output_dir)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = evaluation_timestamp or datetime.now().strftime("%Y%m%dT%H%M%S")
+    metadata = {
+        "evaluation_timestamp": timestamp,
+        "model_id": str(model_id),
         "task": task,
         "feature_run_id": feature_run_id,
         "diagnostic_feature_run_id": diagnostic_feature_run_id,
+        "pass_height_diagnostic_feature_run_id": pass_height_diagnostic_feature_run_id,
+        "pass_height_diagnostic_label_dir": pass_height_diagnostic_label_dir,
+        "observed_pass_height_threshold_meters": observed_pass_height_threshold_meters,
+        "pass_height_diagnostic_ancestry_validated": bool(pass_height_diagnostic_ancestry_validated),
+        "evaluation_options": _json_compatible(evaluation_options),
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
+    metric_record = {
+        "evaluation_timestamp": timestamp,
+        "model_id": str(model_id),
+        "task": task,
+        "metrics": _json_compatible(test_metrics),
+    }
+    (artifact_dir / "metrics.json").write_text(json.dumps(metric_record, indent=2, allow_nan=False), encoding="utf-8")
+
+    flat_record = {
+        "evaluation_timestamp": timestamp,
+        "model_id": str(model_id),
+        "task": task,
+        "feature_run_id": feature_run_id,
+        "diagnostic_feature_run_id": diagnostic_feature_run_id,
+        "pass_height_diagnostic_feature_run_id": pass_height_diagnostic_feature_run_id,
+        "pass_height_diagnostic_label_dir": pass_height_diagnostic_label_dir,
+        "observed_pass_height_threshold_meters": observed_pass_height_threshold_meters,
+        "pass_height_diagnostic_ancestry_validated": bool(pass_height_diagnostic_ancestry_validated),
+        **_json_compatible(evaluation_options),
+        **_json_compatible(test_metrics),
+    }
+    if outcome_metrics is not None:
+        flat_record.update(_json_compatible(_pooled_outcome_summary_metrics(outcome_metrics)))
+    pd.DataFrame([flat_record]).to_csv(artifact_dir / "metrics.csv", index=False)
+
+    summary_path = EVALUATION_RUNS_DIR / "metrics_summary.csv"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = pd.read_csv(summary_path) if summary_path.exists() else pd.DataFrame()
+    row = pd.DataFrame([flat_record])
+    if not existing.empty:
+        existing = existing.loc[
+            ~(
+                existing["evaluation_timestamp"].astype(str).eq(str(timestamp))
+                & existing["model_id"].astype(str).eq(str(model_id))
+            )
+        ]
+    columns = list(dict.fromkeys([*existing.columns, *row.columns]))
+    pd.concat([existing.reindex(columns=columns), row.reindex(columns=columns)], ignore_index=True).to_csv(
+        summary_path,
+        index=False,
+    )
 
 
 if __name__ == "__main__":
@@ -382,22 +652,41 @@ if __name__ == "__main__":
     parser.add_argument("--feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
+    parser.add_argument("--evaluation-timestamp", type=str, required=False, default=None)
     parser.add_argument("--weighted-pass-success-metrics", action="store_true")
+    parser.add_argument("--evaluate-xpass", action="store_true")
+    parser.add_argument("--evaluate-combined-success", action="store_true")
+    parser.add_argument("--xpass-version", default=None)
+    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4"], default=None)
+    parser.add_argument("--observed-pass-height-stratification", action="store_true")
+    parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
     parser.add_argument("--pass-height-model-id", type=str, default=None)
     parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
-    parser.add_argument("--discount", type=parse_bool_text, default=True)
-    parser.add_argument("--v4-power", type=float, default=4.0)
-    parser.add_argument("--v4-zero", type=float, default=0.7)
+    parser.add_argument("--discount", type=parse_bool_text, default=None)
+    parser.add_argument("--v4-power", type=float, default=None)
+    parser.add_argument("--v4-zero", type=float, default=None)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
     weighted_pc_xpass_cache_dir = resolve_weighted_pass_success_cache(args, model_args)
+    evaluation_xpass_cache_dir, evaluation_xpass_metric, evaluation_xpass_metadata = (
+        resolve_evaluation_xpass_cache(args, model_args)
+    )
     model_args.weighted_pass_success_metrics = bool(args.weighted_pass_success_metrics)
-    model_args.discount = bool(args.discount)
-    model_args.v4_power = float(args.v4_power)
-    model_args.v4_zero = float(args.v4_zero)
+    model_args.observed_pass_height_stratification = bool(args.observed_pass_height_stratification)
+    model_args.return_pass_success_height_evaluation = bool(
+        args.observed_pass_height_stratification or args.evaluate_xpass or args.evaluate_combined_success
+    )
+    model_args.evaluate_xpass = bool(args.evaluate_xpass)
+    model_args.evaluate_combined_success = bool(args.evaluate_combined_success)
+    model_args.xpass_metric = evaluation_xpass_metric
+    model_args.xpass_weight = args.xpass_weight
+    model_args.f1_outcome_threshold = args.f1_outcome_threshold
+    model_args.discount = True if args.discount is None else bool(args.discount)
+    model_args.v4_power = 4.0 if args.v4_power is None else float(args.v4_power)
+    model_args.v4_zero = 0.7 if args.v4_zero is None else float(args.v4_zero)
 
     print("\nGenerating test datasets...")
     resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
@@ -414,6 +703,26 @@ if __name__ == "__main__":
         label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
         feature_root = Path(feature_dir).parent
     diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
+    pass_height_diagnostics_required = bool(
+        getattr(model_args, "task", None) == "pass_success"
+        and (
+            args.observed_pass_height_stratification
+            or args.weighted_pass_success_metrics
+            or args.evaluate_xpass
+            or args.evaluate_combined_success
+        )
+    )
+    (
+        pass_height_diagnostic_feature_run_id,
+        pass_height_diagnostic_label_dir,
+        observed_pass_height_threshold_meters,
+        pass_height_diagnostic_lineage,
+    ) = resolve_pass_height_diagnostic_context(
+        args,
+        model_args,
+        resolved_feature_run_id,
+        required=pass_height_diagnostics_required,
+    )
     physical_cache_dir = resolve_physical_xpass_context(
         model_args,
         feature_root,
@@ -448,6 +757,7 @@ if __name__ == "__main__":
         model_args,
         train=False,
         diagnostic_label_dir=diagnostic_label_dir,
+        pass_height_diagnostic_label_dir=pass_height_diagnostic_label_dir,
         physical_cache_dir=physical_cache_dir,
         lane_survival_cache_dir=lane_survival_cache_dir,
     )
@@ -455,6 +765,26 @@ if __name__ == "__main__":
         # These attributes are evaluation sidecars; they do not modify node or edge features.
         dataset_args["pass_height_cache_dir"] = weighted_pc_xpass_cache_dir
         dataset_args["require_observed_pass_height"] = True
+    if evaluation_xpass_cache_dir is not None:
+        dataset_args["evaluation_xpass_cache_dir"] = evaluation_xpass_cache_dir
+        dataset_args["evaluation_xpass_metric"] = evaluation_xpass_metric
+        dataset_args["evaluation_xpass_require_nearest"] = bool(
+            args.evaluate_combined_success and args.xpass_weight == "v2"
+        )
+        dataset_args["evaluation_xpass_require_height"] = bool(
+            args.evaluate_combined_success and args.xpass_weight == "v4"
+        )
+        dataset_args["require_pass_height_labels"] = True
+    if args.observed_pass_height_stratification:
+        if getattr(model_args, "task", None) != "pass_success":
+            parser.error("--observed-pass-height-stratification requires a pass_success checkpoint")
+        if not args.evaluation_output_dir:
+            parser.error("--observed-pass-height-stratification requires --evaluation-output-dir")
+        dataset_args["require_pass_height_labels"] = True
+    if args.f1_outcome_threshold is not None and getattr(model_args, "task", None) not in {
+        "outcome_scoring", "outcome_conceding"
+    }:
+        parser.error("--f1-outcome-threshold requires an outcome_scoring or outcome_conceding checkpoint")
     test_dataset = ActionDataset(
         test_match_ids,
         feature_dir=feature_dir,
@@ -488,24 +818,71 @@ if __name__ == "__main__":
         train=False,
         return_outcome_evaluation=collect_outcome_evaluation,
     )
+    outcome_metrics = None
+    pass_success_height_rows = None
     if collect_outcome_evaluation:
         test_metrics, outcome_evaluation = result
         if outcome_evaluation is None:
             raise RuntimeError("Outcome evaluation artifacts were requested, but no outcome predictions were collected.")
-        artifact_dir = write_outcome_evaluation_artifacts(
+        artifact_dir, outcome_metrics = write_outcome_evaluation_artifacts(
             args.evaluation_output_dir,
             model_id=args.model_id,
             task=model_args.task,
             outcome_evaluation=outcome_evaluation,
+            f1_outcome_threshold=args.f1_outcome_threshold,
         )
-        update_evaluation_run_metadata(
+        print(f"Saved outcome evaluation artifacts to {artifact_dir}")
+    elif model_args.return_pass_success_height_evaluation:
+        test_metrics, pass_success_evaluation = result
+        pass_success_height_rows = pass_success_evaluation["height_rows"]
+        if args.observed_pass_height_stratification:
+            write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows)
+        if pass_success_evaluation["predictor_rows"]:
+            write_pass_success_predictor_metrics(
+                args.evaluation_output_dir, args.model_id, pass_success_evaluation["predictor_rows"]
+            )
+    else:
+        test_metrics = result
+    if args.evaluation_output_dir:
+        write_model_evaluation_artifacts(
             args.evaluation_output_dir,
             model_id=args.model_id,
             task=model_args.task,
             feature_run_id=resolved_feature_run_id,
             diagnostic_feature_run_id=diagnostic_feature_run_id,
+            evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
+            evaluation_options={
+                "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
+                "evaluate_xpass": bool(args.evaluate_xpass),
+                "evaluate_combined_success": bool(args.evaluate_combined_success),
+                "xpass_version": args.xpass_version,
+                "xpass_metric": evaluation_xpass_metric,
+                "xpass_weight": args.xpass_weight,
+                "xpass_cache_metadata_sha256": (
+                    evaluation_xpass_metadata.get("metadata_sha256") if evaluation_xpass_metadata else None
+                ),
+                "xpass_pass_height_model_id": (
+                    evaluation_xpass_metadata.get("pass_height_model_id") if evaluation_xpass_metadata else None
+                ),
+                "xpass_missing_data_policy": "error" if evaluation_xpass_metadata else None,
+                "xpass_blend_formula": (
+                    "(1 - learning_weight) * physical_xpass + learning_weight * learning_probability"
+                    if args.evaluate_combined_success else None
+                ),
+                "pass_success_f1_threshold": 0.5 if evaluation_xpass_metadata else None,
+                "observed_pass_height_stratification": bool(args.observed_pass_height_stratification),
+                "pass_height_diagnostic_lineage": pass_height_diagnostic_lineage,
+                "f1_outcome_threshold": args.f1_outcome_threshold,
+                "discount": model_args.discount if args.evaluate_combined_success and args.xpass_weight == "v4" else args.discount,
+                "v4_power": model_args.v4_power if args.evaluate_combined_success and args.xpass_weight == "v4" else args.v4_power,
+                "v4_zero": model_args.v4_zero if args.evaluate_combined_success and args.xpass_weight == "v4" else args.v4_zero,
+                "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
+            },
+            test_metrics=test_metrics,
+            outcome_metrics=outcome_metrics,
+            pass_height_diagnostic_feature_run_id=pass_height_diagnostic_feature_run_id,
+            pass_height_diagnostic_label_dir=pass_height_diagnostic_label_dir,
+            observed_pass_height_threshold_meters=observed_pass_height_threshold_meters,
+            pass_height_diagnostic_ancestry_validated=bool(pass_height_diagnostic_lineage),
         )
-        print(f"Saved outcome evaluation artifacts to {artifact_dir}")
-    else:
-        test_metrics = result
     print("Test:\t" + get_losses_str(test_metrics))
