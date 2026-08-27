@@ -144,7 +144,9 @@ def pass_success_uses_diagnostic_labels(args: argparse.Namespace, selected_tasks
 
 
 def task_uses_diagnostic_feature_run(args: argparse.Namespace, task: str) -> bool:
-    return task in {"outcome_scoring", "outcome_conceding"} or pass_success_uses_diagnostic_labels(args, {task})
+    return task in {"pass_height", "outcome_scoring", "outcome_conceding"} or pass_success_uses_diagnostic_labels(
+        args, {task}
+    )
 
 
 def validate_selected_task_options(args: argparse.Namespace, requested_tasks: list[str]) -> None:
@@ -160,12 +162,12 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
         raise ValueError("--f1-outcome-threshold requires a selected outcome model.")
     if (
         args.diagnostic_feature_run_id
-        and not selected.intersection({"outcome_scoring", "outcome_conceding"})
+        and not selected.intersection({"pass_height", "outcome_scoring", "outcome_conceding"})
         and not pass_success_uses_diagnostics
     ):
         raise ValueError(
-            "--diagnostic-feature-run-id requires a selected outcome model or a pass_success evaluation "
-            "that uses pass-height diagnostics."
+            "--diagnostic-feature-run-id requires a selected pass_height or outcome model, or a pass_success "
+            "evaluation that uses pass-height diagnostics."
         )
 
 

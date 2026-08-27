@@ -217,7 +217,8 @@ def resolve_pass_height_diagnostic_context(
     *,
     required: bool,
 ) -> tuple[str | None, str | None, float | None, list[str] | None]:
-    if not cli_args.diagnostic_feature_run_id or str(getattr(model_args, "task", "")) != "pass_success":
+    task = str(getattr(model_args, "task", ""))
+    if not cli_args.diagnostic_feature_run_id or task not in {"pass_success", "pass_height"}:
         return None, None, None, None
     if not required:
         raise ValueError(
@@ -245,7 +246,7 @@ def resolve_pass_height_diagnostic_context(
         mode = DEFAULT_INTENDED_RECEIVER_MODE
     return_type = getattr(model_args, "return_type", None)
     if not return_type:
-        raise ValueError("Pass-success checkpoint does not record return_type for diagnostic-label resolution.")
+        raise ValueError(f"{task} checkpoint does not record return_type for diagnostic-label resolution.")
     diagnostic_root = resolve_feature_root(diagnostic_run_id)
     label_dir = get_action_label_dir(str(return_type), intended_receiver_mode=mode, root=diagnostic_root)
     if not label_dir.exists():
@@ -703,13 +704,17 @@ if __name__ == "__main__":
         label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
         feature_root = Path(feature_dir).parent
     diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
+    evaluated_task = str(getattr(model_args, "task", ""))
     pass_height_diagnostics_required = bool(
-        getattr(model_args, "task", None) == "pass_success"
-        and (
-            args.observed_pass_height_stratification
-            or args.weighted_pass_success_metrics
-            or args.evaluate_xpass
-            or args.evaluate_combined_success
+        (evaluated_task == "pass_height" and args.diagnostic_feature_run_id)
+        or (
+            evaluated_task == "pass_success"
+            and (
+                args.observed_pass_height_stratification
+                or args.weighted_pass_success_metrics
+                or args.evaluate_xpass
+                or args.evaluate_combined_success
+            )
         )
     )
     (

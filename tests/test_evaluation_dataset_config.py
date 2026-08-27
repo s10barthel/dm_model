@@ -612,6 +612,36 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pass-height diagnostics"):
             evaluate_relevant_models.validate_selected_task_options(unused_args, ["pass_success"])
 
+    def test_wrapper_forwards_diagnostic_feature_run_to_pass_height(self) -> None:
+        args = evaluate_relevant_models.parse_args(
+            [
+                "--pass-height-model-id", "pass_height/run_1",
+                "--diagnostic-feature-run-id", "feature_diagnostic",
+            ]
+        )
+        evaluate_relevant_models.validate_selected_task_options(args, ["pass_height"])
+        self.assertTrue(evaluate_relevant_models.task_uses_diagnostic_feature_run(args, "pass_height"))
+        command = ["python", "test.py", "--model_id", "pass_height/run_1"]
+        if evaluate_relevant_models.task_uses_diagnostic_feature_run(args, "pass_height"):
+            command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+        self.assertEqual(command[-2:], ["--diagnostic-feature-run-id", "feature_diagnostic"])
+
+    def test_wrapper_scopes_diagnostic_run_across_mixed_tasks(self) -> None:
+        args = evaluate_relevant_models.parse_args(
+            [
+                "--action-intent-model-id", "action_intent/run_1",
+                "--pass-height-model-id", "pass_height/run_1",
+                "--outcome-scoring-model-id", "outcome_scoring/run_1",
+                "--diagnostic-feature-run-id", "feature_diagnostic",
+            ]
+        )
+        evaluate_relevant_models.validate_selected_task_options(
+            args, ["action_intent", "pass_height", "outcome_scoring"]
+        )
+        self.assertFalse(evaluate_relevant_models.task_uses_diagnostic_feature_run(args, "action_intent"))
+        self.assertTrue(evaluate_relevant_models.task_uses_diagnostic_feature_run(args, "pass_height"))
+        self.assertTrue(evaluate_relevant_models.task_uses_diagnostic_feature_run(args, "outcome_scoring"))
+
     def test_pass_height_diagnostic_resolver_accepts_transitive_descendant(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             diagnostic_root = Path(tmpdir) / "diagnostic"
@@ -647,6 +677,28 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             self.assertEqual(resolved_dir, str(label_dir))
             self.assertEqual(threshold, 1.0)
             self.assertEqual(lineage, ["diagnostic", "middle", "base"])
+
+            pass_height_args = SimpleNamespace(
+                task="pass_height", return_type="disc_0.7", intended_receiver_mode="original"
+            )
+            with (
+                patch.object(evaluation_script, "resolve_feature_run_id", side_effect=lambda value, **_: value),
+                patch.object(evaluation_script, "resolve_feature_root", return_value=diagnostic_root),
+                patch.object(
+                    evaluation_script,
+                    "load_feature_run_metadata",
+                    side_effect=lambda run_id, required=True: metadata[run_id],
+                ),
+            ):
+                height_run_id, height_dir, height_threshold, height_lineage = (
+                    evaluation_script.resolve_pass_height_diagnostic_context(
+                        args, pass_height_args, "base", required=True
+                    )
+                )
+            self.assertEqual(height_run_id, "diagnostic")
+            self.assertEqual(height_dir, str(label_dir))
+            self.assertEqual(height_threshold, 1.0)
+            self.assertEqual(height_lineage, ["diagnostic", "middle", "base"])
 
     def test_pass_height_diagnostic_resolver_rejects_unrelated_run_and_invalid_threshold(self) -> None:
         args = SimpleNamespace(diagnostic_feature_run_id="diagnostic")
@@ -769,6 +821,23 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             self.assertEqual(len(dataset), 1)
             self.assertEqual(float(dataset.labels[0][LABEL_INDEX["pass_high"]]), 1.0)
             self.assertAlmostEqual(float(dataset.labels[0][LABEL_INDEX["pass_max_ball_z"]]), 1.3, places=5)
+
+            pass_height_dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=feature_dir,
+                label_dir=label_dir,
+                pass_height_diagnostic_label_dir=diagnostic_dir,
+                task="pass_height",
+                edge_in_dim=2,
+            )
+            self.assertEqual(len(pass_height_dataset), 1)
+            torch.testing.assert_close(pass_height_dataset.features[0].x, graph.x)
+            torch.testing.assert_close(pass_height_dataset.features[0].edge_index, graph.edge_index)
+            torch.testing.assert_close(pass_height_dataset.features[0].edge_attr, graph.edge_attr)
+            self.assertEqual(float(pass_height_dataset.labels[0][LABEL_INDEX["pass_high"]]), 1.0)
+            self.assertAlmostEqual(
+                float(pass_height_dataset.labels[0][LABEL_INDEX["pass_max_ball_z"]]), 1.3, places=5
+            )
 
     def test_model_evaluation_output_dir_uses_task_and_shared_timestamp(self) -> None:
         root = Path("evaluation-root")
