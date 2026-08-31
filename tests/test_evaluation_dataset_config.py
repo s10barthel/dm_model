@@ -11,7 +11,7 @@ from unittest.mock import patch
 import torch
 import numpy as np
 import pandas as pd
-from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
+from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 from torch_geometric.data import Data
 
 import test as evaluation_script
@@ -24,6 +24,7 @@ from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset
 from models.utils import (
     calc_binary_cohort_metrics,
     calc_binary_metrics,
+    calc_binary_diagnostic_rows,
     calc_continuous_target_metrics,
     calc_equal_frequency_bins,
     calc_pass_success_height_metrics,
@@ -343,15 +344,15 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         args = evaluate_relevant_models.parse_args(["--f1-outcome-threshold", "0.2"])
         pass_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "pass_success")
         scoring_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "outcome_scoring")
-        unrelated_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "pass_height")
+        pass_height_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "pass_height")
         self.assertIn("--observed-pass-height-stratification", pass_command)
         self.assertEqual(scoring_command[-2:], ["--f1-outcome-threshold", "0.2"])
-        self.assertEqual(unrelated_command, ["test.py"])
+        self.assertEqual(pass_height_command, ["test.py", "--classification-threshold", "0.5"])
 
         opted_out = evaluate_relevant_models.parse_args(["--no-observed-pass-height-stratification"])
         self.assertEqual(
             evaluate_relevant_models.add_task_evaluation_options(["test.py"], opted_out, "pass_success"),
-            ["test.py"],
+            ["test.py", "--classification-threshold", "0.5"],
         )
 
     def test_xpass_evaluation_cli_validation_and_forwarding(self) -> None:
@@ -401,6 +402,26 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         self.assertTrue({"roc_auc", "brier", "log_loss"}.issubset(threshold_free))
         self.assertTrue({"precision", "recall", "f1"}.isdisjoint(threshold_free))
         self.assertTrue({"precision", "recall", "f1"}.issubset(thresholded))
+
+    def test_binary_metrics_include_pr_auc_confusion_counts_and_strict_threshold(self) -> None:
+        target = np.array([0, 1, 1, 0])
+        prediction = np.array([0.5, 0.5, 0.9, 0.1])
+        metrics = calc_binary_metrics(target, prediction, threshold=0.5)
+        self.assertAlmostEqual(metrics["pr_auc"], average_precision_score(target, prediction))
+        self.assertEqual(metrics["true_positive"], 1)
+        self.assertEqual(metrics["false_positive"], 0)
+        self.assertEqual(metrics["true_negative"], 2)
+        self.assertEqual(metrics["false_negative"], 1)
+        self.assertTrue(np.isfinite(metrics["ece"]))
+
+    def test_binary_diagnostics_threshold_changes_only_thresholded_metrics(self) -> None:
+        target = np.array([0, 1, 1, 0])
+        prediction = {"learning": np.array([0.2, 0.55, 0.9, 0.6])}
+        low_rows, _, _ = calc_binary_diagnostic_rows(target, prediction, threshold=0.5)
+        high_rows, _, _ = calc_binary_diagnostic_rows(target, prediction, threshold=0.8)
+        for key in ("roc_auc", "pr_auc", "brier", "log_loss", "ece", "calibration_intercept", "calibration_slope"):
+            self.assertAlmostEqual(low_rows[0][key], high_rows[0][key])
+        self.assertNotEqual(low_rows[0]["recall"], high_rows[0]["recall"])
 
     def test_binary_cohort_metrics_report_count_and_prevalence(self) -> None:
         metrics = calc_binary_cohort_metrics(np.array([0, 1, 1, 0, 1]))
@@ -469,7 +490,53 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             self.assertListEqual(
                 list(exported.columns),
                 ["model_id", "predictor", "stratum", "sample_count", "positive_count",
-                 "success_prevalence", "roc_auc", "brier", "log_loss", "f1"],
+                 "success_prevalence", "classification_threshold", "roc_auc", "pr_auc", "brier", "log_loss",
+                 "calibration_intercept", "calibration_slope", "ece", "precision", "recall", "f1",
+                 "true_positive", "false_positive", "true_negative", "false_negative"],
+            )
+
+    def test_pass_success_predictor_diagnostics_write_aligned_artifacts(self) -> None:
+        diagnostics = {
+            "targets": np.array([1, 0, 1, 0, 1, 0]),
+            "predictors": {
+                "learning": np.array([0.9, 0.7, 0.8, 0.1, 0.6, 0.2]),
+                "physical_xpass_top10": np.array([0.8, 0.6, 0.7, 0.3, 0.5, 0.2]),
+                "combined_v4": np.array([0.85, 0.65, 0.75, 0.2, 0.55, 0.2]),
+            },
+            "observed_pass_high": np.array([1, 1, 0, 0, 1, 0]),
+            "pass_distance": np.array([5, 10, 20, 30, 40, 50], dtype=float),
+            "combined_learning_weight": np.array([0.0, 0.1, 0.3, 0.5, 0.8, 1.0]),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rows = evaluation_script.write_pass_success_predictor_diagnostics(
+                tmpdir, "pass_success/1", diagnostics, threshold=0.6
+            )
+            self.assertEqual(len(rows), 9)
+            metrics = pd.read_csv(Path(tmpdir) / "pass_success_predictor_metrics.csv")
+            curves = pd.read_csv(Path(tmpdir) / "pass_success_predictor_threshold_curve.csv")
+            distance = pd.read_csv(Path(tmpdir) / "pass_success_predictor_distance_slices.csv")
+            weights = pd.read_csv(Path(tmpdir) / "pass_success_combined_weight_slices.csv")
+            self.assertTrue((metrics["classification_threshold"] == 0.6).all())
+            self.assertEqual(len(curves), 3 * 3 * 101)
+            self.assertEqual(len(distance), 3 * 5)
+            self.assertEqual(len(weights), 5)
+
+    def test_pass_height_diagnostics_write_boundary_slices(self) -> None:
+        diagnostics = {
+            "targets": np.array([0, 0, 1, 1]),
+            "predictions": np.array([0.1, 0.3, 0.7, 0.9]),
+            "observed_pass_max_height": np.array([1.0, 1.8, 2.2, 3.0]),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            evaluation_script.write_pass_height_diagnostics(tmpdir, "pass_height/1", diagnostics, threshold=0.5)
+            metrics = pd.read_csv(Path(tmpdir) / "pass_height_metrics.csv")
+            curves = pd.read_csv(Path(tmpdir) / "pass_height_threshold_curve.csv")
+            slices = pd.read_csv(Path(tmpdir) / "pass_height_observed_height_slices.csv")
+            self.assertEqual(metrics.loc[0, "predictor"], "pass_height")
+            self.assertEqual(len(curves), 101)
+            self.assertSetEqual(
+                set(slices["stratum"]),
+                {"max_height_le_1_5m", "max_height_1_5_to_2_0m", "max_height_2_0_to_2_5m", "max_height_gt_2_5m"},
             )
 
     def test_pass_success_height_csv_has_stable_schema(self) -> None:

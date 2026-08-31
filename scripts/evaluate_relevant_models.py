@@ -62,6 +62,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--xpass-version", default=None)
     parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4"], default=None)
     parser.add_argument("--no-observed-pass-height-stratification", action="store_true")
+    parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
     parser.add_argument("--pc-xpass-cache-dir", default=None)
     parser.add_argument("--discount", type=parse_bool_text, default=None)
@@ -175,6 +176,8 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
     """Append task-specific, evaluation-only CLI options."""
     if task == "pass_success" and not args.no_observed_pass_height_stratification:
         command.append("--observed-pass-height-stratification")
+    if task in {"pass_success", "pass_height"}:
+        command.extend(["--classification-threshold", str(args.classification_threshold)])
     if task == "pass_success" and (args.evaluate_xpass or args.evaluate_combined_success):
         if args.evaluate_xpass:
             command.append("--evaluate-xpass")
@@ -271,6 +274,7 @@ def main() -> None:
             "xpass_version": args.xpass_version,
             "xpass_weight": args.xpass_weight,
             "observed_pass_height_stratification": not bool(args.no_observed_pass_height_stratification),
+            "classification_threshold": args.classification_threshold,
             "f1_outcome_threshold": args.f1_outcome_threshold,
             "discount": args.discount,
             "v4_power": args.v4_power,

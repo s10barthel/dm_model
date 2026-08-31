@@ -18,8 +18,10 @@ from models import utils
 from models.dataset_config import build_action_dataset_kwargs
 from models.utils import (
     calc_binary_metrics,
+    calc_binary_diagnostic_rows,
     calc_continuous_target_metrics,
     calc_equal_frequency_bins,
+    equal_frequency_slice_masks,
     get_losses_str,
     infer_feature_graph_schema,
     infer_training_edge_schema,
@@ -537,12 +539,104 @@ def write_pass_success_predictor_metrics(output_root: str | Path, model_id: str,
     output_dir.mkdir(parents=True, exist_ok=True)
     columns = [
         "model_id", "predictor", "stratum", "sample_count", "positive_count",
-        "success_prevalence", "roc_auc", "brier", "log_loss", "f1",
+        "success_prevalence", "classification_threshold", "roc_auc", "pr_auc", "brier", "log_loss",
+        "calibration_intercept", "calibration_slope", "ece", "precision", "recall", "f1",
+        "true_positive", "false_positive", "true_negative", "false_negative",
     ]
     pd.DataFrame([{"model_id": model_id, **row} for row in rows], columns=columns).to_csv(
         output_dir / "pass_success_predictor_metrics.csv", index=False
     )
     return output_dir / "pass_success_predictor_metrics.csv"
+
+
+def _write_rows(output_dir: Path, filename: str, model_id: str, rows: list[dict]) -> Path:
+    records = [{"model_id": model_id, **row} for row in rows]
+    path = output_dir / filename
+    pd.DataFrame(records).to_csv(path, index=False)
+    return path
+
+
+def write_pass_success_predictor_diagnostics(
+    output_root: str | Path,
+    model_id: str,
+    diagnostics: dict,
+    *,
+    threshold: float,
+) -> list[dict]:
+    """Write full comparable diagnostics for learning, physical, and combined pass-success scores."""
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    targets = np.asarray(diagnostics["targets"])
+    predictors = diagnostics["predictors"]
+    heights = np.asarray(diagnostics["observed_pass_high"])
+    strata = (
+        ("pooled", np.ones(len(targets), dtype=bool)),
+        ("observed_high", heights == 1.0),
+        ("observed_non_high", heights == 0.0),
+    )
+    metric_rows, calibration_rows, curve_rows = calc_binary_diagnostic_rows(
+        targets, predictors, strata, threshold=threshold
+    )
+    write_pass_success_predictor_metrics(output_dir, model_id, metric_rows)
+    _write_rows(output_dir, "pass_success_predictor_calibration_bins.csv", model_id, calibration_rows)
+    _write_rows(output_dir, "pass_success_predictor_threshold_curve.csv", model_id, curve_rows)
+
+    distance_rows: list[dict] = []
+    for name, mask, lower, upper in equal_frequency_slice_masks(diagnostics["pass_distance"], "distance"):
+        rows, _, _ = calc_binary_diagnostic_rows(targets, predictors, ((name, mask),), threshold=threshold)
+        distance_rows.extend({"distance_lower": lower, "distance_upper": upper, **row} for row in rows)
+    _write_rows(output_dir, "pass_success_predictor_distance_slices.csv", model_id, distance_rows)
+
+    weight = diagnostics.get("combined_learning_weight")
+    combined_names = [name for name in predictors if name.startswith("combined_")]
+    physical_names = [name for name in predictors if name.startswith("physical_xpass_")]
+    weight_rows: list[dict] = []
+    if weight is not None and combined_names and physical_names:
+        weight = np.asarray(weight, dtype=float)
+        bounds = np.linspace(0.0, 1.0, 6)
+        for index, (lower, upper) in enumerate(zip(bounds[:-1], bounds[1:]), start=1):
+            mask = (weight >= lower) & ((weight <= upper) if index == 5 else (weight < upper))
+            rows, _, _ = calc_binary_diagnostic_rows(
+                targets, {combined_names[0]: predictors[combined_names[0]]}, ((f"weight_{index}", mask),), threshold=threshold
+            )
+            for row in rows:
+                row.update({
+                    "learning_weight_lower": float(lower), "learning_weight_upper": float(upper),
+                    "mean_learning_weight": float(weight[mask].mean()) if mask.any() else np.nan,
+                    "mean_learning_probability": float(np.asarray(predictors["learning"])[mask].mean()) if mask.any() else np.nan,
+                    "mean_physical_xpass": float(np.asarray(predictors[physical_names[0]])[mask].mean()) if mask.any() else np.nan,
+                })
+                weight_rows.append(row)
+    _write_rows(output_dir, "pass_success_combined_weight_slices.csv", model_id, weight_rows)
+    return metric_rows
+
+
+def write_pass_height_diagnostics(
+    output_root: str | Path,
+    model_id: str,
+    diagnostics: dict,
+    *,
+    threshold: float,
+) -> list[dict]:
+    """Write the same binary-probability diagnostic suite for pass-height predictions."""
+    output_dir = Path(output_root)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    targets = np.asarray(diagnostics["targets"])
+    predictors = {"pass_height": np.asarray(diagnostics["predictions"])}
+    metric_rows, calibration_rows, curve_rows = calc_binary_diagnostic_rows(targets, predictors, threshold=threshold)
+    _write_rows(output_dir, "pass_height_metrics.csv", model_id, metric_rows)
+    _write_rows(output_dir, "pass_height_calibration_bins.csv", model_id, calibration_rows)
+    _write_rows(output_dir, "pass_height_threshold_curve.csv", model_id, curve_rows)
+    heights = np.asarray(diagnostics["observed_pass_max_height"], dtype=float)
+    bands = (
+        ("max_height_le_1_5m", heights <= 1.5),
+        ("max_height_1_5_to_2_0m", (heights > 1.5) & (heights <= 2.0)),
+        ("max_height_2_0_to_2_5m", (heights > 2.0) & (heights <= 2.5)),
+        ("max_height_gt_2_5m", heights > 2.5),
+    )
+    slice_rows, _, _ = calc_binary_diagnostic_rows(targets, predictors, bands, threshold=threshold)
+    _write_rows(output_dir, "pass_height_observed_height_slices.csv", model_id, slice_rows)
+    return metric_rows
 
 
 def _json_compatible(value):
@@ -660,6 +754,7 @@ if __name__ == "__main__":
     parser.add_argument("--xpass-version", default=None)
     parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4"], default=None)
     parser.add_argument("--observed-pass-height-stratification", action="store_true")
+    parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
     parser.add_argument("--pass-height-model-id", type=str, default=None)
     parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
@@ -684,7 +779,11 @@ if __name__ == "__main__":
     model_args.evaluate_combined_success = bool(args.evaluate_combined_success)
     model_args.xpass_metric = evaluation_xpass_metric
     model_args.xpass_weight = args.xpass_weight
+    model_args.classification_threshold = args.classification_threshold
     model_args.f1_outcome_threshold = args.f1_outcome_threshold
+    model_args.return_binary_diagnostics = bool(
+        args.evaluation_output_dir and getattr(model_args, "task", None) == "pass_height"
+    )
     model_args.discount = True if args.discount is None else bool(args.discount)
     model_args.v4_power = 4.0 if args.v4_power is None else float(args.v4_power)
     model_args.v4_zero = 0.7 if args.v4_zero is None else float(args.v4_zero)
@@ -837,14 +936,25 @@ if __name__ == "__main__":
             f1_outcome_threshold=args.f1_outcome_threshold,
         )
         print(f"Saved outcome evaluation artifacts to {artifact_dir}")
-    elif model_args.return_pass_success_height_evaluation:
-        test_metrics, pass_success_evaluation = result
-        pass_success_height_rows = pass_success_evaluation["height_rows"]
-        if args.observed_pass_height_stratification:
-            write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows)
-        if pass_success_evaluation["predictor_rows"]:
-            write_pass_success_predictor_metrics(
-                args.evaluation_output_dir, args.model_id, pass_success_evaluation["predictor_rows"]
+    elif model_args.return_pass_success_height_evaluation or model_args.return_binary_diagnostics:
+        test_metrics, binary_evaluation = result
+        if model_args.return_pass_success_height_evaluation:
+            pass_success_height_rows = binary_evaluation["height_rows"]
+            if args.observed_pass_height_stratification:
+                write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows)
+            if binary_evaluation.get("predictor_diagnostics"):
+                write_pass_success_predictor_diagnostics(
+                    args.evaluation_output_dir,
+                    args.model_id,
+                    binary_evaluation["predictor_diagnostics"],
+                    threshold=args.classification_threshold,
+                )
+        elif model_args.return_binary_diagnostics:
+            write_pass_height_diagnostics(
+                args.evaluation_output_dir,
+                args.model_id,
+                binary_evaluation,
+                threshold=args.classification_threshold,
             )
     else:
         test_metrics = result
@@ -874,7 +984,8 @@ if __name__ == "__main__":
                     "(1 - learning_weight) * physical_xpass + learning_weight * learning_probability"
                     if args.evaluate_combined_success else None
                 ),
-                "pass_success_f1_threshold": 0.5 if evaluation_xpass_metadata else None,
+                "pass_success_f1_threshold": args.classification_threshold if evaluation_xpass_metadata else None,
+                "classification_threshold": args.classification_threshold,
                 "observed_pass_height_stratification": bool(args.observed_pass_height_stratification),
                 "pass_height_diagnostic_lineage": pass_height_diagnostic_lineage,
                 "f1_outcome_threshold": args.f1_outcome_threshold,

@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from collections import OrderedDict
 from datetime import datetime
@@ -13,13 +14,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from catboost import CatBoostClassifier
 from sklearn.metrics import (
+    average_precision_score,
     brier_score_loss,
-    f1_score,
     log_loss,
-    precision_score,
-    recall_score,
     roc_auc_score,
 )
+from sklearn.linear_model import LogisticRegression
 from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
@@ -1261,31 +1261,88 @@ def calc_class_accuracy(y, y_hat, aggfunc="mean"):
         return (torch.argmax(y_hat, dim=1) == y).float().sum().item()
 
 
-def calc_binary_metrics(y, y_hat, threshold: float | None = 0.5):
+def calc_threshold_binary_metrics(y, y_hat, threshold: float) -> dict[str, float | int]:
+    """Return threshold-dependent binary metrics using the documented strict comparison."""
     y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
     y_score = np.asarray(y_hat, dtype=float).reshape(-1)
     if len(y_true) != len(y_score) or len(y_true) == 0:
         raise ValueError("Binary metric inputs must be non-empty and have identical lengths.")
+    if not np.isfinite(y_score).all():
+        raise ValueError("Binary prediction scores must be finite.")
+    if not math.isfinite(float(threshold)) or not 0.0 <= float(threshold) <= 1.0:
+        raise ValueError("Binary classification threshold must be finite and between 0 and 1.")
+    y_pred = y_score > float(threshold)
+    tp = int(np.sum((y_true == 1) & y_pred))
+    fp = int(np.sum((y_true == 0) & y_pred))
+    tn = int(np.sum((y_true == 0) & ~y_pred))
+    fn = int(np.sum((y_true == 1) & ~y_pred))
+    precision = float(tp / (tp + fp)) if tp + fp else 0.0
+    recall = float(tp / (tp + fn)) if tp + fn else 0.0
+    f1 = float(2.0 * precision * recall / (precision + recall)) if precision + recall else 0.0
+    return {
+        "classification_threshold": float(threshold),
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "true_positive": tp,
+        "false_positive": fp,
+        "true_negative": tn,
+        "false_negative": fn,
+    }
+
+
+def calc_binary_calibration_metrics(y, y_hat, n_bins: int = 10) -> dict[str, float]:
+    """Return logistic calibration intercept/slope and equal-frequency ECE."""
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    if len(y_true) != len(y_score) or len(y_true) == 0:
+        raise ValueError("Binary metric inputs must be non-empty and have identical lengths.")
+    if not np.isfinite(y_score).all():
+        raise ValueError("Binary prediction scores must be finite.")
+    has_both_classes = bool(np.any(y_true == 0) and np.any(y_true == 1))
+    has_score_variation = bool(np.ptp(y_score) > 0.0)
+    intercept = np.nan
+    slope = np.nan
+    if has_both_classes and has_score_variation:
+        eps = np.finfo(float).eps
+        logits = np.log(np.clip(y_score, eps, 1.0 - eps) / np.clip(1.0 - y_score, eps, 1.0 - eps))
+        try:
+            calibration = LogisticRegression(C=1e6, solver="lbfgs", max_iter=1000).fit(logits.reshape(-1, 1), y_true)
+            intercept = float(calibration.intercept_[0])
+            slope = float(calibration.coef_[0, 0])
+        except ValueError:
+            pass
+    bins = calc_equal_frequency_bins(y_true, y_score, n_bins=n_bins)
+    if len(bins):
+        ece = float(np.sum(
+            bins["sample_count"].to_numpy(dtype=float) / len(y_true)
+            * np.abs(bins["prediction_minus_observed"].to_numpy(dtype=float))
+        ))
+    else:
+        ece = np.nan
+    return {"calibration_intercept": intercept, "calibration_slope": slope, "ece": ece}
+
+
+def calc_binary_metrics(y, y_hat, threshold: float | None = 0.5, *, include_calibration: bool = True):
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    if len(y_true) != len(y_score) or len(y_true) == 0:
+        raise ValueError("Binary metric inputs must be non-empty and have identical lengths.")
+    if not np.isfinite(y_score).all():
+        raise ValueError("Binary prediction scores must be finite.")
     has_positive = np.sum(y_true) > 0
     has_negative = np.sum(y_true == 0) > 0
 
     metrics = {
         "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else np.nan,
+        "pr_auc": average_precision_score(y_true, y_score) if has_positive else np.nan,
         "brier": brier_score_loss(y_true, y_score),
         "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
     }
+    if include_calibration:
+        metrics.update(calc_binary_calibration_metrics(y_true, y_score))
     if threshold is not None:
-        # The operating point intentionally uses a strict greater-than comparison.
-        y_pred = y_score > float(threshold)
-        precision = precision_score(y_true, y_pred, zero_division=0)
-        recall = recall_score(y_true, y_pred) if has_positive else 0
-        metrics.update(
-            {
-                "precision": precision,
-                "recall": recall,
-                "f1": f1_score(y_true, y_pred) if precision > 0 and recall > 0 else 0,
-            }
-        )
+        metrics.update(calc_threshold_binary_metrics(y_true, y_score, float(threshold)))
     return metrics
 
 
@@ -1365,7 +1422,7 @@ def calc_pass_success_predictor_metrics(
             probability_metrics = (
                 calc_binary_metrics(y_true[mask], scores[mask], threshold=threshold)
                 if count
-                else {"roc_auc": np.nan, "brier": np.nan, "log_loss": np.nan, "f1": np.nan}
+                else {"roc_auc": np.nan, "pr_auc": np.nan, "brier": np.nan, "log_loss": np.nan, "f1": np.nan}
             )
             row = {
                 "predictor": predictor,
@@ -1373,10 +1430,7 @@ def calc_pass_success_predictor_metrics(
                 "sample_count": count,
                 "positive_count": positive_count,
                 "success_prevalence": float(positive_count / count) if count else np.nan,
-                "roc_auc": probability_metrics["roc_auc"],
-                "brier": probability_metrics["brier"],
-                "log_loss": probability_metrics["log_loss"],
-                "f1": probability_metrics["f1"],
+                **probability_metrics,
             }
             rows.append(row)
             if stratum == "pooled":
@@ -1384,6 +1438,72 @@ def calc_pass_success_predictor_metrics(
                     if key not in {"predictor", "stratum"}:
                         flat[f"pass_success_predictor_{predictor}_{key}"] = value
     return flat, rows
+
+
+def calc_binary_diagnostic_rows(
+    y,
+    predictors: dict[str, np.ndarray],
+    strata: tuple[tuple[str, np.ndarray], ...] | None = None,
+    *,
+    threshold: float = 0.5,
+    n_bins: int = 10,
+    curve_step: float = 0.01,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Build comparable metric, calibration-bin, and threshold-curve rows for probabilities."""
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    if not len(y_true):
+        raise ValueError("Binary diagnostics require at least one target.")
+    if strata is None:
+        strata = (("pooled", np.ones(len(y_true), dtype=bool)),)
+    thresholds = np.round(np.arange(0.0, 1.0 + curve_step / 2.0, curve_step), 10)
+    metric_rows: list[dict] = []
+    calibration_rows: list[dict] = []
+    curve_rows: list[dict] = []
+    for predictor, values in predictors.items():
+        scores = np.asarray(values, dtype=float).reshape(-1)
+        if len(scores) != len(y_true) or not np.isfinite(scores).all():
+            raise ValueError(f"Predictor {predictor!r} must contain one finite value per target.")
+        for stratum, raw_mask in strata:
+            mask = np.asarray(raw_mask, dtype=bool).reshape(-1)
+            if len(mask) != len(y_true):
+                raise ValueError(f"Stratum {stratum!r} must align with targets.")
+            observed = y_true[mask]
+            predicted = scores[mask]
+            row = {
+                "predictor": predictor,
+                "stratum": stratum,
+                "sample_count": int(len(observed)),
+                "positive_count": int(observed.sum()),
+                "success_prevalence": float(observed.mean()) if len(observed) else np.nan,
+            }
+            if len(observed):
+                row.update(calc_binary_metrics(observed, predicted, threshold=threshold))
+                bins = calc_equal_frequency_bins(observed, predicted, n_bins=n_bins)
+                for bin_row in bins.to_dict("records"):
+                    calibration_rows.append({"predictor": predictor, "stratum": stratum, **bin_row})
+                for curve_threshold in thresholds:
+                    curve_rows.append({
+                        "predictor": predictor,
+                        "stratum": stratum,
+                        **calc_threshold_binary_metrics(observed, predicted, float(curve_threshold)),
+                    })
+            else:
+                row.update({"classification_threshold": float(threshold)})
+            metric_rows.append(row)
+    return metric_rows, calibration_rows, curve_rows
+
+
+def equal_frequency_slice_masks(values, prefix: str, n_slices: int = 5) -> list[tuple[str, np.ndarray, float, float]]:
+    """Return deterministic equal-count slices plus their observed numeric bounds."""
+    numeric = np.asarray(values, dtype=float).reshape(-1)
+    if not len(numeric) or not np.isfinite(numeric).all():
+        raise ValueError("Slice values must be a non-empty finite vector.")
+    masks: list[tuple[str, np.ndarray, float, float]] = []
+    for index, selected in enumerate(np.array_split(np.argsort(numeric, kind="stable"), min(n_slices, len(numeric))), start=1):
+        mask = np.zeros(len(numeric), dtype=bool)
+        mask[selected] = True
+        masks.append((f"{prefix}_q{index}", mask, float(numeric[selected].min()), float(numeric[selected].max())))
+    return masks
 
 
 def calc_continuous_target_metrics(y, y_hat) -> dict[str, float]:
@@ -1656,6 +1776,8 @@ def run_epoch(
     physical_xpass_predictions: list[np.ndarray] = []
     combined_success_predictions: list[np.ndarray] = []
     combined_learning_weights: list[np.ndarray] = []
+    evaluation_pass_distances: list[np.ndarray] = []
+    observed_pass_max_heights: list[np.ndarray] = []
     binary_predictions: list[np.ndarray] = []
     binary_targets: list[np.ndarray] = []
     binary_threshold: float | None = None
@@ -1854,8 +1976,10 @@ def run_epoch(
                     distance_array = torch.stack(observed_distance).cpu().numpy().astype(float)
                     if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
                         raise ValueError("Physical xPass evaluation requires finite observed-target xPass and distance values.")
-                    if evaluate_xpass:
+                    # The combined diagnostic needs the raw physical component as well.
+                    if evaluate_xpass or evaluate_combined:
                         physical_xpass_predictions.append(xpass_array)
+                    evaluation_pass_distances.append(distance_array)
                     if evaluate_combined:
                         blend_kwargs = {}
                         weight_version = str(getattr(args, "xpass_weight", "")).lower()
@@ -1929,7 +2053,15 @@ def run_epoch(
                     observed_pass_height_labels.append(
                         get_label_slice(batch_labels, "pass_high").cpu().detach().numpy().astype(float)
                     )
-                threshold = 0.5 if args.task.endswith("success") or args.task == "pass_height" else 0.1
+                if args.task == "pass_height":
+                    observed_pass_max_heights.append(
+                        get_label_slice(batch_labels, "pass_max_ball_z").cpu().detach().numpy().astype(float)
+                    )
+                threshold = (
+                    float(getattr(args, "classification_threshold", 0.5))
+                    if args.task.endswith("success") or args.task == "pass_height"
+                    else 0.1
+                )
                 binary_predictions.append(np.asarray(y_hat, dtype=float))
                 binary_targets.append(np.asarray(y, dtype=float))
                 binary_threshold = threshold
@@ -2068,11 +2200,12 @@ def run_epoch(
                 interim_metrics[key] = value / metrics["count"]
             if binary_predictions:
                 interim_metrics.update(
-                    calc_binary_metrics(
-                        np.concatenate(binary_targets),
-                        np.concatenate(binary_predictions),
-                        threshold=binary_threshold,
-                    )
+                calc_binary_metrics(
+                    np.concatenate(binary_targets),
+                    np.concatenate(binary_predictions),
+                    threshold=binary_threshold,
+                    include_calibration=False,
+                )
                 )
             print(f"[{batch_index:>{len(str(n_batches))}d}/{n_batches}]  {get_losses_str(interim_metrics)}")
 
@@ -2140,6 +2273,7 @@ def run_epoch(
             np.concatenate(binary_targets),
             np.concatenate(observed_pass_height_labels),
             predictors,
+            threshold=float(getattr(args, "classification_threshold", 0.5)),
         )
         metrics.update(predictor_metrics)
         if combined_learning_weights:
@@ -2155,8 +2289,25 @@ def run_epoch(
     if return_outcome_evaluation:
         return metrics, outcome_evaluation
     if bool(getattr(args, "return_pass_success_height_evaluation", False)):
-        return metrics, {
+        evaluation = {
             "height_rows": pass_success_height_rows if observed_pass_height_labels else [],
             "predictor_rows": pass_success_predictor_rows or [],
+        }
+        if pass_success_predictor_rows:
+            evaluation["predictor_diagnostics"] = {
+                "targets": np.concatenate(binary_targets),
+                "predictors": predictors,
+                "observed_pass_high": np.concatenate(observed_pass_height_labels),
+                "pass_distance": np.concatenate(evaluation_pass_distances),
+                "combined_learning_weight": np.concatenate(combined_learning_weights) if combined_learning_weights else None,
+            }
+        return metrics, evaluation
+    if bool(getattr(args, "return_binary_diagnostics", False)):
+        return metrics, {
+            "targets": np.concatenate(binary_targets),
+            "predictions": np.concatenate(binary_predictions),
+            "observed_pass_max_height": (
+                np.concatenate(observed_pass_max_heights) if observed_pass_max_heights else None
+            ),
         }
     return metrics
