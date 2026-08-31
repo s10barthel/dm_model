@@ -29,9 +29,19 @@ from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
 from physical_pass_model import (
+    EVALUATION_XPASS_DISTANCE_ATTR,
+    EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+    EVALUATION_XPASS_PASS_HEIGHT_ATTR,
+    EVALUATION_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+    PHYSICAL_XPASS_PROB_ATTR,
+    blend_physical_xpass_predictions,
     physical_xpass_blend_weight_v4,
+    physical_xpass_blend_weight,
+    physical_xpass_blend_weight_v2,
+    physical_xpass_blend_weight_v3,
     normalize_pc_xpass_lane_survival_mode,
     residual_distance_threshold,
     resolved_residual_regularization_lambdas,
@@ -1251,27 +1261,129 @@ def calc_class_accuracy(y, y_hat, aggfunc="mean"):
         return (torch.argmax(y_hat, dim=1) == y).float().sum().item()
 
 
-def calc_binary_metrics(y, y_hat, threshold=0.5):
+def calc_binary_metrics(y, y_hat, threshold: float | None = 0.5):
     y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
     y_score = np.asarray(y_hat, dtype=float).reshape(-1)
     if len(y_true) != len(y_score) or len(y_true) == 0:
         raise ValueError("Binary metric inputs must be non-empty and have identical lengths.")
-    y_pred = y_score > threshold
     has_positive = np.sum(y_true) > 0
     has_negative = np.sum(y_true == 0) > 0
 
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred) if has_positive else 0
-
     metrics = {
-        "precision": precision,
-        "recall": recall,
-        "f1": f1_score(y_true, y_pred) if precision > 0 and recall > 0 else 0,
         "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else np.nan,
         "brier": brier_score_loss(y_true, y_score),
         "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
     }
+    if threshold is not None:
+        # The operating point intentionally uses a strict greater-than comparison.
+        y_pred = y_score > float(threshold)
+        precision = precision_score(y_true, y_pred, zero_division=0)
+        recall = recall_score(y_true, y_pred) if has_positive else 0
+        metrics.update(
+            {
+                "precision": precision,
+                "recall": recall,
+                "f1": f1_score(y_true, y_pred) if precision > 0 and recall > 0 else 0,
+            }
+        )
     return metrics
+
+
+def calc_binary_cohort_metrics(y) -> dict[str, float | int]:
+    """Return cohort size and positive-label prevalence for a binary target."""
+    y_true = np.asarray(y).reshape(-1)
+    if not np.isfinite(y_true).all() or not np.isin(y_true, [0, 1]).all():
+        raise ValueError("Binary cohort targets must contain finite 0/1 values.")
+    sample_count = int(len(y_true))
+    positive_count = int(y_true.sum())
+    return {
+        "sample_count": sample_count,
+        "positive_count": positive_count,
+        "positive_prevalence": float(positive_count / sample_count) if sample_count else np.nan,
+    }
+
+
+def calc_pass_success_height_metrics(y, y_hat, observed_pass_high) -> tuple[dict[str, float | int], list[dict]]:
+    """Calculate threshold-free pass-success metrics by observed pass-height class."""
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    y_score = np.asarray(y_hat, dtype=float).reshape(-1)
+    pass_high = np.asarray(observed_pass_high, dtype=float).reshape(-1)
+    if not (len(y_true) == len(y_score) == len(pass_high)):
+        raise ValueError("Pass-success height-stratification inputs must have identical lengths.")
+    if not np.isfinite(pass_high).all() or not np.isin(pass_high, [0.0, 1.0]).all():
+        raise ValueError("Observed pass-height labels must be finite binary pass_high values.")
+
+    flat: dict[str, float | int] = {}
+    rows: list[dict] = []
+    for stratum, mask in (("observed_high", pass_high == 1.0), ("observed_non_high", pass_high == 0.0)):
+        count = int(mask.sum())
+        positive_count = int(y_true[mask].sum())
+        prevalence = float(positive_count / count) if count else np.nan
+        probability_metrics = (
+            calc_binary_metrics(y_true[mask], y_score[mask], threshold=None)
+            if count
+            else {"roc_auc": np.nan, "brier": np.nan, "log_loss": np.nan}
+        )
+        row = {
+            "stratum": stratum,
+            "sample_count": count,
+            "positive_count": positive_count,
+            "success_prevalence": prevalence,
+            "roc_auc": probability_metrics["roc_auc"],
+            "brier": probability_metrics["brier"],
+        }
+        rows.append(row)
+        prefix = f"pass_success_{stratum}"
+        for key, value in row.items():
+            if key != "stratum":
+                flat[f"{prefix}_{key}"] = value
+    return flat, rows
+
+
+def calc_pass_success_predictor_metrics(
+    y, observed_pass_high, predictors: dict[str, np.ndarray], threshold: float = 0.5,
+) -> tuple[dict[str, float | int], list[dict]]:
+    """Calculate pooled and observed-height metrics for aligned pass-success predictors."""
+    y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
+    pass_high = np.asarray(observed_pass_high, dtype=float).reshape(-1)
+    if len(y_true) != len(pass_high):
+        raise ValueError("Pass-success targets and observed-height labels must have identical lengths.")
+    flat: dict[str, float | int] = {}
+    rows: list[dict] = []
+    strata = (
+        ("pooled", np.ones(len(y_true), dtype=bool)),
+        ("observed_high", pass_high == 1.0),
+        ("observed_non_high", pass_high == 0.0),
+    )
+    for predictor, values in predictors.items():
+        scores = np.asarray(values, dtype=float).reshape(-1)
+        if len(scores) != len(y_true) or not np.isfinite(scores).all():
+            raise ValueError(f"Predictor {predictor!r} must contain one finite value per evaluated pass.")
+        for stratum, mask in strata:
+            count = int(mask.sum())
+            positive_count = int(y_true[mask].sum())
+            probability_metrics = (
+                calc_binary_metrics(y_true[mask], scores[mask], threshold=threshold)
+                if count
+                else {"roc_auc": np.nan, "brier": np.nan, "log_loss": np.nan, "f1": np.nan}
+            )
+            row = {
+                "predictor": predictor,
+                "stratum": stratum,
+                "sample_count": count,
+                "positive_count": positive_count,
+                "success_prevalence": float(positive_count / count) if count else np.nan,
+                "roc_auc": probability_metrics["roc_auc"],
+                "brier": probability_metrics["brier"],
+                "log_loss": probability_metrics["log_loss"],
+                "f1": probability_metrics["f1"],
+            }
+            rows.append(row)
+            if stratum == "pooled":
+                for key, value in row.items():
+                    if key not in {"predictor", "stratum"}:
+                        flat[f"pass_success_predictor_{predictor}_{key}"] = value
+    return flat, rows
 
 
 def calc_continuous_target_metrics(y, y_hat) -> dict[str, float]:
@@ -1528,7 +1640,7 @@ def run_epoch(
     pos_weight = torch.tensor(pos_weight)
 
     if args.gnn_task in ["node_binary", "graph_binary"]:
-        metrics = {"count": 0, "ce_loss": 0, "l1_loss": 0, "f1": 0, "roc_auc": 0, "brier": 0}
+        metrics = {"count": 0, "ce_loss": 0, "l1_loss": 0}
     elif args.gnn_task in ["node_selection", "graph_multiclass"]:
         metrics = {"count": 0, "ce_loss": 0, "l1_loss": 0, "accuracy": 0, "mrr": 0}
     elif args.gnn_task in ["node_regression", "graph_regression"]:
@@ -1540,6 +1652,10 @@ def run_epoch(
     weighted_predictions: list[np.ndarray] = []
     weighted_targets: list[np.ndarray] = []
     weighted_effective_weights: list[np.ndarray] = []
+    observed_pass_height_labels: list[np.ndarray] = []
+    physical_xpass_predictions: list[np.ndarray] = []
+    combined_success_predictions: list[np.ndarray] = []
+    combined_learning_weights: list[np.ndarray] = []
     binary_predictions: list[np.ndarray] = []
     binary_targets: list[np.ndarray] = []
     binary_threshold: float | None = None
@@ -1712,6 +1828,75 @@ def run_epoch(
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()
+                evaluate_xpass = bool(getattr(args, "evaluate_xpass", False))
+                evaluate_combined = bool(getattr(args, "evaluate_combined_success", False))
+                if evaluate_xpass or evaluate_combined:
+                    xpass_values = getattr(batch_graphs, EVALUATION_XPASS_PROB_ATTR, None)
+                    distance_values = getattr(batch_graphs, EVALUATION_XPASS_DISTANCE_ATTR, None)
+                    nearest_values = getattr(batch_graphs, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
+                    height_values = getattr(batch_graphs, EVALUATION_XPASS_PASS_HEIGHT_ATTR, None)
+                    if xpass_values is None or distance_values is None:
+                        raise ValueError("Physical xPass evaluation requires cached xPass and pass-distance tensors.")
+                    observed_xpass = []
+                    observed_distance = []
+                    observed_nearest = []
+                    observed_height = []
+                    for graph_index in index_range:
+                        graph_mask = batch == graph_index
+                        target_index = intent[graph_index]
+                        observed_xpass.append(xpass_values[graph_mask][target_index])
+                        observed_distance.append(distance_values[graph_mask][target_index])
+                        if nearest_values is not None:
+                            observed_nearest.append(nearest_values[graph_mask][target_index])
+                        if height_values is not None:
+                            observed_height.append(height_values[graph_mask][target_index])
+                    xpass_array = torch.stack(observed_xpass).cpu().numpy().astype(float)
+                    distance_array = torch.stack(observed_distance).cpu().numpy().astype(float)
+                    if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
+                        raise ValueError("Physical xPass evaluation requires finite observed-target xPass and distance values.")
+                    if evaluate_xpass:
+                        physical_xpass_predictions.append(xpass_array)
+                    if evaluate_combined:
+                        blend_kwargs = {}
+                        weight_version = str(getattr(args, "xpass_weight", "")).lower()
+                        if weight_version == "v2":
+                            if len(observed_nearest) != len(observed_xpass):
+                                raise ValueError("Combined xPass weight v2 requires cached nearest-opponent distances.")
+                            blend_kwargs["distance_to_nearest_opponent"] = torch.stack(observed_nearest).cpu().numpy()
+                        if weight_version == "v4":
+                            if len(observed_height) != len(observed_xpass):
+                                raise ValueError("Combined xPass weight v4 requires cached pass-height probabilities.")
+                            blend_kwargs.update(
+                                pass_height=torch.stack(observed_height).cpu().numpy(),
+                                v4_power=float(args.v4_power),
+                                v4_zero=float(args.v4_zero),
+                                v4_discount=bool(args.discount),
+                            )
+                        combined = blend_physical_xpass_predictions(
+                            pass_success_model=np.asarray(y_hat, dtype=float),
+                            xpass=xpass_array,
+                            pass_distance=distance_array,
+                            weight_version=weight_version,
+                            **blend_kwargs,
+                        )
+                        combined_success_predictions.append(np.asarray(combined, dtype=float))
+                        if weight_version == "v2":
+                            learning_weight = physical_xpass_blend_weight_v2(
+                                distance_array, blend_kwargs["distance_to_nearest_opponent"]
+                            )
+                        elif weight_version == "v3":
+                            learning_weight = physical_xpass_blend_weight_v3(distance_array)
+                        elif weight_version == "v4":
+                            learning_weight = physical_xpass_blend_weight_v4(
+                                distance_array,
+                                blend_kwargs["pass_height"],
+                                power=float(args.v4_power),
+                                zero_point=float(args.v4_zero),
+                                use_discount=bool(args.discount),
+                            )
+                        else:
+                            learning_weight = physical_xpass_blend_weight(distance_array)
+                        combined_learning_weights.append(np.asarray(learning_weight, dtype=float))
                 if weighted_pass_success_eval:
                     pass_heights = getattr(batch_graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
                     pass_distances = getattr(batch_graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
@@ -1736,6 +1921,14 @@ def run_epoch(
                     weighted_predictions.append(np.asarray(y_hat, dtype=float))
                     weighted_targets.append(np.asarray(y, dtype=float))
                     weighted_effective_weights.append(effective_weights.detach().cpu().numpy().astype(float))
+                if bool(
+                    getattr(args, "observed_pass_height_stratification", False)
+                    or getattr(args, "evaluate_xpass", False)
+                    or getattr(args, "evaluate_combined_success", False)
+                ):
+                    observed_pass_height_labels.append(
+                        get_label_slice(batch_labels, "pass_high").cpu().detach().numpy().astype(float)
+                    )
                 threshold = 0.5 if args.task.endswith("success") or args.task == "pass_height" else 0.1
                 binary_predictions.append(np.asarray(y_hat, dtype=float))
                 binary_targets.append(np.asarray(y, dtype=float))
@@ -1756,7 +1949,7 @@ def run_epoch(
                 y = y.cpu().detach().numpy()
                 binary_predictions.append(np.asarray(y_hat, dtype=float))
                 binary_targets.append(np.asarray(y, dtype=float))
-                binary_threshold = 0.1
+                binary_threshold = getattr(args, "f1_outcome_threshold", None)
                 outcome_predictions.append(np.asarray(y_hat, dtype=float))
                 outcome_targets.append(target.cpu().detach().numpy().astype(float))
                 outcome_diagnostics.append(np.asarray(y, dtype=float))
@@ -1878,7 +2071,7 @@ def run_epoch(
                     calc_binary_metrics(
                         np.concatenate(binary_targets),
                         np.concatenate(binary_predictions),
-                        threshold=float(binary_threshold),
+                        threshold=binary_threshold,
                     )
                 )
             print(f"[{batch_index:>{len(str(n_batches))}d}/{n_batches}]  {get_losses_str(interim_metrics)}")
@@ -1889,15 +2082,16 @@ def run_epoch(
         metrics[key] = value / metrics["count"]
 
     if binary_predictions:
-        if binary_threshold is None:
-            raise RuntimeError("Binary evaluation predictions were collected without a threshold.")
+        pooled_binary_targets = np.concatenate(binary_targets)
         metrics.update(
             calc_binary_metrics(
-                np.concatenate(binary_targets),
+                pooled_binary_targets,
                 np.concatenate(binary_predictions),
                 threshold=binary_threshold,
             )
         )
+        if args.task == "pass_height":
+            metrics.update(calc_binary_cohort_metrics(pooled_binary_targets))
 
     outcome_evaluation = None
     if outcome_predictions:
@@ -1921,6 +2115,48 @@ def run_epoch(
             )
         )
 
+    pass_success_height_metrics = None
+    if observed_pass_height_labels:
+        pass_success_height_metrics, pass_success_height_rows = calc_pass_success_height_metrics(
+            np.concatenate(binary_targets),
+            np.concatenate(binary_predictions),
+            np.concatenate(observed_pass_height_labels),
+        )
+        metrics.update(pass_success_height_metrics)
+
+    pass_success_predictor_rows = None
+    if physical_xpass_predictions or combined_success_predictions:
+        predictors = {"learning": np.concatenate(binary_predictions)}
+        metric_name = str(getattr(args, "xpass_metric", "xpass"))
+        if physical_xpass_predictions:
+            predictors[f"physical_xpass_{metric_name.removesuffix('_xpass')}"] = np.concatenate(
+                physical_xpass_predictions
+            )
+        if combined_success_predictions:
+            predictors[f"combined_{getattr(args, 'xpass_weight', 'unknown')}"] = np.concatenate(
+                combined_success_predictions
+            )
+        predictor_metrics, pass_success_predictor_rows = calc_pass_success_predictor_metrics(
+            np.concatenate(binary_targets),
+            np.concatenate(observed_pass_height_labels),
+            predictors,
+        )
+        metrics.update(predictor_metrics)
+        if combined_learning_weights:
+            learning_weights = np.concatenate(combined_learning_weights)
+            metrics.update(
+                {
+                    "combined_learning_weight_mean": float(np.mean(learning_weights)),
+                    "combined_learning_weight_min": float(np.min(learning_weights)),
+                    "combined_learning_weight_max": float(np.max(learning_weights)),
+                }
+            )
+
     if return_outcome_evaluation:
         return metrics, outcome_evaluation
+    if bool(getattr(args, "return_pass_success_height_evaluation", False)):
+        return metrics, {
+            "height_rows": pass_success_height_rows if observed_pass_height_labels else [],
+            "predictor_rows": pass_success_predictor_rows or [],
+        }
     return metrics
