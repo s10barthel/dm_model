@@ -1502,6 +1502,15 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
 - `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
 
+### `scripts/run_hawkeye_loc.py`
+
+- Selection/frame inputs: `--input-file`, `--tracking-csv`, `--ball-csv`, and `--time-tolerance` (default `0.1`).
+- Model selection: `--bundle-id`, the six `--*-model-id` overrides, and `--device`.
+- Run/output controls: `--run-id`, `--output-dir`, `--overwrite`, `--pc-xpass-cache-dir`/`--physical-cache-dir`, and `--lane-survival-cache-dir`.
+- pc-xPass blending: `--xpass-version`, `--xpass-weight`, `--v4-power`, `--v4-zero`, `--discount`, and `--ball-z-limit`.
+- pc-xPass generation: speed/angle/radial grid, top-N, reaction/player-speed, lane/control, position-discount, teammate-policy, exported-metric, and worker/batch flags.
+- pc-xPass is mandatory and cache misses are computed by this command. See [Location-adjusted Hawkeye inference](#location-adjusted-hawkeye-inference) for every flag, input-column requirement, output column, default, alias, and validation rule.
+
 ### `scripts/run_benchmark.py`
 
 - `--input-dir <path>`: local benchmark data root. Default: `benchmark`.
@@ -1865,15 +1874,18 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/run_hawkeye_loc.py`
 
 - Inputs:
-  - a selection CSV produced by `data_processing/selection_data/add_location_data.py`
-  - `hawkeye_data/centroid_data_team.csv`
-  - `hawkeye_data/ball_data_selected.csv`
-  - `saved/<task>/<model_run_id>/...` or a model bundle
+  - a selection CSV produced by `data_processing/selection_data/add_location_data.py`; default: repository-level `data_analysis/data/dm_processed.csv`
+  - required selection columns: `selection_row_id`, `action_id`, `SelectedPlayer`, `pass_moment`, `PositionX`, `PositionY`, and `loc_info_missing`
+  - `hawkeye_data/centroid_data_team.csv` by default, or `--tracking-csv`
+  - `hawkeye_data/ball_data_selected.csv` by default, or `--ball-csv`
+  - `saved/<task>/<model_run_id>/...` selected through `--bundle-id` or explicit per-task model IDs
 - Outputs:
   - `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.parquet`
   - `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.csv`
   - `data/component_runs/hawkeye_loc/<component_run_id>/metadata.json`
   - `data/component_runs/hawkeye_loc/<component_run_id>/missing_data.csv`
+  - `data/component_runs/hawkeye_loc/latest.json` when the default output root is used
+  - generated/reused pc-xPass rows and metadata under `data/pc_xpass/hawkeye_loc`
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -1948,15 +1960,172 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.{png,mp4,gif}`
   - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
-# Location-adjusted Hawkeye inference
+## Location-adjusted Hawkeye inference
 
-`scripts/run_hawkeye_loc.py` consumes a selection CSV enriched by
-`data_processing/selection_data/add_location_data.py` and creates one focused Hawkeye component state per selection row. The possessor receives the normalized metric offset `(+PositionX/100, -PositionY/100)` for the full situation, is frozen normally after BallReceipt, and the frozen ball x/y follows the adjusted possessor. Only the frame nearest to `pass_moment` is inferred.
+`scripts/run_hawkeye_loc.py` is step 2 of the three-step workflow documented in `data_processing/selection_data/readme.md`. It consumes the location-enriched selection CSV and performs focused inference only at the Hawkeye frame nearest to each row's actual `pass_moment`. Late passes are not filtered in advance; they are processed whenever a Hawkeye frame exists within the configured tolerance.
 
-Runs are stored under `data/component_runs/hawkeye_loc/<run-id>`. pc-xPass is always recomputed on cache misses and stored under `data/pc_xpass/hawkeye_loc`; generation controls from `generate_physical_xpass.py` and inference blend controls from `run_hawkeye.py` are available as CLI flags. Checkpoints that may use possessor velocity/acceleration emit warnings recorded in run metadata but do not stop processing.
+For every eligible row, the script:
 
-Example:
+1. Loads the normal direction-normalized Hawkeye situation for `action_id`.
+2. Finds the possessor through `uefa_player_id == PlayerID`.
+3. Applies the constant metric offset `(+PositionX/100, -PositionY/100)` to that player throughout the complete situation.
+4. Runs the normal BallReceipt freeze. After receipt, ball x/y follows the adjusted frozen possessor while ball z retains the frozen BallReceipt height.
+5. Calculates physical features normally, generates or reuses pc-xPass, and runs the selected model checkpoints only for the resolved target graph.
+
+Adjusted positions are never clamped. Invalid locations, out-of-field positions, unresolved situations/frames/players, pc-xPass errors, and inference errors are recorded as row-level failures while later rows continue. Invalid global inputs and model-loading errors remain fatal.
+
+### Basic command
+
+Run from the `dm_model` directory:
 
 ```shell
-python scripts/run_hawkeye_loc.py --input-file path/to/dm_processed.csv --bundle-id <bundle-id> --time-tolerance 0.1
+python scripts/run_hawkeye_loc.py \
+  --input-file path/to/dm_processed.csv \
+  --bundle-id <bundle-id> \
+  --time-tolerance 0.1
 ```
+
+Explicit checkpoints can replace the bundle selection:
+
+```shell
+python scripts/run_hawkeye_loc.py \
+  --input-file path/to/dm_processed.csv \
+  --action-intent-model-id action_intent/<run-id> \
+  --pass-intent-model-id pass_intent/<run-id> \
+  --pass-success-model-id pass_success/<run-id> \
+  --outcome-scoring-model-id outcome_scoring/<run-id> \
+  --outcome-conceding-model-id outcome_conceding/<run-id>
+```
+
+### Inputs
+
+Selection input:
+
+- `--input-file` defaults to the repository-level `data_analysis/data/dm_processed.csv`.
+- Required columns are `selection_row_id`, `action_id`, `SelectedPlayer`, `pass_moment`, `PositionX`, `PositionY`, and `loc_info_missing`.
+- `selection_row_id` must be unique.
+- `PositionX` and `PositionY` are raw VR Head coordinates in centimetres.
+- Rows already marked with `loc_info_missing == 1` are copied to the run's missing-data report without inference.
+- Optional selection columns such as `participant`, `setting`, `SceneNr`, `loc_status`, and `loc_missing_reason` are retained in diagnostic records when present.
+
+Hawkeye inputs:
+
+- `--tracking-csv` defaults to `hawkeye_data/centroid_data_team.csv`.
+- `--ball-csv` defaults to `hawkeye_data/ball_data_selected.csv`.
+- `--time-tolerance` is the maximum absolute difference between requested and resolved BallReceipt-relative Hawkeye time. Default: `0.1` seconds; it must be non-negative. Equal-distance ties select the earlier frame.
+
+Model inputs:
+
+- `--bundle-id ID`: preferred bundle containing the required checkpoints.
+- `--action-intent-model-id ID`
+- `--pass-intent-model-id ID`
+- `--pass-success-model-id ID`
+- `--pass-height-model-id ID`: optional pass-height checkpoint used by inference and pc-xPass enrichment.
+- `--outcome-scoring-model-id ID`
+- `--outcome-conceding-model-id ID`
+- `--device DEVICE`: requested Torch device. Default: `cuda:0`; automatically falls back to CPU when CUDA is unavailable.
+
+The script warns once for each selected checkpoint whose feature metadata enables possessor velocity, possessor-relative velocity, acceleration, unmasked velocity edge features, or unmasked relative-speed edge features. These warnings are recorded in `metadata.json` and do not make a row missing.
+
+### Outputs
+
+Default run root: `data/component_runs/hawkeye_loc/<run-id>`.
+
+- `hawkeye_data.parquet`: authoritative transferable component table.
+- `hawkeye_data.csv`: CSV copy of the same table.
+- `metadata.json`: run identity and status, resolved model records, graph schema, input paths, tolerance, processed row IDs, pc-xPass cache statistics, and structured compatibility warnings.
+- `missing_data.csv`: complete row-level failure report, including `selection_row_id`, selection keys, `loc_status`, and `loc_missing_reason`. It is written even when all rows fail or no rows fail.
+
+The component table exports every attacking candidate at the resolved target frame and includes:
+
+- identity: `selection_row_id`, original `id`/`original_action_id`, `SelectedPlayer`, `uefa_player_id`, and `PlayerID`;
+- timing: `requested_pass_moment`, `resolved_time_norm`, `abs_time`, and `hawkeye_time_diff`;
+- geometry: `PositionX`, `PositionY`, `adjusted_possessor_x`, and `adjusted_possessor_y`;
+- cache identity: `loc_situation_id` and `geometry_hash`;
+- components: `action_intent`, `pass_intent`, `pass_success`, optional `pass_height`, `outcome_scoring_success`, `outcome_scoring_failure`, `outcome_conceding_success`, and `outcome_conceding_failure`.
+
+When the default output root is used, `data/component_runs/hawkeye_loc/latest.json` is updated. Cache misses are generated under `data/pc_xpass/hawkeye_loc`; valid geometry/configuration cache hits are reused.
+
+### Run and output flags
+
+- `--run-id ID`: explicit component run ID. Default: generated `hawkeye_loc_component_<timestamp>_<suffix>` value.
+- `--output-dir DIR`: parent directory in which the run-ID folder is created. Default: `data/component_runs/hawkeye_loc`.
+- `--overwrite`: permit reuse of a non-empty explicitly named run directory.
+- `--pc-xpass-cache-dir DIR`: pc-xPass cache override. Alias: `--physical-cache-dir`. Default: `data/pc_xpass/hawkeye_loc`.
+- `--lane-survival-cache-dir DIR`: lane-survival cache override. Default: the selected pc-xPass cache directory.
+
+### pc-xPass inference flags
+
+pc-xPass is always enabled; there is no switch to fall back to physical xPass.
+
+- `--xpass-version VALUE`: cached metric used for pass-success blending; `max` or `top<N>`, for example `top10` or `top25`. Default: `top10`. Aliases: `--x-pass-version`, `--x_pass_version`.
+- `--xpass-weight {v1,v2,v3,v4}`: blend weighting version. Default: `v3`. Alias: `--xpass_weight`.
+- `--v4-power FLOAT`: positive v4 power; only valid with `--xpass-weight v4`.
+- `--v4-zero FLOAT`: positive v4 zero point; only valid with `--xpass-weight v4`.
+- `--discount {true,false}`: v4 cosine distance discount. Default: `true`; only valid with v4.
+- `--ball-z-limit VALUE`: use full model weight above this cached ball height, or `none` to disable. Default: `none`.
+
+### pc-xPass generation flags
+
+The following controls are applied when cache misses are generated. Underscore aliases from `generate_physical_xpass.py` are accepted for the corresponding hyphenated numerical/pc-policy flags.
+
+Core grid and numerical controls:
+
+- `--physical-eps FLOAT`: numerical probability bound. Default: `0.0001`.
+- `--speed-aggregation {exact_separate_speed,package_max}`: speed aggregation strategy. Default: `package_max`.
+- `--min-speed FLOAT`: lower ball-speed grid value. Default: `3.0`.
+- `--max-speed FLOAT`: upper ball-speed grid value. Default: `25.0`.
+- `--speed-step FLOAT`: ball-speed grid step. Default: `2.0`.
+- `--radial-gridsize FLOAT`: distance step along each pass ray. Default: `3.0`.
+- `--coarse-n-angles INT`: coarse angular search size. Default: `36`.
+- `--refine-top-k-angles INT`: coarse angles selected for refinement. Default: `2`.
+- `--refine-angle-radius FLOAT`: refinement radius in degrees. Default: `10.0`.
+- `--angle-step FLOAT`: refined angular step in degrees. Default: `2.5`.
+
+Kernel and aggregation controls:
+
+- `--sigma-angle FLOAT`: angular kernel factor. Default: `0.1`.
+- `--sigma-speed FLOAT`: speed kernel factor. Default: `0.05`.
+- `--sigma-distance FLOAT`: distance kernel factor. Default: `0.05`.
+- `--top-n INT`: default top-N aggregation count. Default: `10`.
+- `--top-n-values INT [INT ...]`: additional top-N metrics to cache. Default: none; the N requested through `--xpass-version top<N>` is added automatically.
+- `--top-xt`: rank candidate target locations by xPass multiplied by interpolated xT while still exporting xPass values. Default: off.
+
+Player-motion controls:
+
+- `--reaction-time VALUE`: fixed non-negative seconds or `dist_pass`. Default: `0.25`.
+- `--dist-pass-div FLOAT`: distance-to-passer divisor used by `dist_pass`. Default: `50.0`.
+- `--dist-pass-min FLOAT`: lower `dist_pass` reaction-time clamp. Default: `0.2`.
+- `--dist-pass-max FLOAT`: upper `dist_pass` reaction-time clamp. Default: `0.7`.
+- `--max-player-speed FLOAT`: common post-reaction player speed. Default: `5.0`.
+- `--max-player-speed-off FLOAT`: optional attacking-player override. Default: unset.
+- `--max-player-speed-def FLOAT`: optional defending-player override. Default: unset.
+
+Lane and endpoint-control controls:
+
+- `--lane-power FLOAT`: lane-survival sigmoid power. Default: `15.0`.
+- `--lane-inflection-point FLOAT`: lane-survival sigmoid offset. Default: `0.3`.
+- `--control-power FLOAT`: endpoint-control sigmoid power. Default: `15.0`.
+- `--control-inflection-point FLOAT`: endpoint-control sigmoid offset. Default: `0.3`.
+- `--endpoint-normalization {normal,normal-one,subtract,subtract-one}`: endpoint competition mode. Default: `normal`.
+- `--boost-def-endpoint-control FLOAT`: defending-player endpoint-control multiplier. Default: `1.0`.
+
+Position-discount controls:
+
+- `--use-position-discount {true,false}`: enable goal-distance target-position discounting. Default: `true`.
+- `--position-discount-power FLOAT`: discount power. Default: `2.0`.
+- `--position-discount-distance FLOAT`: backward goal-distance delta at which the discount reaches zero. Default: `20.0`.
+
+Teammate, metric, and compute controls:
+
+- `--consider-teammates` / `--ignore-teammates`: mutually exclusive global teammate policy. Default: consider teammates.
+- `--ignore-teammates-lane-survival`: ignore attacking teammates only in lane-survival competition. Default: off.
+- `--ignore-teammates-control`: ignore attacking teammates only in endpoint-control competition. Default: off.
+- `--no-max`: do not generate the maximum-xPass metric. Default: maximum enabled.
+- `--no-topmean`: do not generate top-N metrics. Default: top-N enabled. The metric selected by `--xpass-version` cannot be disabled.
+- `--num-workers VALUE` / `--physical-num-workers VALUE`: worker count or `auto`. Default: `auto`.
+- `--max-auto-workers INT`: upper bound for automatic worker selection. Default: `12`.
+- `--physical-batch-size INT`: runtime generation batch size. Default: `16`.
+- `--worker-thread-limit INT` / `--physical-worker-thread-limit INT`: per-worker thread limit. Default: `1`.
+
+All numerical arguments are validated before model loading. In particular, tolerances and reaction/clamp minima must be non-negative, speeds and powers that represent positive quantities must be positive, and at least one pc-xPass metric must remain enabled.
