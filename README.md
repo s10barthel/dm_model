@@ -1608,11 +1608,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/visualize_hawkeye.py`
 
+- `--mode {standard,loc}`: select ordinary Hawkeye visualization or location-adjusted component visualization. Default: `standard`.
 - `--situation-id <id>`: restrict visualization to one or more Hawkeye situation ids from the selected component run. Default: all situations in the selected component run.
+- In `loc` mode, repeated explicit IDs select the first successful `selection_row_id` for each ID in command-line order, `--situation-id all` selects the first successful row for every action, and `--limit N` selects the first `N` successful rows without deduplication. `--situation-id` and `--limit` are mutually exclusive, unknown explicit IDs are fatal, and no selector renders every successful row.
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.
 - `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `hawkeye_data/ball_data_selected.csv`.
 - `--component-run-id <component_run_id>`: versioned Hawkeye component run to visualize. Default: latest successful Hawkeye component run.
 - `--component-dir <path>`: explicit Hawkeye component-run root override. Default: none; when set it overrides `--component-run-id`.
+- In `loc` mode, component IDs and the latest pointer resolve under `data/component_runs/hawkeye_loc`; `--run-id` still names the new visualization run.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
 - `--coach-ratings`: restrict rendering to situations with scored coach ratings in `validation/coach_ratings/output/coach_ratings.csv`, then add those ratings below player annotations in `pass_score` outputs. Default: off.
 - `--selections`: add `CAVE | HMD` selection labels from `validation/selections/per_action_option_counts.csv` below player annotations in `pass_intent` and `pass_score` outputs. Default: off. The `pass_score` title shows the per-setting denominators as `Selections (CAVE n=<count> | HMD n=<count>)`.
@@ -1628,6 +1631,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+
+Location mode reads `PositionX`, `PositionY`, `resolved_time_norm`, `selection_row_id`, and `loc_situation_id` from each successful component row, rebuilds the identical relocated/frozen situation, and renders only that resolved frame. It supports PNG only and rejects explicit time/time-range flags. One file is written per component as `data/visualizations/hawkeye/<visualization_run_id>/<action_id>_<selection_row_id>/<component>.png`. Physical overlays automatically use pc-xPass under `data/pc_xpass/hawkeye_loc` unless `--physical-cache-dir` overrides it.
 
 ### `scripts/visualize_benchmark.py`
 
@@ -1897,10 +1902,12 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Inputs:
   - `data/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
   - `data/component_runs/hawkeye/<component_run_id>/metadata.json`
+  - in `--mode loc`: `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.parquet` and `metadata.json`
   - `hawkeye_data/centroid_data_team.csv`
   - `hawkeye_data/ball_data_selected.csv`
 - Outputs:
   - `data/visualizations/hawkeye/<visualization_run_id>/<situation_id>/*.{png,mp4,gif}`
+  - in `--mode loc`: `data/visualizations/hawkeye/<visualization_run_id>/<action_id>_<selection_row_id>/<component>.png`
   - `data/visualizations/hawkeye/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_benchmark.py`
@@ -1975,7 +1982,8 @@ For every eligible row, the script:
 2. Finds the possessor through `uefa_player_id == PlayerID`.
 3. Applies the constant metric offset `(+PositionX/100, -PositionY/100)` to that player throughout the complete situation.
 4. Runs the normal BallReceipt freeze. After receipt, ball x/y follows the adjusted frozen possessor while ball z retains the frozen BallReceipt height.
-5. Calculates physical features normally, generates or reuses pc-xPass, and runs the selected model checkpoints only for the resolved target graph.
+5. Collects the resolved graph into a buffered pc-xPass preparation pass. Cache misses are generated in parallel before any model inference starts.
+6. Audits every expected cache row with one worker, regenerates missing/invalid rows individually, then reconstructs each graph and runs model inference sequentially from the read-only cache.
 
 Adjusted positions are never clamped. Invalid locations, out-of-field positions, unresolved situations/frames/players, pc-xPass errors, and inference errors are recorded as row-level failures while later rows continue. Invalid global inputs and model-loading errors remain fatal.
 
@@ -2012,6 +2020,13 @@ Selection input:
 - `PositionX` and `PositionY` are raw VR Head coordinates in centimetres.
 - Rows already marked with `loc_info_missing == 1` are copied to the run's missing-data report without inference.
 - Optional selection columns such as `participant`, `setting`, `SceneNr`, `loc_status`, and `loc_missing_reason` are retained in diagnostic records when present.
+
+Mutually exclusive row selectors:
+
+- repeated `--situation-id ID` processes the first CSV row for each requested `action_id`, in command-line order; an unknown ID is fatal;
+- `--situation-id all` processes the first CSV row for every distinct `action_id`, preserving first appearance;
+- `--limit N` processes the first positive `N` CSV rows without deduplicating action IDs;
+- with no selector, every CSV row is processed. `all` cannot be mixed with explicit IDs.
 
 Hawkeye inputs:
 
@@ -2058,6 +2073,7 @@ When the default output root is used, `data/component_runs/hawkeye_loc/latest.js
 - `--overwrite`: permit reuse of a non-empty explicitly named run directory.
 - `--pc-xpass-cache-dir DIR`: pc-xPass cache override. Alias: `--physical-cache-dir`. Default: `data/pc_xpass/hawkeye_loc`.
 - `--lane-survival-cache-dir DIR`: lane-survival cache override. Default: the selected pc-xPass cache directory.
+- `--runtime-row-window INT`: relocated target rows collected for each parallel pc-xPass prewarm. Default: `physical_batch_size * resolved_num_workers * 2`; it must be positive.
 
 ### pc-xPass inference flags
 
@@ -2132,5 +2148,7 @@ Teammate, metric, and compute controls:
 - `--max-auto-workers INT`: upper bound for automatic worker selection. Default: `12`.
 - `--physical-batch-size INT`: runtime generation batch size. Default: `16`.
 - `--worker-thread-limit INT` / `--physical-worker-thread-limit INT`: per-worker thread limit. Default: `1`.
+
+Only pc-xPass preparation uses multiple workers. The inference pass is always sequential. After the batch pass, every selected row is checked; a missing/invalid entry is retried individually and becomes `pc_xpass_failed` only if that retry fails. Metadata separates batch errors, audit counts, recovered rows, and final failures.
 
 All numerical arguments are validated before model loading. In particular, tolerances and reaction/clamp minima must be non-negative, speeds and powers that represent positive quantities must be positive, and at least one pc-xPass metric must remain enabled.

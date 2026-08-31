@@ -16,6 +16,7 @@ from PIL import Image
 
 from datatools.hawkeye import (
     COMPONENT_COLUMNS,
+    apply_hawkeye_possessor_offset,
     build_hawkeye_component_tables,
     build_hawkeye_situation,
     build_hawkeye_visualization_probs,
@@ -40,6 +41,7 @@ from project_config import (
     PROJECT_ROOT,
     generate_run_id,
     get_hawkeye_component_run_root,
+    get_hawkeye_loc_component_run_root,
     get_pc_xpass_dir,
     get_runtime_physical_xpass_dir,
     resolve_named_component_run_id,
@@ -56,11 +58,14 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
+    parser.add_argument("--mode", choices=["standard", "loc"], default="standard")
+    row_selection = parser.add_mutually_exclusive_group()
+    row_selection.add_argument(
         "--situation-id",
         action="append",
         help="Restrict visualization to one or more Hawkeye situation ids.",
     )
+    row_selection.add_argument("--limit", type=int, help="Location mode: render the first N successful component rows.")
     parser.add_argument(
         "--tracking-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"),
@@ -119,11 +124,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     args = parser.parse_args(argv)
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    requested_ids = [str(value).strip() for value in (args.situation_id or [])]
+    if "all" in requested_ids and requested_ids != ["all"]:
+        parser.error("--situation-id all cannot be combined with explicit situation ids")
+    args.situation_id = requested_ids or None
+    if args.mode == "standard" and args.limit is not None:
+        parser.error("--limit is only supported with --mode loc")
+    if args.mode == "standard" and args.situation_id == ["all"]:
+        parser.error("--situation-id all is only supported with --mode loc")
+    if args.mode == "loc":
+        if args.output != "png":
+            parser.error("--mode loc only supports --output png")
+        if args.time_norm is not None or args.time_norm_start is not None or args.time_norm_end is not None:
+            parser.error("--time-norm and time-range options are not supported with --mode loc")
+        args.pc_xpass = True
     if args.output != "png" and args.time_norm is not None:
         parser.error("--time-norm is only valid with --output png.")
     if args.output == "png" and (args.time_norm_start is not None or args.time_norm_end is not None):
         parser.error("--time-norm-start/--time-norm-end are only valid with --output gif or --output mp4.")
-    if args.output == "png" and args.time_norm is None:
+    if args.mode == "standard" and args.output == "png" and args.time_norm is None:
         args.time_norm = [0.0]
     return args
 
@@ -377,8 +398,203 @@ def resolve_hawkeye_time_norm_range(
     return selected_frame_ids, metadata
 
 
+def select_location_component_rows(
+    component_export: pd.DataFrame,
+    *,
+    situation_ids: list[str] | None,
+    limit: int | None,
+) -> pd.DataFrame:
+    required = ["selection_row_id", "original_action_id", "PositionX", "PositionY", "resolved_time_norm", "loc_situation_id"]
+    missing = [column for column in required if column not in component_export.columns]
+    if missing:
+        raise ValueError("Location component export is missing required columns: " + ", ".join(missing))
+    rows = component_export.copy()
+    rows["selection_row_id"] = pd.to_numeric(rows["selection_row_id"], errors="raise").astype(int)
+    rows["_action_id"] = rows["original_action_id"].map(lambda value: "" if pd.isna(value) else str(value).strip())
+    rows = rows.sort_values("selection_row_id", kind="mergesort").drop_duplicates("selection_row_id", keep="first")
+    if limit is not None:
+        return rows.iloc[: int(limit)].copy()
+    if not situation_ids:
+        return rows.copy()
+    first_by_action = rows.drop_duplicates("_action_id", keep="first").set_index("_action_id", drop=False)
+    if situation_ids == ["all"]:
+        return first_by_action.reset_index(drop=True)
+    missing_ids = [value for value in situation_ids if value not in first_by_action.index]
+    if missing_ids:
+        raise ValueError("Requested --situation-id values are not present in the location component export: " + ", ".join(missing_ids))
+    ordered_ids = list(dict.fromkeys(situation_ids))
+    return first_by_action.loc[ordered_ids].reset_index(drop=True)
+
+
+def run_location_visualization(
+    args: argparse.Namespace,
+    component_selection,
+    component_export: pd.DataFrame,
+    component_metadata: dict[str, object],
+    component_run_id: str | None,
+    component_dir: Path,
+    output_parent: Path,
+    output_root: Path,
+    visualization_run_id: str,
+) -> None:
+    selected_rows = select_location_component_rows(
+        component_export,
+        situation_ids=args.situation_id,
+        limit=args.limit,
+    )
+    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    physical_cache_dir = args.physical_cache_dir or str(get_pc_xpass_dir("hawkeye_loc"))
+    selected_physical_xpass_metric = physical_xpass_metric(args)
+    overlay_data = load_overlay_data(
+        include_coach_ratings=bool(args.coach_ratings),
+        include_selections=bool(args.selections),
+    )
+    coach_rating_filter: dict[str, object] | None = None
+    if bool(args.coach_ratings):
+        candidate_ids = selected_rows["_action_id"].tolist()
+        eligible_ids, skipped_ids = filter_coach_rated_situation_ids(candidate_ids, overlay_data.coach_ratings)
+        eligible_set = set(eligible_ids)
+        selected_rows = selected_rows.loc[selected_rows["_action_id"].isin(eligible_set)].copy()
+        coach_rating_filter = {
+            "candidate_situation_ids": candidate_ids,
+            "eligible_situation_ids": eligible_ids,
+            "skipped_situation_ids": skipped_ids,
+            "candidate_count": len(candidate_ids),
+            "eligible_count": len(selected_rows),
+            "skipped_count": len(skipped_ids),
+        }
+        if selected_rows.empty:
+            raise ValueError("No coach-rated Hawkeye situations were found among the selected location rows.")
+
+    component_names = list(component_selection.rendered_components)
+    if bool(args.show_physical_xpass):
+        component_names.append("physical_xpass")
+    rendered_situations: list[dict[str, object]] = []
+
+    for _, location_row in selected_rows.iterrows():
+        row_id = int(location_row["selection_row_id"])
+        action_id = str(location_row["_action_id"])
+        situation_tracking = tracking.loc[tracking["id"].eq(action_id)].copy()
+        if situation_tracking.empty:
+            raise KeyError(f"Hawkeye situation id {action_id} was not found in {args.tracking_csv}.")
+        adjusted_tracking, _adjusted_info = apply_hawkeye_possessor_offset(
+            situation_tracking,
+            offset_x=float(location_row["PositionX"]) / 100.0,
+            offset_y=-float(location_row["PositionY"]) / 100.0,
+        )
+        situation, _, _ = build_hawkeye_situation(
+            adjusted_tracking,
+            ball,
+            freeze_ballreceipt=True,
+            build_graphs=False,
+            align_frozen_ball_to_possessor=True,
+        )
+        row_export = component_export.loc[
+            pd.to_numeric(component_export["selection_row_id"], errors="coerce").eq(row_id)
+        ].copy()
+        component_tables = build_hawkeye_component_tables(row_export, situation)
+        frame_selection = resolve_hawkeye_png_frames(
+            situation,
+            resolve_ballreceipt(adjusted_tracking),
+            [float(location_row["resolved_time_norm"])],
+        )[0]
+        frame_id = int(frame_selection["frame_id"])
+        coach_scores, selection_labels, overlay_stats = build_situation_overlays(
+            overlay_data,
+            action_id,
+            adjusted_tracking,
+            situation,
+            selection_format=args.selection_format,
+        )
+        if bool(args.show_physical_xpass):
+            component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
+                physical_cache_dir,
+                str(location_row["loc_situation_id"]),
+                [frame_id],
+                metric=selected_physical_xpass_metric,
+                x_pass_version=args.x_pass_version,
+            )
+
+        output_dir = output_root / f"{action_id}_{row_id}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_paths: list[str] = []
+        for component_name in component_names:
+            probs = _probs_for_component_frame(component_name, component_tables, frame_id)
+            image = render_frame_image(
+                situation,
+                frame_id,
+                component_name,
+                probs,
+                show_trajectories=args.show_trajectories,
+                coach_scores=coach_scores,
+                selection_labels=selection_labels,
+                selections_enabled=bool(args.selections),
+                selection_denominators=overlay_stats["selection_denominators"],
+            )
+            output_path = output_dir / f"{component_name}.png"
+            image.save(output_path)
+            output_paths.append(str(output_path.resolve()))
+        print(f"Saved location-adjusted Hawkeye PNG visualizations to {output_dir}")
+        rendered_situations.append(
+            {
+                "situation_id": action_id,
+                "selection_row_id": row_id,
+                "loc_situation_id": str(location_row["loc_situation_id"]),
+                "frame_id": frame_id,
+                "resolved_time_norm": float(frame_selection["resolved_time_norm"]),
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": output_paths,
+                "overlay_annotations": overlay_stats,
+            }
+        )
+
+    metadata = {
+        "run_id": visualization_run_id,
+        "visualization_mode": "loc",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "component_run_id": component_run_id,
+        "component_dir": str(component_dir.resolve()),
+        "component_metadata_run_id": component_metadata.get("run_id"),
+        "requested_situation_ids": list(args.situation_id or []),
+        "limit": args.limit,
+        "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
+        "rendered_selection_row_ids": [item["selection_row_id"] for item in rendered_situations],
+        "rendered_situations": rendered_situations,
+        "tracking_csv": str(Path(args.tracking_csv).resolve()),
+        "ball_csv": str(Path(args.ball_csv).resolve()),
+        "output": "png",
+        "coach_ratings": bool(args.coach_ratings),
+        "coach_rating_situation_filter": coach_rating_filter,
+        "selections": bool(args.selections),
+        "selection_format": args.selection_format,
+        "overlay_sources": overlay_data.metadata,
+        "source_models": component_metadata.get("models", {}),
+        "requested_component_groups": component_selection.requested_component_groups,
+        "disabled_component_groups": component_selection.disabled_component_groups,
+        "rendered_components": component_selection.rendered_components,
+        "show_physical_xpass": bool(args.show_physical_xpass),
+        "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+        "physical_xpass_runtime_source": PC_XPASS_SOURCE,
+        "physical_xpass_metric": selected_physical_xpass_metric,
+        "x_pass_version": args.x_pass_version,
+        "physical_cache_dir": str(physical_cache_dir),
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
+        "disabled_components": component_selection.disabled_components,
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
+    print(f"Hawkeye location visualization run id: {visualization_run_id}")
+    print(f"Hawkeye location visualization metadata: {metadata_path}")
+
+
 def main() -> None:
     args = parse_args()
+    mode = str(getattr(args, "mode", "standard"))
     component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
@@ -388,10 +604,28 @@ def main() -> None:
     if args.component_dir:
         component_dir = Path(args.component_dir)
     else:
-        component_run_id = resolve_named_component_run_id("hawkeye_component", args.component_run_id, required=True)
-        component_dir = get_hawkeye_component_run_root(component_run_id)
+        component_kind = "hawkeye_loc_component" if mode == "loc" else "hawkeye_component"
+        component_run_id = resolve_named_component_run_id(component_kind, args.component_run_id, required=True)
+        component_dir = (
+            get_hawkeye_loc_component_run_root(component_run_id)
+            if mode == "loc"
+            else get_hawkeye_component_run_root(component_run_id)
+        )
 
     component_export, component_metadata = load_hawkeye_component_run(component_dir)
+    if mode == "loc":
+        run_location_visualization(
+            args,
+            component_selection,
+            component_export,
+            component_metadata,
+            component_run_id,
+            component_dir,
+            output_parent,
+            output_root,
+            visualization_run_id,
+        )
+        return
     situation_ids = resolve_hawkeye_component_situation_ids(
         component_export,
         metadata=component_metadata,
