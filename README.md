@@ -12,6 +12,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Expected Raw Data Layout](#expected-raw-data-layout)
 - [Produced Data Layout](#produced-data-layout)
 - [Run-Id Workflow](#run-id-workflow)
+- [Location-adjusted Hawkeye inference](#location-adjusted-hawkeye-inference)
 - [Split Definition](#split-definition)
 - [Environment Setup](#environment-setup)
 - [Main Pipeline Runner](#main-pipeline-runner)
@@ -113,6 +114,7 @@ After preprocessing, the project writes DEFCON-style files under `data`:
 - `component_runs/sportec/<component_run_id>/...`
 - `component_runs/sportec/latest.json`
 - `component_runs/hawkeye/<component_run_id>/...`
+- `component_runs/hawkeye_loc/<component_run_id>/...`
 - `component_runs/benchmark/<component_run_id>/...`
 - `component_runs/skillcorner/<component_run_id>/...`
 - `splits/match_splits.json`
@@ -128,6 +130,7 @@ The main output directories are:
 - `data/features/runs/<feature_run_id>` for versioned graph tensors and label tensors used by training/evaluation
 - `data/component_runs/sportec/<component_run_id>` for versioned per-match component prediction exports from `scripts/run_relevant_models.py`
 - `data/component_runs/hawkeye/<component_run_id>` for versioned HawkEye exports
+- `data/component_runs/hawkeye_loc/<component_run_id>` for focused location-adjusted HawkEye exports
 - `data/component_runs/benchmark/<component_run_id>` for versioned benchmark exports
 - `data/component_runs/skillcorner/<component_run_id>` for versioned SkillCorner exports
 - `data/runtime_physical_xpass/<dataset>` for runtime physical xPass caches used by inference and visualization
@@ -150,6 +153,7 @@ Feature and component runs use explicit `latest.json` pointers:
 - `data/features/runs/latest.json`
 - `data/component_runs/sportec/latest.json`
 - `data/component_runs/hawkeye/latest.json`
+- `data/component_runs/hawkeye_loc/latest.json`
 - `data/component_runs/benchmark/latest.json`
 - `data/component_runs/skillcorner/latest.json`
 
@@ -191,6 +195,10 @@ The external-data adapters follow the same pattern:
 - `data/component_runs/hawkeye/<component_run_id>/hawkeye_data.parquet`
 - `data/component_runs/hawkeye/<component_run_id>/hawkeye_data.csv`
 - `data/component_runs/hawkeye/<component_run_id>/metadata.json`
+- `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.parquet`
+- `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.csv`
+- `data/component_runs/hawkeye_loc/<component_run_id>/metadata.json`
+- `data/component_runs/hawkeye_loc/<component_run_id>/missing_data.csv`
 - `data/component_runs/benchmark/<component_run_id>/benchmark_data.parquet`
 - `data/component_runs/benchmark/<component_run_id>/benchmark_data.csv`
 - `data/component_runs/benchmark/<component_run_id>/metadata.json`
@@ -1834,6 +1842,19 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/component_runs/hawkeye/<component_run_id>/hawkeye_data.csv`
   - `data/component_runs/hawkeye/<component_run_id>/metadata.json`
 
+### `scripts/run_hawkeye_loc.py`
+
+- Inputs:
+  - a selection CSV produced by `data_processing/selection_data/add_location_data.py`
+  - `hawkeye_data/centroid_data_team.csv`
+  - `hawkeye_data/ball_data_selected.csv`
+  - `saved/<task>/<model_run_id>/...` or a model bundle
+- Outputs:
+  - `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.parquet`
+  - `data/component_runs/hawkeye_loc/<component_run_id>/hawkeye_data.csv`
+  - `data/component_runs/hawkeye_loc/<component_run_id>/metadata.json`
+  - `data/component_runs/hawkeye_loc/<component_run_id>/missing_data.csv`
+
 ### `scripts/visualize_hawkeye.py`
 
 - Inputs:
@@ -1907,3 +1928,15 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.{png,mp4,gif}`
   - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
+# Location-adjusted Hawkeye inference
+
+`scripts/run_hawkeye_loc.py` consumes a selection CSV enriched by
+`data_processing/selection_data/add_location_data.py` and creates one focused Hawkeye component state per selection row. The possessor receives the normalized metric offset `(+PositionX/100, -PositionY/100)` for the full situation, is frozen normally after BallReceipt, and the frozen ball x/y follows the adjusted possessor. Only the frame nearest to `pass_moment` is inferred.
+
+Runs are stored under `data/component_runs/hawkeye_loc/<run-id>`. pc-xPass is always recomputed on cache misses and stored under `data/pc_xpass/hawkeye_loc`; generation controls from `generate_physical_xpass.py` and inference blend controls from `run_hawkeye.py` are available as CLI flags. Checkpoints that may use possessor velocity/acceleration emit warnings recorded in run metadata but do not stop processing.
+
+Example:
+
+```shell
+python scripts/run_hawkeye_loc.py --input-file path/to/dm_processed.csv --bundle-id <bundle-id> --time-tolerance 0.1
+```

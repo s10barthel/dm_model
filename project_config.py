@@ -43,6 +43,7 @@ COMPONENT_RUNS_DIR = DATA_ROOT / "component_runs"
 EVALUATION_RUNS_DIR = DATA_ROOT / "evaluations"
 SPORTEC_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "sportec"
 HAWKEYE_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye"
+HAWKEYE_LOC_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "hawkeye_loc"
 BENCHMARK_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "benchmark"
 SKILLCORNER_COMPONENT_RUNS_DIR = COMPONENT_RUNS_DIR / "skillcorner"
 RUNTIME_PHYSICAL_XPASS_DIR = DATA_ROOT / "runtime_physical_xpass"
@@ -57,6 +58,7 @@ SPLIT_PATH = SPLIT_DIR / "match_splits.json"
 FEATURE_LATEST_PATH = FEATURE_RUNS_DIR / "latest.json"
 COMPONENT_LATEST_PATH = SPORTEC_COMPONENT_RUNS_DIR / "latest.json"
 HAWKEYE_COMPONENT_LATEST_PATH = HAWKEYE_COMPONENT_RUNS_DIR / "latest.json"
+HAWKEYE_LOC_COMPONENT_LATEST_PATH = HAWKEYE_LOC_COMPONENT_RUNS_DIR / "latest.json"
 BENCHMARK_COMPONENT_LATEST_PATH = BENCHMARK_COMPONENT_RUNS_DIR / "latest.json"
 SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.json"
 
@@ -163,6 +165,7 @@ def ensure_project_dirs() -> None:
         EVALUATION_RUNS_DIR,
         SPORTEC_COMPONENT_RUNS_DIR,
         HAWKEYE_COMPONENT_RUNS_DIR,
+        HAWKEYE_LOC_COMPONENT_RUNS_DIR,
         BENCHMARK_COMPONENT_RUNS_DIR,
         SKILLCORNER_COMPONENT_RUNS_DIR,
         RUNTIME_PHYSICAL_XPASS_DIR,
@@ -344,6 +347,10 @@ def get_hawkeye_component_run_root(run_id: str) -> Path:
     return HAWKEYE_COMPONENT_RUNS_DIR / str(run_id)
 
 
+def get_hawkeye_loc_component_run_root(run_id: str) -> Path:
+    return HAWKEYE_LOC_COMPONENT_RUNS_DIR / str(run_id)
+
+
 def get_benchmark_component_run_root(run_id: str) -> Path:
     return BENCHMARK_COMPONENT_RUNS_DIR / str(run_id)
 
@@ -375,6 +382,8 @@ def _latest_path(kind: str) -> Path:
         return COMPONENT_LATEST_PATH
     if kind == "hawkeye_component":
         return HAWKEYE_COMPONENT_LATEST_PATH
+    if kind == "hawkeye_loc_component":
+        return HAWKEYE_LOC_COMPONENT_LATEST_PATH
     if kind == "benchmark_component":
         return BENCHMARK_COMPONENT_LATEST_PATH
     if kind == "skillcorner_component":
@@ -443,6 +452,8 @@ def resolve_named_component_run_id(kind: str, run_id: str | None = None, require
         return None
     if kind == "hawkeye_component":
         run_root = get_hawkeye_component_run_root(resolved)
+    elif kind == "hawkeye_loc_component":
+        run_root = HAWKEYE_LOC_COMPONENT_RUNS_DIR / resolved
     elif kind == "benchmark_component":
         run_root = get_benchmark_component_run_root(resolved)
     elif kind == "skillcorner_component":

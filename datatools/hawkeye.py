@@ -380,6 +380,65 @@ def _freeze_hawkeye_ballreceipt_frame_meta(
     return frozen
 
 
+def apply_hawkeye_possessor_offset(
+    situation_tracking: pd.DataFrame,
+    offset_x: float,
+    offset_y: float,
+) -> tuple[pd.DataFrame, dict[str, float | int]]:
+    """Apply an already-normalized metric offset to the possessor for the full situation."""
+    adjusted = situation_tracking.copy()
+    player_ids = adjusted["PlayerID"].dropna().astype(int).unique()
+    if len(player_ids) != 1:
+        situation_id = adjusted["id"].iloc[0] if not adjusted.empty else "<empty>"
+        raise ValueError(
+            f"Hawkeye situation {situation_id} must contain exactly one PlayerID, found {player_ids.tolist()}."
+        )
+    player_id = int(player_ids[0])
+    carrier_mask = adjusted["uefa_player_id"].eq(player_id)
+    if not carrier_mask.any():
+        raise ValueError(f"Hawkeye situation has no tracking rows for possessor PlayerID={player_id}.")
+    adjusted.loc[carrier_mask, "centroid_x"] = (
+        pd.to_numeric(adjusted.loc[carrier_mask, "centroid_x"], errors="coerce") + float(offset_x)
+    )
+    adjusted.loc[carrier_mask, "centroid_y"] = (
+        pd.to_numeric(adjusted.loc[carrier_mask, "centroid_y"], errors="coerce") + float(offset_y)
+    )
+    anchor = _resolve_ballreceipt_anchor(adjusted)
+    return adjusted, {
+        "PlayerID": player_id,
+        "adjusted_x": float(anchor["carrier_x"]),
+        "adjusted_y": float(anchor["carrier_y"]),
+        "BallReceipt": float(anchor["ballreceipt"]),
+    }
+
+
+def _align_frozen_ball_to_possessor(
+    frame_meta: pd.DataFrame,
+    situation_tracking: pd.DataFrame,
+    anchor: dict[str, Any] | None,
+) -> pd.DataFrame:
+    aligned = frame_meta.copy()
+    if anchor is None:
+        return aligned
+    carrier_rows = situation_tracking.loc[
+        situation_tracking["uefa_player_id"].eq(int(anchor["player_id"])),
+        ["abs_time", "centroid_x", "centroid_y"],
+    ].drop_duplicates(subset=["abs_time"], keep="first")
+    carrier_lookup = carrier_rows.set_index("abs_time")
+    future_mask = aligned["abs_time"].ge(float(anchor["ballreceipt"]))
+    for frame_id, frame_row in aligned.loc[future_mask].iterrows():
+        abs_time = float(frame_row["abs_time"])
+        if abs_time not in carrier_lookup.index:
+            continue
+        carrier_row = carrier_lookup.loc[abs_time]
+        if isinstance(carrier_row, pd.DataFrame):
+            carrier_row = carrier_row.iloc[0]
+        aligned.at[frame_id, "ball_x"] = _field_x(float(carrier_row["centroid_x"]))
+        aligned.at[frame_id, "ball_y"] = _field_y(float(carrier_row["centroid_y"]))
+        aligned.at[frame_id, "has_ball"] = True
+    return aligned
+
+
 def _build_tracking_wide(
     situation_tracking: pd.DataFrame,
     frame_meta: pd.DataFrame,
@@ -573,6 +632,7 @@ def build_hawkeye_situation(
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
     build_graphs: bool = True,
+    align_frozen_ball_to_possessor: bool = False,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
@@ -596,6 +656,8 @@ def build_hawkeye_situation(
         anchor,
         enabled=freeze_ballreceipt,
     )
+    if align_frozen_ball_to_possessor:
+        frame_meta = _align_frozen_ball_to_possessor(frame_meta, situation_tracking, anchor)
     tracking = _build_tracking_wide(situation_tracking, frame_meta, team_map)
 
     keepers = object_map.loc[object_map["role"] == 2, "object_id"].dropna().tolist()
