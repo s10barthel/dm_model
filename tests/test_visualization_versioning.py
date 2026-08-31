@@ -130,6 +130,125 @@ def success_intent_record(model_id: str = "success_intent/selected", feature_run
 
 
 class VisualizationVersioningTests(unittest.TestCase):
+    def test_location_component_row_selection_modes(self) -> None:
+        export = pd.DataFrame(
+            {
+                "selection_row_id": [0, 0, 1, 2, 3],
+                "original_action_id": ["a", "a", "b", "a", "c"],
+                "PositionX": [0.0] * 5,
+                "PositionY": [0.0] * 5,
+                "resolved_time_norm": [0.0] * 5,
+                "loc_situation_id": ["l0", "l0", "l1", "l2", "l3"],
+            }
+        )
+        explicit = visualize_hawkeye.select_location_component_rows(
+            export, situation_ids=["c", "a"], limit=None
+        )
+        self.assertEqual(explicit["selection_row_id"].tolist(), [3, 0])
+        all_first = visualize_hawkeye.select_location_component_rows(
+            export, situation_ids=["all"], limit=None
+        )
+        self.assertEqual(all_first["selection_row_id"].tolist(), [0, 1, 3])
+        limited = visualize_hawkeye.select_location_component_rows(export, situation_ids=None, limit=3)
+        self.assertEqual(limited["selection_row_id"].tolist(), [0, 1, 2])
+        with self.assertRaisesRegex(ValueError, "not present"):
+            visualize_hawkeye.select_location_component_rows(export, situation_ids=["missing"], limit=None)
+
+    def test_location_visualization_cli_constraints(self) -> None:
+        args = visualize_hawkeye.parse_args(["--mode", "loc", "--situation-id", "all"])
+        self.assertEqual(args.mode, "loc")
+        self.assertTrue(args.pc_xpass)
+        self.assertIsNone(args.time_norm)
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--mode", "loc", "--output", "gif"])
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--mode", "loc", "--time-norm", "0"])
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--mode", "loc", "--limit", "0"])
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--mode", "loc", "--situation-id", "a", "--limit", "1"])
+
+    def test_location_visualization_resolves_location_run_and_writes_component_png(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            component_root = root / "components" / "loc-run"
+            args = visualize_hawkeye.parse_args(
+                [
+                    "--mode", "loc",
+                    "--component-run-id", "loc-run",
+                    "--only-pass-intent",
+                    "--show-physical-xpass",
+                    "--run-id", "loc-viz",
+                    "--output-dir", str(root / "visualizations"),
+                ]
+            )
+            component_export = pd.DataFrame(
+                {
+                    "selection_row_id": [7],
+                    "original_action_id": ["action"],
+                    "PositionX": [100.0],
+                    "PositionY": [25.0],
+                    "resolved_time_norm": [0.0],
+                    "loc_situation_id": ["action__loc__7__hash"],
+                    "id": ["action"],
+                }
+            )
+            tracking = pd.DataFrame({"id": ["action"], "BallReceipt": [10.0]})
+            situation = SimpleNamespace(
+                situation_id="action",
+                match_id="action",
+                frame_meta=pd.DataFrame(
+                    {"abs_time": [10.0], "possession_prefix": ["home"], "possessor_object_id": ["home_1"]},
+                    index=[0],
+                ),
+                tracking=pd.DataFrame({"ball_x": [0.0], "ball_y": [0.0]}, index=[0]),
+            )
+            overlays = OverlayData(pd.DataFrame(), pd.DataFrame(), {})
+            with (
+                patch.object(visualize_hawkeye, "parse_args", return_value=args),
+                patch.object(visualize_hawkeye, "resolve_named_component_run_id", return_value="loc-run") as resolve_run,
+                patch.object(visualize_hawkeye, "get_hawkeye_loc_component_run_root", return_value=component_root),
+                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run"})),
+                patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=tracking),
+                patch.object(visualize_hawkeye, "clean_hawkeye_tracking", side_effect=lambda value: value),
+                patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
+                patch.object(visualize_hawkeye, "clean_hawkeye_ball", side_effect=lambda value: value),
+                patch.object(visualize_hawkeye, "apply_hawkeye_possessor_offset", return_value=(tracking, {})),
+                patch.object(visualize_hawkeye, "build_hawkeye_situation", return_value=(situation, pd.DataFrame(), {})),
+                patch.object(
+                    visualize_hawkeye,
+                    "build_hawkeye_component_tables",
+                    return_value={"pass_intent": pd.DataFrame({"home_1": [0.5]}, index=[0])},
+                ),
+                patch.object(
+                    visualize_hawkeye,
+                    "load_runtime_physical_xpass_visualization_table",
+                    return_value=pd.DataFrame({"home_1": [0.4]}, index=[0]),
+                ) as load_physical,
+                patch.object(
+                    visualize_hawkeye,
+                    "resolve_hawkeye_png_frames",
+                    return_value=[{"frame_id": 0, "resolved_time_norm": 0.0}],
+                ),
+                patch.object(visualize_hawkeye, "load_overlay_data", return_value=overlays),
+                patch.object(
+                    visualize_hawkeye,
+                    "build_situation_overlays",
+                    return_value=(pd.Series(dtype=float), pd.Series(dtype=object), {"selection_denominators": {}}),
+                ),
+                patch.object(visualize_hawkeye, "render_frame_image", return_value=FakeImage()),
+            ):
+                visualize_hawkeye.main()
+
+            resolve_run.assert_called_once_with("hawkeye_loc_component", "loc-run", required=True)
+            output = root / "visualizations" / "loc-viz" / "action_7" / "pass_intent.png"
+            self.assertTrue(output.exists())
+            self.assertTrue((output.parent / "physical_xpass.png").exists())
+            self.assertEqual(load_physical.call_args.args[1], "action__loc__7__hash")
+            metadata = json.loads((root / "visualizations" / "loc-viz" / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["visualization_mode"], "loc")
+            self.assertEqual(metadata["rendered_selection_row_ids"], [7])
+
     def test_sportec_defaults_use_dataset_subfolders(self) -> None:
         self.assertEqual(
             project_config.COMPONENT_LATEST_PATH,

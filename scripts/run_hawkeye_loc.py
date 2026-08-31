@@ -85,6 +85,7 @@ from scripts.generate_physical_xpass import (
     enabled_physical_xpass_metrics_from_args,
     merge_stats,
     prewarm_runtime_items,
+    resolve_runtime_row_window,
     runtime_cache_items_from_graphs,
     write_runtime_dataset_metadata,
 )
@@ -142,6 +143,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tracking-csv", default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"))
     parser.add_argument("--ball-csv", default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"))
     parser.add_argument("--time-tolerance", type=float, default=DEFAULT_TIME_TOLERANCE)
+    selection_group = parser.add_mutually_exclusive_group()
+    selection_group.add_argument(
+        "--situation-id",
+        action="append",
+        help="Select the first input row for an action_id; repeat for multiple ids, or use 'all'.",
+    )
+    selection_group.add_argument("--limit", type=int, help="Process the first N input CSV rows without deduplication.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id")
     parser.add_argument("--action-intent-model-id")
@@ -215,6 +223,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--num-workers", "--physical-num-workers", dest="num_workers", default="auto")
     parser.add_argument("--max-auto-workers", type=int, default=PHYSICAL_DEFAULT_MAX_AUTO_WORKERS)
     parser.add_argument("--physical-batch-size", type=int, default=16)
+    parser.add_argument(
+        "--runtime-row-window",
+        type=int,
+        default=None,
+        help="Relocated graph rows to buffer per parallel pc-xPass prewarm; default: physical_batch_size * num_workers * 2.",
+    )
     parser.add_argument("--worker-thread-limit", "--physical-worker-thread-limit", dest="worker_thread_limit", type=int, default=1)
     teammate_group = parser.add_mutually_exclusive_group()
     teammate_group.add_argument("--ignore-teammates", dest="consider_teammates", action="store_false")
@@ -241,6 +255,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.time_tolerance < 0:
         parser.error("--time-tolerance must be non-negative")
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    if args.runtime_row_window is not None and args.runtime_row_window < 1:
+        parser.error("--runtime-row-window must be positive")
+    requested_ids = [str(value).strip() for value in (args.situation_id or [])]
+    if any(not value for value in requested_ids):
+        parser.error("--situation-id must not be empty")
+    if "all" in requested_ids and requested_ids != ["all"]:
+        parser.error("--situation-id all cannot be combined with explicit situation ids")
+    args.situation_id = requested_ids or None
     if not (0 < args.physical_eps < 0.5):
         parser.error("--physical-eps must be between 0 and 0.5")
     for name in ["max_speed", "min_speed", "speed_step", "radial_gridsize", "angle_step"]:
@@ -511,6 +535,124 @@ def _configure_models(args: argparse.Namespace):
     return resolved_ids, shared_context, specs, schema, device
 
 
+def select_location_rows(
+    selection: pd.DataFrame,
+    *,
+    situation_ids: list[str] | None = None,
+    limit: int | None = None,
+) -> pd.DataFrame:
+    """Apply CLI row selection while retaining the source CSV order."""
+    if limit is not None:
+        return selection.iloc[: int(limit)].copy()
+    if not situation_ids:
+        return selection.copy()
+
+    action_values = selection["action_id"].map(lambda value: "" if pd.isna(value) else str(value).strip())
+    first_indices: dict[str, int] = {}
+    for index, value in action_values.items():
+        if value and value not in first_indices:
+            first_indices[value] = index
+
+    if situation_ids == ["all"]:
+        return selection.loc[list(first_indices.values())].copy()
+
+    missing = [value for value in situation_ids if value not in first_indices]
+    if missing:
+        raise ValueError("Requested --situation-id values were not found in action_id: " + ", ".join(missing))
+    # dict.fromkeys prevents repeated CLI values from running the same action twice.
+    indices = [first_indices[value] for value in dict.fromkeys(situation_ids)]
+    return selection.loc[indices].copy()
+
+
+def build_location_target(
+    row: pd.Series,
+    tracking: pd.DataFrame,
+    ball: pd.DataFrame,
+    graph_schema: dict[str, object],
+    time_tolerance: float,
+) -> dict[str, object]:
+    """Build one relocated target graph and the diagnostics needed for export/cache identity."""
+    row_id = int(row["selection_row_id"])
+    if pd.isna(row["action_id"]):
+        raise ValueError("action_id is missing")
+    action_id = str(row["action_id"]).strip()
+    pass_moment = float(row["pass_moment"])
+    position_x = float(row["PositionX"])
+    position_y = float(row["PositionY"])
+    selected_player = float(row["SelectedPlayer"])
+    if not action_id or not all(math.isfinite(value) for value in [pass_moment, position_x, position_y]):
+        raise ValueError("invalid action_id, pass_moment, PositionX, or PositionY")
+    if not math.isfinite(selected_player) or not selected_player.is_integer():
+        raise ValueError("SelectedPlayer is missing or invalid")
+
+    situation_tracking = tracking.loc[tracking["id"].eq(action_id)].copy()
+    if situation_tracking.empty:
+        raise LookupError(f"Hawkeye situation not found for action_id={action_id}")
+    frame = resolve_target_frame(situation_tracking, pass_moment, float(time_tolerance))
+    adjusted_tracking, adjusted_info = apply_hawkeye_possessor_offset(
+        situation_tracking,
+        offset_x=position_x / 100.0,
+        offset_y=-position_y / 100.0,
+    )
+    try:
+        validate_adjusted_possessor_bounds(adjusted_tracking, int(adjusted_info["PlayerID"]))
+    except ArithmeticError as exc:
+        raise ArithmeticError(
+            f"{exc}; anchor=({adjusted_info['adjusted_x']:.6f}, {adjusted_info['adjusted_y']:.6f})"
+        ) from exc
+
+    situation_frame_keys = adjusted_tracking[["game_id", "half", "abs_time"]].drop_duplicates()
+    situation_ball = ball.merge(situation_frame_keys, on=["game_id", "half", "abs_time"], how="inner")
+    state_hash = geometry_hash(
+        action_id,
+        row_id,
+        int(frame["frame_id"]),
+        position_x,
+        position_y,
+        float(adjusted_info["adjusted_x"]),
+        float(adjusted_info["adjusted_y"]),
+        situation_tracking=adjusted_tracking,
+        situation_ball=situation_ball,
+    )
+    synthetic_id = f"{action_id}__loc__{row_id}__{state_hash}"
+    situation, attacking_rows, _stats = build_hawkeye_situation(
+        adjusted_tracking,
+        ball,
+        freeze_ballreceipt=True,
+        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        align_frozen_ball_to_possessor=True,
+    )
+    situation.match_id = synthetic_id
+    attacking_rows = filter_situation_to_frame(situation, attacking_rows, int(frame["frame_id"]))
+    if attacking_rows.empty:
+        raise LookupError(f"target frame {frame['frame_id']} has no attacking-player rows")
+    return {
+        "row": row,
+        "row_id": row_id,
+        "action_id": action_id,
+        "pass_moment": pass_moment,
+        "position_x": position_x,
+        "position_y": position_y,
+        "selected_player": int(selected_player),
+        "frame": frame,
+        "adjusted_info": adjusted_info,
+        "geometry_hash": state_hash,
+        "synthetic_id": synthetic_id,
+        "situation": situation,
+        "attacking_rows": attacking_rows,
+        "cache_items": runtime_cache_items_from_graphs(synthetic_id, situation.graph_features_0, situation.labels),
+    }
+
+
+def _cache_stats_have_misses(stats: dict[str, object] | None) -> bool:
+    return bool(stats) and int(stats.get("cache_misses", 0) or 0) > 0
+
+
+def _cache_stats_have_unusable_rows(stats: dict[str, object] | None) -> bool:
+    return bool(stats) and int(stats.get("skipped_all_nan", 0) or 0) > 0
+
+
 def main() -> None:
     args = parse_args()
     input_path = Path(args.input_file)
@@ -522,6 +664,11 @@ def main() -> None:
         raise ValueError(f"Input selection data is missing required columns: {', '.join(missing_columns)}")
     if selection["selection_row_id"].duplicated().any():
         raise ValueError("selection_row_id must be unique")
+    selected_selection = select_location_rows(
+        selection,
+        situation_ids=args.situation_id,
+        limit=args.limit,
+    )
 
     run_id = args.run_id or generate_run_id("hawkeye_loc_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_LOC_COMPONENT_RUNS_DIR
@@ -539,125 +686,147 @@ def main() -> None:
     missing_records: list[dict[str, object]] = []
     processed_rows: list[int] = []
     pc_stats: dict[str, object] = {}
-    for index, row in selection.iterrows():
+    prepared_rows: list[pd.Series] = []
+    cache_dir = Path(args.pc_xpass_cache_dir)
+    runtime_row_window = resolve_runtime_row_window(args, "runtime_row_window")
+
+    batch_errors: list[dict[str, object]] = []
+    pending_targets: list[dict[str, object]] = []
+
+    def flush_pending_targets() -> None:
+        if not pending_targets:
+            return
+        window = list(pending_targets)
+        pending_targets.clear()
+        items = [item for unit in window for item in unit["cache_items"]]
+        if not items:
+            return
+        try:
+            stats = prewarm_runtime_items(
+                items,
+                cache_dir=cache_dir,
+                args=args,
+                progress_desc=(
+                    f"hawkeye_loc cache rows {window[0]['row_id']}-{window[-1]['row_id']}"
+                ),
+            )
+            merge_stats(pc_stats, stats)
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            batch_errors.append(
+                {
+                    "selection_row_ids": [int(unit["row_id"]) for unit in window],
+                    "reason": message,
+                }
+            )
+            print(f"pc-xPass batch failed; auditing rows individually: {message}")
+
+    # Phase 1: construct target graphs in bounded windows and prewarm pc-xPass in parallel.
+    for _, row in selected_selection.iterrows():
         row_id = int(row["selection_row_id"])
         if int(pd.to_numeric(pd.Series([row.get("loc_info_missing")]), errors="coerce").fillna(1).iloc[0]) == 1:
             missing_records.append(
                 _missing_record(row, str(row.get("loc_status", "location_missing")), str(row.get("loc_missing_reason", "location missing")))
             )
             continue
-        processing_stage = "input_validation"
         try:
-            if pd.isna(row["action_id"]):
-                raise ValueError("action_id is missing")
-            action_id = str(row["action_id"]).strip()
-            pass_moment = float(row["pass_moment"])
-            position_x = float(row["PositionX"])
-            position_y = float(row["PositionY"])
-            selected_player = float(row["SelectedPlayer"])
-            if not action_id or not all(math.isfinite(value) for value in [pass_moment, position_x, position_y]):
-                raise ValueError("invalid action_id, pass_moment, PositionX, or PositionY")
-            if not math.isfinite(selected_player) or not selected_player.is_integer():
-                raise ValueError("SelectedPlayer is missing or invalid")
-            processing_stage = "situation_lookup"
-            situation_tracking = tracking.loc[tracking["id"].eq(action_id)].copy()
-            if situation_tracking.empty:
-                raise LookupError(f"Hawkeye situation not found for action_id={action_id}")
-            processing_stage = "frame_resolution"
-            frame = resolve_target_frame(situation_tracking, pass_moment, float(args.time_tolerance))
-            processing_stage = "geometry"
-            adjusted_tracking, adjusted_info = apply_hawkeye_possessor_offset(
-                situation_tracking,
-                offset_x=position_x / 100.0,
-                offset_y=-position_y / 100.0,
-            )
-            try:
-                validate_adjusted_possessor_bounds(adjusted_tracking, int(adjusted_info["PlayerID"]))
-            except ArithmeticError as exc:
-                raise ArithmeticError(
-                    f"{exc}; anchor=({adjusted_info['adjusted_x']:.6f}, {adjusted_info['adjusted_y']:.6f})"
-                ) from exc
-
-            situation_frame_keys = adjusted_tracking[["game_id", "half", "abs_time"]].drop_duplicates()
-            situation_ball = ball.merge(situation_frame_keys, on=["game_id", "half", "abs_time"], how="inner")
-            state_hash = geometry_hash(
-                action_id,
-                row_id,
-                int(frame["frame_id"]),
-                position_x,
-                position_y,
-                float(adjusted_info["adjusted_x"]),
-                float(adjusted_info["adjusted_y"]),
-                situation_tracking=adjusted_tracking,
-                situation_ball=situation_ball,
-            )
-            synthetic_id = f"{action_id}__loc__{row_id}__{state_hash}"
-            situation, attacking_rows, _stats = build_hawkeye_situation(
-                adjusted_tracking,
-                ball,
-                freeze_ballreceipt=True,
-                add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
-                add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
-                align_frozen_ball_to_possessor=True,
-            )
-            situation.match_id = synthetic_id
-            attacking_rows = filter_situation_to_frame(situation, attacking_rows, int(frame["frame_id"]))
-            if attacking_rows.empty:
-                raise LookupError(f"target frame {frame['frame_id']} has no attacking-player rows")
-            processing_stage = "pc_xpass"
-            unit_stats = prewarm_runtime_items(
-                runtime_cache_items_from_graphs(synthetic_id, situation.graph_features_0, situation.labels),
-                cache_dir=Path(args.pc_xpass_cache_dir),
-                args=args,
-                progress_desc=f"hawkeye_loc row {row_id}",
-            )
-            merge_stats(pc_stats, unit_stats)
-            processing_stage = "model_inference"
-            components = infer_hawkeye_components(situation, model_specs, device=device)
-            export = build_hawkeye_export(attacking_rows, situation, components)
-            selected_export = export.loc[
-                pd.to_numeric(export["uefa_player_id"], errors="coerce").eq(int(selected_player))
-            ]
-            if len(selected_export) != 1:
-                raise RuntimeError(
-                    f"expected one target-frame row for SelectedPlayer={int(selected_player)}, "
-                    f"found {len(selected_export)}"
-                )
-            missing_components = [
-                column for column in REQUIRED_SCORE_COMPONENTS if pd.isna(selected_export.iloc[0][column])
-            ]
-            if missing_components:
-                if "pass_success" in missing_components:
-                    processing_stage = "pc_xpass"
-                raise RuntimeError("selected-player component values are missing: " + ", ".join(missing_components))
-            export["selection_row_id"] = row_id
-            export["original_action_id"] = action_id
-            export["SelectedPlayer"] = row["SelectedPlayer"]
-            export["requested_pass_moment"] = pass_moment
-            export["resolved_time_norm"] = float(frame["time_norm"])
-            export["hawkeye_time_diff"] = float(frame["time_diff"])
-            export["PositionX"] = position_x
-            export["PositionY"] = position_y
-            export["adjusted_possessor_x"] = float(adjusted_info["adjusted_x"])
-            export["adjusted_possessor_y"] = float(adjusted_info["adjusted_y"])
-            export["loc_situation_id"] = synthetic_id
-            export["geometry_hash"] = state_hash
-            exports.append(export)
-            processed_rows.append(row_id)
+            target = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            prepared_rows.append(row.copy())
+            pending_targets.append(target)
+            if len(pending_targets) >= runtime_row_window:
+                flush_pending_targets()
         except LookupError as exc:
-            status = "hawkeye_situation_not_found" if processing_stage == "situation_lookup" else "hawkeye_frame_not_found"
+            status = "hawkeye_situation_not_found" if "situation not found" in str(exc) else "hawkeye_frame_not_found"
             missing_records.append(_missing_record(row, status, str(exc)))
         except ArithmeticError as exc:
             missing_records.append(_missing_record(row, "adjusted_position_out_of_bounds", str(exc)))
         except Exception as exc:
-            status = {
-                "input_validation": "invalid_location_input",
-                "frame_resolution": "hawkeye_frame_not_found",
-                "geometry": "geometry_failed",
-                "pc_xpass": "pc_xpass_failed",
-                "model_inference": "inference_failed",
-            }.get(processing_stage, "inference_failed")
-            missing_records.append(_missing_record(row, status, f"{type(exc).__name__}: {exc}"))
+            missing_records.append(_missing_record(row, "geometry_failed", f"{type(exc).__name__}: {exc}"))
+            print(f"SKIP selection_row_id={row_id}: {type(exc).__name__}: {exc}")
+    flush_pending_targets()
+
+    # Phase 2: a single-worker prewarm is both a cache validity audit and a retry for misses.
+    audit_args = argparse.Namespace(**vars(args))
+    audit_args.num_workers = 1
+    cache_audit = {"checked": 0, "initially_missing": 0, "recovered": 0, "failed": 0}
+    cache_ready_rows: list[pd.Series] = []
+    for row in prepared_rows:
+        row_id = int(row["selection_row_id"])
+        cache_audit["checked"] += 1
+        was_missing = False
+        try:
+            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            stats = prewarm_runtime_items(
+                unit["cache_items"],
+                cache_dir=cache_dir,
+                args=audit_args,
+                progress_desc=f"hawkeye_loc cache audit row {row_id}",
+            )
+            if _cache_stats_have_unusable_rows(stats):
+                raise RuntimeError("pc-xPass cache generation skipped an all-NaN target row")
+            if _cache_stats_have_misses(stats):
+                was_missing = True
+                cache_audit["initially_missing"] += 1
+                merge_stats(pc_stats, stats)
+                verification = prewarm_runtime_items(
+                    unit["cache_items"],
+                    cache_dir=cache_dir,
+                    args=audit_args,
+                    progress_desc=f"hawkeye_loc cache verify row {row_id}",
+                )
+                if _cache_stats_have_misses(verification) or _cache_stats_have_unusable_rows(verification):
+                    raise RuntimeError("pc-xPass cache remained missing or invalid after individual retry")
+                cache_audit["recovered"] += 1
+            cache_ready_rows.append(row)
+        except (LookupError, ArithmeticError, ValueError) as exc:
+            cache_audit["failed"] += 1
+            missing_records.append(_missing_record(row, "geometry_failed", f"{type(exc).__name__}: {exc}"))
+            print(f"SKIP selection_row_id={row_id}: cache audit graph rebuild failed: {type(exc).__name__}: {exc}")
+        except Exception as exc:
+            if not was_missing:
+                cache_audit["initially_missing"] += 1
+            cache_audit["failed"] += 1
+            missing_records.append(_missing_record(row, "pc_xpass_failed", f"{type(exc).__name__}: {exc}"))
+            print(f"SKIP selection_row_id={row_id}: pc-xPass audit/retry failed: {type(exc).__name__}: {exc}")
+
+    # Phase 3: rebuild each graph and infer sequentially from read-only caches.
+    for row in cache_ready_rows:
+        row_id = int(row["selection_row_id"])
+        try:
+            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            situation = unit["situation"]
+            attacking_rows = unit["attacking_rows"]
+            components = infer_hawkeye_components(situation, model_specs, device=device)
+            export = build_hawkeye_export(attacking_rows, situation, components)
+            selected_export = export.loc[
+                pd.to_numeric(export["uefa_player_id"], errors="coerce").eq(int(unit["selected_player"]))
+            ]
+            if len(selected_export) != 1:
+                raise RuntimeError(
+                    f"expected one target-frame row for SelectedPlayer={int(unit['selected_player'])}, "
+                    f"found {len(selected_export)}"
+                )
+            missing_components = [column for column in REQUIRED_SCORE_COMPONENTS if pd.isna(selected_export.iloc[0][column])]
+            if missing_components:
+                raise RuntimeError("selected-player component values are missing: " + ", ".join(missing_components))
+            frame = unit["frame"]
+            adjusted_info = unit["adjusted_info"]
+            export["selection_row_id"] = row_id
+            export["original_action_id"] = unit["action_id"]
+            export["SelectedPlayer"] = row["SelectedPlayer"]
+            export["requested_pass_moment"] = unit["pass_moment"]
+            export["resolved_time_norm"] = float(frame["time_norm"])
+            export["hawkeye_time_diff"] = float(frame["time_diff"])
+            export["PositionX"] = unit["position_x"]
+            export["PositionY"] = unit["position_y"]
+            export["adjusted_possessor_x"] = float(adjusted_info["adjusted_x"])
+            export["adjusted_possessor_y"] = float(adjusted_info["adjusted_y"])
+            export["loc_situation_id"] = unit["synthetic_id"]
+            export["geometry_hash"] = unit["geometry_hash"]
+            exports.append(export)
+            processed_rows.append(row_id)
+        except Exception as exc:
+            missing_records.append(_missing_record(row, "inference_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: {type(exc).__name__}: {exc}")
 
     export_columns = [
@@ -676,6 +845,7 @@ def main() -> None:
     metadata = {
         "run_id": run_id,
         "run_type": "hawkeye_loc_component",
+        "inference_mode": "loc",
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "input_file": str(input_path.resolve()),
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
@@ -685,6 +855,18 @@ def main() -> None:
         "coordinate_transform": "centroid_x + PositionX/100; centroid_y - PositionY/100",
         "pc_xpass_cache_dir": str(Path(args.pc_xpass_cache_dir).resolve()),
         "pc_xpass_stats": pc_stats,
+        "pc_xpass_batch_errors": batch_errors,
+        "pc_xpass_cache_audit": cache_audit,
+        "runtime_row_window": int(runtime_row_window),
+        "num_workers": args.num_workers,
+        "resolved_num_workers": int(resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)),
+        "selection": {
+            "requested_situation_ids": list(args.situation_id or []),
+            "limit": args.limit,
+            "input_rows": int(len(selection)),
+            "selected_rows": int(len(selected_selection)),
+            "selected_selection_row_ids": [int(value) for value in selected_selection["selection_row_id"].tolist()],
+        },
         "processed_selection_row_ids": processed_rows,
         "missing_rows": int(len(missing_report)),
         "models": resolved_ids,
@@ -703,7 +885,14 @@ def main() -> None:
         Path(args.pc_xpass_cache_dir),
         args,
         stats=pc_stats,
-        source_inputs={"component_run_id": run_id, "input_file": str(input_path.resolve())},
+        source_inputs={
+            "component_run_id": run_id,
+            "input_file": str(input_path.resolve()),
+            "requested_situation_ids": list(args.situation_id or []),
+            "limit": args.limit,
+            "selected_selection_row_ids": [int(value) for value in selected_selection["selection_row_id"].tolist()],
+            "runtime_row_window": int(runtime_row_window),
+        },
         skipped={str(record["selection_row_id"]): record["loc_missing_reason"] for record in missing_records},
     )
     print(f"Hawkeye location component run id: {run_id}")
