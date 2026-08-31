@@ -192,7 +192,13 @@ class Match(ABC):
             self._cached_diagnostic_events = utils.label_returns(self._base_events.copy(), lookahead_len=10, skip_first=False)
         return self._cached_diagnostic_events
 
-    def _get_events_for_return_type(self, return_type: str, return_kind: str, return_value: int | float, skip_first: bool) -> pd.DataFrame:
+    def _get_events_for_return_type(
+        self,
+        return_type: str,
+        return_kind: str,
+        return_value: int | float | tuple[float, float],
+        skip_first: bool,
+    ) -> pd.DataFrame:
         if not hasattr(self, "_cached_events_by_return_type"):
             self._cached_events_by_return_type = {}
         if not hasattr(self, "_base_events"):
@@ -239,6 +245,27 @@ class Match(ABC):
             events = utils.label_epv_in_state_returns(
                 events,
                 action_offset=action_offset,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+        elif return_kind == "disc_poly_max":
+            b, z = return_value
+            events = utils.label_returns(events, lookahead_len=10, skip_first=False)
+            events = utils.label_polynomial_xt_returns(
+                events,
+                b=b,
+                z=z,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            events = utils.label_polynomial_goal_distance_returns(
+                events,
+                b=b,
+                z=z,
+                eligible_types=tuple(config.XT_ACTION_TYPES),
+            )
+            events = utils.label_polynomial_epv_returns(
+                events,
+                b=b,
+                z=z,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
             )
         else:

@@ -783,8 +783,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Resolved outcome return type to use for label generation: disc_<gamma>, disc_<gamma>_skip1, "
-            "disc_max_<gamma>, disc_max_<gamma>_skip1, next_<N>, next_<N>_skip1, "
-            "or in_<N> (disc_max/in: xt/goal_distance/epv only)."
+            "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
+            "next_<N>, next_<N>_skip1, or in_<N> "
+            "(disc_max/disc_poly_max/in: xt/goal_distance/epv only)."
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")

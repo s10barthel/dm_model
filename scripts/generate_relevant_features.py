@@ -99,7 +99,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Resolved return type for generated action labels. Repeat the flag to include multiple return types, "
-            "including disc_<gamma>_skip1 and next_<N>_skip1, plus in_<N> for xt/goal_distance/epv training."
+            "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>, "
+            "and next_<N>_skip1, plus in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument(

@@ -22,6 +22,7 @@ from datatools.goal_distance import (
 )
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import utils, xt
+from datatools.match import Match
 from models.utils import calc_binary_metrics, get_outcome_diagnostic_targets, get_outcome_targets
 from scripts.generate_goal_distance import GOAL_DISTANCE_TARGET_RANGE
 from scripts import generate_xt
@@ -136,6 +137,34 @@ class ReturnTypeValidationTests(unittest.TestCase):
         self.assertEqual(project_config.parse_return_type("disc_max_0.9"), ("disc_max", 0.9, False))
         self.assertEqual(project_config.parse_return_type("disc_max_0.5_skip1"), ("disc_max", 0.5, True))
 
+    def test_validate_return_type_accepts_polynomial_max_parameters(self) -> None:
+        accepted = {
+            "disc_poly_max_1_2": (1.0, 2.0),
+            "disc_poly_max_0.05_0.5": (0.05, 0.5),
+            "disc_poly_max_5e-2_2e0": (0.05, 2.0),
+        }
+        for return_type, parameters in accepted.items():
+            with self.subTest(return_type=return_type):
+                self.assertEqual(project_config.validate_return_type(return_type), return_type)
+                self.assertEqual(project_config.parse_return_type(return_type), ("disc_poly_max", parameters, False))
+
+    def test_validate_return_type_rejects_invalid_polynomial_max_parameters(self) -> None:
+        invalid = [
+            "disc_poly_max_0.05",
+            "disc_poly_max_0.05_2_extra",
+            "disc_poly_max_bad_2",
+            "disc_poly_max_0_2",
+            "disc_poly_max_-0.05_2",
+            "disc_poly_max_0.05_0",
+            "disc_poly_max_0.05_-2",
+            "disc_poly_max_nan_2",
+            "disc_poly_max_0.05_inf",
+            "disc_poly_max_0.05_2_skip1",
+        ]
+        for return_type in invalid:
+            with self.subTest(return_type=return_type), self.assertRaises(ValueError):
+                project_config.validate_return_type(return_type)
+
     def test_validate_return_type_rejects_invalid_in_variant(self) -> None:
         with self.assertRaises(ValueError):
             project_config.validate_return_type("in_0")
@@ -175,6 +204,22 @@ class ReturnTypeValidationTests(unittest.TestCase):
                 "disc_max_0.5",
             )
 
+    def test_validate_return_type_for_target_family_limits_polynomial_max_to_soft_targets(self) -> None:
+        for target_family in ["xt", "goal_distance", "epv"]:
+            self.assertEqual(
+                project_config.validate_return_type_for_target_family(
+                    "disc_poly_max_0.05_2",
+                    target_family=target_family,
+                ),
+                "disc_poly_max_0.05_2",
+            )
+        for target_family in ["goal", "xg"]:
+            with self.assertRaises(ValueError):
+                project_config.validate_return_type_for_target_family(
+                    "disc_poly_max_0.05_2",
+                    target_family=target_family,
+                )
+
     def test_resolve_effective_return_type_rejects_invalid_in_state_target_family(self) -> None:
         with self.assertRaises(ValueError):
             project_config.resolve_effective_return_type("goal", "in_3")
@@ -187,6 +232,7 @@ class ReturnTypeValidationTests(unittest.TestCase):
             (run_root / "action_labels_next_5_skip1_angle_only").mkdir()
             (run_root / "action_labels_disc_0.5_skip1_model").mkdir()
             (run_root / "action_labels_disc_max_0.5_skip1_model").mkdir()
+            (run_root / "action_labels_disc_poly_max_0.05_2_angle_only").mkdir()
 
             with (
                 patch.object(project_config, "load_feature_run_metadata", return_value={}),
@@ -194,7 +240,10 @@ class ReturnTypeValidationTests(unittest.TestCase):
             ):
                 return_types = project_config.infer_feature_run_return_types("feature_run")
 
-        self.assertEqual(return_types, ["disc_0.5_skip1", "disc_max_0.5_skip1", "in_3", "next_5_skip1"])
+        self.assertEqual(
+            return_types,
+            ["disc_0.5_skip1", "disc_max_0.5_skip1", "disc_poly_max_0.05_2", "in_3", "next_5_skip1"],
+        )
 
 
 class InStateLabelingTests(unittest.TestCase):
@@ -435,6 +484,111 @@ class InStateLabelingTests(unittest.TestCase):
         self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.70)
         self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.025)
 
+    def test_polynomial_max_uses_expected_weights_and_clamps_at_zero(self) -> None:
+        expected_weights = [1.0, 0.95, 0.8, 0.55, 0.2, 0.0]
+        for target_rank, expected_weight in enumerate(expected_weights):
+            rows = [("pass", "home_1", 0.0)]
+            rows.extend(("pass", "away_1", 0.0) for _ in range(target_rank))
+            rows.append(("pass", "home_1", 1.0))
+            labeled = utils.label_polynomial_xt_returns(make_xt_events(rows), b=0.05, z=2.0)
+            with self.subTest(target_rank=target_rank):
+                self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), expected_weight)
+
+    def test_polynomial_max_allows_fractional_power_and_ignores_ineligible_events(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.0),
+                ("pass", "away_1", 0.0),
+                ("interception", "away_1", 1.0),
+                ("pass", "home_1", 1.0),
+            ]
+        )
+
+        labeled = utils.label_polynomial_xt_returns(events, b=0.25, z=0.5)
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.75)
+
+    def test_polynomial_max_uses_shared_rank_for_teammate_and_opponent_candidates(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.0),
+                ("pass", "away_1", 0.4),
+                ("pass", "home_1", 1.0),
+            ]
+        )
+
+        labeled = utils.label_polynomial_xt_returns(events, b=0.25, z=1.0)
+
+        self.assertAlmostEqual(float(labeled.at[0, "concedes_xT"]), 0.4)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.75)
+
+    def test_polynomial_max_applies_to_goal_distance_and_epv(self) -> None:
+        rows = [("pass", "home_1", 0.0), ("pass", "away_1", 0.0), ("pass", "home_1", 0.8)]
+
+        goal_distance = utils.label_polynomial_goal_distance_returns(
+            make_goal_distance_events(rows), b=0.5, z=1.0
+        )
+        epv = utils.label_polynomial_epv_returns(make_epv_events(rows), b=0.5, z=1.0)
+
+        self.assertAlmostEqual(float(goal_distance.at[0, "scores_goal_distance"]), 0.4)
+        self.assertAlmostEqual(float(epv.at[0, "scores_epv"]), 0.4)
+
+    def test_polynomial_max_preserves_discount_scan_boundaries(self) -> None:
+        boundary_events = []
+
+        goal_events = make_xt_events(
+            [("pass", "home_1", 0.0), ("shot", "away_1", 0.2), ("pass", "home_1", 1.0)]
+        )
+        goal_events.loc[1, ["success", "expected_goal"]] = [True, 0.5]
+        boundary_events.append(("goal", goal_events))
+
+        period_events = make_xt_events(
+            [("pass", "home_1", 0.0), ("pass", "away_1", 0.2), ("pass", "home_1", 1.0)]
+        )
+        period_events.loc[2, "period_id"] = 2
+        boundary_events.append(("period", period_events))
+
+        goalkick_events = make_xt_events(
+            [
+                ("pass", "home_1", 0.0),
+                ("pass", "away_1", 0.2),
+                ("goalkick", "away_1", 0.0),
+                ("pass", "home_1", 1.0),
+            ]
+        )
+        boundary_events.append(("goalkick", goalkick_events))
+
+        for boundary, events in boundary_events:
+            labeled = utils.label_polynomial_xt_returns(events, b=0.01, z=1.0)
+            with self.subTest(boundary=boundary):
+                self.assertEqual(float(labeled.at[0, "scores_xT"]), 0.0)
+
+    def test_match_routes_polynomial_max_to_all_soft_targets_and_populates_structural_labels(self) -> None:
+        events = make_xt_events(
+            [
+                ("pass", "home_1", 0.0),
+                ("pass", "away_1", 0.0),
+                ("pass", "home_1", 1.0),
+            ]
+        )
+        events["goal_distance"] = events["xT"]
+        events["epv"] = events["xT"]
+        match = SimpleNamespace(_base_events=events, _cached_events_by_return_type={})
+
+        labeled = Match._get_events_for_return_type(
+            match,
+            "disc_poly_max_0.05_2",
+            "disc_poly_max",
+            (0.05, 2.0),
+            False,
+        )
+
+        self.assertAlmostEqual(float(labeled.at[0, "scores_xT"]), 0.95)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_goal_distance"]), 0.95)
+        self.assertAlmostEqual(float(labeled.at[0, "scores_epv"]), 0.95)
+        for column in ["scores", "concedes", "scores_xg", "concedes_xg"]:
+            self.assertIn(column, labeled.columns)
+
     def test_discounted_future_probability_value_clips_out_of_range_values(self) -> None:
         events = make_xt_events(
             [
@@ -542,6 +696,55 @@ class OutcomeTargetSelectionTests(unittest.TestCase):
 
 
 class WrapperValidationTests(unittest.TestCase):
+    def test_train_wrapper_accepts_xt_polynomial_max_return_type(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original"]),
+            patch.object(
+                train_wrapper,
+                "infer_feature_run_return_types",
+                return_value=["disc_poly_max_0.05_2"],
+            ),
+        ):
+            args = train_wrapper.parse_args(
+                [
+                    "--feature-run-id",
+                    "feature_run",
+                    "--target-family",
+                    "xt",
+                    "--return_type",
+                    "disc_poly_max_0.05_2",
+                    "--intended-receiver-mode",
+                    "original",
+                ]
+            )
+
+        self.assertEqual(args.return_type, "disc_poly_max_0.05_2")
+
+    def test_train_wrapper_rejects_xg_polynomial_max_return_type(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original"]),
+            patch.object(
+                train_wrapper,
+                "infer_feature_run_return_types",
+                return_value=["disc_poly_max_0.05_2"],
+            ),
+        ):
+            with self.assertRaises(SystemExit):
+                train_wrapper.parse_args(
+                    [
+                        "--feature-run-id",
+                        "feature_run",
+                        "--target-family",
+                        "xg",
+                        "--return_type",
+                        "disc_poly_max_0.05_2",
+                        "--intended-receiver-mode",
+                        "original",
+                    ]
+                )
+
     def test_train_wrapper_accepts_xt_disc_max_return_type(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
