@@ -64,6 +64,7 @@ class HawkeyeSituation:
     lineup: pd.DataFrame = field(default_factory=pd.DataFrame)
     tabular_features_0: None = None
     tabular_features_1: None = None
+    target_geometry: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.match_id is None:
@@ -439,6 +440,59 @@ def _align_frozen_ball_to_possessor(
     return aligned
 
 
+def _clamp_target_possessor_position(
+    situation_tracking: pd.DataFrame,
+    *,
+    target_abs_time: float,
+    player_id: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Clamp one possessor snapshot in centered pitch coordinates.
+
+    Call this after BallReceipt freezing so the corrected snapshot is exactly
+    the position exposed to target-frame inference.
+    """
+    adjusted = situation_tracking.copy()
+    target_rows = adjusted.loc[
+        np.isclose(adjusted["abs_time"], float(target_abs_time), atol=BALLRECEIPT_ATOL)
+        & adjusted["uefa_player_id"].eq(int(player_id))
+    ]
+    if len(target_rows) != 1:
+        situation_id = adjusted["id"].iloc[0] if not adjusted.empty else "<empty>"
+        raise ValueError(
+            f"Hawkeye situation {situation_id} requires exactly one possessor row at "
+            f"target abs_time={float(target_abs_time)}, found {len(target_rows)}."
+        )
+
+    target_index = target_rows.index[0]
+    raw_x = float(target_rows.iloc[0]["centroid_x"])
+    raw_y = float(target_rows.iloc[0]["centroid_y"])
+    half_length = float(config.FIELD_SIZE[0]) / 2.0
+    half_width = float(config.FIELD_SIZE[1]) / 2.0
+    effective_x = float(np.clip(raw_x, -half_length, half_length))
+    effective_y = float(np.clip(raw_y, -half_width, half_width))
+    boundaries: list[str] = []
+    if raw_x < -half_length:
+        boundaries.append("x_min")
+    elif raw_x > half_length:
+        boundaries.append("x_max")
+    if raw_y < -half_width:
+        boundaries.append("y_min")
+    elif raw_y > half_width:
+        boundaries.append("y_max")
+
+    adjusted.at[target_index, "centroid_x"] = effective_x
+    adjusted.at[target_index, "centroid_y"] = effective_y
+    return adjusted, {
+        "target_abs_time": float(target_abs_time),
+        "raw_target_possessor_x": raw_x,
+        "raw_target_possessor_y": raw_y,
+        "effective_target_possessor_x": effective_x,
+        "effective_target_possessor_y": effective_y,
+        "loc_target_position_clamped": bool(boundaries),
+        "clamped_boundaries": boundaries,
+    }
+
+
 def _build_tracking_wide(
     situation_tracking: pd.DataFrame,
     frame_meta: pd.DataFrame,
@@ -633,6 +687,8 @@ def build_hawkeye_situation(
     add_relative_speed_edge_features: bool = False,
     build_graphs: bool = True,
     align_frozen_ball_to_possessor: bool = False,
+    target_abs_time: float | None = None,
+    clamp_target_possessor: bool = False,
 ) -> tuple[HawkeyeSituation, pd.DataFrame, dict[str, int]]:
     if situation_tracking.empty:
         raise ValueError("Cannot build a Hawkeye situation from an empty tracking frame.")
@@ -644,6 +700,17 @@ def build_hawkeye_situation(
         anchor,
         enabled=freeze_ballreceipt,
     )
+    target_geometry: dict[str, Any] = {}
+    if clamp_target_possessor:
+        if target_abs_time is None:
+            raise ValueError("target_abs_time is required when clamp_target_possessor is enabled.")
+        if anchor is None:
+            raise ValueError("BallReceipt freezing must be enabled when clamping a target possessor position.")
+        situation_tracking, target_geometry = _clamp_target_possessor_position(
+            situation_tracking,
+            target_abs_time=float(target_abs_time),
+            player_id=int(anchor["player_id"]),
+        )
     team_map = _stable_team_map(situation_tracking)
     prefix_to_team = {prefix: team for team, prefix in team_map.items()}
     object_map = _build_object_map(situation_tracking, team_map)
@@ -658,6 +725,19 @@ def build_hawkeye_situation(
     )
     if align_frozen_ball_to_possessor:
         frame_meta = _align_frozen_ball_to_possessor(frame_meta, situation_tracking, anchor)
+    if target_geometry.get("loc_target_position_clamped", False):
+        target_frame_rows = frame_meta.index[
+            np.isclose(frame_meta["abs_time"], float(target_geometry["target_abs_time"]), atol=BALLRECEIPT_ATOL)
+        ]
+        if len(target_frame_rows) != 1:
+            raise ValueError(
+                f"Hawkeye situation {situation_tracking['id'].iloc[0]} requires exactly one target frame at "
+                f"abs_time={target_geometry['target_abs_time']}, found {len(target_frame_rows)}."
+            )
+        target_frame_id = int(target_frame_rows[0])
+        frame_meta.at[target_frame_id, "ball_x"] = _field_x(float(target_geometry["effective_target_possessor_x"]))
+        frame_meta.at[target_frame_id, "ball_y"] = _field_y(float(target_geometry["effective_target_possessor_y"]))
+        frame_meta.at[target_frame_id, "has_ball"] = True
     tracking = _build_tracking_wide(situation_tracking, frame_meta, team_map)
 
     keepers = object_map.loc[object_map["role"] == 2, "object_id"].dropna().tolist()
@@ -675,6 +755,7 @@ def build_hawkeye_situation(
         team_map=team_map,
         prefix_to_team=prefix_to_team,
         max_players=20 + 2 + 2,
+        target_geometry=target_geometry,
     )
     attacking_rows = situation_tracking[situation_tracking["team"] == situation_tracking["possession_team"]].copy()
     attacking_rows["uefa_player_id"] = attacking_rows["uefa_player_id"].astype(int)

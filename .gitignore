@@ -30,6 +30,7 @@ tests/AS_viz/
 !tests/test_skillcorner_filter.py
 !tests/test_bundesliga_ranking.py
 !tests/test_visualization_versioning.py
+!tests/test_hawkeye_target_clamping.py
 test_kpi_final/
 test_nan_xg/
 test_smoke_2425

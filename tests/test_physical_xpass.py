@@ -57,7 +57,6 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
-    PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     PC_XPASS_METRIC_TOP10,
     PC_XPASS_METRIC_TOP25,
     PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
@@ -6803,7 +6802,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.control_inflection_point, PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT)
         self.assertEqual(args.endpoint_normalization, PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION)
         self.assertEqual(args.boost_def_endpoint_control, PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL)
-        self.assertEqual(args.use_position_discount, PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT)
+        self.assertFalse(args.use_position_discount)
         self.assertEqual(args.position_discount_power, PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
         self.assertEqual(args.position_discount_distance, PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
         self.assertFalse(args.top_xt)

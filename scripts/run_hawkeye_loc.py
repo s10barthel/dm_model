@@ -6,6 +6,7 @@ import json
 import math
 from datetime import datetime
 from pathlib import Path
+import subprocess
 import sys
 import warnings
 
@@ -18,7 +19,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-from datatools import config
 from datatools.config import LABEL_INDEX
 from datatools.hawkeye import (
     COMPONENT_COLUMNS,
@@ -61,7 +61,6 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
-    PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     PC_XPASS_REACTION_TIME_MODE_DIST_PASS,
     PC_XPASS_REACTION_TIME_MODE_FIXED,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
@@ -117,6 +116,21 @@ MISSING_REPORT_COLUMNS = [
     "loc_status",
     "loc_missing_reason",
 ]
+GEOMETRY_WARNING_COLUMNS = [
+    "selection_row_id",
+    "action_id",
+    "SelectedPlayer",
+    "pass_moment",
+    "PositionX",
+    "PositionY",
+    "resolved_time_norm",
+    "hawkeye_time_diff",
+    "raw_target_possessor_x",
+    "raw_target_possessor_y",
+    "effective_target_possessor_x",
+    "effective_target_possessor_y",
+    "clamped_boundaries",
+]
 REQUIRED_SCORE_COMPONENTS = [
     "action_intent",
     "pass_intent",
@@ -135,6 +149,43 @@ def parse_bool_text(value: str) -> bool:
     if lowered == "false":
         return False
     raise argparse.ArgumentTypeError("expected true or false")
+
+
+def _json_safe_cli_value(value: object) -> object:
+    """Convert parser values to stable JSON primitives for run provenance."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_cli_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_safe_cli_value(item) for key, item in sorted(value.items())}
+    raise TypeError(f"CLI option value is not JSON serializable: {type(value).__name__}")
+
+
+def build_invocation_metadata(
+    args: argparse.Namespace,
+    *,
+    argv: list[str] | None = None,
+    script_argv: list[str] | None = None,
+    working_directory: Path | None = None,
+) -> dict[str, object]:
+    """Capture the original command plus every post-validation CLI option."""
+    invocation_argv = list(sys.argv[1:] if argv is None else argv)
+    invocation_script_argv = list(sys.argv if script_argv is None else script_argv)
+    options = {
+        key: _json_safe_cli_value(value)
+        for key, value in sorted(vars(args).items())
+        if not key.startswith("_")
+    }
+    return {
+        "schema_version": 1,
+        "argv": invocation_argv,
+        "command": subprocess.list2cmdline([sys.executable, *invocation_script_argv]),
+        "working_directory": str((working_directory or Path.cwd()).resolve()),
+        "effective_cli_options": options,
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -217,7 +268,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION,
     )
     parser.add_argument("--boost-def-endpoint-control", "--boost_def_endpoint_control", dest="boost_def_endpoint_control", type=float, default=PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL)
-    parser.add_argument("--use-position-discount", "--use_position_discount", dest="use_position_discount", type=parse_bool_text, default=PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT)
+    parser.add_argument("--use-position-discount", "--use_position_discount", dest="use_position_discount", type=parse_bool_text, default=False)
     parser.add_argument("--position-discount-power", "--position_discount_power", dest="position_discount_power", type=float, default=PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
     parser.add_argument("--position-discount-distance", "--position_discount_distance", dest="position_discount_distance", type=float, default=PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
     parser.add_argument("--num-workers", "--physical-num-workers", dest="num_workers", default="auto")
@@ -437,17 +488,6 @@ def compatibility_warnings(model_ids: dict[str, str], model_specs: dict[str, obj
     return records
 
 
-def validate_adjusted_possessor_bounds(adjusted_tracking: pd.DataFrame, player_id: int) -> None:
-    carrier_rows = adjusted_tracking.loc[adjusted_tracking["uefa_player_id"].eq(int(player_id))]
-    if carrier_rows.empty:
-        raise ValueError(f"adjusted tracking has no rows for possessor PlayerID={int(player_id)}")
-    half_length = float(config.FIELD_SIZE[0]) / 2.0
-    half_width = float(config.FIELD_SIZE[1]) / 2.0
-    outside = carrier_rows["centroid_x"].abs().gt(half_length) | carrier_rows["centroid_y"].abs().gt(half_width)
-    if outside.any():
-        raise ArithmeticError("adjusted possessor position is outside pitch bounds")
-
-
 def filter_situation_to_frame(situation, attacking_rows: pd.DataFrame, frame_id: int) -> pd.DataFrame:
     kept_graphs = []
     kept_labels = []
@@ -470,6 +510,24 @@ def _missing_record(row: pd.Series, status: str, reason: str) -> dict[str, objec
     record["loc_status"] = status
     record["loc_missing_reason"] = reason
     return record
+
+
+def _geometry_warning_record(row: pd.Series, frame: dict[str, float | int], geometry: dict[str, object]) -> dict[str, object]:
+    return {
+        "selection_row_id": row.get("selection_row_id", pd.NA),
+        "action_id": row.get("action_id", pd.NA),
+        "SelectedPlayer": row.get("SelectedPlayer", pd.NA),
+        "pass_moment": row.get("pass_moment", pd.NA),
+        "PositionX": row.get("PositionX", pd.NA),
+        "PositionY": row.get("PositionY", pd.NA),
+        "resolved_time_norm": frame["time_norm"],
+        "hawkeye_time_diff": frame["time_diff"],
+        "raw_target_possessor_x": geometry["raw_target_possessor_x"],
+        "raw_target_possessor_y": geometry["raw_target_possessor_y"],
+        "effective_target_possessor_x": geometry["effective_target_possessor_x"],
+        "effective_target_possessor_y": geometry["effective_target_possessor_y"],
+        "clamped_boundaries": ",".join(geometry["clamped_boundaries"]),
+    }
 
 
 def _configure_models(args: argparse.Namespace):
@@ -594,15 +652,18 @@ def build_location_target(
         offset_x=position_x / 100.0,
         offset_y=-position_y / 100.0,
     )
-    try:
-        validate_adjusted_possessor_bounds(adjusted_tracking, int(adjusted_info["PlayerID"]))
-    except ArithmeticError as exc:
-        raise ArithmeticError(
-            f"{exc}; anchor=({adjusted_info['adjusted_x']:.6f}, {adjusted_info['adjusted_y']:.6f})"
-        ) from exc
 
-    situation_frame_keys = adjusted_tracking[["game_id", "half", "abs_time"]].drop_duplicates()
-    situation_ball = ball.merge(situation_frame_keys, on=["game_id", "half", "abs_time"], how="inner")
+    situation, attacking_rows, _stats = build_hawkeye_situation(
+        adjusted_tracking,
+        ball,
+        freeze_ballreceipt=True,
+        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        align_frozen_ball_to_possessor=True,
+        target_abs_time=float(frame["abs_time"]),
+        clamp_target_possessor=True,
+    )
+    target_geometry = situation.target_geometry
     state_hash = geometry_hash(
         action_id,
         row_id,
@@ -611,18 +672,10 @@ def build_location_target(
         position_y,
         float(adjusted_info["adjusted_x"]),
         float(adjusted_info["adjusted_y"]),
-        situation_tracking=adjusted_tracking,
-        situation_ball=situation_ball,
+        situation_tracking=situation.tracking,
+        situation_ball=situation.frame_meta,
     )
     synthetic_id = f"{action_id}__loc__{row_id}__{state_hash}"
-    situation, attacking_rows, _stats = build_hawkeye_situation(
-        adjusted_tracking,
-        ball,
-        freeze_ballreceipt=True,
-        add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
-        add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
-        align_frozen_ball_to_possessor=True,
-    )
     situation.match_id = synthetic_id
     attacking_rows = filter_situation_to_frame(situation, attacking_rows, int(frame["frame_id"]))
     if attacking_rows.empty:
@@ -637,6 +690,7 @@ def build_location_target(
         "selected_player": int(selected_player),
         "frame": frame,
         "adjusted_info": adjusted_info,
+        "target_geometry": target_geometry,
         "geometry_hash": state_hash,
         "synthetic_id": synthetic_id,
         "situation": situation,
@@ -655,6 +709,7 @@ def _cache_stats_have_unusable_rows(stats: dict[str, object] | None) -> bool:
 
 def main() -> None:
     args = parse_args()
+    invocation_metadata = build_invocation_metadata(args)
     input_path = Path(args.input_file)
     if not input_path.exists():
         raise FileNotFoundError(f"Input selection file not found: {input_path}")
@@ -684,6 +739,7 @@ def main() -> None:
 
     exports: list[pd.DataFrame] = []
     missing_records: list[dict[str, object]] = []
+    geometry_warning_records: list[dict[str, object]] = []
     processed_rows: list[int] = []
     pc_stats: dict[str, object] = {}
     prepared_rows: list[pd.Series] = []
@@ -821,10 +877,18 @@ def main() -> None:
             export["PositionY"] = unit["position_y"]
             export["adjusted_possessor_x"] = float(adjusted_info["adjusted_x"])
             export["adjusted_possessor_y"] = float(adjusted_info["adjusted_y"])
+            target_geometry = unit["target_geometry"]
+            export["loc_target_position_clamped"] = bool(target_geometry["loc_target_position_clamped"])
+            export["raw_target_possessor_x"] = float(target_geometry["raw_target_possessor_x"])
+            export["raw_target_possessor_y"] = float(target_geometry["raw_target_possessor_y"])
+            export["effective_target_possessor_x"] = float(target_geometry["effective_target_possessor_x"])
+            export["effective_target_possessor_y"] = float(target_geometry["effective_target_possessor_y"])
             export["loc_situation_id"] = unit["synthetic_id"]
             export["geometry_hash"] = unit["geometry_hash"]
             exports.append(export)
             processed_rows.append(row_id)
+            if bool(target_geometry["loc_target_position_clamped"]):
+                geometry_warning_records.append(_geometry_warning_record(row, frame, target_geometry))
         except Exception as exc:
             missing_records.append(_missing_record(row, "inference_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: {type(exc).__name__}: {exc}")
@@ -833,13 +897,17 @@ def main() -> None:
         "selection_row_id", "original_action_id", "SelectedPlayer", "requested_pass_moment",
         "resolved_time_norm", "hawkeye_time_diff", "PositionX", "PositionY",
         "adjusted_possessor_x", "adjusted_possessor_y", "loc_situation_id", "geometry_hash",
+        "loc_target_position_clamped", "raw_target_possessor_x", "raw_target_possessor_y",
+        "effective_target_possessor_x", "effective_target_possessor_y",
         "id", "uefa_player_id", "PlayerID", "abs_time", *COMPONENT_COLUMNS,
     ]
     hawkeye_table = pd.concat(exports, ignore_index=True, sort=False) if exports else pd.DataFrame(columns=export_columns)
     missing_report = pd.DataFrame.from_records(missing_records, columns=MISSING_REPORT_COLUMNS)
+    geometry_warning_report = pd.DataFrame.from_records(geometry_warning_records, columns=GEOMETRY_WARNING_COLUMNS)
     hawkeye_table.to_parquet(output_dir / "hawkeye_data.parquet", index=False)
     hawkeye_table.to_csv(output_dir / "hawkeye_data.csv", index=False)
     missing_report.to_csv(output_dir / "missing_data.csv", index=False)
+    geometry_warning_report.to_csv(output_dir / "geometry_warnings.csv", index=False)
 
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_ids.items()}
     metadata = {
@@ -847,6 +915,7 @@ def main() -> None:
         "run_type": "hawkeye_loc_component",
         "inference_mode": "loc",
         "created_at": datetime.now().isoformat(timespec="seconds"),
+        "invocation": invocation_metadata,
         "input_file": str(input_path.resolve()),
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
         "ball_csv": str(Path(args.ball_csv).resolve()),
@@ -869,6 +938,7 @@ def main() -> None:
         },
         "processed_selection_row_ids": processed_rows,
         "missing_rows": int(len(missing_report)),
+        "geometry_warning_rows": int(len(geometry_warning_report)),
         "models": resolved_ids,
         "model_records": model_records,
         "model_compatibility_warnings": model_warning_records,

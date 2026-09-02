@@ -65,7 +65,6 @@ from physical_pass_model import (
     PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
     PC_XPASS_DEFAULT_REACTION_TIME,
     PC_XPASS_DEFAULT_SPEED_STEP,
-    PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT,
     PC_XPASS_REACTION_TIME_MODE_DIST_PASS,
     PC_XPASS_REACTION_TIME_MODE_FIXED,
     PC_XPASS_SOURCE,
@@ -463,7 +462,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not hasattr(args, "boost_def_endpoint_control"):
         args.boost_def_endpoint_control = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL
     if not hasattr(args, "use_position_discount"):
-        args.use_position_discount = PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT
+        args.use_position_discount = False
     if not hasattr(args, "position_discount_power"):
         args.position_discount_power = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER
     if not hasattr(args, "position_discount_distance"):
