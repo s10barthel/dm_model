@@ -341,13 +341,21 @@ def label_nth_future_state_value(
     return events
 
 
-def _should_stop_discount_scan(events: pd.DataFrame, row_pos: int, period_i: Any, goal_array: np.ndarray) -> bool:
+def _should_stop_discount_scan(
+    events: pd.DataFrame,
+    row_pos: int,
+    period_i: Any,
+    goal_array: np.ndarray,
+    stop_at_set_pieces: bool = False,
+) -> bool:
     if bool(goal_array[row_pos]):
         return True
     if row_pos + 1 < len(events) and events.iat[row_pos + 1, events.columns.get_loc("period_id")] != period_i:
         return True
-    if row_pos + 1 < len(events) and events.iat[row_pos + 1, events.columns.get_loc("spadl_type")] == "goalkick":
-        return True
+    if row_pos + 1 < len(events):
+        next_type = events.iat[row_pos + 1, events.columns.get_loc("spadl_type")]
+        if next_type == "goalkick" or (stop_at_set_pieces and next_type in config.SET_PIECE):
+            return True
     return False
 
 
@@ -642,6 +650,7 @@ def label_polynomial_future_max_value(
     b: float,
     z: float,
     eligible_types: tuple[str, ...] | None = None,
+    stop_at_set_pieces: bool = False,
 ) -> pd.DataFrame:
     events = events.copy()
     eligible_types = eligible_types or tuple(config.XT_ACTION_TYPES)
@@ -678,7 +687,13 @@ def label_polynomial_future_max_value(
         best_concede = 0.0
         eligible_rank = 0
 
-        if _should_stop_discount_scan(events, row_pos, period_i, goal_array):
+        if _should_stop_discount_scan(
+            events,
+            row_pos,
+            period_i,
+            goal_array,
+            stop_at_set_pieces=stop_at_set_pieces,
+        ):
             continue
 
         for future_pos in range(row_pos + 1, len(events)):
@@ -697,7 +712,13 @@ def label_polynomial_future_max_value(
                     best_concede = max(best_concede, candidate)
                 eligible_rank += 1
 
-            if _should_stop_discount_scan(events, future_pos, period_i, goal_array):
+            if _should_stop_discount_scan(
+                events,
+                future_pos,
+                period_i,
+                goal_array,
+                stop_at_set_pieces=stop_at_set_pieces,
+            ):
                 break
 
         events.iat[row_pos, score_loc] = float(best_score)
@@ -758,6 +779,7 @@ def label_polynomial_xt_returns(
     b: float,
     z: float,
     eligible_types: tuple[str, ...] | None = None,
+    stop_at_set_pieces: bool = False,
 ) -> pd.DataFrame:
     return label_polynomial_future_max_value(
         events,
@@ -767,6 +789,7 @@ def label_polynomial_xt_returns(
         b=b,
         z=z,
         eligible_types=eligible_types,
+        stop_at_set_pieces=stop_at_set_pieces,
     )
 
 
@@ -864,23 +887,6 @@ def label_discounted_epv_returns(
     )
 
 
-def label_polynomial_epv_returns(
-    events: pd.DataFrame,
-    b: float,
-    z: float,
-    eligible_types: tuple[str, ...] | None = None,
-) -> pd.DataFrame:
-    return label_polynomial_future_max_value(
-        events,
-        value_col="epv",
-        scores_col="scores_epv",
-        concedes_col="concedes_epv",
-        b=b,
-        z=z,
-        eligible_types=eligible_types,
-    )
-
-
 def label_goal_distance_in_state_returns(
     events: pd.DataFrame,
     action_offset: int = 5,
@@ -931,6 +937,7 @@ def label_polynomial_goal_distance_returns(
     b: float,
     z: float,
     eligible_types: tuple[str, ...] | None = None,
+    stop_at_set_pieces: bool = False,
 ) -> pd.DataFrame:
     return label_polynomial_future_max_value(
         events,
@@ -940,6 +947,7 @@ def label_polynomial_goal_distance_returns(
         b=b,
         z=z,
         eligible_types=eligible_types,
+        stop_at_set_pieces=stop_at_set_pieces,
     )
 
 

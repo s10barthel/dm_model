@@ -546,8 +546,10 @@ def validate_return_type(return_type: str) -> str:
     if not value:
         raise ValueError("return_type must be a non-empty string.")
 
-    skip_first = value.endswith("_skip1")
-    core_value = value[:-6] if skip_first else value
+    stop_at_set_pieces = value.endswith("_spstop")
+    core_value = value[:-7] if stop_at_set_pieces else value
+    skip_first = core_value.endswith("_skip1")
+    core_value = core_value[:-6] if skip_first else core_value
 
     if core_value.startswith("disc_poly_max_"):
         if skip_first:
@@ -567,6 +569,11 @@ def validate_return_type(return_type: str) -> str:
         if not np.isfinite(z) or z <= 0.0:
             raise ValueError(f"Polynomial decay exponent z must be finite and > 0, got {z}.")
         return value
+
+    if stop_at_set_pieces:
+        raise ValueError(
+            f"Unsupported return_type {return_type!r}. _spstop is only supported for disc_poly_max_<b>_<z>."
+        )
 
     if core_value.startswith("disc_max_"):
         try:
@@ -609,7 +616,7 @@ def validate_return_type(return_type: str) -> str:
     raise ValueError(
         f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
         "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
-        "next_<N>, next_<N>_skip1, or in_<N>."
+        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, or in_<N>."
     )
 
 
@@ -630,9 +637,13 @@ def validate_return_type_for_target_family(
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
         )
-    if kind in {"disc_max", "disc_poly_max"} and family not in {"xt", "goal_distance", "epv"}:
+    if kind == "disc_max" and family not in {"xt", "goal_distance", "epv"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
+        )
+    if kind == "disc_poly_max" and family not in {"xt", "goal_distance"}:
+        raise ValueError(
+            f"return_type={normalized!r} is only supported for target_family='xt' or 'goal_distance', got {family!r}."
         )
     return normalized
 
@@ -711,8 +722,9 @@ def infer_feature_run_intended_receiver_modes(feature_run_id: str) -> list[str]:
 
 def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float, float], bool]:
     value = validate_return_type(return_type)
-    skip_first = value.endswith("_skip1")
-    core_value = value[:-6] if skip_first else value
+    core_value = value[:-7] if value.endswith("_spstop") else value
+    skip_first = core_value.endswith("_skip1")
+    core_value = core_value[:-6] if skip_first else core_value
     if core_value.startswith("disc_poly_max_"):
         b_raw, z_raw = core_value[len("disc_poly_max_") :].split("_")
         return "disc_poly_max", (float(b_raw), float(z_raw)), False

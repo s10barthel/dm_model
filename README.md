@@ -441,7 +441,7 @@ Useful options:
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - `--pass-height` to enable pass-height label configuration during a new run, or with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
 - `--pass-height-threshold <meters>` with `--pass-height` to classify a pass as high when its maximum `ball_z` is at least the supplied value; defaults to `2.0` metres and is recorded in run metadata
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
 - `--num-workers <N|auto>` to parallelize matches inside each `datatools/graph_feature.py` subprocess; default: `1`
@@ -846,12 +846,14 @@ The logged metric names remain `f1`, `roc_auc`, and `brier`. For non-goal target
 
 ### `--return_type` Applies To All Outcome Target Families
 
-`--return_type` accepts seven resolved forms overall:
+`--return_type` accepts nine resolved forms overall:
 
 - `disc_<gamma>` uses discounted returns
 - `disc_<gamma>_skip1` uses discounted returns but skips the first rated future non-shot action
 - `disc_max_<gamma>` uses the maximum discounted future eligible value and is supported only for `xt`, `goal_distance`, and `epv`
 - `disc_max_<gamma>_skip1` uses the same discounted max scan, but skips the first rated future non-shot action
+- `disc_poly_max_<b>_<z>` uses the maximum polynomially weighted future eligible value and is supported only for `xt` and `goal_distance`
+- `disc_poly_max_<b>_<z>_spstop` uses the same polynomial maximum and additionally stops at every set-piece restart
 - `next_<N>` uses non-discounted lookahead returns
 - `next_<N>_skip1` uses non-discounted lookahead returns but skips the first rated future non-shot action
 - `in_<N>` uses the state at the Nth future eligible action and is supported only for `xt`, `goal_distance`, and `epv`
@@ -862,6 +864,7 @@ Example:
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123450_abcdef12 --model gat --return_type next_10 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123456_abcdef12 --model gat --use_xg --return_type disc_0.9 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123510_cdef1234 --model gat --use_xt --return_type disc_0.9 ...
+python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123515_cdef1235 --model gat --use_xt --return_type disc_poly_max_0.05_2_spstop ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123520_def12345 --model gat --use_goal_distance --return_type next_7 ...
 python train.py --task outcome_scoring --run-id outcome_scoring_20260414T123530_ef123456 --model gat --use_epv --return_type next_5 ...
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xg --return_type disc_0.9 --intended-receiver-mode angle_only
@@ -885,6 +888,8 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
   - `disc_max_<gamma>` uses the maximum `gamma^k * xT` over future eligible actions separately for teammate and opponent actions, where the first contributing eligible action has `k=0`
   - `disc_max_<gamma>_skip1` skips the first future eligible non-shot action without consuming discount rank
+  - `disc_poly_max_<b>_<z>` uses the maximum `max(0, 1 - b*k^z) * xT`; the first future eligible action has `k=0`, only eligible actions advance the shared chronological rank, and `_skip1` is not supported
+  - `disc_poly_max_<b>_<z>_spstop` additionally stops before throw-ins, corners, free kicks, penalties, and goal kicks; the restart and later actions cannot contribute, while ordinary eligible actions before it remain candidates; a scan whose analyzed event is itself a set piece starts inside the new situation and continues normally
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - goal_distance:
   - raw `goal_distance` is a bounded proximity-to-goal score in `[0.0, 1.0]`, using `1.0 * (1 - raw_distance / sqrt(105^2 + 34^2))`
@@ -895,6 +900,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
   - `disc_<gamma>_skip1` skips the first considered future non-shot action and shifts the discount anchor to the next contributing row
   - `disc_max_<gamma>` uses the maximum `gamma^k * goal_distance` over future eligible actions separately for teammate and opponent actions, where the first contributing eligible action has `k=0`
   - `disc_max_<gamma>_skip1` skips the first future eligible non-shot action without consuming discount rank
+  - `disc_poly_max_<b>_<z>` and its `_spstop` form use the same eligible-action ranking, polynomial weighting, clamping, and set-piece boundaries described for xT
   - discounted probability scans clip contributing values to `[0.0, 1.0]`
 - EPV:
   - `next_<N>` uses the maximum future teammate/opponent EPV over the next `N` eligible `pass` / `cross` / `shot` actions
@@ -1244,7 +1250,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/main.py`
 
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`. Required when feature generation or training is enabled.
+- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
@@ -1351,7 +1357,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`.
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
@@ -1367,7 +1373,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 ### `scripts/train_relevant_models.py`
 
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
-- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
+- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional feature run containing compatible `action_labels_next_10*` labels for canonical goal-event diagnostics when the selected run lacks embedded `goal next_10` diagnostic columns.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.

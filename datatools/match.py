@@ -249,23 +249,25 @@ class Match(ABC):
             )
         elif return_kind == "disc_poly_max":
             b, z = return_value
+            stop_at_set_pieces = return_type.endswith("_spstop")
             events = utils.label_returns(events, lookahead_len=10, skip_first=False)
             events = utils.label_polynomial_xt_returns(
                 events,
                 b=b,
                 z=z,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                stop_at_set_pieces=stop_at_set_pieces,
             )
             events = utils.label_polynomial_goal_distance_returns(
                 events,
                 b=b,
                 z=z,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
+                stop_at_set_pieces=stop_at_set_pieces,
             )
-            events = utils.label_polynomial_epv_returns(
+            events = utils.label_epv_returns(
                 events,
-                b=b,
-                z=z,
+                lookahead_len=10,
                 eligible_types=tuple(config.XT_ACTION_TYPES),
             )
         else:
