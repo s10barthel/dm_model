@@ -61,6 +61,7 @@ from physical_pass_model import (
     PC_XPASS_METRIC_TOP25,
     PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
     PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE,
+    PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
     PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT,
     PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE,
     PC_XPASS_REACTION_TIME_MODE_DIST_PASS,
@@ -1455,8 +1456,62 @@ class PhysicalXPassTests(unittest.TestCase):
         under_one = np.asarray([0.2, 0.3, 0.4], dtype=float)
         over_one = np.asarray([1.0, 0.5, 0.5], dtype=float)
 
-        np.testing.assert_allclose(pc_xpass_endpoint_control_probabilities(under_one), under_one)
-        np.testing.assert_allclose(pc_xpass_endpoint_control_probabilities(over_one), np.asarray([0.5, 0.25, 0.25]))
+        np.testing.assert_allclose(
+            pc_xpass_endpoint_control_probabilities(
+                under_one,
+                endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
+            ),
+            under_one,
+        )
+        np.testing.assert_allclose(
+            pc_xpass_endpoint_control_probabilities(
+                over_one,
+                endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
+            ),
+            np.asarray([0.5, 0.25, 0.25]),
+        )
+
+    def test_pc_xpass_endpoint_share_uses_receiver_raw_times_cumulative_share(self) -> None:
+        cases = [
+            (np.asarray([0.5, 0.5]), 0.25),
+            (np.asarray([1.0, 1.0]), 0.5),
+            (np.asarray([0.8, 0.4]), 0.8 * 0.8 / 1.2),
+            (np.asarray([0.8, 0.0]), 0.8),
+            (np.asarray([0.0, 0.0]), 0.0),
+            (np.asarray([0.6, 0.2, 0.1]), 0.6 * 0.6 / 0.9),
+        ]
+
+        for raw, expected in cases:
+            output = pc_xpass_endpoint_control_probabilities(
+                raw,
+                receiver_index=0,
+                endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
+            )
+            self.assertAlmostEqual(float(output[0]), expected)
+            np.testing.assert_allclose(output[1:], 0.0)
+
+        default_output = pc_xpass_endpoint_control_probabilities(
+            np.asarray([0.5, 0.5]),
+            receiver_index=0,
+        )
+        self.assertAlmostEqual(float(default_output[0]), 0.25)
+
+    def test_pc_xpass_endpoint_share_preserves_nonfinite_receiver_and_applies_defender_boost(self) -> None:
+        nonfinite = pc_xpass_endpoint_control_probabilities(
+            np.asarray([np.nan, 0.4]),
+            receiver_index=0,
+            endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
+        )
+        self.assertTrue(np.isnan(nonfinite[0]))
+
+        boosted = pc_xpass_endpoint_control_probabilities(
+            np.asarray([0.8, 0.4, 0.2]),
+            receiver_index=0,
+            player_teams=np.asarray(["attack", "defense", "attack"]),
+            endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
+            boost_def_endpoint_control=2.0,
+        )
+        self.assertAlmostEqual(float(boosted[0]), 0.8 * 0.8 / (0.8 + 0.8 + 0.2))
 
     def test_pc_xpass_endpoint_normalization_modes_for_receiver(self) -> None:
         raw = np.asarray([1.0, 1.0, 1.0], dtype=float)
@@ -1481,11 +1536,17 @@ class PhysicalXPassTests(unittest.TestCase):
             receiver_index=0,
             endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE,
         )
+        share = pc_xpass_endpoint_control_probabilities(
+            raw,
+            receiver_index=0,
+            endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
+        )
 
         self.assertAlmostEqual(float(normal[0]), 1 / 3)
         self.assertAlmostEqual(float(normal_one[0]), 0.5)
         self.assertAlmostEqual(float(subtract[0]), 0.0)
         self.assertAlmostEqual(float(subtract_one[0]), 0.0)
+        self.assertAlmostEqual(float(share[0]), 1 / 3)
 
     def test_pc_xpass_endpoint_one_challenger_and_defender_boost(self) -> None:
         raw = np.asarray([0.8, 0.4, 0.2], dtype=float)
@@ -1555,6 +1616,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 angle_step=180.0,
                 radial_gridsize=20.0,
                 use_position_discount=False,
+                control_power=16.0,
                 endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
             )
         calls = 0
@@ -1567,6 +1629,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 angle_step=180.0,
                 radial_gridsize=20.0,
                 use_position_discount=False,
+                control_power=16.0,
                 endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE,
             )
 
@@ -1894,8 +1957,11 @@ class PhysicalXPassTests(unittest.TestCase):
             ignore_teammates_control=True,
         )
 
-        self.assertGreater(float(lane_ignores_teammate["home_2__lane_survival"]), float(lane_considers_teammate["home_2__lane_survival"]))
-        self.assertGreater(float(lane_ignores_teammate["home_2"]), float(lane_considers_teammate["home_2"]))
+        self.assertEqual(
+            float(lane_ignores_teammate["home_2__lane_survival"]),
+            float(lane_considers_teammate["home_2__lane_survival"]),
+        )
+        self.assertEqual(float(lane_ignores_teammate["home_2"]), float(lane_considers_teammate["home_2"]))
         self.assertGreater(float(control_ignores_teammate["home_2__control_prob"]), float(control_considers_teammate["home_2__control_prob"]))
         self.assertGreater(float(control_ignores_teammate["home_2"]), float(control_considers_teammate["home_2"]))
 
@@ -6801,17 +6867,21 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.control_power, PC_XPASS_DEFAULT_CONTROL_POWER)
         self.assertEqual(args.control_inflection_point, PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT)
         self.assertEqual(args.endpoint_normalization, PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION)
+        self.assertEqual(args.endpoint_normalization, PC_XPASS_ENDPOINT_NORMALIZATION_SHARE)
         self.assertEqual(args.boost_def_endpoint_control, PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL)
         self.assertFalse(args.use_position_discount)
         self.assertEqual(args.position_discount_power, PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER)
         self.assertEqual(args.position_discount_distance, PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE)
         self.assertFalse(args.top_xt)
-        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
 
         top25_args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-n", "25"])
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(top25_args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP25])
+
+        share_args = generate_physical_xpass.parse_args(["--pc-xpass", "--endpoint-normalization", "share"])
+        self.assertEqual(share_args.endpoint_normalization, PC_XPASS_ENDPOINT_NORMALIZATION_SHARE)
 
         multi_top_args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-n-values", "5", "10", "25"])
         self.assertEqual(generate_physical_xpass.pc_top_n_values_from_args(multi_top_args), [5, 10, 25])
@@ -6909,7 +6979,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(lane_args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(lane_args))
-        self.assertFalse(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(control_args))
+        self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(control_args))
         self.assertTrue(generate_physical_xpass.pc_ignore_teammates_control_from_args(control_args))
         self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(both_args))
         self.assertTrue(generate_physical_xpass.pc_ignore_teammates_control_from_args(both_args))

@@ -134,13 +134,15 @@ PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL = "normal"
 PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE = "normal-one"
 PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT = "subtract"
 PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE = "subtract-one"
+PC_XPASS_ENDPOINT_NORMALIZATION_SHARE = "share"
 PC_XPASS_ENDPOINT_NORMALIZATIONS = {
     PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL,
     PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL_ONE,
     PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT,
     PC_XPASS_ENDPOINT_NORMALIZATION_SUBTRACT_ONE,
+    PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
 }
-PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION = PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL
+PC_XPASS_DEFAULT_ENDPOINT_NORMALIZATION = PC_XPASS_ENDPOINT_NORMALIZATION_SHARE
 PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL = 1.0
 PC_XPASS_DEFAULT_USE_POSITION_DISCOUNT = True
 PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER = 2.0
@@ -2680,7 +2682,16 @@ def pc_xpass_endpoint_control_probabilities(
     finite_other = np.where(np.isfinite(other_raw), np.clip(other_raw, 0.0, 1.0), 0.0)
     receiver_values = np.where(np.isfinite(receiver_raw), np.clip(receiver_raw, 0.0, 1.0), np.nan)
 
-    if mode == PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL:
+    if mode == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
+        competitor_sum = np.sum(finite_other, axis=0)
+        total = receiver_values + competitor_sum
+        receiver_control = np.divide(
+            np.square(receiver_values),
+            total,
+            out=np.zeros_like(receiver_values),
+            where=total > 0,
+        )
+    elif mode == PC_XPASS_ENDPOINT_NORMALIZATION_NORMAL:
         total = np.nansum(values, axis=0)
         normalized_receiver = np.divide(receiver_values, total, out=np.zeros_like(receiver_values), where=total > 0)
         receiver_control = np.where(total > 1.0, normalized_receiver, receiver_values)
@@ -2705,17 +2716,11 @@ def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
     if raw.ndim != 4:
         raise ValueError("pc_xpass lane raw controls must have shape players x speeds x angles x distances.")
     lane_survival = np.ones(raw.shape[1:], dtype=float)
-    for distance_i in range(raw.shape[3]):
-        if distance_i == 0:
-            lane_survival[:, :, distance_i] = 1.0
-            continue
-        prior_raw = np.where(
-            np.isfinite(raw[:, :, :, :distance_i]),
-            np.clip(raw[:, :, :, :distance_i], 0.0, 1.0),
-            0.0,
-        )
-        player_max = np.max(prior_raw, axis=3)
-        lane_survival[:, :, distance_i] = np.prod(1.0 - player_max, axis=0)
+    if raw.shape[3] <= 1:
+        return lane_survival
+    finite_raw = np.where(np.isfinite(raw), np.clip(raw, 0.0, 1.0), 0.0)
+    player_prefix_max = np.maximum.accumulate(finite_raw, axis=3)
+    lane_survival[:, :, 1:] = np.prod(1.0 - player_prefix_max[:, :, :, :-1], axis=0)
     return lane_survival
 
 
@@ -2762,7 +2767,9 @@ def _resolve_pc_xpass_ignore_teammate_flags(
     ignore_teammates_control: bool | None = None,
 ) -> tuple[bool, bool]:
     legacy_ignore = not bool(consider_teammates)
-    ignore_lane = bool(legacy_ignore or bool(ignore_teammates_lane_survival))
+    # PC-xPass lane survival is always opponent-only. Keep the argument for
+    # call-site and metadata compatibility.
+    ignore_lane = True
     ignore_control = bool(legacy_ignore or bool(ignore_teammates_control))
     return ignore_lane, ignore_control
 
@@ -2945,10 +2952,12 @@ def compute_graph_pc_xpass_metrics(
         & (target_y_base >= -FIELD_SIZE[1] / 2.0)
         & (target_y_base <= FIELD_SIZE[1] / 2.0)
     )
-    target_x = np.repeat(target_x_base[np.newaxis, :, :], len(speeds), axis=0)
-    target_y = np.repeat(target_y_base[np.newaxis, :, :], len(speeds), axis=0)
-    t_ball = np.repeat((distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]), len(angles), axis=1)
-    on_pitch_grid = np.repeat(on_pitch[np.newaxis, :, :], len(speeds), axis=0)
+    # Keep speed-independent coordinates and masks two-dimensional. NumPy
+    # broadcasts them across the speed axis when arrival margins and scores are
+    # computed, avoiding several full speed x angle x distance copies.
+    target_x = target_x_base
+    target_y = target_y_base
+    t_ball = distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]
     effective_off_speed = float(max_player_speed if max_player_speed_off is None else max_player_speed_off)
     effective_def_speed = float(max_player_speed if max_player_speed_def is None else max_player_speed_def)
     max_player_speed_by_player = np.where(player_teams == "attack", effective_off_speed, effective_def_speed).astype(float)
@@ -2980,41 +2989,86 @@ def compute_graph_pc_xpass_metrics(
         power=lane_power,
         inflection_point=lane_inflection_point,
     )
-    control_raw_all = pc_xpass_raw_control_with_params(
-        margins,
-        power=control_power,
-        inflection_point=control_inflection_point,
-    )
+    if float(lane_power) == float(control_power) and float(lane_inflection_point) == float(control_inflection_point):
+        control_raw_all = lane_raw_all
+    else:
+        control_raw_all = pc_xpass_raw_control_with_params(
+            margins,
+            power=control_power,
+            inflection_point=control_inflection_point,
+        )
     lane_raw_all[:, :, ~on_pitch] = np.nan
-    control_raw_all[:, :, ~on_pitch] = np.nan
+    if control_raw_all is not lane_raw_all:
+        control_raw_all[:, :, ~on_pitch] = np.nan
     attack_mask = player_teams == "attack"
+    defense_mask = player_teams == "defense"
+
+    lane_raw = lane_raw_all.copy()
+    lane_raw[passer_sim_index] = 0.0
+    lane_raw[attack_mask] = 0.0
+    lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
+    lane_survival = np.where(on_pitch[np.newaxis, :, :], lane_survival, np.nan)
+
+    share_receiver_control: dict[int, np.ndarray] = {}
+    if endpoint_normalization == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
+        competition_raw = np.where(
+            np.isfinite(control_raw_all),
+            np.clip(control_raw_all, 0.0, 1.0),
+            0.0,
+        )
+        competition_raw = competition_raw.copy()
+        competition_raw[passer_sim_index] = 0.0
+        if float(boost_def_endpoint_control) != 1.0:
+            competition_raw[defense_mask] *= float(boost_def_endpoint_control)
+            competition_raw = np.clip(competition_raw, 0.0, 1.0)
+        if ignore_control_teammates:
+            competitor_base = np.sum(competition_raw[defense_mask], axis=0)
+        else:
+            competitor_base = np.sum(competition_raw, axis=0)
+        for graph_target_index in candidate_indices:
+            receiver_sim_index = int(target_index_lookup[graph_target_index])
+            receiver_raw = control_raw_all[receiver_sim_index]
+            receiver_values = np.where(np.isfinite(receiver_raw), np.clip(receiver_raw, 0.0, 1.0), np.nan)
+            total = (
+                receiver_values + competitor_base
+                if ignore_control_teammates
+                else competitor_base
+            )
+            receiver_control = np.divide(
+                np.square(receiver_values),
+                total,
+                out=np.zeros_like(receiver_values),
+                where=total > 0,
+            )
+            share_receiver_control[receiver_sim_index] = np.where(
+                np.isfinite(receiver_raw),
+                np.clip(receiver_control, 0.0, 1.0),
+                np.nan,
+            )
+
+    xt_values = _pc_xpass_xt_values(target_x, target_y) if bool(top_xt) else None
 
     for graph_target_index in candidate_indices:
         receiver_sim_index = int(target_index_lookup[graph_target_index])
         node_id = str(node_ids[graph_target_index])
 
-        endpoint_raw = control_raw_all.copy()
-        endpoint_raw[passer_sim_index] = 0.0
-        if ignore_control_teammates:
-            endpoint_raw[attack_mask] = 0.0
-            endpoint_raw[receiver_sim_index] = control_raw_all[receiver_sim_index]
-        endpoint_probs = pc_xpass_endpoint_control_probabilities(
-            endpoint_raw,
-            axis=0,
-            receiver_index=receiver_sim_index,
-            player_teams=player_teams,
-            endpoint_normalization=endpoint_normalization,
-            boost_def_endpoint_control=boost_def_endpoint_control,
-        )
-        receiver_control = endpoint_probs[receiver_sim_index]
-
-        lane_raw = lane_raw_all.copy()
-        lane_raw[passer_sim_index] = 0.0
-        lane_raw[receiver_sim_index] = 0.0
-        if ignore_lane_teammates:
-            lane_raw[attack_mask] = 0.0
-        lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
-        lane_survival = np.where(on_pitch_grid, lane_survival, np.nan)
+        if endpoint_normalization == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
+            receiver_control = share_receiver_control[receiver_sim_index]
+        else:
+            endpoint_raw = control_raw_all.copy()
+            endpoint_raw[passer_sim_index] = 0.0
+            if ignore_control_teammates:
+                endpoint_raw[attack_mask] = 0.0
+                endpoint_raw[receiver_sim_index] = control_raw_all[receiver_sim_index]
+            endpoint_probs = pc_xpass_endpoint_control_probabilities(
+                endpoint_raw,
+                axis=0,
+                receiver_index=receiver_sim_index,
+                player_teams=player_teams,
+                endpoint_normalization=endpoint_normalization,
+                boost_def_endpoint_control=boost_def_endpoint_control,
+            )
+            receiver_control = endpoint_probs[receiver_sim_index]
         receiver_x = float(player_pos[receiver_sim_index, 0])
         receiver_y = float(player_pos[receiver_sim_index, 1])
         position_discount = pc_xpass_position_discount(
@@ -3026,12 +3080,12 @@ def compute_graph_pc_xpass_metrics(
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
         )
-        position_discount = np.where(on_pitch_grid, position_discount, np.nan)
+        position_discount = np.where(on_pitch, position_discount, np.nan)
         score = lane_survival * receiver_control * position_discount
         if not np.isfinite(score).any():
             continue
 
-        ranking = score * _pc_xpass_xt_values(target_x, target_y) if bool(top_xt) else score
+        ranking = score * xt_values if xt_values is not None else score
         flat = int(np.nanargmax(ranking))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
@@ -3066,8 +3120,8 @@ def compute_graph_pc_xpass_metrics(
         result.loc[f"{node_id}__speed"] = float(speeds[speed_i])
         result.loc[f"{node_id}__angle"] = math.degrees(float(angles[angle_i])) % 360.0
         result.loc[f"{node_id}__distance"] = float(distances[distance_i])
-        result.loc[f"{node_id}__target_x"] = float(target_x[speed_i, angle_i, distance_i])
-        result.loc[f"{node_id}__target_y"] = float(target_y[speed_i, angle_i, distance_i])
+        result.loc[f"{node_id}__target_x"] = float(target_x[angle_i, distance_i])
+        result.loc[f"{node_id}__target_y"] = float(target_y[angle_i, distance_i])
     return result
 
 

@@ -302,9 +302,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--endpoint-normalization",
         "--endpoint_normalization",
         dest="endpoint_normalization",
-        choices=["normal", "normal-one", "subtract", "subtract-one"],
+        choices=["share", "normal", "normal-one", "subtract", "subtract-one"],
         default=argparse.SUPPRESS,
-        help="pc-xPass only: endpoint receiver-control competition mode. Default: normal.",
+        help=(
+            "pc-xPass only: endpoint receiver-control competition mode. "
+            "share multiplies receiver raw control by its share of cumulative eligible endpoint control. Default: share."
+        ),
     )
     parser.add_argument(
         "--boost-def-endpoint-control",
@@ -364,7 +367,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ignore_teammates_lane_survival",
         dest="ignore_teammates_lane_survival",
         action="store_true",
-        help="pc-xPass only: ignore attacking teammates in lane-survival competition.",
+        default=argparse.SUPPRESS,
+        help="pc-xPass compatibility flag; teammate lane interference is always disabled.",
     )
     parser.add_argument(
         "--ignore-teammates-control",
@@ -377,7 +381,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(
         normalize=True,
         consider_teammates=True,
-        ignore_teammates_lane_survival=False,
         ignore_teammates_control=False,
         freeze_ballreceipt=True,
         export_noise_kernel=True,
@@ -418,6 +421,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--endpoint-normalization, --boost-def-endpoint-control, "
             "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
+    explicitly_ignored_teammates_lane_survival = hasattr(args, "ignore_teammates_lane_survival")
+    if not explicitly_ignored_teammates_lane_survival:
+        args.ignore_teammates_lane_survival = True
     if not hasattr(args, "reaction_time"):
         args.reaction_time = PC_XPASS_DEFAULT_REACTION_TIME
     if not hasattr(args, "dist_pass_div"):
@@ -566,7 +572,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"{flag_name} must be a positive finite float.")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
-    if not bool(args.pc_xpass) and (bool(args.ignore_teammates_lane_survival) or bool(args.ignore_teammates_control)):
+    if not bool(args.pc_xpass) and (
+        explicitly_ignored_teammates_lane_survival or bool(args.ignore_teammates_control)
+    ):
         parser.error("--ignore-teammates-lane-survival and --ignore-teammates-control require --pc-xpass.")
     if bool(args.pc_xpass) and not any([bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one pc-xPass metric must be exported.")
@@ -653,7 +661,9 @@ def teammate_policy_from_args(args: argparse.Namespace) -> str:
 
 
 def pc_ignore_teammates_lane_survival_from_args(args: argparse.Namespace) -> bool:
-    return (not bool(args.consider_teammates)) or bool(getattr(args, "ignore_teammates_lane_survival", False))
+    # PC-xPass lane survival is always opponent-only. Keep this helper and its
+    # metadata field so existing cache metadata retains the same structure.
+    return True
 
 
 def pc_ignore_teammates_control_from_args(args: argparse.Namespace) -> bool:
