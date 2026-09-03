@@ -154,6 +154,11 @@ class VisualizationVersioningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present"):
             visualize_hawkeye.select_location_component_rows(export, situation_ids=["missing"], limit=None)
 
+    def test_freeze_visualization_uses_zero_offsets(self) -> None:
+        row = pd.Series({"PositionX": 125.0, "PositionY": -50.0})
+        self.assertEqual(visualize_hawkeye.visualization_position_offsets(row, "freeze"), (0.0, 0.0))
+        self.assertEqual(visualize_hawkeye.visualization_position_offsets(row, "loc"), (1.25, 0.5))
+
     def test_location_visualization_cli_constraints(self) -> None:
         args = visualize_hawkeye.parse_args(["--mode", "loc", "--situation-id", "all"])
         self.assertEqual(args.mode, "loc")
@@ -167,6 +172,11 @@ class VisualizationVersioningTests(unittest.TestCase):
             visualize_hawkeye.parse_args(["--mode", "loc", "--limit", "0"])
         with self.assertRaises(SystemExit):
             visualize_hawkeye.parse_args(["--mode", "loc", "--situation-id", "a", "--limit", "1"])
+        freeze_args = visualize_hawkeye.parse_args(["--mode", "freeze", "--situation-id", "all"])
+        self.assertEqual(freeze_args.mode, "freeze")
+        self.assertTrue(freeze_args.pc_xpass)
+        with self.assertRaises(SystemExit):
+            visualize_hawkeye.parse_args(["--mode", "freeze", "--output", "gif"])
 
     def test_location_visualization_resolves_location_run_and_writes_component_png(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -208,7 +218,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(visualize_hawkeye, "parse_args", return_value=args),
                 patch.object(visualize_hawkeye, "resolve_named_component_run_id", return_value="loc-run") as resolve_run,
                 patch.object(visualize_hawkeye, "get_hawkeye_loc_component_run_root", return_value=component_root),
-                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run"})),
+                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run", "inference_mode": "loc"})),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=tracking),
                 patch.object(visualize_hawkeye, "clean_hawkeye_tracking", side_effect=lambda value: value),
                 patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
@@ -248,6 +258,17 @@ class VisualizationVersioningTests(unittest.TestCase):
             metadata = json.loads((root / "visualizations" / "loc-viz" / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["visualization_mode"], "loc")
             self.assertEqual(metadata["rendered_selection_row_ids"], [7])
+
+    def test_location_visualization_rejects_component_mode_mismatch(self) -> None:
+        args = visualize_hawkeye.parse_args(["--mode", "freeze", "--component-run-id", "loc-run"])
+        with (
+            patch.object(visualize_hawkeye, "parse_args", return_value=args),
+            patch.object(visualize_hawkeye, "resolve_named_component_run_id", return_value="loc-run"),
+            patch.object(visualize_hawkeye, "get_hawkeye_loc_component_run_root", return_value=Path("components/loc-run")),
+            patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(pd.DataFrame(), {"inference_mode": "loc"})),
+        ):
+            with self.assertRaisesRegex(ValueError, "Requested --mode freeze"):
+                visualize_hawkeye.main()
 
     def test_sportec_defaults_use_dataset_subfolders(self) -> None:
         self.assertEqual(

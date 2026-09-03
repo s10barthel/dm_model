@@ -58,7 +58,7 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["standard", "loc"], default="standard")
+    parser.add_argument("--mode", choices=["standard", "loc", "freeze"], default="standard")
     row_selection = parser.add_mutually_exclusive_group()
     row_selection.add_argument(
         "--situation-id",
@@ -131,14 +131,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--situation-id all cannot be combined with explicit situation ids")
     args.situation_id = requested_ids or None
     if args.mode == "standard" and args.limit is not None:
-        parser.error("--limit is only supported with --mode loc")
+        parser.error("--limit is only supported with --mode loc or freeze")
     if args.mode == "standard" and args.situation_id == ["all"]:
-        parser.error("--situation-id all is only supported with --mode loc")
-    if args.mode == "loc":
+        parser.error("--situation-id all is only supported with --mode loc or freeze")
+    if args.mode in {"loc", "freeze"}:
         if args.output != "png":
-            parser.error("--mode loc only supports --output png")
+            parser.error(f"--mode {args.mode} only supports --output png")
         if args.time_norm is not None or args.time_norm_start is not None or args.time_norm_end is not None:
-            parser.error("--time-norm and time-range options are not supported with --mode loc")
+            parser.error(f"--time-norm and time-range options are not supported with --mode {args.mode}")
         args.pc_xpass = True
     if args.output != "png" and args.time_norm is not None:
         parser.error("--time-norm is only valid with --output png.")
@@ -426,6 +426,12 @@ def select_location_component_rows(
     return first_by_action.loc[ordered_ids].reset_index(drop=True)
 
 
+def visualization_position_offsets(location_row: pd.Series, mode: str) -> tuple[float, float]:
+    if mode == "freeze":
+        return 0.0, 0.0
+    return float(location_row["PositionX"]) / 100.0, -float(location_row["PositionY"]) / 100.0
+
+
 def run_location_visualization(
     args: argparse.Namespace,
     component_selection,
@@ -437,6 +443,7 @@ def run_location_visualization(
     output_root: Path,
     visualization_run_id: str,
 ) -> None:
+    mode = str(args.mode)
     selected_rows = select_location_component_rows(
         component_export,
         situation_ids=args.situation_id,
@@ -478,10 +485,11 @@ def run_location_visualization(
         situation_tracking = tracking.loc[tracking["id"].eq(action_id)].copy()
         if situation_tracking.empty:
             raise KeyError(f"Hawkeye situation id {action_id} was not found in {args.tracking_csv}.")
+        offset_x, offset_y = visualization_position_offsets(location_row, mode)
         adjusted_tracking, _adjusted_info = apply_hawkeye_possessor_offset(
             situation_tracking,
-            offset_x=float(location_row["PositionX"]) / 100.0,
-            offset_y=-float(location_row["PositionY"]) / 100.0,
+            offset_x=offset_x,
+            offset_y=offset_y,
         )
         situation, _, _ = build_hawkeye_situation(
             adjusted_tracking,
@@ -535,7 +543,7 @@ def run_location_visualization(
             output_path = output_dir / f"{component_name}.png"
             image.save(output_path)
             output_paths.append(str(output_path.resolve()))
-        print(f"Saved location-adjusted Hawkeye PNG visualizations to {output_dir}")
+        print(f"Saved Hawkeye {mode} PNG visualizations to {output_dir}")
         rendered_situations.append(
             {
                 "situation_id": action_id,
@@ -551,7 +559,7 @@ def run_location_visualization(
 
     metadata = {
         "run_id": visualization_run_id,
-        "visualization_mode": "loc",
+        "visualization_mode": mode,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": " ".join(sys.argv),
         "script": Path(__file__).name,
@@ -604,16 +612,22 @@ def main() -> None:
     if args.component_dir:
         component_dir = Path(args.component_dir)
     else:
-        component_kind = "hawkeye_loc_component" if mode == "loc" else "hawkeye_component"
+        component_kind = "hawkeye_loc_component" if mode in {"loc", "freeze"} else "hawkeye_component"
         component_run_id = resolve_named_component_run_id(component_kind, args.component_run_id, required=True)
         component_dir = (
             get_hawkeye_loc_component_run_root(component_run_id)
-            if mode == "loc"
+            if mode in {"loc", "freeze"}
             else get_hawkeye_component_run_root(component_run_id)
         )
 
     component_export, component_metadata = load_hawkeye_component_run(component_dir)
-    if mode == "loc":
+    if mode in {"loc", "freeze"}:
+        component_mode = component_metadata.get("inference_mode")
+        if component_mode != mode:
+            raise ValueError(
+                f"Requested --mode {mode} but component run metadata has inference_mode={component_mode!r}. "
+                "Select a matching run with --component-run-id or --component-dir."
+            )
         run_location_visualization(
             args,
             component_selection,

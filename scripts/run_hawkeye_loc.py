@@ -99,10 +99,16 @@ REQUIRED_INPUT_COLUMNS = [
     "action_id",
     "SelectedPlayer",
     "pass_moment",
+]
+LOCATION_INPUT_COLUMNS = [
     "PositionX",
     "PositionY",
     "loc_info_missing",
 ]
+
+
+def required_input_columns(mode: str) -> list[str]:
+    return [*REQUIRED_INPUT_COLUMNS, *(LOCATION_INPUT_COLUMNS if mode == "loc" else [])]
 MISSING_REPORT_COLUMNS = [
     "selection_row_id",
     "action_id",
@@ -190,6 +196,7 @@ def build_invocation_metadata(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run single-frame location-adjusted Hawkeye inference.")
+    parser.add_argument("--mode", choices=["loc", "freeze"], default="loc")
     parser.add_argument("--input-file", default=str(DEFAULT_INPUT_FILE))
     parser.add_argument("--tracking-csv", default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"))
     parser.add_argument("--ball-csv", default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"))
@@ -436,8 +443,10 @@ def geometry_hash(
     adjusted_y: float,
     situation_tracking: pd.DataFrame | None = None,
     situation_ball: pd.DataFrame | None = None,
+    mode: str = "loc",
 ) -> str:
     payload = {
+        "mode": str(mode),
         "action_id": str(action_id),
         "selection_row_id": int(selection_row_id),
         "frame_id": int(frame_id),
@@ -628,6 +637,7 @@ def build_location_target(
     ball: pd.DataFrame,
     graph_schema: dict[str, object],
     time_tolerance: float,
+    mode: str = "loc",
 ) -> dict[str, object]:
     """Build one relocated target graph and the diagnostics needed for export/cache identity."""
     row_id = int(row["selection_row_id"])
@@ -635,8 +645,9 @@ def build_location_target(
         raise ValueError("action_id is missing")
     action_id = str(row["action_id"]).strip()
     pass_moment = float(row["pass_moment"])
-    position_x = float(row["PositionX"])
-    position_y = float(row["PositionY"])
+    freeze_mode = mode == "freeze"
+    position_x = 0.0 if freeze_mode else float(row["PositionX"])
+    position_y = 0.0 if freeze_mode else float(row["PositionY"])
     selected_player = float(row["SelectedPlayer"])
     if not action_id or not all(math.isfinite(value) for value in [pass_moment, position_x, position_y]):
         raise ValueError("invalid action_id, pass_moment, PositionX, or PositionY")
@@ -674,8 +685,9 @@ def build_location_target(
         float(adjusted_info["adjusted_y"]),
         situation_tracking=situation.tracking,
         situation_ball=situation.frame_meta,
+        mode=mode,
     )
-    synthetic_id = f"{action_id}__loc__{row_id}__{state_hash}"
+    synthetic_id = f"{action_id}__{mode}__{row_id}__{state_hash}"
     situation.match_id = synthetic_id
     attacking_rows = filter_situation_to_frame(situation, attacking_rows, int(frame["frame_id"]))
     if attacking_rows.empty:
@@ -714,7 +726,8 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input selection file not found: {input_path}")
     selection = pd.read_csv(input_path)
-    missing_columns = [column for column in REQUIRED_INPUT_COLUMNS if column not in selection.columns]
+    required_columns = required_input_columns(args.mode)
+    missing_columns = [column for column in required_columns if column not in selection.columns]
     if missing_columns:
         raise ValueError(f"Input selection data is missing required columns: {', '.join(missing_columns)}")
     if selection["selection_row_id"].duplicated().any():
@@ -724,6 +737,9 @@ def main() -> None:
         situation_ids=args.situation_id,
         limit=args.limit,
     )
+    if args.mode == "freeze":
+        selected_selection["PositionX"] = 0.0
+        selected_selection["PositionY"] = 0.0
 
     run_id = args.run_id or generate_run_id("hawkeye_loc_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_LOC_COMPONENT_RUNS_DIR
@@ -780,13 +796,13 @@ def main() -> None:
     # Phase 1: construct target graphs in bounded windows and prewarm pc-xPass in parallel.
     for _, row in selected_selection.iterrows():
         row_id = int(row["selection_row_id"])
-        if int(pd.to_numeric(pd.Series([row.get("loc_info_missing")]), errors="coerce").fillna(1).iloc[0]) == 1:
+        if args.mode == "loc" and int(pd.to_numeric(pd.Series([row.get("loc_info_missing")]), errors="coerce").fillna(1).iloc[0]) == 1:
             missing_records.append(
                 _missing_record(row, str(row.get("loc_status", "location_missing")), str(row.get("loc_missing_reason", "location missing")))
             )
             continue
         try:
-            target = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            target = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
             prepared_rows.append(row.copy())
             pending_targets.append(target)
             if len(pending_targets) >= runtime_row_window:
@@ -811,7 +827,7 @@ def main() -> None:
         cache_audit["checked"] += 1
         was_missing = False
         try:
-            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
             stats = prewarm_runtime_items(
                 unit["cache_items"],
                 cache_dir=cache_dir,
@@ -849,7 +865,7 @@ def main() -> None:
     for row in cache_ready_rows:
         row_id = int(row["selection_row_id"])
         try:
-            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance))
+            unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
             situation = unit["situation"]
             attacking_rows = unit["attacking_rows"]
             components = infer_hawkeye_components(situation, model_specs, device=device)
@@ -913,7 +929,7 @@ def main() -> None:
     metadata = {
         "run_id": run_id,
         "run_type": "hawkeye_loc_component",
-        "inference_mode": "loc",
+        "inference_mode": args.mode,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "invocation": invocation_metadata,
         "input_file": str(input_path.resolve()),
@@ -921,7 +937,11 @@ def main() -> None:
         "ball_csv": str(Path(args.ball_csv).resolve()),
         "time_tolerance": float(args.time_tolerance),
         "position_units": "centimetres",
-        "coordinate_transform": "centroid_x + PositionX/100; centroid_y - PositionY/100",
+        "coordinate_transform": (
+            "no position offset (offset_x=0; offset_y=0)"
+            if args.mode == "freeze"
+            else "centroid_x + PositionX/100; centroid_y - PositionY/100"
+        ),
         "pc_xpass_cache_dir": str(Path(args.pc_xpass_cache_dir).resolve()),
         "pc_xpass_stats": pc_stats,
         "pc_xpass_batch_errors": batch_errors,
@@ -962,6 +982,7 @@ def main() -> None:
             "limit": args.limit,
             "selected_selection_row_ids": [int(value) for value in selected_selection["selection_row_id"].tolist()],
             "runtime_row_window": int(runtime_row_window),
+            "inference_mode": args.mode,
         },
         skipped={str(record["selection_row_id"]): record["loc_missing_reason"] for record in missing_records},
     )

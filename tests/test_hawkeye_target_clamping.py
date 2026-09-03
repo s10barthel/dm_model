@@ -3,11 +3,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
+import torch
 
 from datatools.hawkeye import build_hawkeye_situation
-from scripts.run_hawkeye_loc import _geometry_warning_record, build_invocation_metadata, geometry_hash, parse_args
+from scripts import run_hawkeye_loc
+from scripts.run_hawkeye_loc import (
+    _geometry_warning_record,
+    build_invocation_metadata,
+    build_location_target,
+    geometry_hash,
+    parse_args,
+    required_input_columns,
+)
 
 
 def make_tracking(points: list[tuple[float, float, float]], receipt: float = 1.0) -> pd.DataFrame:
@@ -57,6 +68,52 @@ def make_ball(times: list[float]) -> pd.DataFrame:
 
 
 class HawkeyeTargetClampingTest(unittest.TestCase):
+    def test_freeze_cli_and_required_columns(self) -> None:
+        self.assertEqual(parse_args([]).mode, "loc")
+        self.assertEqual(parse_args(["--mode", "freeze"]).mode, "freeze")
+        self.assertIn("PositionX", required_input_columns("loc"))
+        self.assertIn("loc_info_missing", required_input_columns("loc"))
+        self.assertNotIn("PositionX", required_input_columns("freeze"))
+        self.assertNotIn("PositionY", required_input_columns("freeze"))
+        self.assertNotIn("loc_info_missing", required_input_columns("freeze"))
+
+    def test_freeze_target_uses_zero_offset_without_location_fields(self) -> None:
+        tracking = make_tracking([(0.0, 3.0, 4.0), (1.0, 5.0, 6.0)])
+        row = pd.Series(
+            {"selection_row_id": 9, "action_id": "s1", "SelectedPlayer": 1, "pass_moment": 0.0}
+        )
+        fake_graph = object()
+        situation = SimpleNamespace(
+            target_geometry={"loc_target_position_clamped": False},
+            tracking=pd.DataFrame({"frame_id": [0]}),
+            frame_meta=pd.DataFrame({"abs_time": [1.0]}),
+            graph_features_0=[fake_graph],
+            graph_features_by_dir={"action_graphs": [fake_graph]},
+            labels=torch.tensor([[0.0]]),
+            actions=pd.DataFrame(index=[0]),
+            match_id="s1",
+        )
+        attacking = pd.DataFrame({"frame_id": [0]})
+        adjusted_info = {"adjusted_x": 5.0, "adjusted_y": 6.0}
+        with (
+            patch.object(run_hawkeye_loc, "resolve_target_frame", return_value={"frame_id": 0, "abs_time": 1.0, "time_norm": 0.0, "time_diff": 0.0}),
+            patch.object(run_hawkeye_loc, "apply_hawkeye_possessor_offset", return_value=(tracking, adjusted_info)) as apply_offset,
+            patch.object(run_hawkeye_loc, "build_hawkeye_situation", return_value=(situation, attacking, {})),
+            patch.object(run_hawkeye_loc, "filter_situation_to_frame", return_value=attacking),
+            patch.object(run_hawkeye_loc, "runtime_cache_items_from_graphs", return_value=[]),
+        ):
+            target = build_location_target(row, tracking, pd.DataFrame(), {"add_v_edge_features": False}, 0.1, "freeze")
+
+        self.assertEqual(target["position_x"], 0.0)
+        self.assertEqual(target["position_y"], 0.0)
+        self.assertIn("__freeze__", target["synthetic_id"])
+        self.assertEqual(apply_offset.call_args.kwargs, {"offset_x": 0.0, "offset_y": 0.0})
+
+    def test_geometry_hash_distinguishes_loc_and_freeze(self) -> None:
+        loc_hash = geometry_hash("s1", 1, 0, 0.0, 0.0, 3.0, 4.0, mode="loc")
+        freeze_hash = geometry_hash("s1", 1, 0, 0.0, 0.0, 3.0, 4.0, mode="freeze")
+        self.assertNotEqual(loc_hash, freeze_hash)
+
     def test_post_receipt_target_is_frozen_then_clamped_with_aligned_ball(self) -> None:
         tracking = make_tracking([(0.0, 0.0, 0.0), (1.0, 60.0, 35.0), (2.0, 61.0, 36.0)])
         situation, _, stats = build_hawkeye_situation(
