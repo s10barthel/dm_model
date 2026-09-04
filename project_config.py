@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,8 @@ BENCHMARK_VISUALIZATION_DIR = VISUALIZATION_DIR / "benchmark"
 SKILLCORNER_VISUALIZATION_DIR = VISUALIZATION_DIR / "skillcorner"
 SPLIT_DIR = DATA_ROOT / "splits"
 SPLIT_PATH = SPLIT_DIR / "match_splits.json"
+MATCH_UNIVERSE_PATH = SPLIT_DIR / "match_universe.json"
+SPLIT_MANIFESTS_DIR = SPLIT_DIR / "manifests"
 FEATURE_LATEST_PATH = FEATURE_RUNS_DIR / "latest.json"
 COMPONENT_LATEST_PATH = SPORTEC_COMPONENT_RUNS_DIR / "latest.json"
 HAWKEYE_COMPONENT_LATEST_PATH = HAWKEYE_COMPONENT_RUNS_DIR / "latest.json"
@@ -63,6 +66,10 @@ BENCHMARK_COMPONENT_LATEST_PATH = BENCHMARK_COMPONENT_RUNS_DIR / "latest.json"
 SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.json"
 
 MODEL_TRAIN_FRACTION = 0.8
+DEFAULT_TRAIN_SPLIT_PERCENT = 50
+VALIDATION_MODE_HOLDOUT = "holdout_80_20"
+VALIDATION_MODE_EXPANDING = "expanding"
+VALIDATION_MODES = (VALIDATION_MODE_HOLDOUT, VALIDATION_MODE_EXPANDING)
 INTENT_TRAIN_OFFSETS = (12, 25)
 
 INTENDED_RECEIVER_MODE_ORIGINAL = "original"
@@ -782,6 +789,97 @@ def _unique_in_order(ids: list[str]) -> list[str]:
     return list(dict.fromkeys(str(match_id) for match_id in ids))
 
 
+def _match_universe_fingerprint(match_ids: list[str]) -> str:
+    encoded = "\n".join(match_ids).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def save_match_universe(match_ids: list[str], metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Persist the canonical, MatchId-ordered preprocessed match universe."""
+    ensure_project_dirs()
+    ordered = sorted(_unique_in_order(match_ids))
+    if len(ordered) != len(match_ids):
+        raise ValueError("The canonical match universe contains duplicate MatchIds.")
+    payload = {
+        "match_ids": ordered,
+        "count": len(ordered),
+        "fingerprint": _match_universe_fingerprint(ordered),
+        "ordering": "match_id",
+        "metadata": metadata or {},
+    }
+    MATCH_UNIVERSE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def load_match_universe() -> dict[str, Any]:
+    if MATCH_UNIVERSE_PATH.exists():
+        payload = json.loads(MATCH_UNIVERSE_PATH.read_text(encoding="utf-8-sig"))
+        match_ids = [str(value) for value in payload.get("match_ids", [])]
+    elif SPLIT_PATH.exists():
+        # Backward-compatible bootstrap from the original two-season manifest.
+        legacy = json.loads(SPLIT_PATH.read_text(encoding="utf-8-sig"))
+        match_ids = sorted(_unique_in_order(list(legacy.get("train", [])) + list(legacy.get("test", []))))
+        payload = {"match_ids": match_ids, "ordering": "match_id", "metadata": {"source": "legacy_manifest"}}
+    else:
+        raise FileNotFoundError(
+            f"Match universe not found at {MATCH_UNIVERSE_PATH}. Run scripts/preprocess_sportec.py first."
+        )
+    if not match_ids:
+        raise ValueError("The canonical match universe is empty.")
+    if len(match_ids) != len(set(match_ids)):
+        raise ValueError("The canonical match universe contains duplicate MatchIds.")
+    expected = _match_universe_fingerprint(match_ids)
+    recorded = payload.get("fingerprint")
+    if recorded and recorded != expected:
+        raise ValueError("The canonical match-universe fingerprint does not match its MatchIds.")
+    payload.update({"match_ids": match_ids, "count": len(match_ids), "fingerprint": expected})
+    return payload
+
+
+def split_manifest_id(train_split: int, universe_fingerprint: str) -> str:
+    return f"train_{int(train_split):02d}pct_{universe_fingerprint[:12]}"
+
+
+def resolve_split_manifest(train_split: int = DEFAULT_TRAIN_SPLIT_PERCENT) -> dict[str, Any]:
+    """Resolve and immutably persist a percentage-based outer split."""
+    if isinstance(train_split, bool) or int(train_split) != train_split or not 1 <= int(train_split) <= 99:
+        raise ValueError("--train-split must be an integer percentage from 1 to 99.")
+    train_split = int(train_split)
+    universe = load_match_universe()
+    match_ids = universe["match_ids"]
+    train_size = len(match_ids) * train_split // 100
+    if train_size < 1 or train_size >= len(match_ids):
+        raise ValueError(
+            f"--train-split {train_split} resolves to {train_size} development and "
+            f"{len(match_ids) - train_size} test matches; both sets must be non-empty."
+        )
+    manifest_id = split_manifest_id(train_split, universe["fingerprint"])
+    payload = {
+        "manifest_id": manifest_id,
+        "train_split_percent": train_split,
+        "train": match_ids[:train_size],
+        "test": match_ids[train_size:],
+        "metadata": {
+            "train_size": train_size,
+            "test_size": len(match_ids) - train_size,
+            "rounding": "floor",
+            "ordering": "match_id",
+            "universe_count": len(match_ids),
+            "universe_fingerprint": universe["fingerprint"],
+        },
+    }
+    SPLIT_MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SPLIT_MANIFESTS_DIR / f"{manifest_id}.json"
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8-sig"))
+        if existing != payload:
+            raise ValueError(f"Immutable split manifest collision at {path}.")
+    else:
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    payload["path"] = str(path)
+    return payload
+
+
 def save_split_manifest(train_ids: list[str], test_ids: list[str], metadata: dict[str, Any] | None = None) -> None:
     ensure_project_dirs()
     payload = {
@@ -792,7 +890,9 @@ def save_split_manifest(train_ids: list[str], test_ids: list[str], metadata: dic
     SPLIT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def load_split_manifest() -> dict[str, Any]:
+def load_split_manifest(train_split: int | None = None) -> dict[str, Any]:
+    if train_split is not None:
+        return resolve_split_manifest(train_split)
     if not SPLIT_PATH.exists():
         raise FileNotFoundError(
             f"Split manifest not found at {SPLIT_PATH}. Run scripts/preprocess_sportec.py first."
@@ -810,8 +910,11 @@ def filter_available_match_ids(match_ids: list[str], feature_dir: str | Path | N
     return np.array([match_id for match_id in _unique_in_order(match_ids) if match_id in available_ids])
 
 
-def load_base_splits(feature_dir: str | Path | None = None) -> tuple[np.ndarray, np.ndarray]:
-    manifest = load_split_manifest()
+def load_base_splits(
+    feature_dir: str | Path | None = None,
+    train_split: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    manifest = load_split_manifest(train_split)
     train_ids = filter_available_match_ids(manifest["train"], feature_dir)
     test_ids = filter_available_match_ids(manifest["test"], feature_dir)
     return train_ids, test_ids
@@ -829,7 +932,37 @@ def derive_model_train_valid(train_pool_ids: list[str] | np.ndarray) -> tuple[np
     return train_ids, valid_ids
 
 
-def load_model_splits(feature_dir: str | Path | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    train_pool_ids, test_ids = load_base_splits(feature_dir)
-    train_ids, valid_ids = derive_model_train_valid(train_pool_ids)
+def derive_expanding_folds(train_pool_ids: list[str] | np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    ids = np.array(_unique_in_order(list(train_pool_ids)))
+    boundaries = [len(ids) * numerator // 6 for numerator in (3, 4, 5, 6)]
+    folds = [(ids[:boundaries[index]], ids[boundaries[index]:boundaries[index + 1]]) for index in range(3)]
+    first_train_size = len(folds[0][0])
+    validation_sizes = [len(valid) for _, valid in folds]
+    if first_train_size < 100 or any(size < 30 for size in validation_sizes):
+        raise ValueError(
+            "Expanding validation requires at least 100 first-fold training matches and 30 matches "
+            f"per validation block; resolved {first_train_size} and {validation_sizes}."
+        )
+    return folds
+
+
+def load_model_splits(
+    feature_dir: str | Path | None = None,
+    train_split: int | None = None,
+    validation_mode: str = VALIDATION_MODE_HOLDOUT,
+    validation_fold: int | None = None,
+    final_refit: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    train_pool_ids, test_ids = load_base_splits(feature_dir, train_split=train_split)
+    if final_refit:
+        return train_pool_ids, np.array([], dtype=str), test_ids
+    if validation_mode == VALIDATION_MODE_HOLDOUT:
+        train_ids, valid_ids = derive_model_train_valid(train_pool_ids)
+    elif validation_mode == VALIDATION_MODE_EXPANDING:
+        folds = derive_expanding_folds(train_pool_ids)
+        if validation_fold not in (1, 2, 3):
+            raise ValueError("Expanding validation requires --validation-fold 1, 2, or 3.")
+        train_ids, valid_ids = folds[int(validation_fold) - 1]
+    else:
+        raise ValueError(f"Unknown validation mode {validation_mode!r}; expected one of {VALIDATION_MODES}.")
     return train_ids, valid_ids, test_ids

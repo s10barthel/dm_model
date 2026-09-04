@@ -32,6 +32,7 @@ from project_config import (
     get_resolved_action_dir,
     get_success_intent_graph_dir,
     load_feature_run_metadata,
+    resolve_split_manifest,
     resolve_generation_intended_receiver_modes,
     resolve_requested_return_types,
     resolve_feature_run_id,
@@ -93,6 +94,12 @@ class FeatureExtensionPlan:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--train-split",
+        type=int,
+        default=50,
+        help="Percentage of canonical MatchId order assigned to development data (default: 50).",
+    )
     parser.add_argument(
         "--return_type",
         action="append",
@@ -286,6 +293,7 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
     if args.run_id:
         command.extend(["--run-id", args.run_id])
+    command.extend(["--train-split", str(getattr(args, "train_split", 50))])
     command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
     command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
     command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
@@ -756,6 +764,14 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     base_metadata = load_feature_run_metadata(base_run_id, required=True)
     if base_metadata is None:
         raise FileNotFoundError(f"Feature run {base_run_id} does not have metadata.json.")
+    train_split = int(getattr(args, "train_split", 50))
+    requested_split = resolve_split_manifest(train_split)
+    base_split_id = base_metadata.get("split_manifest_id")
+    if base_split_id and base_split_id != requested_split["manifest_id"]:
+        raise ValueError(
+            f"Feature run {base_run_id} uses split {base_split_id}, but --train-split {train_split} "
+            f"resolves to {requested_split['manifest_id']}. Create a new full feature run for a different split."
+        )
     if base_metadata.get("status") != "completed":
         raise ValueError(f"Feature run {base_run_id} is not completed; status={base_metadata.get('status')!r}.")
 
@@ -897,6 +913,13 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         FeatureGenerationStep(step.description, with_edge_schema_flags(step.command, graph_schema))
         for step in command_steps
     ]
+    command_steps = [
+        FeatureGenerationStep(
+            step.description,
+            [*step.command, "--train-split", str(getattr(args, "train_split", 50))],
+        )
+        for step in command_steps
+    ]
     if refresh_pass_height_labels:
         threshold = str(pass_height_threshold_meters(args))
         command_steps = [
@@ -938,6 +961,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
 
 
 def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, status: str, error: str | None = None) -> dict[str, Any]:
+    train_split = int(getattr(args, "train_split", 50))
+    split_manifest = resolve_split_manifest(train_split)
     metadata = {
         "run_id": plan.output_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -962,6 +987,9 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "intended_receiver_model_id": plan.intended_receiver_model_id,
         "graph_schema": copy.deepcopy(plan.graph_schema),
         "splits": ["train", "test"],
+        "train_split_percent": train_split,
+        "split_manifest_id": split_manifest["manifest_id"],
+        "split_manifest": split_manifest["metadata"],
         "return_types": plan.final_return_types,
         "return_type": plan.final_return_types[0] if len(plan.final_return_types) == 1 else None,
         "base_feature_run_metadata": plan.base_metadata,
@@ -1014,6 +1042,8 @@ def mutating_metadata(
     history_status: str | None = None,
 ) -> dict[str, Any]:
     metadata = copy.deepcopy(plan.base_metadata)
+    train_split = int(getattr(args, "train_split", 50))
+    split_manifest = resolve_split_manifest(train_split)
     history = metadata.get("extension_history")
     if not isinstance(history, list):
         history = []
@@ -1033,6 +1063,9 @@ def mutating_metadata(
     metadata.update(
         {
             "run_id": plan.base_run_id,
+            "train_split_percent": train_split,
+            "split_manifest_id": split_manifest["manifest_id"],
+            "split_manifest": split_manifest["metadata"],
             "command": subprocess.list2cmdline(sys.argv),
             "last_extension_mode": plan.extension_mode,
             "extension_requested_return_types": args.requested_return_types,
@@ -1259,6 +1292,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
     run_generation_steps(command_steps)
 
     run_root = get_feature_run_root(args.run_id)
+    train_split = int(getattr(args, "train_split", 50))
+    split_manifest = resolve_split_manifest(train_split)
     metadata = {
         "run_id": args.run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1271,6 +1306,9 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "splits": ["train", "test"],
+        "train_split_percent": train_split,
+        "split_manifest_id": split_manifest["manifest_id"],
+        "split_manifest": split_manifest["metadata"],
         "return_types": args.return_types,
         "return_type": args.return_types[0] if len(args.return_types) == 1 else None,
         "commands": [step.command for step in command_steps],

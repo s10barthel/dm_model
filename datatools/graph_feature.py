@@ -1631,6 +1631,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
     parser.add_argument(
+        "--train-split",
+        type=int,
+        default=50,
+        help="Percentage of the canonical MatchId-ordered universe assigned to development data.",
+    )
+    parser.add_argument(
         "--return_type",
         type=str,
         action="append",
@@ -1929,9 +1935,9 @@ def main() -> None:
     lineups["game_date"] = pd.to_datetime(lineups["game_date"])
 
     if args.split == "train":
-        match_ids, _ = load_base_splits()
+        match_ids, _ = load_base_splits(train_split=args.train_split)
     else:
-        _, match_ids = load_base_splits()
+        _, match_ids = load_base_splits(train_split=args.train_split)
 
     tasks = build_match_tasks(
         [str(match_id) for match_id in match_ids],

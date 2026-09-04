@@ -382,6 +382,8 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "timestamp": created_at,
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
+        "train_split_percent": metadata.get("train_split_percent", args.get("train_split", 50)),
+        "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
         "return_type": return_type,
@@ -563,9 +565,19 @@ def encode_onehot(labels, classes=None):
 def load_splits(
     lineup_path="data/lineup/line_up.parquet",
     feature_dir: str = "data/features/action_graphs",
+    train_split: int | None = None,
+    validation_mode: str = "holdout_80_20",
+    validation_fold: int | None = None,
+    final_refit: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     del lineup_path
-    return load_model_splits(feature_dir)
+    return load_model_splits(
+        feature_dir,
+        train_split=train_split,
+        validation_mode=validation_mode,
+        validation_fold=validation_fold,
+        final_refit=final_refit,
+    )
 
 
 def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
@@ -893,6 +905,26 @@ def resolve_model_selection(
         require_target_family=require_target_family,
     )
     shared["model_records"] = model_records
+    split_values = {
+        int(record["train_split_percent"])
+        for record in model_records.values()
+        if record.get("train_split_percent") is not None
+    }
+    if len(split_values) > 1:
+        raise ValueError(f"Selected model checkpoints do not agree on train_split_percent: {sorted(split_values)}.")
+    if split_values:
+        shared["train_split_percent"] = next(iter(split_values))
+    split_manifest_ids = {
+        str(record["split_manifest_id"])
+        for record in model_records.values()
+        if record.get("split_manifest_id")
+    }
+    if len(split_manifest_ids) > 1:
+        raise ValueError(
+            f"Selected model checkpoints do not agree on split_manifest_id: {sorted(split_manifest_ids)}."
+        )
+    if split_manifest_ids:
+        shared["split_manifest_id"] = next(iter(split_manifest_ids))
 
     if bundle is not None:
         if require_feature_run_id and bundle.get("feature_run_id") and shared.get("feature_run_id") and bundle["feature_run_id"] != shared["feature_run_id"]:
@@ -922,6 +954,13 @@ def resolve_model_selection(
         shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or bundle.get("intended_receiver_mode")
         shared["return_type"] = shared.get("return_type") or bundle.get("return_type")
         shared["target_family"] = shared.get("target_family") or bundle.get("target_family")
+        shared["train_split_percent"] = shared.get("train_split_percent") or bundle.get("train_split_percent")
+        if bundle.get("split_manifest_id") and shared.get("split_manifest_id") and bundle["split_manifest_id"] != shared["split_manifest_id"]:
+            raise ValueError(
+                f"Bundle {bundle_id!r} split_manifest_id={bundle['split_manifest_id']!r} does not match selected "
+                f"model checkpoints ({shared['split_manifest_id']!r})."
+            )
+        shared["split_manifest_id"] = shared.get("split_manifest_id") or bundle.get("split_manifest_id")
 
     return resolved_model_ids, shared, bundle
 

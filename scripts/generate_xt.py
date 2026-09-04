@@ -31,6 +31,7 @@ from project_config import EVENT_SYNCED_DIR, XT_DIR, XT_MATCH_DIR, ensure_projec
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--train-split", type=int, default=50, help="Development percentage used to fit the xT surface.")
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--source-grid-l", type=int, default=None, help="Socceraction source-grid length bins. Default: 12.")
@@ -221,6 +222,7 @@ def ignored_export_filters(args: argparse.Namespace) -> dict[str, object]:
 def main() -> None:
     args = parse_args()
     ensure_project_dirs()
+    manifest = load_split_manifest(args.train_split)
 
     output_csv = XT_DIR / "xT.csv"
     output_grid = XT_DIR / "xT_grid.csv"
@@ -239,10 +241,14 @@ def main() -> None:
     ]
     expected_outputs = model_outputs if args.fit_only else [output_csv, *model_outputs]
     if not args.overwrite and all(path.exists() for path in expected_outputs):
+        existing_metadata = json.loads(output_metadata.read_text(encoding="utf-8"))
+        if existing_metadata.get("split_manifest_id") != manifest.get("manifest_id"):
+            raise ValueError(
+                "Existing xT artifacts were fitted with a different or legacy split. "
+                "Use --overwrite to rebuild them for the requested --train-split."
+            )
         print(f"xT outputs already exist in {XT_DIR}. Use --overwrite to rebuild them.")
         return
-
-    manifest = load_split_manifest()
     train_ids = [match_id for match_id in manifest["train"] if (EVENT_SYNCED_DIR / f"{match_id}.csv").exists()]
     all_events: list[pd.DataFrame] = []
     skipped_export_matches: list[dict[str, str]] = []
@@ -280,6 +286,9 @@ def main() -> None:
         "created_at_utc": datetime.now(UTC).isoformat(),
         "xt_model_type": "xy_logit_glm",
         "fit_only": bool(args.fit_only),
+        "train_split_percent": args.train_split,
+        "split_manifest_id": manifest["manifest_id"],
+        "split_manifest": manifest["metadata"],
         "match_sidecars_written": not bool(args.fit_only),
         "xT_csv_written": not bool(args.fit_only),
         "ignored_export_filters": ignored_export_filters(args) if args.fit_only else {},

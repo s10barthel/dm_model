@@ -109,6 +109,13 @@ def parse_args() -> argparse.Namespace:
         help="Pinned success_intent checkpoint used to add the model-backed intended-receiver variant during feature generation.",
     )
     parser.add_argument("--feature-run-id", default=None, help="Explicit feature-run id to reuse or assign.")
+    parser.add_argument("--train-split", type=int, default=50, help="Development percentage of canonical MatchId order.")
+    parser.add_argument(
+        "--validation-mode",
+        choices=["holdout_80_20", "expanding"],
+        default="holdout_80_20",
+        help="Temporal validation protocol used during model training.",
+    )
     parser.add_argument("--bundle-id", default=None, help="Explicit model bundle id to reuse or assign.")
     parser.add_argument(
         "--success-intent-model-id",
@@ -576,6 +583,8 @@ def append_generation_edge_feature_flag(command: list[str], args: argparse.Names
 def build_commands(args: argparse.Namespace) -> list[list[str]]:
     python = sys.executable
     commands: list[list[str]] = []
+    train_split = int(getattr(args, "train_split", 50))
+    validation_mode = str(getattr(args, "validation_mode", "holdout_80_20"))
     feature_run_id = args.feature_run_id if args.skip_features else (args.feature_run_id or generate_run_id("feature"))
     bundle_id = args.bundle_id if args.skip_train else (args.bundle_id or generate_run_id("model_bundle"))
 
@@ -586,7 +595,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         commands.append(preprocess_command)
 
     if args.target_family == "xt" and not args.skip_xt:
-        xt_command = [python, "scripts/generate_xt.py"]
+        xt_command = [python, "scripts/generate_xt.py", "--train-split", str(train_split)]
         if args.overwrite:
             xt_command.append("--overwrite")
         commands.append(xt_command)
@@ -606,6 +615,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             [python, "scripts/generate_relevant_features.py", "--run-id", feature_run_id],
             args,
         )
+        feature_command.extend(["--train-split", str(train_split)])
         if args.intended_receiver_model_id:
             feature_command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
         feature_command = append_generation_edge_feature_flag(feature_command, args)
@@ -619,6 +629,10 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             bundle_id,
             "--feature-run-id",
             feature_run_id,
+            "--train-split",
+            str(train_split),
+            "--validation-mode",
+            validation_mode,
         ]
         train_command = append_training_target_flags(train_command, args)
         train_command = append_return_type_flag(train_command, args)
@@ -660,6 +674,8 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
                     args.relevant_split,
                     "--device",
                     args.device,
+                    "--train-split",
+                    str(train_split),
                 ],
                 bundle_id,
             )

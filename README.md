@@ -228,17 +228,13 @@ The current pipeline now follows an explicit-artifact contract:
 
 ## Split Definition
 
-The dataset split is season-based:
+Preprocessing records every successfully preprocessed Sportec match in a canonical sequence sorted by `MatchId`. The user-facing `--train-split <percentage>` option assigns the first percentage to model development and retains the chronologically later remainder as the independent test set. The percentage is an integer from 1 through 99 and uses floor rounding.
 
-1. all `Bundesliga_season_23_24` matches become the train pool
-2. all `Bundesliga_season_24_25` matches become the test set
+Resolved match assignments are stored as immutable, fingerprinted manifests under `data/splits/manifests`. Feature runs, model runs, bundles, and evaluations record that manifest identity so incompatible artifacts cannot be mixed. Existing commands default to `--train-split 50`, which gives 306 development and 306 test matches for the current 612-match universe. The recommended out-of-time protocol uses `--train-split 75`, giving 459 development and 153 test matches.
 
-To keep upstream `train.py` behavior, the `23_24` train pool is deterministically split again into:
+`--validation-mode holdout_80_20` is the backward-compatible default and uses the first 80% of development matches for training and the remaining 20% for validation. `--validation-mode expanding` creates three chronological folds with development-set boundaries at 50%, 66⅔%, 83⅓%, and 100%, then refits each selected model on the complete development set for the median best-fold epoch count. For 459 development matches, the folds are 229/77, 306/76, and 382/77 training/validation matches. The final 153 matches are used only by the subsequent evaluation stage.
 
-- `80%` model-training matches
-- `20%` validation matches
-
-The internal train/validation split is deterministic: sort the `23_24` train-pool matches by actual `KickoffTime`, break ties with `MatchId`, then take the first `80%` for training and the remaining `20%` for validation.
+Expanding runs retain `fold_1`, `fold_2`, `fold_3`, and `final_refit` checkpoints inside each model run. The root checkpoint is the promoted final refit used by runtime model loading. Fold metrics, aggregate validation metrics, CSV data, and learning-curve figures are stored with the model bundle.
 
 ## Environment Setup
 

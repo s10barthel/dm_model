@@ -2,6 +2,7 @@ import argparse
 import faulthandler
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -63,9 +64,11 @@ from project_config import (
     get_success_intent_graph_dir,
     get_success_intent_label_dir,
     infer_target_family,
+    load_feature_run_metadata,
     resolve_effective_return_type,
     resolve_feature_root,
     resolve_feature_run_id,
+    resolve_split_manifest,
     write_run_metadata,
 )
 
@@ -82,6 +85,11 @@ parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--trial", type=int, required=False, default=None)
 parser.add_argument("--run-id", type=str, default=None, help="Checkpoint run id. Auto-generated when omitted.")
 parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing checkpoint run id.")
+parser.add_argument("--train-split", type=int, default=50)
+parser.add_argument("--validation-mode", choices=["holdout_80_20", "expanding"], default="holdout_80_20")
+parser.add_argument("--validation-fold", type=int, choices=[1, 2, 3], default=None)
+parser.add_argument("--final-refit", action="store_true", help="Train on the complete development pool without validation.")
+parser.add_argument("--artifact-stage", choices=["fold_1", "fold_2", "fold_3", "final_refit"], default=None)
 parser.add_argument("--device", type=str, default=None, help="Training device. Defaults to cuda when available, otherwise cpu.")
 parser.add_argument("--model", type=str, required=True, default="gat")
 parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID to estimate propensity scores")
@@ -626,6 +634,16 @@ if __name__ == "__main__":
     args.model_id = f"{args.task}/{args.run_id}"
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
+    args.split_manifest = resolve_split_manifest(args.train_split)
+    args.split_manifest_id = args.split_manifest["manifest_id"]
+    if args.feature_run_id:
+        feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
+        feature_split_id = feature_metadata.get("split_manifest_id")
+        if feature_split_id and feature_split_id != args.split_manifest["manifest_id"]:
+            raise ValueError(
+                f"Feature run {args.feature_run_id} uses split {feature_split_id}, but training resolved "
+                f"{args.split_manifest['manifest_id']}."
+            )
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
     args.lane_survival_cache_dir = str(get_pc_xpass_dir("sportec")) if args.lane_survival else None
@@ -734,7 +752,8 @@ if __name__ == "__main__":
     args_dict["model_id"] = args.model_id
 
     # Create a path to save model arguments and parameters
-    trial_path = str(get_model_run_root(args.task, args.run_id))
+    model_run_root = get_model_run_root(args.task, args.run_id)
+    trial_path = str(model_run_root / args.artifact_stage) if args.artifact_stage else str(model_run_root)
     os.makedirs(trial_path, exist_ok=True)
     crash_log_file = open(f"{trial_path}/crash.log", "a", encoding="utf-8", buffering=1)
     faulthandler.enable(file=crash_log_file, all_threads=True)
@@ -752,6 +771,13 @@ if __name__ == "__main__":
         "command": subprocess.list2cmdline(sys.argv),
         "resume_run_id": args.resume_run_id,
         "feature_run_id": args.feature_run_id,
+        "train_split_percent": args.train_split,
+        "split_manifest_id": args.split_manifest["manifest_id"],
+        "split_manifest": args.split_manifest["metadata"],
+        "validation_mode": args.validation_mode,
+        "validation_fold": args.validation_fold,
+        "final_refit": bool(args.final_refit),
+        "artifact_stage": args.artifact_stage,
         "intended_receiver_mode": None if args.task == "success_intent" and args.intended_receiver_mode == "unknown" else args.intended_receiver_mode,
         "target_family": args.target_family,
         "diagnostic_target": args.diagnostic_target,
@@ -835,7 +861,22 @@ if __name__ == "__main__":
         state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False, map_location=device)
         unwrap_model(model).load_state_dict(state_dict)
 
-    train_match_ids, valid_match_ids, _ = load_splits(feature_dir=feature_dir)
+    train_match_ids, valid_match_ids, _ = load_splits(
+        feature_dir=feature_dir,
+        train_split=args.train_split,
+        validation_mode=args.validation_mode,
+        validation_fold=args.validation_fold,
+        final_refit=args.final_refit,
+    )
+    metadata.update(
+        {
+            "train_match_count": len(train_match_ids),
+            "validation_match_count": len(valid_match_ids),
+            "train_match_ids": [str(value) for value in train_match_ids],
+            "validation_match_ids": [str(value) for value in valid_match_ids],
+        }
+    )
+    write_run_metadata(Path(trial_path), metadata)
 
     print("Generating datasets...")
     common_dataset_args = build_action_dataset_kwargs(
@@ -852,19 +893,21 @@ if __name__ == "__main__":
         label_dir=args.train_label_dir,
         **common_dataset_args,
     )
-    valid_dataset = ActionDataset(
+    valid_dataset = None if args.final_refit else ActionDataset(
         valid_match_ids,
         feature_dir=args.valid_feature_dir,
         label_dir=args.valid_label_dir,
         **common_dataset_args,
     )
     log_skipped_matches("training", train_dataset, trial_path)
-    log_skipped_matches("validation", valid_dataset, trial_path)
+    if valid_dataset is not None:
+        log_skipped_matches("validation", valid_dataset, trial_path)
     log_skipped_rows("training", train_dataset, trial_path)
-    log_skipped_rows("validation", valid_dataset, trial_path)
+    if valid_dataset is not None:
+        log_skipped_rows("validation", valid_dataset, trial_path)
     if len(train_dataset) == 0:
         raise ValueError("No usable training samples remained after loading graph and label artifacts.")
-    if len(valid_dataset) == 0:
+    if valid_dataset is not None and len(valid_dataset) == 0:
         raise ValueError("No usable validation samples remained after loading graph and label artifacts.")
 
     if args.task in {"pass_success", "pass_height"} and args.weight_bce:
@@ -894,13 +937,13 @@ if __name__ == "__main__":
             label_dir=args.label_dir,
             **ipw_dataset_args,
         )
-        ipw_valid_dataset = ActionDataset(
+        ipw_valid_dataset = None if args.final_refit else ActionDataset(
             valid_match_ids,
             feature_dir=args.ipw_feature_dir,
             label_dir=args.label_dir,
             **ipw_dataset_args,
         )
-        if len(ipw_train_dataset) == 0 or len(ipw_valid_dataset) == 0:
+        if len(ipw_train_dataset) == 0 or (ipw_valid_dataset is not None and len(ipw_valid_dataset) == 0):
             raise ValueError("No usable samples remained for inverse-propensity weighting.")
 
         inverse_propensity = 1 / estimate_propensity(
@@ -912,17 +955,18 @@ if __name__ == "__main__":
         train_ipw = inverse_propensity / inverse_propensity.mean()
         train_dataset.set_inverse_propensity_weights(train_ipw)
 
-        inverse_propensity = 1 / estimate_propensity(
-            ipw_valid_dataset,
-            model_id=args.ipw_model_id,
-            device=device,
-            pin_memory=args.pin_memory,
-        )
-        valid_ipw = inverse_propensity / inverse_propensity.mean()
-        valid_dataset.set_inverse_propensity_weights(valid_ipw)
+        if ipw_valid_dataset is not None and valid_dataset is not None:
+            inverse_propensity = 1 / estimate_propensity(
+                ipw_valid_dataset,
+                model_id=args.ipw_model_id,
+                device=device,
+                pin_memory=args.pin_memory,
+            )
+            valid_ipw = inverse_propensity / inverse_propensity.mean()
+            valid_dataset.set_inverse_propensity_weights(valid_ipw)
 
     train_loader = DataLoader(train_dataset, **loader_args)
-    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
+    valid_loader = None if valid_dataset is None else DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
 
     # Train loop
     default_lr = max(args.start_lr, args.min_lr)
@@ -991,19 +1035,31 @@ if __name__ == "__main__":
         train_metrics = run_epoch(args, model, train_loader, optimizer, device, pos_weight, train=True)
         printlog("Train:\t" + get_losses_str(train_metrics), trial_path)
 
-        valid_metrics = run_epoch(args, model, valid_loader, optimizer, device, pos_weight, train=False)
-        printlog("Valid:\t" + get_losses_str(valid_metrics), trial_path)
+        valid_metrics = (
+            {} if valid_loader is None else run_epoch(args, model, valid_loader, optimizer, device, pos_weight, train=False)
+        )
+        if valid_loader is not None:
+            printlog("Valid:\t" + get_losses_str(valid_metrics), trial_path)
 
         epoch_time = time.time() - start_time
         printlog("Time:\t {:.2f}s".format(epoch_time), trial_path)
 
-        epoch_loss = valid_metrics["ce_loss"] if "ce_loss" in valid_metrics else valid_metrics["mse_loss"]
+        epoch_loss = None
+        if valid_metrics:
+            epoch_loss = valid_metrics["ce_loss"] if "ce_loss" in valid_metrics else valid_metrics["mse_loss"]
 
         # Best model on test set
-        if is_validation_loss_improved(epoch_loss, best_loss, args.early_stopping_min_delta):
+        if args.final_refit:
+            torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_weights.pt")
+            best_loss = float(train_metrics.get("ce_loss", train_metrics.get("mse_loss", 0.0)))
+            metadata["best_epoch"] = epoch
+            metadata["best_train_metrics"] = train_metrics
+        elif is_validation_loss_improved(epoch_loss, best_loss, args.early_stopping_min_delta):
             epochs_since_loss_improvement = 0
             epochs_since_lr_loss_improvement = 0
             best_loss = epoch_loss
+            metadata["best_epoch"] = epoch
+            metadata["best_valid_metrics"] = valid_metrics
 
             torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_weights.pt")
             printlog("######## Best Loss ########", trial_path)
@@ -1011,7 +1067,7 @@ if __name__ == "__main__":
             epochs_since_loss_improvement += 1
             epochs_since_lr_loss_improvement += 1
 
-        if "accuracy" in valid_metrics or "f1" in valid_metrics:
+        if not args.final_refit and ("accuracy" in valid_metrics or "f1" in valid_metrics):
             epoch_acc = valid_metrics["accuracy"] if "accuracy" in valid_metrics else valid_metrics["f1"]
             if epoch_acc > best_acc:
                 best_acc = epoch_acc
@@ -1036,7 +1092,7 @@ if __name__ == "__main__":
         )
 
         if should_stop_early(
-            args.early_stopping,
+            args.early_stopping and not args.final_refit,
             epoch,
             args.early_stopping_min_epochs,
             epochs_since_loss_improvement,
@@ -1067,5 +1123,11 @@ if __name__ == "__main__":
         completed_at=datetime.now().isoformat(timespec="seconds"),
         updated_at=datetime.now().isoformat(timespec="seconds"),
     )
+    if args.artifact_stage:
+        model_run_root.mkdir(parents=True, exist_ok=True)
+        for name in ("args.json", "metadata.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
+            source = Path(trial_path) / name
+            if source.exists():
+                shutil.copy2(source, model_run_root / name)
     faulthandler.disable()
     crash_log_file.close()

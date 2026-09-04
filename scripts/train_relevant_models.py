@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import json
+import statistics
 import subprocess
 import sys
 from collections import OrderedDict
@@ -46,8 +49,11 @@ from project_config import (
     infer_feature_run_return_types,
     load_feature_run_metadata,
     load_model_bundle_metadata,
+    derive_expanding_folds,
+    load_base_splits,
     resolve_feature_run_id,
     resolve_feature_root,
+    resolve_split_manifest,
     validate_intended_receiver_mode,
     validate_return_type,
     validate_return_type_for_target_family,
@@ -608,6 +614,11 @@ def validate_external_pass_intent_model_id(
         mismatches.append(f"task={record.get('task')!r}")
     if not record.get("has_weights"):
         mismatches.append("missing best_weights.pt or best_model.json")
+    requested_train_split = int(getattr(args, "train_split", 50))
+    if int(record.get("train_split_percent", 50)) != requested_train_split:
+        mismatches.append(
+            f"train_split_percent={record.get('train_split_percent')!r}, expected {requested_train_split}"
+        )
 
     if runtime_schema is None:
         feature_root = resolve_feature_root(resolved_feature_run_id)
@@ -772,6 +783,13 @@ def derive_bundle_shared_context(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--train-split", type=int, default=50, help="Development percentage of canonical MatchId order.")
+    parser.add_argument(
+        "--validation-mode",
+        choices=["holdout_80_20", "expanding"],
+        default="holdout_80_20",
+        help="Temporal model-validation protocol.",
+    )
     parser.add_argument(
         "--target-family",
         choices=["goal", "xg", "xt", "goal_distance", "epv"],
@@ -1205,6 +1223,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     except FileNotFoundError as exc:
         parser.error(str(exc))
+
+    try:
+        split_manifest = resolve_split_manifest(args.train_split)
+    except (ValueError, FileNotFoundError) as exc:
+        parser.error(str(exc))
+    feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
+    feature_split_id = feature_metadata.get("split_manifest_id")
+    if feature_split_id and feature_split_id != split_manifest["manifest_id"]:
+        parser.error(
+            f"Feature run {args.feature_run_id} uses split {feature_split_id}, but --train-split "
+            f"{args.train_split} resolves to {split_manifest['manifest_id']}."
+        )
+    if not feature_split_id and args.train_split != 50:
+        parser.error("Legacy feature runs without split metadata can only be used with --train-split 50.")
+    if args.validation_mode == "expanding":
+        try:
+            development_ids, _ = load_base_splits(train_split=args.train_split)
+            derive_expanding_folds(development_ids)
+        except ValueError as exc:
+            parser.error(str(exc))
+    args.split_manifest = split_manifest
 
     available_modes = infer_feature_run_intended_receiver_modes(args.feature_run_id)
     available_return_types = infer_feature_run_return_types(args.feature_run_id)
@@ -1776,8 +1815,94 @@ def build_training_commands(
     )
 
 
+def _replace_cli_value(command: list[str], flag: str, value: object) -> list[str]:
+    updated = list(command)
+    if flag in updated:
+        updated[updated.index(flag) + 1] = str(value)
+    else:
+        updated.extend([flag, str(value)])
+    return updated
+
+
+def _read_fold_summaries(trained_model_ids: dict[str, str]) -> dict[str, list[dict[str, object]]]:
+    summaries: dict[str, list[dict[str, object]]] = {}
+    for task, model_id in trained_model_ids.items():
+        _, run_id = model_id.split("/", 1)
+        task_rows = []
+        for fold in range(1, 4):
+            path = get_model_run_root(task, run_id) / f"fold_{fold}" / "metadata.json"
+            metadata = json.loads(path.read_text(encoding="utf-8"))
+            metrics = dict(metadata.get("best_valid_metrics") or metadata.get("last_epoch_valid_metrics") or {})
+            task_rows.append(
+                {
+                    "fold": fold,
+                    "train_matches": int(metadata.get("train_match_count", 0)),
+                    "validation_matches": int(metadata.get("validation_match_count", 0)),
+                    "best_epoch": int(metadata.get("best_epoch") or metadata.get("last_epoch") or 1),
+                    "metrics": metrics,
+                }
+            )
+        summaries[task] = task_rows
+    return summaries
+
+
+def _write_learning_curves(bundle_root: Path, summaries: dict[str, list[dict[str, object]]]) -> dict[str, str | None]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir = bundle_root / "learning_curves"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs: dict[str, str | None] = {}
+    for task, rows in summaries.items():
+        csv_path = output_dir / f"{task}.csv"
+        metric_names = sorted({name for row in rows for name in row["metrics"]})
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["fold", "train_matches", "validation_matches", "best_epoch", *metric_names])
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({**{key: row[key] for key in ("fold", "train_matches", "validation_matches", "best_epoch")}, **row["metrics"]})
+        loss_key = "log_loss" if all("log_loss" in row["metrics"] for row in rows) else (
+            "ce_loss" if all("ce_loss" in row["metrics"] for row in rows) else "mse_loss"
+        )
+        has_brier = all("brier" in row["metrics"] for row in rows)
+        figure, axes = plt.subplots(1, 2 if has_brier else 1, figsize=(10 if has_brier else 5, 4))
+        axes_list = list(axes) if has_brier else [axes]
+        x = [row["train_matches"] for row in rows]
+        axes_list[0].plot(x, [row["metrics"][loss_key] for row in rows], marker="o")
+        axes_list[0].set(xlabel="Training matches", ylabel=loss_key, title=f"{task}: validation loss")
+        if has_brier:
+            axes_list[1].plot(x, [row["metrics"]["brier"] for row in rows], marker="o")
+            axes_list[1].set(xlabel="Training matches", ylabel="Brier score", title=f"{task}: calibration")
+        figure.tight_layout()
+        plot_path = output_dir / f"{task}.png"
+        figure.savefig(plot_path, dpi=180)
+        plt.close(figure)
+        outputs[task] = str(plot_path)
+    return outputs
+
+
+def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> dict[str, dict[str, float]]:
+    aggregated: dict[str, dict[str, float]] = {}
+    for task, rows in summaries.items():
+        metric_names = sorted({name for row in rows for name in row["metrics"] if name != "count"})
+        result: dict[str, float] = {}
+        for name in metric_names:
+            eligible = [row for row in rows if name in row["metrics"]]
+            weights = [float(row["metrics"].get("count", row["validation_matches"])) for row in eligible]
+            denominator = sum(weights)
+            if denominator:
+                result[name] = sum(float(row["metrics"][name]) * weight for row, weight in zip(eligible, weights)) / denominator
+        aggregated[task] = result
+    return aggregated
+
+
 def main() -> None:
     cli_args = parse_args()
+    train_split = int(getattr(cli_args, "train_split", 50))
+    validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
+    split_manifest = getattr(cli_args, "split_manifest", None) or resolve_split_manifest(train_split)
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
     relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(cli_args)
     python = sys.executable
@@ -1802,12 +1927,111 @@ def main() -> None:
         {task: task in trained_model_ids for task in MODEL_TOGGLE_DEFAULTS},
     )
 
+    expanding_summaries: dict[str, list[dict[str, object]]] = {}
+    learning_curve_paths: dict[str, str | None] = {}
+    if validation_mode == "expanding":
+        total_stages = len(commands) * 4
+        stage_index = 0
+        for fold in range(1, 4):
+            for low_level_args in commands:
+                stage_index += 1
+                command = [python, "train.py"]
+                if resolved_feature_run_id:
+                    command.extend(["--feature-run-id", str(resolved_feature_run_id)])
+                command.extend(low_level_args)
+                command.extend(
+                    [
+                        "--train-split", str(train_split),
+                        "--validation-mode", "expanding",
+                        "--validation-fold", str(fold),
+                        "--artifact-stage", f"fold_{fold}",
+                    ]
+                )
+                command = append_runtime_flags(
+                    command,
+                    device=getattr(cli_args, "device", None),
+                    pin_memory=getattr(cli_args, "pin_memory", None),
+                )
+                command = append_training_control_flags(command, training_control_settings)
+                command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
+                print("Running:", " ".join(command))
+                try:
+                    subprocess.run(command, cwd=ROOT, check=True)
+                except subprocess.CalledProcessError as exc:
+                    write_run_metadata(
+                        bundle_root,
+                        {
+                            "bundle_id": bundle_id,
+                            "feature_run_id": resolved_feature_run_id,
+                            "train_split_percent": train_split,
+                            "split_manifest_id": split_manifest["manifest_id"],
+                            "validation_mode": validation_mode,
+                            "failed_command": command,
+                            "commands": executed_commands,
+                            "returncode": int(exc.returncode),
+                            "status": "failed",
+                        },
+                    )
+                    raise
+                executed_commands.append(command)
+
+        expanding_summaries = _read_fold_summaries(trained_model_ids)
+        for low_level_args in commands:
+            stage_index += 1
+            task = get_cli_value(low_level_args, "--task")
+            best_epochs = [int(row["best_epoch"]) for row in expanding_summaries[str(task)]]
+            fixed_epochs = max(1, int(statistics.median(best_epochs) + 0.5))
+            command = [python, "train.py"]
+            if resolved_feature_run_id:
+                command.extend(["--feature-run-id", str(resolved_feature_run_id)])
+            command.extend(_replace_cli_value(low_level_args, "--n_epochs", fixed_epochs))
+            command.extend(
+                [
+                    "--train-split", str(train_split),
+                    "--validation-mode", "expanding",
+                    "--final-refit",
+                    "--artifact-stage", "final_refit",
+                    "--no-early-stopping",
+                ]
+            )
+            command = append_runtime_flags(
+                command,
+                device=getattr(cli_args, "device", None),
+                pin_memory=getattr(cli_args, "pin_memory", None),
+            )
+            command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
+            print("Running:", " ".join(command))
+            try:
+                subprocess.run(command, cwd=ROOT, check=True)
+            except subprocess.CalledProcessError as exc:
+                write_run_metadata(
+                    bundle_root,
+                    {
+                        "bundle_id": bundle_id,
+                        "feature_run_id": resolved_feature_run_id,
+                        "train_split_percent": train_split,
+                        "split_manifest_id": split_manifest["manifest_id"],
+                        "validation_mode": validation_mode,
+                        "failed_command": command,
+                        "commands": executed_commands,
+                        "returncode": int(exc.returncode),
+                        "status": "failed",
+                    },
+                )
+                raise
+            executed_commands.append(command)
+            if task:
+                completed_model_ids[task] = trained_model_ids[task]
+        learning_curve_paths = _write_learning_curves(bundle_root, expanding_summaries)
+        commands = []
+
     total_commands = len(commands)
     for index, args in enumerate(commands, start=1):
         command = [python, "train.py"]
         if resolved_feature_run_id:
             command.extend(["--feature-run-id", str(resolved_feature_run_id)])
         command.extend(args)
+        command.extend(["--train-split", str(train_split), "--validation-mode", validation_mode])
         command = append_runtime_flags(
             command,
             device=getattr(cli_args, "device", None),
@@ -1904,6 +2128,14 @@ def main() -> None:
         "updated_at": timestamp,
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": effective_feature_run_id,
+        "train_split_percent": train_split,
+        "split_manifest_id": split_manifest["manifest_id"],
+        "split_manifest": split_manifest["metadata"],
+        "validation_mode": validation_mode,
+        "validation_folds": expanding_summaries,
+        "aggregate_validation_metrics": _aggregate_fold_metrics(expanding_summaries),
+        "final_refit_epoch_rule": "rounded_median_best_fold_epoch" if expanding_summaries else None,
+        "learning_curves": learning_curve_paths,
         "intended_receiver_mode": bundle_shared.get("intended_receiver_mode"),
         "feature_run_intended_receiver_modes": feature_run_metadata.get(
             "intended_receiver_modes",

@@ -4820,7 +4820,130 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(second_stats["cache_hits"], 1)
         self.assertEqual(second_stats["cache_misses"], 0)
 
-    def test_runtime_physical_xpass_prewarm_writes_batch_chunks_incrementally_and_resumes(self) -> None:
+    def test_runtime_physical_xpass_writer_uses_unique_atomic_temporary_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            observed_temporary_paths: list[Path] = []
+            real_replace = Path.replace
+
+            def record_replace(path: Path, target: Path) -> Path:
+                observed_temporary_paths.append(path)
+                return real_replace(path, target)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=record_replace):
+                physical_pass_model._write_runtime_physical_xpass_rows(
+                    cache_dir,
+                    "runtime_match",
+                    pd.DataFrame([{"action_index": 5, "home_2": 0.4}]),
+                )
+
+            output_path = cache_dir / "matches" / "runtime_match.parquet"
+            self.assertTrue(output_path.exists())
+            self.assertEqual(len(observed_temporary_paths), 1)
+            self.assertRegex(
+                observed_temporary_paths[0].name,
+                r"^\.runtime_match\.\d+\.[0-9a-f]{32}\.tmp\.parquet$",
+            )
+            self.assertEqual(list(output_path.parent.glob(".*.tmp.parquet")), [])
+
+    def test_runtime_physical_xpass_writer_retries_permission_error_then_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            attempts = 0
+            retry_stats: dict[str, object] = {}
+            real_replace = Path.replace
+
+            def flaky_replace(path: Path, target: Path) -> Path:
+                nonlocal attempts
+                attempts += 1
+                if attempts <= 2:
+                    raise PermissionError("file is locked")
+                return real_replace(path, target)
+
+            with patch.object(Path, "replace", autospec=True, side_effect=flaky_replace):
+                with patch("physical_pass_model.time.sleep") as sleep:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        physical_pass_model._write_runtime_physical_xpass_rows(
+                            cache_dir,
+                            "runtime_match",
+                            pd.DataFrame([{"action_index": 5, "home_2": 0.4}]),
+                            retry_stats=retry_stats,
+                        )
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(retry_stats["write_permission_retries"], 2)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.05, 0.1])
+
+    def test_runtime_physical_xpass_writer_exhaustion_preserves_destination_and_cleans_temp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            output_dir = cache_dir / "matches"
+            output_dir.mkdir(parents=True)
+            output_path = output_dir / "runtime_match.parquet"
+            pd.DataFrame([{"action_index": 5, "home_2": 0.2}]).to_parquet(output_path, index=False)
+            retry_stats: dict[str, object] = {}
+
+            with patch.object(Path, "replace", autospec=True, side_effect=PermissionError("file is locked")):
+                with patch("physical_pass_model.time.sleep") as sleep:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        with self.assertRaises(PermissionError) as raised:
+                            physical_pass_model._write_runtime_physical_xpass_rows(
+                                cache_dir,
+                                "runtime_match",
+                                pd.DataFrame([{"action_index": 5, "home_2": 0.9}]),
+                                retry_stats=retry_stats,
+                            )
+
+            persisted = pd.read_parquet(output_path)
+            self.assertAlmostEqual(float(persisted.loc[0, "home_2"]), 0.2)
+            self.assertEqual(len(sleep.call_args_list), 5)
+            self.assertEqual(retry_stats["write_permission_retries"], 5)
+            self.assertEqual(getattr(raised.exception, "write_permission_retries"), 5)
+            self.assertEqual(list(output_dir.glob(".*.tmp.parquet")), [])
+
+    def test_runtime_physical_xpass_multiworker_prewarm_recovers_transient_atomic_replace(self) -> None:
+        labels = torch.stack([make_label(action_index=5), make_label(action_index=6)])
+        real_replace = Path.replace
+        attempts = 0
+
+        def flaky_replace(path: Path, target: Path) -> Path:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError("file is locked")
+            return real_replace(path, target)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir) / "physical_xpass"
+            with patch.object(Path, "replace", autospec=True, side_effect=flaky_replace):
+                with patch("physical_pass_model.time.sleep"):
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        stats = prewarm_physical_xpass_runtime_cache(
+                            [{"match_id": "runtime_match", "graphs": [make_graph(), make_graph()], "labels": labels}],
+                            cache_dir=cache_dir,
+                            source=PC_XPASS_SOURCE,
+                            num_workers=2,
+                            physical_batch_size=1,
+                            max_speed=5.0,
+                            min_speed=5.0,
+                            speed_step=1.0,
+                            angle_step=180.0,
+                            radial_gridsize=20.0,
+                            use_position_discount=False,
+                            available_metrics=[PHYSICAL_XPASS_METRIC_MAX],
+                        )
+            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+
+        self.assertEqual(stats["num_workers"], 2)
+        self.assertEqual(stats["compute_chunks"], 2)
+        self.assertEqual(stats["write_permission_retries"], 1)
+        self.assertEqual(stats["cache_written"], 2)
+        self.assertEqual(rows.index.tolist(), [5, 6])
+
+    def test_runtime_physical_xpass_prewarm_consolidates_batch_chunks_into_one_match_write(self) -> None:
         labels = torch.stack(
             [
                 make_label(action_index=5),
@@ -4838,20 +4961,23 @@ class PhysicalXPassTests(unittest.TestCase):
                 del kwargs
                 call_count += 1
                 if call_count == 2:
-                    partial = load_physical_xpass_match(cache_dir, "runtime_match")
-                    self.assertEqual(partial.index.tolist(), [5, 6])
+                    self.assertFalse((cache_dir / "matches" / "runtime_match.parquet").exists())
                 return [pd.Series({"home_2": 0.3 + index}, dtype=float) for index, _graph in enumerate(chunk_graphs)]
 
             with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults", side_effect=fake_compute) as compute:
-                first_stats = prewarm_physical_xpass_runtime_cache(
-                    [{"match_id": "runtime_match", "graphs": graphs, "labels": labels}],
-                    cache_dir=cache_dir,
-                    source=PHYSICAL_XPASS_SOURCE,
-                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
-                    num_workers=1,
-                    physical_batch_size=2,
-                )
+                with patch(
+                    "physical_pass_model._write_runtime_physical_xpass_rows",
+                    wraps=physical_pass_model._write_runtime_physical_xpass_rows,
+                ) as write_rows:
+                    first_stats = prewarm_physical_xpass_runtime_cache(
+                        [{"match_id": "runtime_match", "graphs": graphs, "labels": labels}],
+                        cache_dir=cache_dir,
+                        source=PHYSICAL_XPASS_SOURCE,
+                        teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+                        speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
+                        num_workers=1,
+                        physical_batch_size=2,
+                    )
             with patch("physical_pass_model.compute_graphs_physical_xpass_metrics_as_defaults") as compute_again:
                 second_stats = prewarm_physical_xpass_runtime_cache(
                     [{"match_id": "runtime_match", "graphs": graphs, "labels": labels}],
@@ -4865,6 +4991,7 @@ class PhysicalXPassTests(unittest.TestCase):
             rows = load_physical_xpass_match(cache_dir, "runtime_match")
 
         self.assertEqual(compute.call_count, 2)
+        write_rows.assert_called_once()
         self.assertEqual(first_stats["cache_misses"], 3)
         self.assertEqual(first_stats["cache_written"], 3)
         self.assertEqual(first_stats["compute_chunks"], 2)
@@ -5760,6 +5887,59 @@ class PhysicalXPassTests(unittest.TestCase):
         metadata_mock.assert_called_once()
         self.assertEqual(metadata_mock.call_args.args[1], pc_cache_dir)
 
+    def test_runtime_sportec_parallel_failure_retries_and_audits_one_match_serially(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_root = root / "feature"
+            graph_dir = feature_root / "action_graphs"
+            post_graph_dir = feature_root / "post_action_graphs"
+            label_dir = feature_root / "labels"
+            resolved_path = feature_root / "resolved.parquet"
+            for directory in [graph_dir, post_graph_dir, label_dir]:
+                directory.mkdir(parents=True)
+            torch.save([make_graph()], graph_dir / "m1.pt")
+            torch.save([make_graph()], post_graph_dir / "m1.pt")
+            torch.save(torch.stack([make_label(action_index=5)]), label_dir / "m1.pt")
+            pd.DataFrame({"dummy": [1]}).to_parquet(resolved_path)
+            args = generate_physical_xpass.parse_args(["--pc-xpass", "--match-id", "m1"])
+            calls: list[tuple[int, object]] = []
+
+            def fake_prewarm(items, **kwargs):
+                calls.append((len(items), kwargs["args"].num_workers))
+                if len(calls) == 1:
+                    raise PermissionError("file is locked")
+                if len(calls) == 2:
+                    return make_runtime_prewarm_stats(len(items))
+                verified = make_runtime_prewarm_stats(0)
+                verified["cache_hits"] = len(items)
+                return verified
+
+            with patch.object(generate_physical_xpass, "resolve_feature_run_id", return_value="feature_run"):
+                with patch.object(generate_physical_xpass, "resolve_feature_root", return_value=feature_root):
+                    with patch.object(generate_physical_xpass, "get_action_graph_dir", return_value=graph_dir):
+                        with patch.object(generate_physical_xpass, "get_post_action_graph_dir", return_value=post_graph_dir):
+                            with patch.object(
+                                generate_physical_xpass,
+                                "resolve_reference_label_context",
+                                return_value=(label_dir, "disc_0.7", "model"),
+                            ):
+                                with patch.object(generate_physical_xpass, "get_resolved_action_path", return_value=resolved_path):
+                                    with patch.object(generate_physical_xpass, "get_pc_xpass_dir", return_value=root / "cache"):
+                                        with patch.object(
+                                            generate_physical_xpass,
+                                            "resolve_runtime_sportec_reuse_cache",
+                                            return_value=(None, None),
+                                        ):
+                                            with patch.object(generate_physical_xpass, "prewarm_runtime_items", side_effect=fake_prewarm):
+                                                with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                                                    with patch.object(generate_physical_xpass.tqdm, "write"):
+                                                        result = generate_physical_xpass.run_runtime_sportec(args)
+
+        self.assertEqual(calls, [(2, "auto"), (2, 1), (2, 1)])
+        self.assertEqual(result["skipped"], {})
+        self.assertEqual(result["stats"]["serial_retry_recovered"], 1)
+        self.assertEqual(result["stats"]["serial_retry_failed"], 0)
+
     def test_runtime_physical_xpass_dir_points_directly_to_dataset_folder(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -6598,6 +6778,47 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(result["stats"]["cache_misses"], 1)
         self.assertEqual(result["skipped"], {})
 
+    def test_generate_physical_xpass_hawkeye_parallel_failure_retries_and_audits_serially(self) -> None:
+        args = generate_physical_xpass.parse_args(["--hawkeye-situation-id", "s1"])
+        tracking = pd.DataFrame({"id": ["s1"]})
+        situation = SimpleNamespace(
+            match_id="hawkeye_s1",
+            graph_features_0=[object()],
+            labels=torch.stack([make_label(action_index=5)]),
+        )
+        calls: list[tuple[int, object]] = []
+
+        def fake_prewarm(items, **kwargs):
+            calls.append((len(items), kwargs["args"].num_workers))
+            if len(calls) == 1:
+                raise PermissionError("file is locked")
+            if len(calls) == 2:
+                return make_runtime_prewarm_stats(len(items))
+            verified = make_runtime_prewarm_stats(0)
+            verified["cache_hits"] = len(items)
+            return verified
+
+        with patch.object(generate_physical_xpass, "get_runtime_physical_xpass_dir", return_value=Path("cache")):
+            with patch.object(generate_physical_xpass, "load_hawkeye_tracking", return_value=tracking):
+                with patch.object(generate_physical_xpass, "clean_hawkeye_tracking", side_effect=lambda frame: frame):
+                    with patch.object(generate_physical_xpass, "load_hawkeye_ball", return_value=pd.DataFrame()):
+                        with patch.object(generate_physical_xpass, "clean_hawkeye_ball", side_effect=lambda frame: frame):
+                            with patch.object(generate_physical_xpass, "resolve_situation_ids", return_value=["s1"]):
+                                with patch.object(
+                                    generate_physical_xpass,
+                                    "build_hawkeye_situation",
+                                    return_value=(situation, pd.DataFrame(), {}),
+                                ):
+                                    with patch.object(generate_physical_xpass, "prewarm_runtime_items", side_effect=fake_prewarm):
+                                        with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata"):
+                                            with patch.object(generate_physical_xpass.tqdm, "write"):
+                                                result = generate_physical_xpass.run_runtime_hawkeye(args)
+
+        self.assertEqual(calls, [(1, "auto"), (1, 1), (1, 1)])
+        self.assertEqual(result["skipped"], {})
+        self.assertEqual(result["stats"]["serial_retry_recovered"], 1)
+        self.assertEqual(result["stats"]["serial_retry_failed"], 0)
+
     def test_generate_physical_xpass_skillcorner_batches_runtime_prewarm_by_rows(self) -> None:
         args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "3"])
         args._runtime_graph_schema = {"node_in_dim": 26, "edge_in_dim": 4, "add_v_edge_features": True}
@@ -6637,7 +6858,7 @@ class PhysicalXPassTests(unittest.TestCase):
     def test_generate_physical_xpass_skillcorner_batch_failure_retries_per_event(self) -> None:
         args = generate_physical_xpass.parse_args(["--skillcorner-runtime-row-window", "2"])
         context = {"events": pd.DataFrame({"index": [1, 2]})}
-        call_sizes: list[int] = []
+        calls: list[tuple[int, object]] = []
 
         def fake_possession(_context, event_index: int, **_kwargs):
             return (
@@ -6649,11 +6870,15 @@ class PhysicalXPassTests(unittest.TestCase):
                 {},
             )
 
-        def fake_prewarm(items, **_kwargs):
-            call_sizes.append(len(items))
-            if len(call_sizes) == 1:
+        def fake_prewarm(items, **kwargs):
+            calls.append((len(items), kwargs["args"].num_workers))
+            if len(calls) == 1:
                 raise RuntimeError("batch failed")
-            if len(call_sizes) == 3:
+            if len(calls) == 3:
+                verified = make_runtime_prewarm_stats(0)
+                verified["cache_hits"] = len(items)
+                return verified
+            if len(calls) == 4:
                 raise ValueError("event failed")
             return make_runtime_prewarm_stats(len(items))
 
@@ -6670,10 +6895,14 @@ class PhysicalXPassTests(unittest.TestCase):
                                 ):
                                     result = generate_physical_xpass.run_runtime_skillcorner(args)
 
-        self.assertEqual(call_sizes, [2, 1, 1])
+        self.assertEqual(calls, [(2, "auto"), (1, 1), (1, 1), (1, 1)])
         self.assertIn("m1:2", result["skipped"])
         self.assertIn("ValueError", result["skipped"]["m1:2"])
         self.assertEqual(result["stats"]["cache_misses"], 1)
+        self.assertEqual(result["stats"]["parallel_unit_failures"], 2)
+        self.assertEqual(result["stats"]["serial_retry_attempts"], 2)
+        self.assertEqual(result["stats"]["serial_retry_recovered"], 1)
+        self.assertEqual(result["stats"]["serial_retry_failed"], 1)
 
     def test_generate_physical_xpass_benchmark_batches_runtime_prewarm_by_rows(self) -> None:
         args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
@@ -6721,7 +6950,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
     def test_generate_physical_xpass_benchmark_batch_failure_retries_per_modification(self) -> None:
         args = generate_physical_xpass.parse_args(["--benchmark-runtime-row-window", "4"])
-        call_sizes: list[int] = []
+        calls: list[tuple[int, object]] = []
 
         def fake_build_state(_raw_state, modification_id: int, game_state_id: int, _higher_state_id: int, **_kwargs):
             return (
@@ -6734,11 +6963,15 @@ class PhysicalXPassTests(unittest.TestCase):
                 {},
             )
 
-        def fake_prewarm(items, **_kwargs):
-            call_sizes.append(len(items))
-            if len(call_sizes) == 1:
+        def fake_prewarm(items, **kwargs):
+            calls.append((len(items), kwargs["args"].num_workers))
+            if len(calls) == 1:
                 raise RuntimeError("batch failed")
-            if len(call_sizes) == 3:
+            if len(calls) == 3:
+                verified = make_runtime_prewarm_stats(0)
+                verified["cache_hits"] = len(items)
+                return verified
+            if len(calls) == 4:
                 raise ValueError("modification failed")
             return make_runtime_prewarm_stats(len(items))
 
@@ -6759,10 +6992,12 @@ class PhysicalXPassTests(unittest.TestCase):
                                 ):
                                     result = generate_physical_xpass.run_runtime_benchmark(args)
 
-        self.assertEqual(call_sizes, [4, 2, 2])
+        self.assertEqual(calls, [(4, "auto"), (2, 1), (2, 1), (2, 1)])
         self.assertIn("2", result["skipped"])
         self.assertIn("ValueError", result["skipped"]["2"])
         self.assertEqual(result["stats"]["cache_misses"], 2)
+        self.assertEqual(result["stats"]["serial_retry_recovered"], 1)
+        self.assertEqual(result["stats"]["serial_retry_failed"], 1)
 
     def test_generate_physical_xpass_cli_runtime_dataset_opt_out_flags(self) -> None:
         args = generate_physical_xpass.parse_args(["--no-skillcorner", "--no-hawkeye"])

@@ -28,6 +28,8 @@ from project_config import (
     TRAIN_SEASONS,
     ensure_project_dirs,
     load_split_manifest,
+    resolve_split_manifest,
+    save_match_universe,
     save_split_manifest,
 )
 from sync import config as sync_config
@@ -1255,25 +1257,33 @@ def sync_events(
 
 
 def build_split_manifest(metadata_records: pd.DataFrame, require_both_seasons: bool = True) -> None:
-    ordered = metadata_records.sort_values(["kickoff_time", "match_id"], ignore_index=True)
-    train_ids = ordered.loc[ordered["season"].isin(TRAIN_SEASONS), "match_id"].tolist()
-    test_ids = ordered.loc[ordered["season"].isin(TEST_SEASONS), "match_id"].tolist()
-    if require_both_seasons and not train_ids:
+    ordered = metadata_records.sort_values("match_id", ignore_index=True)
+    legacy_train_ids = ordered.loc[ordered["season"].isin(TRAIN_SEASONS), "match_id"].tolist()
+    legacy_test_ids = ordered.loc[ordered["season"].isin(TEST_SEASONS), "match_id"].tolist()
+    if require_both_seasons and not legacy_train_ids:
         raise ValueError(f"No training-season matches were available for seasons: {', '.join(TRAIN_SEASONS)}")
-    if require_both_seasons and not test_ids:
+    if require_both_seasons and not legacy_test_ids:
         raise ValueError(f"No test-season matches were available for seasons: {', '.join(TEST_SEASONS)}")
-
-    save_split_manifest(
-        train_ids,
-        test_ids,
+    universe = save_match_universe(
+        ordered["match_id"].astype(str).tolist(),
         metadata={
-            "train_size": len(train_ids),
-            "test_size": len(test_ids),
-            "train_seasons": list(TRAIN_SEASONS),
-            "test_seasons": list(TEST_SEASONS),
             "season_counts": ordered["season"].value_counts().sort_index().to_dict(),
-            "split_rule": "season-based; matches ordered by kickoff_time, then match_id",
             "allow_partial": not require_both_seasons,
+        },
+    )
+    default_manifest = resolve_split_manifest(50)
+    # Keep the historical path as a compatibility alias for callers without --train-split.
+    save_split_manifest(
+        default_manifest["train"],
+        default_manifest["test"],
+        metadata={
+            **default_manifest["metadata"],
+            "manifest_id": default_manifest["manifest_id"],
+            "train_split_percent": 50,
+            "season_counts": ordered["season"].value_counts().sort_index().to_dict(),
+            "split_rule": "first 50 percent of canonical MatchId order",
+            "allow_partial": not require_both_seasons,
+            "universe_fingerprint": universe["fingerprint"],
         },
     )
 

@@ -143,6 +143,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--split", choices=["train", "test", "all"], default="all", help="Sportec split subset.")
+    parser.add_argument("--train-split", type=int, default=50, help="Development percentage for Sportec split selection.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
     parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
     parser.add_argument(
@@ -648,7 +649,7 @@ def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
     if args.match_id:
         return [str(match_id) for match_id in args.match_id]
 
-    train_ids, test_ids = load_base_splits(feature_dir=graph_dir)
+    train_ids, test_ids = load_base_splits(feature_dir=graph_dir, train_split=args.train_split)
     if args.split == "train":
         return [str(match_id) for match_id in train_ids.tolist()]
     if args.split == "test":
@@ -1023,6 +1024,11 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
         "online_graphs",
         "compute_chunks",
         "skipped_all_nan",
+        "write_permission_retries",
+        "parallel_unit_failures",
+        "serial_retry_attempts",
+        "serial_retry_recovered",
+        "serial_retry_failed",
     ]:
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
@@ -1071,6 +1077,11 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "online_graphs": 0,
         "compute_chunks": 0,
         "skipped_all_nan": 0,
+        "write_permission_retries": 0,
+        "parallel_unit_failures": 0,
+        "serial_retry_attempts": 0,
+        "serial_retry_recovered": 0,
+        "serial_retry_failed": 0,
         "dry_run": False,
         "max_auto_workers": None,
         "cache_scan_seconds": 0.0,
@@ -1099,7 +1110,10 @@ def _format_runtime_stats_line(prefix: str, stats: dict[str, Any]) -> str:
         f"ball_z_filled={int(stats.get('ball_z_filled', 0) or 0)} "
         f"pass_height_filled={int(stats.get('pass_height_filled', 0) or 0)} "
         f"pass_height_refreshed={int(stats.get('pass_height_refreshed', 0) or 0)} "
-        f"skipped_all_nan={int(stats.get('skipped_all_nan', 0) or 0)}"
+        f"skipped_all_nan={int(stats.get('skipped_all_nan', 0) or 0)} "
+        f"write_retries={int(stats.get('write_permission_retries', 0) or 0)} "
+        f"serial_recovered={int(stats.get('serial_retry_recovered', 0) or 0)} "
+        f"serial_failed={int(stats.get('serial_retry_failed', 0) or 0)}"
     )
 
 
@@ -1120,6 +1134,13 @@ def _runtime_stats_has_work(stats: dict[str, Any]) -> bool:
             "pass_height_refreshed",
             "skipped_all_nan",
         ]
+    )
+
+
+def _runtime_stats_have_remaining_misses(stats: dict[str, Any] | None) -> bool:
+    return bool(stats) and (
+        int(stats.get("cache_misses", 0) or 0) > 0
+        or int(stats.get("skipped_all_nan", 0) or 0) > 0
     )
 
 
@@ -1282,6 +1303,7 @@ def flush_runtime_buffer(
     stats: dict[str, Any],
     skipped: dict[str, Any],
     progress_desc: str,
+    reuse_cache_dir: Path | None = None,
 ) -> int:
     if not buffer:
         return 0
@@ -1295,6 +1317,7 @@ def flush_runtime_buffer(
             items,
             cache_dir=cache_dir,
             args=args,
+            reuse_cache_dir=reuse_cache_dir,
             progress_desc=progress_desc,
         )
         merge_stats(stats, unit_stats)
@@ -1302,21 +1325,44 @@ def flush_runtime_buffer(
             tqdm.write(_format_runtime_stats_line(progress_desc, unit_stats))
         return 0
     except Exception as batch_exc:
+        stats["parallel_unit_failures"] = int(stats.get("parallel_unit_failures", 0) or 0) + len(units)
+        stats["write_permission_retries"] = int(stats.get("write_permission_retries", 0) or 0) + int(
+            getattr(batch_exc, "write_permission_retries", 0) or 0
+        )
         tqdm.write(f"{progress_desc}: batch retry per unit after {type(batch_exc).__name__}: {batch_exc}")
 
+    serial_args = argparse.Namespace(**vars(args))
+    serial_args.num_workers = 1
     for unit in units:
         display_key = str(unit["display_key"])
+        stats["serial_retry_attempts"] = int(stats.get("serial_retry_attempts", 0) or 0) + 1
         try:
             unit_stats = prewarm_runtime_items(
                 list(unit["items"]),
                 cache_dir=cache_dir,
-                args=args,
+                args=serial_args,
+                reuse_cache_dir=reuse_cache_dir,
                 progress_desc=display_key,
             )
             merge_stats(stats, unit_stats)
+            verification = prewarm_runtime_items(
+                list(unit["items"]),
+                cache_dir=cache_dir,
+                args=serial_args,
+                reuse_cache_dir=reuse_cache_dir,
+                progress_desc=f"{display_key} cache audit",
+            )
+            if _runtime_stats_have_remaining_misses(verification):
+                raise RuntimeError("runtime physical xPass cache remained missing or unusable after serial retry")
+            stats["serial_retry_recovered"] = int(stats.get("serial_retry_recovered", 0) or 0) + 1
             if unit_stats and _runtime_stats_has_work(unit_stats):
                 tqdm.write(_format_runtime_stats_line(display_key, unit_stats))
+            tqdm.write(f"{display_key}: serial retry recovered and verified")
         except Exception as exc:
+            stats["write_permission_retries"] = int(stats.get("write_permission_retries", 0) or 0) + int(
+                getattr(exc, "write_permission_retries", 0) or 0
+            )
+            stats["serial_retry_failed"] = int(stats.get("serial_retry_failed", 0) or 0) + 1
             reason = f"{type(exc).__name__}: {exc}"
             for skip_key in unit["skip_keys"]:
                 skipped[str(skip_key)] = reason
@@ -1599,36 +1645,31 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
 
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
-    pending_items: list[dict[str, Any]] = []
+    pending_units: list[dict[str, Any]] = []
     pending_match_ids: list[str] = []
 
     def flush_pending_window() -> None:
-        nonlocal pending_items, pending_match_ids
-        if not pending_items:
+        nonlocal pending_units, pending_match_ids
+        if not pending_units:
             pending_match_ids = []
             return
         first_match = pending_match_ids[0]
         last_match = pending_match_ids[-1]
-        try:
-            merge_stats(
-                stats,
-                prewarm_runtime_items(
-                    pending_items,
-                    cache_dir=cache_dir,
-                    args=args,
-                    reuse_cache_dir=reuse_cache_dir,
-                    progress_desc=f"sportec {first_match}..{last_match}",
-                ),
-            )
-            for pending_match_id in pending_match_ids:
-                match_stats = _runtime_unit_stats(stats, str(pending_match_id))
+        flush_runtime_buffer(
+            pending_units,
+            cache_dir=cache_dir,
+            args=args,
+            stats=stats,
+            skipped=skipped,
+            progress_desc=f"sportec {first_match}..{last_match}",
+            reuse_cache_dir=reuse_cache_dir,
+        )
+        for pending_match_id in pending_match_ids:
+            match_stats = _runtime_unit_stats(stats, str(pending_match_id))
+            if match_stats:
                 tqdm.write(_format_runtime_stats_line(f"sportec match {pending_match_id}", match_stats))
-        except Exception as exc:
-            for pending_match_id in pending_match_ids:
-                skipped[str(pending_match_id)] = f"{type(exc).__name__}: {exc}"
-        finally:
-            pending_items = []
-            pending_match_ids = []
+        pending_units = []
+        pending_match_ids = []
 
     for match_id in tqdm(resolve_match_ids(args, graph_dir), desc="sportec runtime", unit="matches"):
         graph_path = graph_dir / f"{match_id}.pt"
@@ -1678,8 +1719,14 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             if items:
-                pending_items.extend(items)
-                pending_match_ids.append(str(match_id))
+                unit = make_runtime_buffer_unit(
+                    display_key=f"sportec match {match_id}",
+                    skip_keys=[str(match_id)],
+                    items=items,
+                )
+                if unit is not None:
+                    pending_units.append(unit)
+                    pending_match_ids.append(str(match_id))
             if len(pending_match_ids) >= int(args.sportec_runtime_match_window):
                 flush_pending_window()
         except Exception as exc:
@@ -1861,15 +1908,23 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
             )
             if frame_selections:
                 resolved_time_norms[str(situation_id)] = frame_selections
-            unit_stats = prewarm_runtime_items(
-                runtime_cache_items_from_graphs(str(situation.match_id), graphs, labels),
-                cache_dir=cache_dir,
-                args=args,
-                progress_desc=f"hawkeye situation {situation_id}",
+            unit = make_runtime_buffer_unit(
+                display_key=f"hawkeye situation {situation_id}",
+                skip_keys=[str(situation_id)],
+                items=runtime_cache_items_from_graphs(str(situation.match_id), graphs, labels),
             )
-            merge_stats(stats, unit_stats)
-            if unit_stats:
-                tqdm.write(_format_runtime_stats_line(f"hawkeye situation {situation_id}", unit_stats))
+            if unit is not None:
+                flush_runtime_buffer(
+                    [unit],
+                    cache_dir=cache_dir,
+                    args=args,
+                    stats=stats,
+                    skipped=skipped,
+                    progress_desc=f"hawkeye situation {situation_id}",
+                )
+                unit_stats = _runtime_unit_stats(stats, str(situation.match_id))
+                if unit_stats:
+                    tqdm.write(_format_runtime_stats_line(f"hawkeye situation {situation_id}", unit_stats))
             else:
                 tqdm.write(f"hawkeye situation {situation_id}: rows=0 passes=0 hits=0 misses=0 written=0 skipped_all_nan=0")
         except Exception as exc:

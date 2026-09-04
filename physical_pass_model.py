@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import uuid
 import warnings
 from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -4390,6 +4391,8 @@ def _write_runtime_physical_xpass_rows(
     cache_dir: str | Path,
     match_id: str,
     rows: pd.DataFrame,
+    *,
+    retry_stats: dict[str, object] | None = None,
 ) -> Path:
     cache_root = Path(cache_dir)
     output_path = cache_root / "matches" / f"{match_id}.parquet"
@@ -4434,10 +4437,41 @@ def _write_runtime_physical_xpass_rows(
     else:
         sort_columns = ["action_index"]
     rows = rows.sort_values(sort_columns).reset_index(drop=True)
-    tmp_path = output_path.with_name(f".{output_path.stem}.tmp.parquet")
+    tmp_path = output_path.with_name(
+        f".{output_path.stem}.{os.getpid()}.{uuid.uuid4().hex}.tmp.parquet"
+    )
     rows.to_parquet(tmp_path, index=False)
-    tmp_path.replace(output_path)
-    return output_path
+    retry_delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+    try:
+        for attempt in range(len(retry_delays) + 1):
+            try:
+                tmp_path.replace(output_path)
+                return output_path
+            except PermissionError as exc:
+                if attempt >= len(retry_delays):
+                    setattr(
+                        exc,
+                        "write_permission_retries",
+                        int(retry_stats.get("write_permission_retries", 0) or 0)
+                        if retry_stats is not None
+                        else len(retry_delays),
+                    )
+                    raise
+                if retry_stats is not None:
+                    retry_stats["write_permission_retries"] = int(
+                        retry_stats.get("write_permission_retries", 0) or 0
+                    ) + 1
+                delay = retry_delays[attempt]
+                warnings.warn(
+                    f"Runtime physical xPass write for {match_id} was temporarily locked; "
+                    f"retrying atomic replacement in {delay:.2f}s."
+                )
+                time.sleep(delay)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
@@ -4458,6 +4492,7 @@ def _runtime_physical_xpass_stats(cache_dir: str | Path) -> dict[str, object]:
         "online_graphs": 0,
         "compute_chunks": 0,
         "skipped_all_nan": 0,
+        "write_permission_retries": 0,
         "cache_disabled": False,
         "dry_run": False,
         "num_workers": 1,
@@ -4490,6 +4525,7 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
         "online_graphs",
         "compute_chunks",
         "skipped_all_nan",
+        "write_permission_retries",
     ]:
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
@@ -4523,6 +4559,7 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
                     "online_graphs",
                     "compute_chunks",
                     "skipped_all_nan",
+                    "write_permission_retries",
                 ]:
                     current[key] = int(current.get(key, 0)) + int(match_stats.get(key, 0))
     return target
@@ -4543,6 +4580,7 @@ def _aggregate_physical_xpass_stat_tree(stats: dict[str, object] | None) -> dict
         "online_graphs": 0,
         "compute_chunks": 0,
         "skipped_all_nan": 0,
+        "write_permission_retries": 0,
         "cache_scan_seconds": 0.0,
         "compute_seconds": 0.0,
         "write_seconds": 0.0,
@@ -5006,6 +5044,7 @@ def _runtime_match_stats_template() -> dict[str, int]:
         "online_graphs": 0,
         "compute_chunks": 0,
         "skipped_all_nan": 0,
+        "write_permission_retries": 0,
     }
 
 
@@ -5392,27 +5431,9 @@ def prewarm_physical_xpass_runtime_cache(
         stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
         return stats
 
-    if copied_rows:
-        copied_by_match: dict[str, list[dict[str, Any]]] = {}
-        for row in copied_rows:
-            copied_by_match.setdefault(str(row["match_id"]), []).append(row)
-        for match_id, match_rows in copied_by_match.items():
-            frame = pd.DataFrame(match_rows)
-            dedupe_columns = (
-                ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
-                if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
-                else ["action_index"]
-            )
-            frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
-            write_start = time.perf_counter()
-            _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
-            write_elapsed = time.perf_counter() - write_start
-            written = int(len(frame))
-            stats["cache_written"] = int(stats["cache_written"]) + written
-            stats["write_seconds"] = float(stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
-            match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
-            match_stats["cache_written"] += written
-            match_stats["write_seconds"] = float(match_stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
+    pending_write_rows: dict[str, list[tuple[dict[str, Any], bool]]] = {}
+    for row in copied_rows:
+        pending_write_rows.setdefault(str(row["match_id"]), []).append((row, False))
 
     if misses:
         worker_count = min(int(resolved_workers), len(misses))
@@ -5500,24 +5521,7 @@ def prewarm_physical_xpass_runtime_cache(
             for row in rows:
                 rows_by_match.setdefault(str(row["match_id"]), []).append(row)
             for match_id, match_rows in rows_by_match.items():
-                frame = pd.DataFrame(match_rows)
-                dedupe_columns = (
-                    ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
-                    if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
-                    else ["action_index"]
-                )
-                frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
-                write_start = time.perf_counter()
-                _write_runtime_physical_xpass_rows(cache_dir, match_id, frame)
-                write_elapsed = time.perf_counter() - write_start
-                written = int(len(frame))
-                stats["cache_written"] = int(stats["cache_written"]) + written
-                stats["online_graphs"] = int(stats["online_graphs"]) + written
-                stats["write_seconds"] = float(stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
-                match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
-                match_stats["cache_written"] += written
-                match_stats["online_graphs"] += written
-                match_stats["write_seconds"] = float(match_stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
+                pending_write_rows.setdefault(match_id, []).extend((row, True) for row in match_rows)
             stats["compute_chunks"] = int(stats["compute_chunks"]) + 1
             stats["skipped_all_nan"] = int(stats["skipped_all_nan"]) + skipped_all_nan
             for match_id, match_rows in rows_by_match.items():
@@ -5550,6 +5554,27 @@ def prewarm_physical_xpass_runtime_cache(
             0.0,
             time.perf_counter() - compute_start - write_seconds_during_compute,
         )
+
+    for match_id, tagged_rows in pending_write_rows.items():
+        frame = pd.DataFrame([row for row, _computed_online in tagged_rows])
+        dedupe_columns = (
+            ["action_index", PHYSICAL_XPASS_FRAME_SCOPE_COLUMN]
+            if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
+            else ["action_index"]
+        )
+        frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
+        online_written = sum(1 for _row, computed_online in tagged_rows if computed_online)
+        write_start = time.perf_counter()
+        _write_runtime_physical_xpass_rows(cache_dir, match_id, frame, retry_stats=stats)
+        write_elapsed = time.perf_counter() - write_start
+        written = int(len(frame))
+        stats["cache_written"] = int(stats["cache_written"]) + written
+        stats["online_graphs"] = int(stats["online_graphs"]) + online_written
+        stats["write_seconds"] = float(stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
+        match_stats = match_stats_by_id.setdefault(match_id, _runtime_match_stats_template())
+        match_stats["cache_written"] += written
+        match_stats["online_graphs"] += online_written
+        match_stats["write_seconds"] = float(match_stats.get("write_seconds", 0.0) or 0.0) + write_elapsed
 
     stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
     compute_seconds = float(stats.get("compute_seconds", 0.0) or 0.0)
