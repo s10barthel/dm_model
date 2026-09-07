@@ -1,6 +1,6 @@
 # dm_model
 
-This repository is a scoped adaptation of the upstream DEFCON implementation for Sportec Bundesliga data, currently centered on season-based training/testing across 2023/24 and 2024/25.
+This repository is a scoped adaptation of the upstream DEFCON implementation for Sportec Bundesliga data, currently centered on Bundesliga data from 2022/23 through 2024/25.
 Upstream DEFCON source code: https://github.com/hyunsungkim-ds/defcon
 
 The model structure is copied from DEFCON, the upstream source code for the paper "Better Prevent than Tackle: Valuing Defense in Soccer Based on Graph Neural Networks". This repository keeps the downstream DEFCON runtime close to upstream, narrows the retained scope, and adds the dataset- and workflow-specific adaptations needed for Sportec, HawkEye, and SkillCorner data.
@@ -75,6 +75,11 @@ The copied/adapted runtime files live at the project root. `_vendor` is kept as 
 
 The raw Sportec XML files are expected under:
 
+- `Bundesliga_season_22_23/tracking_data`
+- `Bundesliga_season_22_23/event_data`
+- `Bundesliga_season_22_23/starting_players`
+- `Bundesliga_season_22_23/master`
+- `Bundesliga_season_22_23/events_advanced`
 - `Bundesliga_season_23_24/tracking_data`
 - `Bundesliga_season_23_24/event_data`
 - `Bundesliga_season_23_24/match_information`
@@ -84,7 +89,7 @@ The raw Sportec XML files are expected under:
 - `Bundesliga_season_24_25/match_information/starting_players`
 - `Bundesliga_season_24_25/KPI_Merged`
 
-`scripts/preprocess_sportec.py` now handles the observed raw-format differences between the two seasons and still writes the same canonical processed outputs under `data`.
+`scripts/preprocess_sportec.py` handles the observed raw-format differences between the three seasons and still writes the same canonical processed outputs under `data`. The 2023/24 synchronization feed is a semicolon-delimited CSV; the 2022/23 and 2024/25 feeds use the extensionless AdvancedEvents XML format.
 
 ## Produced Data Layout
 
@@ -303,7 +308,8 @@ python scripts/preprocess_sportec.py
 
 Inputs:
 
-- raw Sportec season folders under `Bundesliga_season_23_24/...` and `Bundesliga_season_24_25/...`
+- raw Sportec season folders under `Bundesliga_season_22_23/...`, `Bundesliga_season_23_24/...`, and `Bundesliga_season_24_25/...`
+- for `22_23`, the root-level split metadata layout under `master`, `starting_players`, and `events_advanced`
 - for `24_25`, the split metadata layout under `match_information/master`, `match_information/starting_players`, and `KPI_Merged`
 
 Outputs:
@@ -312,19 +318,34 @@ Outputs:
 - `data/tracking_processed/*.parquet`
 - `data/event/event.parquet`
 - `data/event_synced/*.csv`
+- `data/control_events_synced/*.parquet`
+- `data/carry_segments/*.parquet`
+- `data/carry_segments/audits/*.parquet`
 - `data/lineup/line_up.parquet`
 - `data/splits/match_splits.json`
 
 Useful options:
 
 - `--match-id DFL-MAT-...` to process only selected matches
+- `--season {22_23,23_24,24_25}` to process selected seasons; repeat the option to select more than one
 - `--limit N` to smoke-test on the first `N` matches
 - `--overwrite` to rebuild existing outputs
 - `--skip-sync` to stop before ELASTIC synchronization
+- `--skip-carry-artifacts` to build canonical and synchronized outputs without carry sidecars
+- `--carry-artifacts-only` to rebuild carry sidecars from existing canonical outputs without preprocessing them again
+
+To add 2022/23 first and then refresh carry artifacts consistently for all seasons:
+
+```powershell
+python scripts/preprocess_sportec.py --season 22_23 --skip-carry-artifacts
+python scripts/preprocess_sportec.py --carry-artifacts-only
+```
+
+`--carry-artifacts-only` and `--skip-carry-artifacts` are mutually exclusive. An unfiltered carry-only run processes every discovered season and overwrites the per-match control-event, carry-segment, and carry-audit sidecars. A normal unfiltered preprocessing run revisits every discovered match; without `--overwrite`, only existing raw and processed tracking Parquets are reused automatically.
 
 Subset-safe aggregate behavior:
 
-- when you run a subset with `--match-id` or `--limit`, the per-match files for the selected matches are still processed as usual
+- when you run a subset with `--season`, `--match-id`, or `--limit`, the per-match files for the selected matches are still processed as usual
 - `data/lineup/line_up.parquet` and `data/splits/match_splits.json` are rebuilt from the currently processed match universe, so subset runs no longer shrink those global files to only the selected matches
 - `data/event/event.parquet` is merged incrementally in subset mode, so reprocessed matches are refreshed without dropping untouched matches
 - full runs without subset filters still rebuild the aggregate files from the full successful run
@@ -338,6 +359,8 @@ This step does the Sportec-specific work that DEFCON does not provide:
 - SPADL action generation with `socceraction`
 - ELASTIC synchronization
 - split-manifest creation
+
+The canonical train/test split remains percentage-based over the MatchId-ordered processed universe. Adding the third complete season expands that universe from 612 to 918 matches, changes its fingerprint, and regenerates percentage manifests without assigning entire seasons to either split.
 
 ### 2. Generate soft-target artifacts when xT, goal_distance, or EPV targets are needed
 
@@ -1703,6 +1726,11 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 ### `scripts/preprocess_sportec.py`
 
 - Inputs:
+  - `Bundesliga_season_22_23/tracking_data/*`
+  - `Bundesliga_season_22_23/event_data/*`
+  - `Bundesliga_season_22_23/starting_players/*`
+  - `Bundesliga_season_22_23/master/*`
+  - `Bundesliga_season_22_23/events_advanced/*`
   - `Bundesliga_season_23_24/tracking_data/*`
   - `Bundesliga_season_23_24/event_data/*`
   - `Bundesliga_season_23_24/match_information/*`
@@ -1716,6 +1744,9 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/tracking_processed/*.parquet`
   - `data/event/event.parquet`
   - `data/event_synced/*.csv`
+  - `data/control_events_synced/*.parquet`
+  - `data/carry_segments/*.parquet`
+  - `data/carry_segments/audits/*.parquet`
   - `data/lineup/line_up.parquet`
   - `data/splits/match_splits.json`
 

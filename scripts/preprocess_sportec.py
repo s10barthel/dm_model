@@ -4,6 +4,7 @@ import argparse
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
@@ -116,6 +117,11 @@ CANONICAL_LINEUP_COLS = [
 INTERNAL_LINEUP_COLS = CANONICAL_LINEUP_COLS + ["starting", "team_prefix"]
 
 
+class KpiFormat(str, Enum):
+    CSV = "csv"
+    ADVANCED_EVENTS_XML = "advanced_events_xml"
+
+
 @dataclass(frozen=True)
 class MatchFiles:
     match_id: str
@@ -125,6 +131,7 @@ class MatchFiles:
     tracking_path: Path
     kpi_path: Path | None = None
     matchplan_path: Path | None = None
+    kpi_format: KpiFormat | None = None
 
 
 class SportecSpadlData(MatchData):
@@ -142,16 +149,28 @@ class SportecSpadlData(MatchData):
         return self.events[input_cols].rename(columns={"object_id": "player_id"}).copy()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--match-id", action="append", help="Process only the specified match id(s).")
+    parser.add_argument(
+        "--season",
+        action="append",
+        choices=sorted(RAW_SEASON_ROOTS),
+        help="Process only matches from the specified season(s). May be repeated.",
+    )
     parser.add_argument("--limit", type=int, help="Process only the first N discovered matches.")
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing outputs.")
     parser.add_argument("--skip-sync", action="store_true", help="Skip event-tracking synchronization.")
-    parser.add_argument(
+    carry_group = parser.add_mutually_exclusive_group()
+    carry_group.add_argument(
         "--carry-artifacts-only",
         action="store_true",
         help="Add or refresh carry sidecars from existing canonical Sportec outputs without rebuilding them.",
+    )
+    carry_group.add_argument(
+        "--skip-carry-artifacts",
+        action="store_true",
+        help="Build canonical outputs without creating control-event, carry-segment, or carry-audit sidecars.",
     )
     parser.add_argument(
         "--sync-source",
@@ -159,7 +178,7 @@ def parse_args() -> argparse.Namespace:
         default="sportec_kpi",
         help="Synchronization source for canonical event outputs.",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def write_carry_artifacts(
@@ -262,7 +281,28 @@ def discover_match_files() -> list[MatchFiles]:
         if not season_root.exists():
             continue
 
-        if season == "23_24":
+        if season == "22_23":
+            meta_files = _match_file_map(season_root / "starting_players")
+            event_files = _match_file_map(season_root / "event_data")
+            tracking_files = _match_file_map(season_root / "tracking_data")
+            kpi_dir = season_root / "events_advanced"
+            matchplan_path = season_root / "master" / "matchplan"
+            match_ids = sorted(meta_files.keys() & event_files.keys() & tracking_files.keys())
+            for match_id in match_ids:
+                kpi_path = kpi_dir / match_id
+                discovered.append(
+                    MatchFiles(
+                        match_id=match_id,
+                        season=season,
+                        meta_path=meta_files[match_id],
+                        event_path=event_files[match_id],
+                        tracking_path=tracking_files[match_id],
+                        kpi_path=kpi_path if kpi_path.exists() else None,
+                        matchplan_path=matchplan_path if matchplan_path.exists() else None,
+                        kpi_format=KpiFormat.ADVANCED_EVENTS_XML,
+                    )
+                )
+        elif season == "23_24":
             meta_files = _match_file_map(season_root / "match_information", "*.xml")
             event_files = _match_file_map(season_root / "event_data", "*.xml")
             tracking_files = _match_file_map(season_root / "tracking_data", "*.xml")
@@ -278,6 +318,7 @@ def discover_match_files() -> list[MatchFiles]:
                         event_path=event_files[match_id],
                         tracking_path=tracking_files[match_id],
                         kpi_path=kpi_path if kpi_path.exists() else None,
+                        kpi_format=KpiFormat.CSV,
                     )
                 )
         elif season == "24_25":
@@ -299,6 +340,7 @@ def discover_match_files() -> list[MatchFiles]:
                         tracking_path=tracking_files[match_id],
                         kpi_path=kpi_path if kpi_path.exists() else None,
                         matchplan_path=matchplan_path if matchplan_path.exists() else None,
+                        kpi_format=KpiFormat.ADVANCED_EVENTS_XML,
                     )
                 )
 
@@ -942,7 +984,9 @@ def _strip_kpi_xml_prefix(raw_text: str) -> str:
 
 def _parse_kpi_xml_table(match_files: MatchFiles) -> pd.DataFrame:
     if match_files.kpi_path is None or not match_files.kpi_path.exists():
-        raise FileNotFoundError(f"Missing KPI_Merged file for {match_files.match_id}: {match_files.kpi_path}")
+        raise FileNotFoundError(
+            f"Missing KPI/AdvancedEvents file for {match_files.match_id}: {match_files.kpi_path}"
+        )
 
     raw_text = match_files.kpi_path.read_text(encoding="utf-8", errors="replace")
     root = ET.fromstring(_strip_kpi_xml_prefix(raw_text))
@@ -1020,10 +1064,16 @@ def _parse_kpi_xml_table(match_files: MatchFiles) -> pd.DataFrame:
 
 def load_kpi_merged_table(match_files: MatchFiles) -> pd.DataFrame:
     if match_files.kpi_path is None or not match_files.kpi_path.exists():
-        raise FileNotFoundError(f"Missing KPI_Merged file for {match_files.match_id}: {match_files.kpi_path}")
+        raise FileNotFoundError(
+            f"Missing KPI/AdvancedEvents file for {match_files.match_id}: {match_files.kpi_path}"
+        )
 
-    if match_files.season == "24_25":
+    if match_files.kpi_format == KpiFormat.ADVANCED_EVENTS_XML:
         return _parse_kpi_xml_table(match_files)
+    if match_files.kpi_format != KpiFormat.CSV:
+        raise ValueError(
+            f"Unsupported KPI format for {match_files.match_id}: {match_files.kpi_format!r}"
+        )
 
     kpi = pd.read_csv(
         match_files.kpi_path,
@@ -1359,7 +1409,15 @@ def build_split_manifest(metadata_records: pd.DataFrame, require_both_seasons: b
     )
 
 
-def filter_matches(matches: list[MatchFiles], requested_ids: Iterable[str] | None, limit: int | None) -> list[MatchFiles]:
+def filter_matches(
+    matches: list[MatchFiles],
+    requested_seasons: Iterable[str] | None,
+    requested_ids: Iterable[str] | None,
+    limit: int | None,
+) -> list[MatchFiles]:
+    if requested_seasons:
+        seasons = set(requested_seasons)
+        matches = [match for match in matches if match.season in seasons]
     if requested_ids:
         requested = set(requested_ids)
         matches = [match for match in matches if match.match_id in requested]
@@ -1369,7 +1427,7 @@ def filter_matches(matches: list[MatchFiles], requested_ids: Iterable[str] | Non
 
 
 def is_subset_mode(args: argparse.Namespace) -> bool:
-    return bool(args.match_id) or args.limit is not None
+    return bool(args.season) or bool(args.match_id) or args.limit is not None
 
 
 def has_processed_match_outputs(match_id: str) -> bool:
@@ -1486,7 +1544,7 @@ def main() -> None:
     skipped_matches: list[dict[str, str]] = []
     subset_mode = is_subset_mode(args)
 
-    selected_matches = filter_matches(all_matches, args.match_id, args.limit)
+    selected_matches = filter_matches(all_matches, args.season, args.match_id, args.limit)
     if not selected_matches:
         raise ValueError("No matches selected for processing.")
     if args.carry_artifacts_only:
@@ -1554,20 +1612,21 @@ def main() -> None:
                     f"elastic_frame_fallbacks={sync_audit.get('elastic_frame_fallbacks', 0)}",
                     f"elastic_receive_fallbacks={sync_audit.get('elastic_receive_fallbacks', 0)}",
                 )
-                carry_stats = write_carry_artifacts(
-                    match_files,
-                    finalized_lineup,
-                    raw_events,
-                    tracking,
-                    fps,
-                    synced_events,
-                )
-                print(
-                    "  Carries:",
-                    f"control={carry_stats['mapped_control_events']}/{carry_stats['control_events']}",
-                    f"spells={carry_stats['retained_spells']}",
-                    f"segments={carry_stats['segments']}",
-                )
+                if not args.skip_carry_artifacts:
+                    carry_stats = write_carry_artifacts(
+                        match_files,
+                        finalized_lineup,
+                        raw_events,
+                        tracking,
+                        fps,
+                        synced_events,
+                    )
+                    print(
+                        "  Carries:",
+                        f"control={carry_stats['mapped_control_events']}/{carry_stats['control_events']}",
+                        f"spells={carry_stats['retained_spells']}",
+                        f"segments={carry_stats['segments']}",
+                    )
 
             exported_lineup = export_lineup_table(finalized_lineup)
             metadata_record = {
@@ -1611,7 +1670,8 @@ def main() -> None:
     print(f"Saved unsynced event parquet to {EVENT_PATH}")
     if not args.skip_sync:
         print(f"Saved synced per-match CSV files to {EVENT_SYNCED_DIR}")
-        print(f"Saved carry-segment sidecars to {CARRY_SEGMENTS_DIR}")
+        if not args.skip_carry_artifacts:
+            print(f"Saved carry-segment sidecars to {CARRY_SEGMENTS_DIR}")
     if skipped_matches:
         print(f"Skipped {len(skipped_matches)} matches during preprocessing.")
         for item in skipped_matches[:10]:

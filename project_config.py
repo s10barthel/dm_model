@@ -12,6 +12,7 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 RAW_SEASON_ROOTS = {
+    "22_23": PROJECT_ROOT / "Bundesliga_season_22_23",
     "23_24": PROJECT_ROOT / "Bundesliga_season_23_24",
     "24_25": PROJECT_ROOT / "Bundesliga_season_24_25",
 }
