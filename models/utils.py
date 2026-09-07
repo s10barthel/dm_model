@@ -39,6 +39,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_PROB_ATTR,
     blend_physical_xpass_predictions,
     physical_xpass_blend_weight_v4,
+    physical_xpass_blend_weight_v5,
     physical_xpass_blend_weight,
     physical_xpass_blend_weight_v2,
     physical_xpass_blend_weight_v3,
@@ -1819,6 +1820,7 @@ def run_epoch(
     pos_weight: float = 1.0,
     train: bool = False,
     return_outcome_evaluation: bool = False,
+    pass_intent_model: nn.Module | None = None,
 ):
     # torch.autograd.set_detect_anomaly(True)
     model.train() if train else model.eval()
@@ -1835,6 +1837,13 @@ def run_epoch(
     weighted_pass_success_eval = bool(getattr(args, "weighted_pass_success_metrics", False))
     if weighted_pass_success_eval and args.task != "pass_success":
         raise ValueError("weighted_pass_success_metrics is only supported for task='pass_success'.")
+    evaluate_combined_v5 = bool(
+        getattr(args, "evaluate_combined_success", False) and str(getattr(args, "xpass_weight", "")).lower() == "v5"
+    )
+    if evaluate_combined_v5 and pass_intent_model is None:
+        raise ValueError("Combined v5 evaluation requires an explicit pass-intent model.")
+    if pass_intent_model is not None:
+        pass_intent_model.eval()
     weighted_predictions: list[np.ndarray] = []
     weighted_targets: list[np.ndarray] = []
     weighted_effective_weights: list[np.ndarray] = []
@@ -1862,6 +1871,34 @@ def run_epoch(
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
         diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(batch_labels)
+        observed_v5_pass_intent: list[torch.Tensor] = []
+        if evaluate_combined_v5:
+            intent_graphs = adapt_batch_graphs_for_model(
+                batch_graphs.clone(),
+                pass_intent_model.args,
+                context="v5 evaluation pass_intent model",
+            )
+            with torch.no_grad():
+                intent_logits = pass_intent_model(intent_graphs)
+            for graph_index in torch.unique(intent_graphs.batch):
+                if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
+                    continue
+                graph_mask = intent_graphs.batch == graph_index
+                teammate_mask = intent_graphs.x[graph_mask, config.NODE_FEATURE_IS_TEAMMATE] == 1
+                possessor_mask = intent_graphs.x[graph_mask, config.NODE_FEATURE_IS_POSSESSOR] == 1
+                candidate_mask = teammate_mask & ~possessor_mask
+                teammate_positions = torch.nonzero(teammate_mask, as_tuple=False).flatten()
+                target_index = int(batch_labels[graph_index, config.LABEL_INDEX["intent_index"]].item())
+                if target_index < 0 or target_index >= teammate_positions.numel():
+                    raise ValueError(f"Combined v5 evaluation has invalid intent target index {target_index}.")
+                target_node_position = teammate_positions[target_index]
+                candidate_positions = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+                target_candidate = torch.nonzero(candidate_positions == target_node_position, as_tuple=False).flatten()
+                if target_candidate.numel() != 1:
+                    raise ValueError("Combined v5 evaluation target is not a unique non-possessor teammate.")
+                candidate_logits = intent_logits[graph_mask][candidate_mask].reshape(-1)
+                candidate_probs = torch.softmax(candidate_logits, dim=0)
+                observed_v5_pass_intent.append(candidate_probs[target_candidate.item()])
 
         if args.include_out:
             # One node per player and one ball-out node per graph instance
@@ -2060,14 +2097,23 @@ def run_epoch(
                             if len(observed_nearest) != len(observed_xpass):
                                 raise ValueError("Combined xPass weight v2 requires cached nearest-opponent distances.")
                             blend_kwargs["distance_to_nearest_opponent"] = torch.stack(observed_nearest).cpu().numpy()
-                        if weight_version == "v4":
+                        if weight_version in {"v4", "v5"}:
                             if len(observed_height) != len(observed_xpass):
-                                raise ValueError("Combined xPass weight v4 requires cached pass-height probabilities.")
+                                raise ValueError(f"Combined xPass weight {weight_version} requires cached pass-height probabilities.")
+                            blend_kwargs["pass_height"] = torch.stack(observed_height).cpu().numpy()
+                        if weight_version == "v4":
                             blend_kwargs.update(
-                                pass_height=torch.stack(observed_height).cpu().numpy(),
                                 v4_power=float(args.v4_power),
                                 v4_zero=float(args.v4_zero),
                                 v4_discount=bool(args.discount),
+                            )
+                        if weight_version == "v5":
+                            if len(observed_v5_pass_intent) != len(observed_xpass):
+                                raise ValueError("Combined xPass weight v5 requires one pass_intent probability per pass.")
+                            blend_kwargs.update(
+                                pass_intent=torch.stack(observed_v5_pass_intent).cpu().numpy(),
+                                v5_intent_threshold=float(args.v5_intent_threshold),
+                                v5_discount=bool(args.v5_discount),
                             )
                         combined = blend_physical_xpass_predictions(
                             pass_success_model=np.asarray(y_hat[pass_diagnostic_mask], dtype=float),
@@ -2090,6 +2136,13 @@ def run_epoch(
                                 power=float(args.v4_power),
                                 zero_point=float(args.v4_zero),
                                 use_discount=bool(args.discount),
+                            )
+                        elif weight_version == "v5":
+                            learning_weight = physical_xpass_blend_weight_v5(
+                                blend_kwargs["pass_height"],
+                                blend_kwargs["pass_intent"],
+                                intent_threshold=float(args.v5_intent_threshold),
+                                use_discount=bool(args.v5_discount),
                             )
                         else:
                             learning_weight = physical_xpass_blend_weight(distance_array)

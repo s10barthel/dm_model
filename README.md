@@ -1039,7 +1039,7 @@ Use physical xPass at inference by adding `--use-physical-xpass` to the inferenc
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-Select the blend weight with `--xpass-weight {v1,v2,v3,v4}`. The default is `v3`.
+Select the blend weight with `--xpass-weight {v1,v2,v3,v4,v5}`. The default is `v3`.
 
 `v1` is the original distance-only weight:
 
@@ -1074,9 +1074,19 @@ pass_success = (1 - w) * physical_xpass + w * pass_success_model
 
 The defaults are `n=2` and `z=0.8`; override them with `--v4-power <float>` and `--v4-zero <float>` when using `--xpass-weight v4`. Add `--discount false` to disable the cosine distance discount and use `w = pass_height` directly.
 
+`v5` uses the same cached per-player pass-height probability as v4, but replaces the distance discount with a linear discount based on the runtime pass-intent probability:
+
+```text
+intent_factor = clip(pass_intent / t, 0, 1)
+w = pass_height * intent_factor
+pass_success = (1 - w) * physical_xpass + w * pass_success_model
+```
+
+The default threshold is `t=0.01`; override it with `--v5-intent-threshold <float>`. Thus intent probabilities `0`, `0.005`, `0.009`, and at least `0.01` apply discounts of 100%, 50%, 10%, and 0% to the learning-model weight. Use `--v5-discount false` to disable the intent discount and use `w = pass_height`. V5 requires a resolved pass-intent model at inference and an explicit `--pass-intent-model-id` for combined evaluation. Pass intent is computed once at runtime, aligned by event and player, and is not stored in the physical xPass cache.
+
 `--xpass-weight v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
 
-`--xpass-weight v4` requires cached per-player `<player_id>__pass_height` columns. If they are missing or non-finite for a blended player, inference fails clearly. Generate or backfill them with `scripts/generate_physical_xpass.py --pass-height-model-id pass_height/<model_run_id>`.
+`--xpass-weight v4` and `v5` require cached per-player `<player_id>__pass_height` columns. If they are missing or non-finite for a blended player, inference fails clearly. Generate or backfill them with `scripts/generate_physical_xpass.py --pass-height-model-id pass_height/<model_run_id>`.
 
 Add `--ball-z-limit <float>` to ignore physical xPass for high-ball passes. When cached `ball_z` is greater than the limit, the blend weight is forced to `1.0`, so the final pass-success value is the pass-success model output. The default is `--ball-z-limit none`, which ignores `ball_z` and keeps existing behavior. Cached `ball_z` is required only when a numeric limit is set; rerun `scripts/generate_physical_xpass.py` to backfill it without recomputing existing xPass metrics.
 

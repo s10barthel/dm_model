@@ -118,6 +118,13 @@ def resolve_evaluation_xpass_cache(
         raise ValueError("--xpass-weight requires --evaluate-combined-success.")
     if args.evaluate_combined_success and not args.xpass_weight:
         raise ValueError("--evaluate-combined-success requires --xpass-weight.")
+    if args.evaluate_combined_success and args.xpass_weight == "v5":
+        if not getattr(args, "pass_intent_model_id", None):
+            raise ValueError("Combined v5 evaluation requires explicit --pass-intent-model-id.")
+        args.v5_intent_threshold = 0.01 if getattr(args, "v5_intent_threshold", None) is None else args.v5_intent_threshold
+        args.v5_discount = True if getattr(args, "v5_discount", None) is None else args.v5_discount
+        if not math.isfinite(float(args.v5_intent_threshold)) or float(args.v5_intent_threshold) <= 0.0:
+            raise ValueError("--v5-intent-threshold must be a positive finite float.")
     if args.evaluate_combined_success and args.xpass_weight == "v4":
         if args.discount is None or args.v4_power is None or args.v4_zero is None:
             raise ValueError("Combined v4 evaluation requires explicit --discount, --v4-power, and --v4-zero.")
@@ -129,6 +136,10 @@ def resolve_evaluation_xpass_cache(
         value is not None for value in (args.discount, args.v4_power, args.v4_zero)
     ):
         raise ValueError("v4 options are only valid with combined --xpass-weight v4.")
+    if args.xpass_weight != "v5" and (
+        getattr(args, "v5_intent_threshold", None) is not None or getattr(args, "v5_discount", None) is not None
+    ):
+        raise ValueError("v5 options are only valid with combined --xpass-weight v5.")
 
     cache_dir = Path(args.pc_xpass_cache_dir)
     metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
@@ -138,8 +149,8 @@ def resolve_evaluation_xpass_cache(
         raise ValueError(
             f"Requested pc-xPass metric {metric!r} is not available in {cache_dir}; available={sorted(available)}."
         )
-    if args.evaluate_combined_success and args.xpass_weight == "v4" and not metadata.get("pass_height_model_id"):
-        raise ValueError("Combined v4 evaluation requires cache metadata pass_height_model_id provenance.")
+    if args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"} and not metadata.get("pass_height_model_id"):
+        raise ValueError(f"Combined {args.xpass_weight} evaluation requires cache metadata pass_height_model_id provenance.")
     metadata_path = cache_dir / "metadata.json"
     metadata = dict(metadata)
     metadata["metadata_sha256"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
@@ -753,15 +764,18 @@ if __name__ == "__main__":
     parser.add_argument("--evaluate-xpass", action="store_true")
     parser.add_argument("--evaluate-combined-success", action="store_true")
     parser.add_argument("--xpass-version", default=None)
-    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4"], default=None)
+    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4", "v5"], default=None)
     parser.add_argument("--observed-pass-height-stratification", action="store_true")
     parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
     parser.add_argument("--pass-height-model-id", type=str, default=None)
+    parser.add_argument("--pass-intent-model-id", type=str, default=None)
     parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
     parser.add_argument("--discount", type=parse_bool_text, default=None)
     parser.add_argument("--v4-power", type=float, default=None)
     parser.add_argument("--v4-zero", type=float, default=None)
+    parser.add_argument("--v5-intent-threshold", type=float, default=None)
+    parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     args, _ = parser.parse_known_args()
 
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -788,6 +802,15 @@ if __name__ == "__main__":
     model_args.discount = True if args.discount is None else bool(args.discount)
     model_args.v4_power = 4.0 if args.v4_power is None else float(args.v4_power)
     model_args.v4_zero = 0.7 if args.v4_zero is None else float(args.v4_zero)
+    model_args.v5_intent_threshold = float(0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold)
+    model_args.v5_discount = True if args.v5_discount is None else bool(args.v5_discount)
+    pass_intent_model = None
+    if args.evaluate_combined_success and args.xpass_weight == "v5":
+        pass_intent_model = utils.load_model(args.pass_intent_model_id, device)
+        if pass_intent_model is None:
+            raise FileNotFoundError(f"Missing pass_intent model checkpoint: {args.pass_intent_model_id}")
+        if str(pass_intent_model.args.get("task")) != "pass_intent":
+            raise ValueError("--pass-intent-model-id must reference a pass_intent checkpoint.")
 
     print("\nGenerating test datasets...")
     resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
@@ -890,7 +913,7 @@ if __name__ == "__main__":
             args.evaluate_combined_success and args.xpass_weight == "v2"
         )
         dataset_args["evaluation_xpass_require_height"] = bool(
-            args.evaluate_combined_success and args.xpass_weight == "v4"
+            args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"}
         )
         dataset_args["require_pass_height_labels"] = True
     if args.observed_pass_height_stratification:
@@ -935,6 +958,7 @@ if __name__ == "__main__":
         device=device,
         train=False,
         return_outcome_evaluation=collect_outcome_evaluation,
+        pass_intent_model=pass_intent_model,
     )
     outcome_metrics = None
     pass_success_height_rows = None
@@ -1006,6 +1030,9 @@ if __name__ == "__main__":
                 "discount": model_args.discount if args.evaluate_combined_success and args.xpass_weight == "v4" else args.discount,
                 "v4_power": model_args.v4_power if args.evaluate_combined_success and args.xpass_weight == "v4" else args.v4_power,
                 "v4_zero": model_args.v4_zero if args.evaluate_combined_success and args.xpass_weight == "v4" else args.v4_zero,
+                "v5_intent_threshold": model_args.v5_intent_threshold if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
+                "v5_discount": model_args.v5_discount if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
+                "pass_intent_model_id": args.pass_intent_model_id if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
                 "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
             },
             test_metrics=test_metrics,

@@ -231,10 +231,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10"
     )
-    parser.add_argument("--xpass-weight", "--xpass_weight", choices=["v1", "v2", "v3", "v4"], default="v3")
+    parser.add_argument("--xpass-weight", "--xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3")
     parser.add_argument("--v4-power", type=float)
     parser.add_argument("--v4-zero", type=float)
     parser.add_argument("--discount", dest="v4_discount", type=parse_bool_text, default=None)
+    parser.add_argument("--v5-intent-threshold", type=float, default=None)
+    parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     parser.add_argument("--ball-z-limit", default="none")
 
     # Applicable pc-xPass generation flags from generate_physical_xpass.py.
@@ -401,6 +403,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--discount is only valid with --xpass-weight v4")
     if args.v4_discount is None:
         args.v4_discount = True
+    if (args.v5_intent_threshold is not None or args.v5_discount is not None) and args.xpass_weight != "v5":
+        parser.error("v5 options are only valid with --xpass-weight v5")
+    args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
+    args.v5_discount = True if args.v5_discount is None else args.v5_discount
+    if not math.isfinite(args.v5_intent_threshold) or args.v5_intent_threshold <= 0:
+        parser.error("--v5-intent-threshold must be a positive finite float")
 
 
 def resolve_target_frame(situation_tracking: pd.DataFrame, pass_moment: float, tolerance: float) -> dict[str, float | int]:
@@ -577,6 +585,8 @@ def _configure_models(args: argparse.Namespace):
             "x_pass_version": args.x_pass_version,
             "xpass_weight": args.xpass_weight,
             "v4_discount": bool(args.v4_discount),
+            "v5_intent_threshold": float(args.v5_intent_threshold),
+            "v5_discount": bool(args.v5_discount),
             "ball_z_limit": args.ball_z_limit,
             "physical_runtime_cache_disabled": False,
             "physical_runtime_cache_refresh": False,

@@ -60,7 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--evaluate-xpass", action="store_true")
     parser.add_argument("--evaluate-combined-success", action="store_true")
     parser.add_argument("--xpass-version", default=None)
-    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4"], default=None)
+    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4", "v5"], default=None)
     parser.add_argument("--no-observed-pass-height-stratification", action="store_true")
     parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
@@ -68,6 +68,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--discount", type=parse_bool_text, default=None)
     parser.add_argument("--v4-power", type=float, default=None)
     parser.add_argument("--v4-zero", type=float, default=None)
+    parser.add_argument("--v5-intent-threshold", type=float, default=None)
+    parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     return parser.parse_args(argv)
 
 
@@ -79,6 +81,15 @@ def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
         raise ValueError("--xpass-weight requires --evaluate-combined-success.")
     if args.evaluate_combined_success and not args.xpass_weight:
         raise ValueError("--evaluate-combined-success requires --xpass-weight.")
+    if args.evaluate_combined_success and args.xpass_weight == "v5":
+        if not args.pass_intent_model_id:
+            raise ValueError("Combined v5 evaluation requires explicit --pass-intent-model-id.")
+        args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
+        args.v5_discount = True if args.v5_discount is None else args.v5_discount
+        if not math.isfinite(float(args.v5_intent_threshold)) or float(args.v5_intent_threshold) <= 0.0:
+            raise ValueError("--v5-intent-threshold must be a positive finite float.")
+    elif args.v5_intent_threshold is not None or args.v5_discount is not None:
+        raise ValueError("v5 options are only valid with combined --xpass-weight v5.")
     explicit_v4 = args.discount is not None or args.v4_power is not None or args.v4_zero is not None
     if args.evaluate_combined_success and args.xpass_weight == "v4":
         if args.discount is None or args.v4_power is None or args.v4_zero is None:
@@ -196,6 +207,14 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
                         "--v4-zero", str(args.v4_zero),
                     ]
                 )
+            if args.xpass_weight == "v5":
+                command.extend(
+                    [
+                        "--pass-intent-model-id", str(args.pass_intent_model_id),
+                        "--v5-intent-threshold", str(args.v5_intent_threshold),
+                        "--v5-discount", str(bool(args.v5_discount)).lower(),
+                    ]
+                )
     if task in {"outcome_scoring", "outcome_conceding"} and args.f1_outcome_threshold is not None:
         command.extend(["--f1-outcome-threshold", str(args.f1_outcome_threshold)])
     return command
@@ -273,6 +292,9 @@ def main() -> None:
             "evaluate_combined_success": bool(args.evaluate_combined_success),
             "xpass_version": args.xpass_version,
             "xpass_weight": args.xpass_weight,
+            "v5_intent_threshold": args.v5_intent_threshold if args.xpass_weight == "v5" else None,
+            "v5_discount": args.v5_discount if args.xpass_weight == "v5" else None,
+            "pass_intent_model_id": args.pass_intent_model_id if args.xpass_weight == "v5" else None,
             "observed_pass_height_stratification": not bool(args.no_observed_pass_height_stratification),
             "classification_threshold": args.classification_threshold,
             "f1_outcome_threshold": args.f1_outcome_threshold,

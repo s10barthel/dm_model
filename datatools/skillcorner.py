@@ -691,7 +691,13 @@ def infer_skillcorner_components(
     action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False)
     pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False)
     try:
-        pass_success, _ = inference_gnn(possession, model_specs["pass_success"], device=device, post_action=False)
+        pass_success, _ = inference_gnn(
+            possession,
+            model_specs["pass_success"],
+            device=device,
+            post_action=False,
+            pass_intent_probs=pass_intent,
+        )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
     if "pass_height" in model_specs:

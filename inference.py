@@ -51,6 +51,8 @@ from physical_pass_model import (
     physical_xpass_v4_discount,
     physical_xpass_v4_power,
     physical_xpass_v4_zero,
+    physical_xpass_v5_discount,
+    physical_xpass_v5_intent_threshold,
     physical_xpass_weight_version,
     physical_xpass_speed_aggregation,
     physical_xpass_source,
@@ -132,6 +134,7 @@ def _physical_xpass_blend_finite_mask(
     weight_version: str,
     distance_to_nearest_opponent: np.ndarray | None = None,
     pass_height: np.ndarray | None = None,
+    pass_intent: np.ndarray | None = None,
     ball_z: np.ndarray | None = None,
     ball_z_limit: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -148,12 +151,18 @@ def _physical_xpass_blend_finite_mask(
         if bool(missing_nearest_mask.any()):
             raise ValueError("Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player.")
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(nearest_values)
-    elif weight_version == "v4":
+    elif weight_version in {"v4", "v5"}:
         pass_height_values = np.asarray(pass_height, dtype=float)
         missing_pass_height_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(pass_height_values)
         if bool(missing_pass_height_mask.any()):
-            raise ValueError("Physical xPass weight v4 requires finite cached pass_height for every blended player.")
+            raise ValueError(f"Physical xPass weight {weight_version} requires finite cached pass_height for every blended player.")
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(pass_height_values)
+        if weight_version == "v5":
+            pass_intent_values = np.asarray(pass_intent, dtype=float)
+            missing_pass_intent_mask = finite_mask & ~np.isfinite(pass_intent_values)
+            if bool(missing_pass_intent_mask.any()):
+                raise ValueError("Physical xPass weight v5 requires finite pass_intent for every blended player.")
+            finite_mask = finite_mask & np.isfinite(pass_intent_values)
     else:
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values)
 
@@ -785,10 +794,18 @@ def inference_gnn(
     device: str = "cuda",
     post_action: bool = False,
     event_indices: pd.Index = None,
+    pass_intent_probs: pd.DataFrame | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
     include_goals = TASK_CONFIG.at[model.args["task"], "include_goals"]
     out_filter = TASK_CONFIG.at[model.args["task"], "out_filter"]
+    if (
+        model.args["task"] == "pass_success"
+        and inference_uses_physical_xpass(model.args)
+        and physical_xpass_weight_version(model.args) == "v5"
+        and pass_intent_probs is None
+    ):
+        raise ValueError("Physical xPass weight v5 requires aligned pass_intent probabilities from a pass-intent model.")
     match_graphs, feature_action_indices = resolve_match_graphs(match, model, post_action)
     graphs, labels = filter_features_and_labels(
         match_graphs,
@@ -968,11 +985,13 @@ def inference_gnn(
                 v4_power = physical_xpass_v4_power(model.args)
                 v4_zero = physical_xpass_v4_zero(model.args)
                 v4_discount = physical_xpass_v4_discount(model.args)
+                v5_intent_threshold = physical_xpass_v5_intent_threshold(model.args)
+                v5_discount = physical_xpass_v5_discount(model.args)
                 ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
                     raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
-                if weight_version == "v4" and physical_pass_height_out is None:
-                    raise ValueError("Inference physical xPass weight v4 requires attached cached pass_height tensors.")
+                if weight_version in {"v4", "v5"} and physical_pass_height_out is None:
+                    raise ValueError(f"Inference physical xPass weight {weight_version} requires attached cached pass_height tensors.")
                 if ball_z_limit is not None and physical_ball_z_out is None:
                     raise ValueError("Inference physical xPass ball_z_limit requires attached cached ball_z tensors.")
                 xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
@@ -992,6 +1011,19 @@ def inference_gnn(
                     if physical_pass_height_out is not None
                     else None
                 )
+                pass_intent_i = None
+                if weight_version == "v5":
+                    if event_index not in pass_intent_probs.index:
+                        raise ValueError(f"Physical xPass weight v5 has no pass_intent row for event {event_index}.")
+                    missing_players = [player_id for player_id in player_indices_i if player_id not in pass_intent_probs.columns]
+                    if missing_players:
+                        raise ValueError(
+                            f"Physical xPass weight v5 has no pass_intent column for event {event_index} players {missing_players}."
+                        )
+                    intent_row = pass_intent_probs.loc[event_index, player_indices_i]
+                    if isinstance(intent_row, pd.DataFrame):
+                        raise ValueError(f"Physical xPass weight v5 requires a unique pass_intent row for event {event_index}.")
+                    pass_intent_i = np.asarray(intent_row, dtype=float)
                 if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
                     raise ValueError(
                         "Physical xPass blend tensors do not match pass-success probabilities: "
@@ -1003,11 +1035,16 @@ def inference_gnn(
                             "Physical xPass weight v2 tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, distance_to_nearest_opponent={None if nearest_i is None else nearest_i.shape}."
                         )
-                elif weight_version == "v4":
+                elif weight_version in {"v4", "v5"}:
                     if pass_height_i is None or pass_height_i.shape[0] != probs_i.shape[0]:
                         raise ValueError(
-                            "Physical xPass weight v4 tensors do not match pass-success probabilities: "
+                            f"Physical xPass weight {weight_version} tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, pass_height={None if pass_height_i is None else pass_height_i.shape}."
+                        )
+                    if weight_version == "v5" and (pass_intent_i is None or pass_intent_i.shape[0] != probs_i.shape[0]):
+                        raise ValueError(
+                            "Physical xPass weight v5 pass_intent values do not match pass-success probabilities: "
+                            f"probs={probs_i.shape}, pass_intent={None if pass_intent_i is None else pass_intent_i.shape}."
                         )
                 if ball_z_limit is not None:
                     if ball_z_i is None or ball_z_i.shape[0] != probs_i.shape[0]:
@@ -1022,6 +1059,7 @@ def inference_gnn(
                     weight_version=weight_version,
                     distance_to_nearest_opponent=nearest_i,
                     pass_height=pass_height_i,
+                    pass_intent=pass_intent_i,
                     ball_z=ball_z_i,
                     ball_z_limit=ball_z_limit,
                 )
@@ -1034,6 +1072,11 @@ def inference_gnn(
                         blend_kwargs["v4_power"] = v4_power
                         blend_kwargs["v4_zero"] = v4_zero
                         blend_kwargs["v4_discount"] = v4_discount
+                    if weight_version == "v5":
+                        blend_kwargs["pass_height"] = pass_height_i[finite_mask]
+                        blend_kwargs["pass_intent"] = pass_intent_i[finite_mask]
+                        blend_kwargs["v5_intent_threshold"] = v5_intent_threshold
+                        blend_kwargs["v5_discount"] = v5_discount
                     if ball_z_limit is not None:
                         blend_kwargs["ball_z"] = ball_z_i[finite_mask]
                         blend_kwargs["ball_z_limit"] = ball_z_limit

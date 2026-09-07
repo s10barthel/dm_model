@@ -86,9 +86,10 @@ PC_XPASS_METRIC_TOP25 = "top25_xpass"
 X_PASS_VERSION_MAX = "max"
 X_PASS_VERSION_NOISE_KERNEL = "noise-kernel"
 X_PASS_VERSION_DEFAULT = "top10"
-XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3", "v4"}
+XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3", "v4", "v5"}
 PHYSICAL_XPASS_DEFAULT_V4_POWER = 2.0
 PHYSICAL_XPASS_DEFAULT_V4_ZERO = 0.8
+PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD = 0.01
 PHYSICAL_XPASS_DEFAULT_METRIC = PHYSICAL_XPASS_METRIC_NOISE_KERNEL
 PHYSICAL_XPASS_AVAILABLE_METRICS = [
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
@@ -981,7 +982,7 @@ def physical_xpass_weight_version(args: Any) -> str:
         value = _get_arg(args, "xpass_weight_version", None)
     version = "v3" if value is None else str(value).strip().lower()
     if version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError("--xpass-weight must be one of v1, v2, v3, or v4.")
+        raise ValueError("--xpass-weight must be one of v1, v2, v3, v4, or v5.")
     return version
 
 
@@ -1024,6 +1025,24 @@ def physical_xpass_v4_discount(args: Any) -> bool:
         raise ValueError("--discount must be true or false.") from exc
 
 
+def physical_xpass_v5_intent_threshold(args: Any) -> float:
+    value = _get_arg(args, "v5_intent_threshold", None)
+    threshold = PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD if value is None else float(value)
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("--v5-intent-threshold must be a positive finite float.")
+    return threshold
+
+
+def physical_xpass_v5_discount(args: Any) -> bool:
+    value = _get_arg(args, "v5_discount", None)
+    if value is None:
+        return True
+    try:
+        return parse_physical_xpass_bool(value)
+    except ValueError as exc:
+        raise ValueError("--v5-discount must be true or false.") from exc
+
+
 def physical_xpass_ball_z_limit(args: Any) -> float | None:
     value = _get_arg(args, "ball_z_limit", None)
     if value is None:
@@ -1054,6 +1073,8 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "v4_power": physical_xpass_v4_power(args),
         "v4_zero": physical_xpass_v4_zero(args),
         "v4_discount": physical_xpass_v4_discount(args),
+        "v5_intent_threshold": physical_xpass_v5_intent_threshold(args),
+        "v5_discount": physical_xpass_v5_discount(args),
         "ball_z_limit": physical_xpass_ball_z_limit(args),
         "source": source,
         "speed_aggregation": PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
@@ -1268,6 +1289,35 @@ def physical_xpass_blend_weight_v4(
     return weights
 
 
+def physical_xpass_blend_weight_v5(
+    pass_height: np.ndarray | torch.Tensor | float,
+    pass_intent: np.ndarray | torch.Tensor | float,
+    *,
+    intent_threshold: float = PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD,
+    use_discount: bool = True,
+) -> np.ndarray | torch.Tensor | float:
+    threshold = float(intent_threshold)
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("--v5-intent-threshold must be a positive finite float.")
+    if isinstance(pass_height, torch.Tensor) or isinstance(pass_intent, torch.Tensor):
+        height_tensor = torch.as_tensor(pass_height, dtype=torch.float32)
+        intent_tensor = torch.as_tensor(pass_intent, dtype=torch.float32, device=height_tensor.device)
+        if not bool(use_discount):
+            return torch.clamp(height_tensor, 0.0, 1.0)
+        intent_factor = torch.clamp(intent_tensor, 0.0, 1.0) / threshold
+        return torch.clamp(height_tensor * torch.clamp(intent_factor, 0.0, 1.0), 0.0, 1.0)
+    height_values = np.asarray(pass_height, dtype=float)
+    intent_values = np.asarray(pass_intent, dtype=float)
+    if bool(use_discount):
+        intent_factor = np.clip(np.clip(intent_values, 0.0, 1.0) / threshold, 0.0, 1.0)
+        weights = np.clip(height_values * intent_factor, 0.0, 1.0)
+    else:
+        weights = np.clip(height_values, 0.0, 1.0)
+    if np.isscalar(pass_height) and np.isscalar(pass_intent):
+        return float(weights)
+    return weights
+
+
 def blend_physical_xpass_predictions(
     *,
     pass_success_model: np.ndarray | torch.Tensor | float,
@@ -1275,26 +1325,37 @@ def blend_physical_xpass_predictions(
     pass_distance: np.ndarray | torch.Tensor | float,
     distance_to_nearest_opponent: np.ndarray | torch.Tensor | float | None = None,
     pass_height: np.ndarray | torch.Tensor | float | None = None,
+    pass_intent: np.ndarray | torch.Tensor | float | None = None,
     ball_z: np.ndarray | torch.Tensor | float | None = None,
     ball_z_limit: float | None = None,
     weight_version: str = "v1",
     v4_power: float = PHYSICAL_XPASS_DEFAULT_V4_POWER,
     v4_zero: float = PHYSICAL_XPASS_DEFAULT_V4_ZERO,
     v4_discount: bool = True,
+    v5_intent_threshold: float = PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD,
+    v5_discount: bool = True,
 ) -> np.ndarray | torch.Tensor | float:
     weight_version = str(weight_version or "v3").lower()
     if weight_version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', 'v3', or 'v4'.")
+        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', 'v3', 'v4', or 'v5'.")
     if weight_version == "v2" and distance_to_nearest_opponent is None:
         raise ValueError("weight_version='v2' requires distance_to_nearest_opponent.")
-    if weight_version == "v4" and pass_height is None:
-        raise ValueError("weight_version='v4' requires cached pass_height.")
-    if weight_version == "v4":
+    if weight_version in {"v4", "v5"} and pass_height is None:
+        raise ValueError(f"weight_version={weight_version!r} requires cached pass_height.")
+    if weight_version == "v5" and pass_intent is None:
+        raise ValueError("weight_version='v5' requires pass_intent.")
+    if weight_version in {"v4", "v5"}:
         if isinstance(pass_height, torch.Tensor):
             if bool((~torch.isfinite(pass_height)).any().item()):
-                raise ValueError("weight_version='v4' requires finite cached pass_height.")
+                raise ValueError(f"weight_version={weight_version!r} requires finite cached pass_height.")
         elif not np.isfinite(np.asarray(pass_height, dtype=float)).all():
-            raise ValueError("weight_version='v4' requires finite cached pass_height.")
+            raise ValueError(f"weight_version={weight_version!r} requires finite cached pass_height.")
+    if weight_version == "v5":
+        if isinstance(pass_intent, torch.Tensor):
+            if bool((~torch.isfinite(pass_intent)).any().item()):
+                raise ValueError("weight_version='v5' requires finite pass_intent.")
+        elif not np.isfinite(np.asarray(pass_intent, dtype=float)).all():
+            raise ValueError("weight_version='v5' requires finite pass_intent.")
     if isinstance(pass_success_model, torch.Tensor) or isinstance(xpass, torch.Tensor) or isinstance(pass_distance, torch.Tensor):
         model_tensor = torch.as_tensor(pass_success_model, dtype=torch.float32)
         xpass_tensor = torch.as_tensor(xpass, dtype=torch.float32, device=model_tensor.device)
@@ -1312,6 +1373,13 @@ def blend_physical_xpass_predictions(
                 power=v4_power,
                 zero_point=v4_zero,
                 use_discount=v4_discount,
+            )
+        elif weight_version == "v5":
+            weight = physical_xpass_blend_weight_v5(
+                torch.as_tensor(pass_height, dtype=torch.float32, device=model_tensor.device),
+                torch.as_tensor(pass_intent, dtype=torch.float32, device=model_tensor.device),
+                intent_threshold=v5_intent_threshold,
+                use_discount=v5_discount,
             )
         else:
             weight = physical_xpass_blend_weight(distance_tensor)
@@ -1336,6 +1404,13 @@ def blend_physical_xpass_predictions(
             zero_point=v4_zero,
             use_discount=v4_discount,
         )
+    elif weight_version == "v5":
+        weight = physical_xpass_blend_weight_v5(
+            np.asarray(pass_height, dtype=float),
+            np.asarray(pass_intent, dtype=float),
+            intent_threshold=v5_intent_threshold,
+            use_discount=v5_discount,
+        )
     else:
         weight = physical_xpass_blend_weight(distance_values)
     if ball_z_limit is not None:
@@ -1349,7 +1424,8 @@ def blend_physical_xpass_predictions(
         and np.isscalar(xpass)
         and np.isscalar(pass_distance)
         and (weight_version == "v1" or np.isscalar(distance_to_nearest_opponent))
-        and (weight_version != "v4" or np.isscalar(pass_height))
+        and (weight_version not in {"v4", "v5"} or np.isscalar(pass_height))
+        and (weight_version != "v5" or np.isscalar(pass_intent))
         and (ball_z_limit is None or np.isscalar(ball_z))
     ):
         return float(blended)

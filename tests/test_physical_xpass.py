@@ -67,6 +67,9 @@ from physical_pass_model import (
     PC_XPASS_REACTION_TIME_MODE_DIST_PASS,
     PC_XPASS_REACTION_TIME_MODE_FIXED,
     PC_XPASS_SOURCE,
+    EVALUATION_XPASS_DISTANCE_ATTR,
+    EVALUATION_XPASS_PASS_HEIGHT_ATTR,
+    EVALUATION_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PHYSICAL_XPASS_LEGACY_SOURCE,
@@ -154,6 +157,7 @@ from physical_pass_model import (
     physical_xpass_blend_weight_v2,
     physical_xpass_blend_weight_v3,
     physical_xpass_blend_weight_v4,
+    physical_xpass_blend_weight_v5,
     physical_xpass_source,
     prepare_runtime_physical_xpass_prewarm_items,
     prewarm_physical_xpass_runtime_cache,
@@ -1007,6 +1011,68 @@ class PhysicalXPassTests(unittest.TestCase):
                 weight_version="v4",
             )
 
+    def test_inference_physical_xpass_blend_formula_v5(self) -> None:
+        expected = [0.0, 0.25, 0.45, 0.5, 0.5]
+        actual = physical_xpass_blend_weight_v5(
+            np.full(5, 0.5),
+            np.asarray([0.0, 0.005, 0.009, 0.01, 0.2]),
+        )
+        np.testing.assert_allclose(actual, expected)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v5(0.5, -1.0)), 0.0)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v5(0.5, 2.0)), 0.5)
+        self.assertAlmostEqual(float(physical_xpass_blend_weight_v5(0.5, 0.0, use_discount=False)), 0.5)
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=120.0,
+                    pass_height=0.5,
+                    pass_intent=0.005,
+                    weight_version="v5",
+                )
+            ),
+            0.6,
+        )
+
+    def test_inference_physical_xpass_blend_formula_v5_requires_inputs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pass_height"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9, xpass=0.5, pass_distance=50.0, pass_intent=0.01, weight_version="v5"
+            )
+        with self.assertRaisesRegex(ValueError, "pass_intent"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9, xpass=0.5, pass_distance=50.0, pass_height=0.5, weight_version="v5"
+            )
+        with self.assertRaisesRegex(ValueError, "finite pass_intent"):
+            blend_physical_xpass_predictions(
+                pass_success_model=0.9,
+                xpass=0.5,
+                pass_distance=50.0,
+                pass_height=0.5,
+                pass_intent=np.nan,
+                weight_version="v5",
+            )
+        with self.assertRaisesRegex(ValueError, "positive finite"):
+            physical_xpass_blend_weight_v5(0.5, 0.01, intent_threshold=0.0)
+
+    def test_inference_physical_xpass_ball_z_limit_overrides_v5(self) -> None:
+        self.assertAlmostEqual(
+            float(
+                blend_physical_xpass_predictions(
+                    pass_success_model=0.9,
+                    xpass=0.5,
+                    pass_distance=40.0,
+                    pass_height=0.5,
+                    pass_intent=0.0,
+                    ball_z=1.2,
+                    ball_z_limit=1.0,
+                    weight_version="v5",
+                )
+            ),
+            0.9,
+        )
+
     def test_inference_physical_xpass_ball_z_limit_overrides_v4(self) -> None:
         self.assertAlmostEqual(
             float(
@@ -1519,6 +1585,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 receiver_index=0,
                 endpoint_normalization=PC_XPASS_ENDPOINT_NORMALIZATION_SHARE,
             )
+
             self.assertAlmostEqual(float(output[0]), expected)
             np.testing.assert_allclose(output[1:], 0.0)
 
@@ -5410,11 +5477,20 @@ class PhysicalXPassTests(unittest.TestCase):
             v4_zero=1.0,
             v4_discount=False,
         )
+        v5_args = make_pass_success_args(
+            use_physical_xpass=False,
+            inference_use_physical_xpass=True,
+            model_variant="gat_baseline",
+            xpass_weight="v5",
+            v5_intent_threshold=0.02,
+            v5_discount=False,
+        )
 
         self.assertEqual(physical_xpass_weight_version(args), "v2")
         self.assertEqual(physical_xpass_inference_lookup_config(args, cache_dir="runtime_cache")["weight_version"], "v2")
         self.assertEqual(physical_xpass_weight_version(make_pass_success_args()), "v3")
         self.assertEqual(physical_xpass_weight_version(v4_args), "v4")
+        self.assertEqual(physical_xpass_weight_version(v5_args), "v5")
         self.assertTrue(physical_xpass_v4_discount({}))
         self.assertEqual(physical_xpass_v4_zero({}), PHYSICAL_XPASS_DEFAULT_V4_ZERO)
         self.assertEqual(physical_xpass_v4_zero({"v4_zero": 1.0}), 1.0)
@@ -5427,6 +5503,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_power"], 1.5)
         self.assertEqual(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_zero"], 1.0)
         self.assertFalse(physical_xpass_inference_lookup_config(v4_args, cache_dir="runtime_cache")["v4_discount"])
+        self.assertEqual(physical_xpass_inference_lookup_config(v5_args, cache_dir="runtime_cache")["v5_intent_threshold"], 0.02)
+        self.assertFalse(physical_xpass_inference_lookup_config(v5_args, cache_dir="runtime_cache")["v5_discount"])
 
     def test_inference_lookup_config_parses_ball_z_limit(self) -> None:
         disabled_args = make_pass_success_args(
@@ -6370,6 +6448,57 @@ class PhysicalXPassTests(unittest.TestCase):
         )
         self.assertNotIn("high_pass_weighted_roc_auc", unweighted_metrics)
         self.assertNotIn("high_pass_weighted_brier", unweighted_metrics)
+
+    def test_run_epoch_combined_v5_uses_runtime_pass_intent_without_floor(self) -> None:
+        graph = make_graph(["home_1", "home_2", "home_3"])
+        graph.x[2, config.NODE_FEATURE_IS_TEAMMATE] = 1.0
+        setattr(graph, EVALUATION_XPASS_PROB_ATTR, torch.tensor([np.nan, 0.2, 0.3]))
+        setattr(graph, EVALUATION_XPASS_DISTANCE_ATTR, torch.tensor([0.0, 30.0, 40.0]))
+        setattr(graph, EVALUATION_XPASS_PASS_HEIGHT_ATTR, torch.tensor([np.nan, 0.8, 0.6]))
+        label = make_label(intent_index=1)
+        loader = DataLoader([(graph, label, torch.tensor(1.0, dtype=torch.float32))], batch_size=1)
+        args = SimpleNamespace(
+            gnn_task="node_binary",
+            task="pass_success",
+            include_out=False,
+            lambda_l1=0.0,
+            residual_regularization_lambda=0.0,
+            use_physical_xpass=False,
+            model_variant="gat_baseline",
+            use_xg=False,
+            use_xt=False,
+            use_goal_distance=False,
+            use_epv=False,
+            print_freq=99,
+            clip=10,
+            weighted_pass_success_metrics=False,
+            evaluate_xpass=False,
+            evaluate_combined_success=True,
+            return_pass_success_height_evaluation=True,
+            observed_pass_height_stratification=False,
+            xpass_weight="v5",
+            xpass_metric="top10_xpass",
+            v5_intent_threshold=0.01,
+            v5_discount=True,
+            classification_threshold=0.5,
+        )
+        pass_intent_model = DummyColumnNodeSelectionModel(
+            [100.0, math.log(0.005), math.log(0.995)]
+        )
+        pass_intent_model.args = {"task": "pass_intent", "node_in_dim": 25, "edge_in_dim": 2}
+
+        _, evaluation = run_epoch(
+            args,
+            DummyOffsetModel(output_values=[-10.0, 0.0, -10.0]),
+            loader,
+            device="cpu",
+            train=False,
+            pass_intent_model=pass_intent_model,
+        )
+
+        diagnostics = evaluation["predictor_diagnostics"]
+        self.assertAlmostEqual(float(diagnostics["combined_learning_weight"][0]), 0.4, places=6)
+        self.assertAlmostEqual(float(diagnostics["predictors"]["combined_v5"][0]), 0.32, places=6)
 
     def test_run_epoch_node_selection_accepts_singleton_column_logits(self) -> None:
         graph = make_graph(["home_1", "home_2", "away_3"])
@@ -7425,6 +7554,20 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(v4_args.v4_power, 1.5)
         self.assertEqual(v4_args.v4_zero, 1.0)
         self.assertFalse(v4_args.v4_discount)
+        v5_args = generate_epv.parse_args(
+            [
+                "--use-physical-xpass",
+                "--xpass-weight",
+                "v5",
+                "--v5-intent-threshold",
+                "0.02",
+                "--v5-discount",
+                "false",
+            ]
+        )
+        self.assertEqual(v5_args.xpass_weight, "v5")
+        self.assertEqual(v5_args.v5_intent_threshold, 0.02)
+        self.assertFalse(v5_args.v5_discount)
 
         with patch.object(sys, "argv", ["run_hawkeye.py", "--use-physical-xpass", "--v4-power", "1.5"]):
             with self.assertRaises(SystemExit):
@@ -7553,6 +7696,10 @@ class PhysicalXPassTests(unittest.TestCase):
             generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v4", "--v4-zero", "0"])
         with self.assertRaises(SystemExit):
             generate_epv.parse_args(["--use-physical-xpass", "--discount", "false"])
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--v5-discount", "false"])
+        with self.assertRaises(SystemExit):
+            generate_epv.parse_args(["--use-physical-xpass", "--xpass-weight", "v5", "--v5-intent-threshold", "0"])
         self.assertEqual(args.physical_cache_dir, "runtime_cache")
 
     def test_generate_epv_configures_only_pass_success_physical_xpass(self) -> None:

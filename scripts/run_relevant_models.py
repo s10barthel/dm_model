@@ -78,10 +78,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for physical xPass inference blending.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
-    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4"], default="v3", help="Physical xPass/model blend weighting version.")
+    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
     parser.add_argument("--discount", dest="v4_discount", type=parse_physical_xpass_bool, default=None, help="For --xpass-weight v4, enable/disable the distance cosine discount. Default: true.")
+    parser.add_argument("--v5-intent-threshold", type=float, default=None)
+    parser.add_argument("--v5-discount", type=parse_physical_xpass_bool, default=None)
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     parser.add_argument("--no-physical-cache", action="store_true", help="Disable runtime physical xPass cache.")
@@ -112,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--discount is only valid with --xpass-weight v4.")
     if args.v4_discount is None:
         args.v4_discount = True
+    if (args.v5_intent_threshold is not None or args.v5_discount is not None) and args.xpass_weight != "v5":
+        parser.error("v5 options are only valid with --xpass-weight v5.")
+    args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
+    args.v5_discount = True if args.v5_discount is None else args.v5_discount
+    if not math.isfinite(args.v5_intent_threshold) or args.v5_intent_threshold <= 0:
+        parser.error("--v5-intent-threshold must be a positive finite float.")
     return args
 
 
@@ -631,6 +639,8 @@ def main() -> None:
         if getattr(args, "v4_zero", None) is not None:
             pass_success_args["v4_zero"] = float(args.v4_zero)
         pass_success_args["v4_discount"] = bool(getattr(args, "v4_discount", True))
+        pass_success_args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
+        pass_success_args["v5_discount"] = bool(getattr(args, "v5_discount", True))
         pass_success_args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_has_args and (model_uses_physical_xpass(pass_success_args) or inference_uses_physical_xpass(pass_success_args)):
         pass_success_args["physical_runtime_cache_disabled"] = no_physical_cache
@@ -725,6 +735,9 @@ def main() -> None:
         "physical_xpass_v4_power": physical_lookup_config.get("v4_power") if physical_lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v4_zero": physical_lookup_config.get("v4_zero") if physical_lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v4_discount": physical_lookup_config.get("v4_discount") if physical_lookup_config.get("weight_version") == "v4" else None,
+        "physical_xpass_v5_intent_threshold": physical_lookup_config.get("v5_intent_threshold") if physical_lookup_config.get("weight_version") == "v5" else None,
+        "physical_xpass_v5_discount": physical_lookup_config.get("v5_discount") if physical_lookup_config.get("weight_version") == "v5" else None,
+        "physical_xpass_pass_intent_model_id": resolved_model_ids.get("pass_intent") if physical_lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_lookup_config.get("ball_z_limit"),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_cache_disabled": no_physical_cache,
@@ -773,7 +786,13 @@ def main() -> None:
             pass_height = None
             pass_height_receive = None
             try:
-                pass_success, _ = inference_gnn(match, model_specs["pass_success"], device=device, post_action=False)
+                pass_success, _ = inference_gnn(
+                    match,
+                    model_specs["pass_success"],
+                    device=device,
+                    post_action=False,
+                    pass_intent_probs=pass_intent,
+                )
             except PhysicalXPassNoUsableRowsError as exc:
                 print(f"  WARN {match_id}: pass_success frame_id export skipped: {summarize_exception(exc)}")
             try:
@@ -792,6 +811,7 @@ def main() -> None:
                     model_specs["pass_height"],
                     device=device,
                     post_action=True,
+                    pass_intent_probs=pass_intent_receive,
                 )
             scoring_failure, scoring_success = inference_gnn(
                 match,
