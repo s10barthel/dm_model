@@ -26,6 +26,8 @@ EVENT_PATH = EVENT_DIR / "event.parquet"
 TRACKING_DIR = DATA_ROOT / "tracking"
 TRACKING_PROCESSED_DIR = DATA_ROOT / "tracking_processed"
 EVENT_SYNCED_DIR = DATA_ROOT / "event_synced"
+CONTROL_EVENTS_SYNCED_DIR = DATA_ROOT / "control_events_synced"
+CARRY_SEGMENTS_DIR = DATA_ROOT / "carry_segments"
 FEATURE_DIR = DATA_ROOT / "features"
 ACTION_GRAPH_DIR = FEATURE_DIR / "action_graphs"
 ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
@@ -159,6 +161,8 @@ def ensure_project_dirs() -> None:
         TRACKING_DIR,
         TRACKING_PROCESSED_DIR,
         EVENT_SYNCED_DIR,
+        CONTROL_EVENTS_SYNCED_DIR,
+        CARRY_SEGMENTS_DIR,
         FEATURE_DIR,
         FEATURE_RUNS_DIR,
         XT_DIR,
@@ -249,13 +253,21 @@ def get_intent_train_label_dir(
     return root / f"action_labels_intent_train_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
 
 
+def carry_artifact_suffix(use_carries: bool = False) -> str:
+    return "_carries" if use_carries else ""
+
+
 def get_action_label_dir(
     return_type: str = "disc_0.9",
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,
+    use_carries: bool = False,
 ) -> Path:
     root = Path(root) if root is not None else FEATURE_DIR
-    return root / f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
+    return root / (
+        f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
+        f"{carry_artifact_suffix(use_carries)}"
+    )
 
 
 def get_success_intent_label_dir(root: Path | None = None) -> Path:
@@ -266,17 +278,26 @@ def get_success_intent_label_dir(root: Path | None = None) -> Path:
 def get_resolved_action_dir(
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,
+    use_carries: bool = False,
 ) -> Path:
     root = Path(root) if root is not None else FEATURE_DIR
-    return root / f"resolved_actions{intended_receiver_suffix(intended_receiver_mode, include_original=True)}"
+    return root / (
+        f"resolved_actions{intended_receiver_suffix(intended_receiver_mode, include_original=True)}"
+        f"{carry_artifact_suffix(use_carries)}"
+    )
 
 
 def get_resolved_action_path(
     match_id: str,
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,
+    use_carries: bool = False,
 ) -> Path:
-    return get_resolved_action_dir(intended_receiver_mode, root=root) / f"{match_id}.parquet"
+    return get_resolved_action_dir(
+        intended_receiver_mode,
+        root=root,
+        use_carries=use_carries,
+    ) / f"{match_id}.parquet"
 
 
 def get_augmented_feature_dir(
@@ -295,9 +316,9 @@ def get_augmented_label_dir(
     return root / f"augmented_labels{intended_receiver_suffix(intended_receiver_mode)}"
 
 
-def get_action_graph_dir(root: Path | None = None) -> Path:
+def get_action_graph_dir(root: Path | None = None, use_carries: bool = False) -> Path:
     root = Path(root) if root is not None else FEATURE_DIR
-    return root / ACTION_GRAPH_DIR.name
+    return root / f"{ACTION_GRAPH_DIR.name}{carry_artifact_suffix(use_carries)}"
 
 
 def get_action_graph_intent_train_dir(root: Path | None = None) -> Path:
@@ -305,9 +326,9 @@ def get_action_graph_intent_train_dir(root: Path | None = None) -> Path:
     return root / ACTION_GRAPH_INTENT_TRAIN_DIR.name
 
 
-def get_post_action_graph_dir(root: Path | None = None) -> Path:
+def get_post_action_graph_dir(root: Path | None = None, use_carries: bool = False) -> Path:
     root = Path(root) if root is not None else FEATURE_DIR
-    return root / POST_ACTION_GRAPH_DIR.name
+    return root / f"{POST_ACTION_GRAPH_DIR.name}{carry_artifact_suffix(use_carries)}"
 
 
 def get_success_intent_graph_dir(root: Path | None = None) -> Path:

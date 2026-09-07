@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
     INTENDED_RECEIVER_MODE_MODEL,
@@ -142,6 +143,14 @@ def parse_args() -> argparse.Namespace:
             "Enable pass-height label generation/configuration. With --extend-feature-run-id, rebuild copied "
             "label tensors so pass-height labels are present. "
             f"High passes use ball_z >= {config.PASS_HEIGHT_THRESHOLD_METERS:g}m between pass and receipt."
+        ),
+    )
+    parser.add_argument(
+        "--use-carries",
+        action="store_true",
+        help=(
+            "Generate additive Sportec carry-augmented base artifacts. With --extend-feature-run-id, "
+            "this can extend an existing completed run without changing its canonical artifacts."
         ),
     )
     parser.add_argument(
@@ -317,8 +326,8 @@ def next_action_conditions_flag(enabled: bool) -> str:
     return "--next-action-conditions-on" if enabled else "--next-action-conditions-off"
 
 
-def full_generation_commands(python: str) -> list[FeatureGenerationStep]:
-    return [
+def full_generation_commands(python: str, use_carries: bool = False) -> list[FeatureGenerationStep]:
+    steps = [
         FeatureGenerationStep(
             "train split with post_action + augment_blocks",
             [
@@ -384,6 +393,20 @@ def full_generation_commands(python: str) -> list[FeatureGenerationStep]:
             ],
         ),
     ]
+    if use_carries:
+        steps.extend(
+            [
+                FeatureGenerationStep(
+                    "train split with carry-augmented base and post_action",
+                    [python, "datatools/graph_feature.py", "--action_type", "all", "--split", "train", "--post_action", "--use-carries"],
+                ),
+                FeatureGenerationStep(
+                    "test split with carry-augmented base and post_action",
+                    [python, "datatools/graph_feature.py", "--action_type", "all", "--split", "test", "--post_action", "--use-carries"],
+                ),
+            ]
+        )
+    return steps
 
 
 def normalize_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
@@ -1282,12 +1305,122 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     print(f"Extension mode: {plan.extension_mode}")
 
 
+def carry_extension_steps(
+    args: argparse.Namespace,
+    metadata: dict[str, Any],
+    output_run_id: str,
+) -> list[FeatureGenerationStep]:
+    python = sys.executable
+    schema = normalize_graph_schema(metadata.get("graph_schema"))
+    common = [
+        "--run-id",
+        output_run_id,
+        "--train-split",
+        str(int(metadata.get("train_split_percent", getattr(args, "train_split", 50)))),
+        "--num-workers",
+        str(getattr(args, "num_workers", "1")),
+        "--worker-thread-limit",
+        str(getattr(args, "worker_thread_limit", 1)),
+        next_action_conditions_flag(metadata_next_action_conditions_enabled(metadata)),
+        *edge_feature_flags_for_schema(schema),
+    ]
+    for return_type in metadata_return_types(metadata):
+        common.extend(["--return_type", return_type])
+    for mode in metadata_intended_receiver_modes(metadata):
+        common.extend(["--only-intended-receiver-mode", mode])
+    model_id = metadata.get("intended_receiver_model_id")
+    if model_id:
+        common.extend(["--intended-receiver-model-id", str(model_id)])
+    threshold = metadata.get("pass_height_threshold_meters")
+    if threshold is not None:
+        common.extend(["--pass-height-threshold", str(float(threshold))])
+
+    steps: list[FeatureGenerationStep] = []
+    for split in ("train", "test"):
+        command = [
+            python,
+            "datatools/graph_feature.py",
+            "--action_type",
+            "all",
+            "--split",
+            split,
+            "--post_action",
+            "--use-carries",
+            *common,
+        ]
+        steps.append(FeatureGenerationStep(f"{split} split carry-augmented base", command))
+    return steps
+
+
+def run_carry_extension_generation(args: argparse.Namespace) -> None:
+    if args.overwrite_feature_run:
+        raise ValueError("--use-carries is additive; use --in-place or create a derived feature run.")
+    base_run_id = resolve_feature_run_id(args.extend_feature_run_id, required=True, allow_latest=False)
+    if base_run_id is None:
+        raise FileNotFoundError("No base feature run id was provided.")
+    metadata = load_feature_run_metadata(base_run_id, required=True)
+    if metadata is None or metadata.get("status") != "completed":
+        raise ValueError(f"Feature run {base_run_id} must be completed before adding carries.")
+    if bool((metadata.get("carry_variant") or {}).get("available", False)):
+        raise ValueError(f"Feature run {base_run_id} already contains carry-augmented artifacts.")
+
+    if args.in_place:
+        output_run_id = base_run_id
+        output_root = get_feature_run_root(base_run_id)
+    else:
+        output_run_id = args.run_id or generate_run_id("feature")
+        output_root = copy_base_feature_run(base_run_id, output_run_id)
+
+    updated = copy.deepcopy(metadata)
+    updated["run_id"] = output_run_id
+    updated["status"] = "in_progress"
+    if output_run_id != base_run_id:
+        updated["base_feature_run_id"] = base_run_id
+    write_run_metadata(output_root, updated)
+    steps = carry_extension_steps(args, metadata, output_run_id)
+    try:
+        run_generation_steps(steps)
+    except Exception as exc:
+        updated["status"] = "completed" if args.in_place else "failed"
+        updated["carry_variant_error"] = str(exc)
+        write_run_metadata(output_root, updated)
+        raise
+
+    history = list(updated.get("extension_history") or [])
+    history.append(
+        {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "type": "carry_variant",
+            "status": "completed",
+            "base_feature_run_id": base_run_id,
+            "commands": [step.command for step in steps],
+        }
+    )
+    updated.update(
+        {
+            "status": "completed",
+            "carry_variant": {
+                "available": True,
+                "definition": CARRY_DEFINITION_VERSION,
+                "artifact_suffix": "_carries",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            "extension_history": history,
+        }
+    )
+    updated.pop("carry_variant_error", None)
+    write_run_metadata(output_root, updated)
+    if output_run_id != base_run_id:
+        write_latest_run("feature", output_run_id)
+    print(f"Feature run id with carry variant: {output_run_id}")
+
+
 def run_full_generation(args: argparse.Namespace) -> None:
     args.run_id = args.run_id or generate_run_id("feature")
     python = sys.executable
     command_steps = [
         FeatureGenerationStep(step.description, with_mode_flags(step.command, args))
-        for step in full_generation_commands(python)
+        for step in full_generation_commands(python, use_carries=bool(getattr(args, "use_carries", False)))
     ]
     run_generation_steps(command_steps)
 
@@ -1314,6 +1447,13 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "commands": [step.command for step in command_steps],
         "status": "completed",
     }
+    if bool(getattr(args, "use_carries", False)):
+        metadata["carry_variant"] = {
+            "available": True,
+            "definition": CARRY_DEFINITION_VERSION,
+            "artifact_suffix": "_carries",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        }
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
     print(f"Feature run id: {args.run_id}")
@@ -1322,7 +1462,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
 def main() -> None:
     args = parse_args()
     if args.extend_feature_run_id:
-        run_extension_generation(args)
+        if args.use_carries:
+            run_carry_extension_generation(args)
+        else:
+            run_extension_generation(args)
     else:
         run_full_generation(args)
 

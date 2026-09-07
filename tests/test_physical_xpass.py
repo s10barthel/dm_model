@@ -782,6 +782,38 @@ class PhysicalXPassTests(unittest.TestCase):
             with self.assertRaisesRegex(inference.LaneSurvivalCacheError, "generate_physical_xpass.py --pc-xpass"):
                 inference.inference_gnn(match, model, device="cpu", post_action=False)
 
+    def test_carry_only_lane_survival_inference_does_not_require_pass_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            match = make_physical_inference_match([7], [0])
+            match.labels[0, LABEL_INDEX["is_dribble"]] = 1
+            match.labels[0, LABEL_INDEX["intent_index"]] = 0
+            model = ConstantPassHeightModel(node_in_dim=26)
+            model.args.update(
+                make_pass_success_args(
+                    model_id="pass_success/carry-lane-survival",
+                    node_in_dim=26,
+                    lane_survival=True,
+                    lane_survival_cache_dir=str(Path(tmpdir) / "missing"),
+                    use_physical_xpass=False,
+                )
+            )
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+
+    def test_carry_only_physical_xpass_inference_does_not_require_pass_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            match = make_physical_inference_match([7], [0])
+            match.labels[0, LABEL_INDEX["is_dribble"]] = 1
+            match.labels[0, LABEL_INDEX["intent_index"]] = 0
+            model = DummyPhysicalInferenceModel(Path(tmpdir) / "missing")
+
+            probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
+
+        self.assertEqual(probs.index.tolist(), [7])
+        self.assertAlmostEqual(float(probs.at[7, "home_1"]), 0.5)
+
     def test_inference_physical_xpass_blend_formula(self) -> None:
         self.assertAlmostEqual(
             float(blend_physical_xpass_predictions(pass_success_model=0.9, xpass=0.5, pass_distance=10.0)),
@@ -3773,6 +3805,56 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(len(dataset), 1)
         pass_heights = getattr(dataset.features[0], PHYSICAL_XPASS_PASS_HEIGHT_ATTR)
         self.assertAlmostEqual(float(pass_heights[1]), 0.2)
+
+    def test_action_dataset_does_not_require_pass_sidecars_for_carry_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            feature_dir = root / "features"
+            label_dir = root / "labels"
+            physical_cache = root / "physical_xpass"
+            match_dir = physical_cache / "matches"
+            feature_dir.mkdir()
+            label_dir.mkdir()
+            match_dir.mkdir(parents=True)
+
+            graphs = [make_graph(["home_1", "home_2", "away_3"]), make_graph(["home_1", "home_2", "away_3"])]
+            pass_label = make_label(action_index=7, intent_index=1)
+            carry_label = make_label(action_index=8, intent_index=0)
+            carry_label[LABEL_INDEX["is_pass"]] = 0
+            carry_label[LABEL_INDEX["is_dribble"]] = 1
+            torch.save(graphs, feature_dir / "match_1.pt")
+            torch.save(torch.stack([pass_label, carry_label]), label_dir / "match_1.pt")
+            pd.DataFrame(
+                [
+                    {
+                        "match_id": "match_1",
+                        "action_index": 7,
+                        "home_2": 0.4,
+                        physical_xpass_pass_height_column("home_2"): 0.2,
+                    }
+                ]
+            ).to_parquet(match_dir / "match_1.parquet", index=False)
+
+            dataset = ActionDataset(
+                ["match_1"],
+                feature_dir=feature_dir,
+                label_dir=label_dir,
+                task="pass_success",
+                use_physical_xpass=True,
+                physical_cache_dir=physical_cache,
+                pass_height_cache_dir=physical_cache,
+                require_observed_pass_height=True,
+                evaluation_xpass_cache_dir=physical_cache,
+                evaluation_xpass_metric=PHYSICAL_XPASS_DEFAULT_METRIC,
+            )
+
+        self.assertEqual(len(dataset), 2)
+        carry_index = int(torch.nonzero(dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1).item())
+        carry_graph = dataset.features[carry_index]
+        self.assertAlmostEqual(float(getattr(carry_graph, PHYSICAL_XPASS_PROB_ATTR)[0]), 0.5)
+        self.assertAlmostEqual(float(getattr(carry_graph, PHYSICAL_XPASS_LOGIT_ATTR)[0]), 0.0)
+        self.assertTrue(torch.isnan(getattr(carry_graph, PHYSICAL_XPASS_PASS_HEIGHT_ATTR)[0]))
+        self.assertTrue(torch.isnan(getattr(carry_graph, "evaluation_physical_xpass")[0]))
 
     def test_action_dataset_masks_possessor_relative_speed_edges_for_no_poss_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

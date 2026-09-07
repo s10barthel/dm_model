@@ -30,6 +30,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE,
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
+    PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
@@ -54,6 +55,7 @@ from physical_pass_model import (
     physical_xpass_speed_aggregation,
     physical_xpass_source,
     physical_xpass_teammate_policy,
+    graph_pass_distances,
     requires_physical_xpass_for_inference,
     pc_xpass_enabled,
     pc_xpass_lane_survival_metadata_fingerprint,
@@ -77,7 +79,7 @@ class LaneSurvivalCacheError(ValueError):
 
 def model_requires_lane_survival(model: GNN) -> bool:
     """Return whether this checkpoint was trained with the appended lane-survival input."""
-    return bool(model.args.get("lane_survival", False))
+    return bool(getattr(model, "args", {}).get("lane_survival", False))
 
 
 def model_lane_survival_mode(model: GNN) -> str:
@@ -185,6 +187,8 @@ def resolve_graph_feature_dir(model: GNN, post_action: bool = False) -> str:
         return str(feature_path.with_name("post_action_graphs_temporal"))
     if feature_name == "action_graphs":
         return str(feature_path.with_name("post_action_graphs"))
+    if feature_name == "action_graphs_carries":
+        return str(feature_path.with_name("post_action_graphs_carries"))
     return str(feature_path)
 
 
@@ -318,6 +322,14 @@ def attach_lane_survival_for_inference(
     """
     if not model_requires_lane_survival(model):
         return graphs
+    carry_mask = [bool(label[config.LABEL_INDEX["is_dribble"]].item()) for label in labels]
+    if carry_mask and all(carry_mask):
+        for graph in graphs:
+            graph.x = torch.cat(
+                [graph.x, torch.zeros((graph.x.shape[0], 1), dtype=graph.x.dtype, device=graph.x.device)],
+                dim=-1,
+            )
+        return graphs
 
     cache_dir = _lane_survival_cache_dir_for_inference(match, model)
     match_id = resolve_match_id(match)
@@ -340,17 +352,26 @@ def attach_lane_survival_for_inference(
             match_id,
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
         )
-        return [
-            append_pc_xpass_lane_survival_to_graph(
-                graph,
-                label,
-                rows,
-                match_id=match_id,
-                require_observed_target=False,
-                mode=lane_survival_mode,
-            )
-            for graph, label in zip(graphs, labels)
-        ]
+        attached: list[Data] = []
+        for graph, label in zip(graphs, labels):
+            if bool(label[config.LABEL_INDEX["is_dribble"]].item()):
+                graph.x = torch.cat(
+                    [graph.x, torch.zeros((graph.x.shape[0], 1), dtype=graph.x.dtype, device=graph.x.device)],
+                    dim=-1,
+                )
+                attached.append(graph)
+            else:
+                attached.append(
+                    append_pc_xpass_lane_survival_to_graph(
+                        graph,
+                        label,
+                        rows,
+                        match_id=match_id,
+                        require_observed_target=False,
+                        mode=lane_survival_mode,
+                    )
+                )
+        return attached
     except (FileNotFoundError, ValueError) as exc:
         raise LaneSurvivalCacheError(
             f"Model {model_id!r} requires cached pc-xPass lane_survival, but it could not be attached "
@@ -367,6 +388,41 @@ def attach_physical_xpass_for_inference(
     *,
     post_action: bool = False,
 ) -> list[Data]:
+    carry_mask = [bool(label[config.LABEL_INDEX["is_dribble"]].item()) for label in labels]
+    if any(carry_mask):
+        pass_positions = [index for index, is_carry in enumerate(carry_mask) if not is_carry]
+        attached_passes = (
+            attach_physical_xpass_for_inference(
+                match,
+                [graphs[index] for index in pass_positions],
+                labels[pass_positions],
+                model,
+                post_action=post_action,
+            )
+            if pass_positions
+            else []
+        )
+        pass_iter = iter(attached_passes)
+        result: list[Data] = []
+        for graph, is_carry in zip(graphs, carry_mask):
+            if not is_carry:
+                result.append(next(pass_iter))
+                continue
+            node_count = int(graph.x.shape[0])
+            dtype = graph.x.dtype
+            device = graph.x.device
+            setattr(graph, PHYSICAL_XPASS_PROB_ATTR, torch.full((node_count,), 0.5, dtype=dtype, device=device))
+            setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, torch.zeros(node_count, dtype=dtype, device=device))
+            setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
+            for name in (
+                PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+                PHYSICAL_XPASS_BALL_Z_ATTR,
+                PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+            ):
+                setattr(graph, name, torch.full((node_count,), float("nan"), dtype=dtype, device=device))
+            result.append(graph)
+        return result
+
     eps = float(model.args.get("physical_eps", 1e-4))
     floor = physical_xpass_floor(model.args)
     feature_root = _runtime_feature_root(match)
@@ -530,6 +586,8 @@ def filter_missing_physical_xpass_rows_for_inference(
 ) -> tuple[list[Data], torch.Tensor]:
     if not requires_physical_xpass_for_inference(model.args):
         return graphs, labels
+    if len(labels) and bool((labels[:, config.LABEL_INDEX["is_dribble"]] == 1).all().item()):
+        return graphs, labels
 
     use_inference_blend = inference_uses_physical_xpass(model.args)
     cache_dir = _physical_xpass_cache_dir_for_inference(match, model)
@@ -579,6 +637,10 @@ def filter_missing_physical_xpass_rows_for_inference(
     skip_reasons: dict[str, int] = {}
     for graph, label in zip(graphs, labels):
         action_index = int(label[config.LABEL_INDEX["action_index"]].item())
+        if bool(label[config.LABEL_INDEX["is_dribble"]].item()):
+            kept_graphs.append(graph)
+            kept_labels.append(label)
+            continue
         if action_index not in available_action_indexes:
             skipped_action_indexes.append(action_index)
             reason_key = "missing_row" if frame_scope is None else f"missing_row_{frame_scope}"
@@ -664,12 +726,12 @@ def resolve_match_graphs(match: Match, model: GNN, post_action: bool = False) ->
         return graph_cache[cache_key], action_index_cache.get(cache_key)
 
     feature_name = feature_path.name
-    if not post_action and feature_name == "action_graphs" and getattr(match, "graph_features_0", None) is not None:
+    if not post_action and feature_name in {"action_graphs", "action_graphs_carries"} and getattr(match, "graph_features_0", None) is not None:
         graph_cache[cache_key] = match.graph_features_0
         action_index_cache[cache_key] = None
         return match.graph_features_0, None
 
-    if post_action and feature_name == "post_action_graphs" and getattr(match, "graph_features_1", None) is not None:
+    if post_action and feature_name in {"post_action_graphs", "post_action_graphs_carries"} and getattr(match, "graph_features_1", None) is not None:
         graph_cache[cache_key] = match.graph_features_1
         action_index_cache[cache_key] = None
         return match.graph_features_1, None
@@ -898,7 +960,8 @@ def inference_gnn(
             probs_i = np.asarray(probs_i, dtype=float).copy()
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
-            if inference_uses_physical_xpass(model.args):
+            is_carry = bool(labels[i, config.LABEL_INDEX["is_dribble"]].item())
+            if inference_uses_physical_xpass(model.args) and not is_carry:
                 if physical_xpass_out is None or physical_distance_out is None:
                     raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                 weight_version = physical_xpass_weight_version(model.args)

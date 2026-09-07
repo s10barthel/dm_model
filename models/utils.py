@@ -270,6 +270,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
         "node_in_dim": int(args.get("node_in_dim", 0)),
         "edge_in_dim": int(args.get("edge_in_dim", 2)),
+        "use_carries": bool(args.get("use_carries", False)),
     }
     signature["add_v_edge_features"] = use_v_edge_features_for_mode(v_edge_feature_mode)
     signature["add_relative_speed_edge_features"] = use_relative_speed_edge_features_for_mode(
@@ -387,6 +388,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
         "return_type": return_type,
+        "use_carries": bool(metadata.get("use_carries", args.get("use_carries", False))),
         "model_name": str(args.get("model", metadata.get("model", "unknown"))),
         "feature_signature": feature_signature,
         "graph_schema": {
@@ -418,6 +420,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "intended_receiver_mode",
             "target_family",
             "return_type",
+            "use_carries",
             "model_name",
             "feature_signature",
             "graph_schema",
@@ -805,6 +808,18 @@ def validate_model_record_consistency(
 
     shared: dict[str, Any] = {}
 
+    carry_sensitive_tasks = {"action_intent", "pass_success", "outcome_scoring", "outcome_conceding"}
+    carry_records = {
+        task: record for task, record in model_records.items() if task in carry_sensitive_tasks
+    }
+    carry_values = {bool(record.get("use_carries", False)) for record in carry_records.values()}
+    if len(carry_values) > 1:
+        details = ", ".join(
+            f"{task}={bool(record.get('use_carries', False))}" for task, record in carry_records.items()
+        )
+        raise ValueError(f"Selected carry-sensitive checkpoints do not agree on use_carries: {details}.")
+    shared["use_carries"] = next(iter(carry_values)) if carry_values else None
+
     feature_run_ids = {record.get("feature_run_id") for record in model_records.values()}
     feature_run_ids.discard(None)
     if require_feature_run_id and len(feature_run_ids) != 1:
@@ -927,6 +942,15 @@ def resolve_model_selection(
         shared["split_manifest_id"] = next(iter(split_manifest_ids))
 
     if bundle is not None:
+        if "use_carries" in bundle:
+            bundle_use_carries = bool(bundle.get("use_carries"))
+            selected_use_carries = shared.get("use_carries")
+            if selected_use_carries is not None and bundle_use_carries != bool(selected_use_carries):
+                raise ValueError(
+                    f"Bundle {bundle_id!r} use_carries={bundle_use_carries} does not match the "
+                    f"selected carry-sensitive checkpoints (use_carries={bool(selected_use_carries)})."
+                )
+            shared["use_carries"] = bundle_use_carries
         if require_feature_run_id and bundle.get("feature_run_id") and shared.get("feature_run_id") and bundle["feature_run_id"] != shared["feature_run_id"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} feature_run_id={bundle['feature_run_id']!r} does not match the selected model ids "
@@ -1276,6 +1300,9 @@ def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_c
             batch_graphs = adapt_batch_graphs_for_model(batch_graphs, model.args, context=f"IPW model {model_id!r}")
             out: torch.Tensor = model(batch_graphs)
             for graph_index in range(batch_graphs.num_graphs):
+                if bool(batch_labels[graph_index, config.LABEL_INDEX["is_dribble"]].item()):
+                    likelihoods.append(1.0)
+                    continue
                 logits = out[
                     (batch_graphs.batch == graph_index)
                     & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
@@ -1819,6 +1846,8 @@ def run_epoch(
     observed_pass_max_heights: list[np.ndarray] = []
     binary_predictions: list[np.ndarray] = []
     binary_targets: list[np.ndarray] = []
+    pass_success_diagnostic_predictions: list[np.ndarray] = []
+    pass_success_diagnostic_targets: list[np.ndarray] = []
     binary_threshold: float | None = None
     outcome_predictions: list[np.ndarray] = []
     outcome_targets: list[np.ndarray] = []
@@ -1989,9 +2018,12 @@ def run_epoch(
 
                 y_hat = torch.sigmoid(pred).cpu().detach().numpy()
                 y = target.cpu().detach().numpy()
+                pass_diagnostic_mask = (
+                    batch_labels[:, config.LABEL_INDEX["is_pass"]].detach().cpu().numpy().astype(bool)
+                )
                 evaluate_xpass = bool(getattr(args, "evaluate_xpass", False))
                 evaluate_combined = bool(getattr(args, "evaluate_combined_success", False))
-                if evaluate_xpass or evaluate_combined:
+                if (evaluate_xpass or evaluate_combined) and pass_diagnostic_mask.any():
                     xpass_values = getattr(batch_graphs, EVALUATION_XPASS_PROB_ATTR, None)
                     distance_values = getattr(batch_graphs, EVALUATION_XPASS_DISTANCE_ATTR, None)
                     nearest_values = getattr(batch_graphs, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
@@ -2003,6 +2035,8 @@ def run_epoch(
                     observed_nearest = []
                     observed_height = []
                     for graph_index in index_range:
+                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
+                            continue
                         graph_mask = batch == graph_index
                         target_index = intent[graph_index]
                         observed_xpass.append(xpass_values[graph_mask][target_index])
@@ -2036,7 +2070,7 @@ def run_epoch(
                                 v4_discount=bool(args.discount),
                             )
                         combined = blend_physical_xpass_predictions(
-                            pass_success_model=np.asarray(y_hat, dtype=float),
+                            pass_success_model=np.asarray(y_hat[pass_diagnostic_mask], dtype=float),
                             xpass=xpass_array,
                             pass_distance=distance_array,
                             weight_version=weight_version,
@@ -2060,7 +2094,7 @@ def run_epoch(
                         else:
                             learning_weight = physical_xpass_blend_weight(distance_array)
                         combined_learning_weights.append(np.asarray(learning_weight, dtype=float))
-                if weighted_pass_success_eval:
+                if weighted_pass_success_eval and pass_diagnostic_mask.any():
                     pass_heights = getattr(batch_graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
                     pass_distances = getattr(batch_graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
                     if pass_heights is None or pass_distances is None:
@@ -2070,6 +2104,8 @@ def run_epoch(
                     observed_heights = []
                     observed_distances = []
                     for graph_index in index_range:
+                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
+                            continue
                         graph_mask = batch == graph_index
                         target_index = intent[graph_index]
                         observed_heights.append(pass_heights[graph_mask][target_index])
@@ -2081,17 +2117,21 @@ def run_epoch(
                         zero_point=float(getattr(args, "v4_zero", 0.7)),
                         use_discount=bool(getattr(args, "discount", True)),
                     )
-                    weighted_predictions.append(np.asarray(y_hat, dtype=float))
-                    weighted_targets.append(np.asarray(y, dtype=float))
+                    weighted_predictions.append(np.asarray(y_hat[pass_diagnostic_mask], dtype=float))
+                    weighted_targets.append(np.asarray(y[pass_diagnostic_mask], dtype=float))
                     weighted_effective_weights.append(effective_weights.detach().cpu().numpy().astype(float))
-                if bool(
+                if pass_diagnostic_mask.any() and bool(
                     getattr(args, "observed_pass_height_stratification", False)
                     or getattr(args, "evaluate_xpass", False)
                     or getattr(args, "evaluate_combined_success", False)
                 ):
                     observed_pass_height_labels.append(
-                        get_label_slice(batch_labels, "pass_high").cpu().detach().numpy().astype(float)
+                        get_label_slice(batch_labels, "pass_high").cpu().detach().numpy().astype(float)[
+                            pass_diagnostic_mask
+                        ]
                     )
+                    pass_success_diagnostic_predictions.append(np.asarray(y_hat[pass_diagnostic_mask], dtype=float))
+                    pass_success_diagnostic_targets.append(np.asarray(y[pass_diagnostic_mask], dtype=float))
                 if args.task == "pass_height":
                     observed_pass_max_heights.append(
                         get_label_slice(batch_labels, "pass_max_ball_z").cpu().detach().numpy().astype(float)
@@ -2290,15 +2330,15 @@ def run_epoch(
     pass_success_height_metrics = None
     if observed_pass_height_labels:
         pass_success_height_metrics, pass_success_height_rows = calc_pass_success_height_metrics(
-            np.concatenate(binary_targets),
-            np.concatenate(binary_predictions),
+            np.concatenate(pass_success_diagnostic_targets),
+            np.concatenate(pass_success_diagnostic_predictions),
             np.concatenate(observed_pass_height_labels),
         )
         metrics.update(pass_success_height_metrics)
 
     pass_success_predictor_rows = None
     if physical_xpass_predictions or combined_success_predictions:
-        predictors = {"learning": np.concatenate(binary_predictions)}
+        predictors = {"learning": np.concatenate(pass_success_diagnostic_predictions)}
         metric_name = str(getattr(args, "xpass_metric", "xpass"))
         if physical_xpass_predictions:
             predictors[f"physical_xpass_{metric_name.removesuffix('_xpass')}"] = np.concatenate(
@@ -2309,7 +2349,7 @@ def run_epoch(
                 combined_success_predictions
             )
         predictor_metrics, pass_success_predictor_rows = calc_pass_success_predictor_metrics(
-            np.concatenate(binary_targets),
+            np.concatenate(pass_success_diagnostic_targets),
             np.concatenate(observed_pass_height_labels),
             predictors,
             threshold=float(getattr(args, "classification_threshold", 0.5)),
@@ -2334,7 +2374,7 @@ def run_epoch(
         }
         if pass_success_predictor_rows:
             evaluation["predictor_diagnostics"] = {
-                "targets": np.concatenate(binary_targets),
+                "targets": np.concatenate(pass_success_diagnostic_targets),
                 "predictors": predictors,
                 "observed_pass_high": np.concatenate(observed_pass_height_labels),
                 "pass_distance": np.concatenate(evaluation_pass_distances),

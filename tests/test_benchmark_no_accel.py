@@ -254,6 +254,7 @@ def make_model_record(
     node_in_dim: int = 25,
     edge_in_dim: int = 4,
     add_v_edge_features: bool = True,
+    use_carries: bool = False,
 ) -> dict[str, object]:
     return {
         "task": task,
@@ -261,6 +262,7 @@ def make_model_record(
         "intended_receiver_mode": intended_receiver_mode,
         "return_type": return_type,
         "target_family": target_family,
+        "use_carries": use_carries,
         "graph_schema": {
             "node_in_dim": node_in_dim,
             "edge_in_dim": edge_in_dim,
@@ -1694,6 +1696,48 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             model_utils.validate_model_record_consistency(model_records)
+
+    def test_validate_model_record_consistency_rejects_mixed_carry_sensitive_checkpoints(self) -> None:
+        model_records = {
+            "action_intent": make_model_record("action_intent", use_carries=True),
+            "pass_intent": make_model_record("pass_intent", use_carries=False),
+            "pass_success": make_model_record("pass_success", use_carries=False),
+        }
+
+        with self.assertRaisesRegex(ValueError, "do not agree on use_carries"):
+            model_utils.validate_model_record_consistency(model_records)
+
+    def test_pass_only_checkpoint_does_not_determine_carry_variant(self) -> None:
+        model_records = {
+            "action_intent": make_model_record("action_intent", use_carries=True),
+            "pass_intent": make_model_record("pass_intent", use_carries=False),
+            "pass_success": make_model_record("pass_success", use_carries=True),
+        }
+
+        shared = model_utils.validate_model_record_consistency(model_records)
+
+        self.assertTrue(shared["use_carries"])
+
+    def test_bundle_supplies_carry_variant_when_only_pass_only_checkpoint_is_selected(self) -> None:
+        resolved_model_ids = {"pass_intent": "pass_intent/old"}
+        bundle = {
+            "bundle_id": "bundle_under_test",
+            "feature_run_id": "feature_run",
+            "use_carries": True,
+            "model_ids": resolved_model_ids,
+        }
+        model_records = {"pass_intent": make_model_record("pass_intent")}
+
+        with (
+            patch.object(model_utils, "resolve_bundle_model_ids", return_value=(resolved_model_ids, bundle)),
+            patch.object(model_utils, "get_model_records", return_value=model_records),
+        ):
+            _, shared, _ = model_utils.resolve_model_selection(
+                required_tasks=["pass_intent"],
+                bundle_id="bundle_under_test",
+            )
+
+        self.assertTrue(shared["use_carries"])
 
     def test_validate_model_record_consistency_accepts_mixed_feature_run_when_relaxed(self) -> None:
         model_records = {

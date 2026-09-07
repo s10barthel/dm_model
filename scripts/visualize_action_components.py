@@ -94,6 +94,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--team-id", action="append", help="Filter by team_id. Repeat for OR within this column.")
     parser.add_argument("--spadl-type", action="append", help="Filter by spadl_type. Repeat for OR within this column.")
+    parser.add_argument(
+        "--action-type",
+        action="append",
+        choices=["pass", "dribble", "shot"],
+        help="Filter by modeled action_type. Repeat for OR within this column.",
+    )
     parser.add_argument("--success", action="append", type=parse_bool, help="Filter by success true/false.")
     parser.add_argument("--offside", action="append", type=parse_bool, help="Filter by offside true/false.")
     parser.add_argument("--next-type", action="append", help="Filter by next_type. Repeat for OR within this column.")
@@ -184,6 +190,7 @@ EXACT_FILTERS = {
     "advanced_position": "advanced_position",
     "team_id": "team_id",
     "spadl_type": "spadl_type",
+    "action_type": "action_type",
     "success": "success",
     "offside": "offside",
     "next_type": "next_type",
@@ -215,6 +222,7 @@ def load_match(
     feature_root: Path | None = None,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    use_carries: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -228,6 +236,7 @@ def load_match(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
         root=feature_root,
+        use_carries=use_carries,
     )
     if not resolved_action_path.exists():
         raise FileNotFoundError(
@@ -242,7 +251,7 @@ def load_match(
         return_type=return_type,
     )
 
-    graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
+    graph_path = get_action_graph_dir(feature_root, use_carries=use_carries) / f"{match_id}.pt"
     if graph_path.exists():
         match.graph_features_0 = torch.load(graph_path, weights_only=False)
     else:
@@ -355,18 +364,18 @@ def _resolve_candidate_event_indices(match: Match, args: argparse.Namespace) -> 
     has_explicit_selectors = any([args.action_id, args.row_index, args.original_event_id])
 
     if not has_explicit_selectors:
-        return [int(index) for index in match.events.index.tolist()]
+        return [int(index) for index in match.actions.index.tolist()]
 
     for event_index in args.row_index or []:
         identifier_desc = f"Row index {event_index}"
-        if int(event_index) not in match.events.index:
+        if int(event_index) not in match.actions.index:
             warn_skip(f"{identifier_desc} is not present in match {match_id}.")
             continue
         candidates.append(int(event_index))
 
     for action_id in args.action_id or []:
         identifier_desc = f"CSV action_id {action_id}"
-        matches = match.events.index[match.events["action_id"] == int(action_id)].tolist()
+        matches = match.actions.index[match.actions["action_id"] == int(action_id)].tolist()
         if not matches:
             warn_skip(f"{identifier_desc} is not present in match {match_id}.")
             continue
@@ -378,8 +387,8 @@ def _resolve_candidate_event_indices(match: Match, args: argparse.Namespace) -> 
     for original_event_id in args.original_event_id or []:
         requested_original_event_id = str(original_event_id)
         identifier_desc = f"Original event id {requested_original_event_id}"
-        matches = match.events.index[
-            match.events["original_event_id"].astype("string") == requested_original_event_id
+        matches = match.actions.index[
+            match.actions["original_event_id"].astype("string") == requested_original_event_id
         ].tolist()
         if not matches:
             warn_skip(f"{identifier_desc} is not present in match {match_id}.")
@@ -398,6 +407,9 @@ def _filter_mask_for_events(events: pd.DataFrame, args: argparse.Namespace) -> p
     for attr_name, column in EXACT_FILTERS.items():
         requested_values = getattr(args, attr_name, None)
         if not requested_values:
+            continue
+        if column not in events.columns:
+            mask &= False
             continue
         if column in {"success", "offside"}:
             normalized_values = {bool(value) for value in requested_values}
@@ -425,19 +437,14 @@ def resolve_action_indices(match: Match, args: argparse.Namespace) -> list[tuple
     if not candidate_event_indices:
         return []
 
-    filter_mask = _filter_mask_for_events(match.events, args)
+    selection_actions = match.actions.copy()
+    for column in match.events.columns:
+        if column not in selection_actions.columns:
+            selection_actions[column] = match.events[column].reindex(selection_actions.index)
+    filter_mask = _filter_mask_for_events(selection_actions, args)
     selected: list[tuple[int, str]] = []
     for event_index in candidate_event_indices:
         if event_index not in filter_mask.index or not bool(filter_mask.at[event_index]):
-            continue
-        if event_index not in match.actions.index:
-            reason = describe_action_subset_exclusion(match, event_index)
-            event = match.events.loc[event_index]
-            warn_skip(
-                f"row index {event_index} in match {match_id} "
-                f"(action_id={event.get('action_id')}, original_event_id={event.get('original_event_id')}, "
-                f"spadl_type={event.get('spadl_type')}) is not part of the modeled action subset: {reason}."
-            )
             continue
         selected.append((event_index, str(int(match.actions.at[event_index, "action_id"]))))
         if getattr(args, "first", None) is not None and len(selected) >= int(args.first):
@@ -793,12 +800,13 @@ def main() -> None:
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context["selection"]
+    use_carries = bool(shared_context.get("use_carries", (bundle or {}).get("use_carries", False)))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = args.physical_cache_dir or str(
         get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     )
-    lane_survival_cache_dir = args.lane_survival_cache_dir or str(get_pc_xpass_dir("sportec"))
+    lane_survival_cache_dir = getattr(args, "lane_survival_cache_dir", None) or str(get_pc_xpass_dir("sportec"))
     configure_lane_survival_runtime_cache(loaded_models, lane_survival_cache_dir)
     selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = loaded_models.get("pass_success")
@@ -830,6 +838,7 @@ def main() -> None:
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        use_carries=use_carries,
     )
     selected_actions = resolve_action_indices(match, args)
     if not selected_actions:
@@ -917,6 +926,7 @@ def main() -> None:
         "runtime_feature_run_selection": shared_context["runtime_feature_run_selection"],
         "intended_receiver_mode": intended_receiver_mode,
         "return_type": return_type,
+        "use_carries": use_carries,
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
         "show_physical_xpass": bool(args.show_physical_xpass),

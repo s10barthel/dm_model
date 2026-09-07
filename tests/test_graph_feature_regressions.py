@@ -13,13 +13,16 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from datatools.benchmark import build_benchmark_export
+from datatools.ball_carries import CARRY_DEFINITION_VERSION, _map_frames, derive_carry_segments
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
+from datatools import config
 from datatools import graph_feature
 from datatools.match import Match, clear_intended_receiver_model_cache
 from datatools.utils import filter_features_and_labels
 from inference import inference_gnn, resolve_match_graphs
 from models import utils as model_utils
 from scripts import run_relevant_models
+from dataset import pass_success_observed_target_invalid_reason
 
 
 def make_minimal_match() -> SimpleNamespace:
@@ -1194,6 +1197,185 @@ class ComponentExportRegressionTests(unittest.TestCase):
             self.assertTrue((output_dir / "outcome_scoring_success.parquet").exists())
             self.assertTrue((output_dir / "outcome_conceding_failure.parquet").exists())
             self.assertFalse((output_dir / "pass_success.parquet").exists())
+
+
+class BallCarryRegressionTests(unittest.TestCase):
+    @staticmethod
+    def tracking() -> pd.DataFrame:
+        index = pd.Index(range(251), name="frame_id")
+        return pd.DataFrame({"ball_x": index / 10.0, "ball_y": 20.0}, index=index)
+
+    @staticmethod
+    def canonical(next_frame: int = 170) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "original_event_id": "source-pass", "period_id": 1, "frame_id": 80,
+                    "receive_frame_id": 100, "receiver_id": "home_2", "object_id": "home_1",
+                    "spadl_type": "pass", "offside": False,
+                },
+                {
+                    "original_event_id": "opponent-next", "period_id": 1, "frame_id": next_frame,
+                    "receive_frame_id": pd.NA, "receiver_id": pd.NA, "object_id": "away_3",
+                    "spadl_type": "pass", "offside": False,
+                },
+            ]
+        )
+
+    @staticmethod
+    def control(frame: int, kind: str = "tackle") -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "event_id": kind, "event_kind": kind, "period_id": 1, "frame_id": frame,
+                    "utc_timestamp": pd.NaT, "object_id": None, "winner_id": "away_3",
+                    "loser_id": "home_2", "fouler_id": None, "fouled_id": None,
+                    "winner_role": "withoutBallControl", "loser_role": "withBallControl",
+                    "winner_result": None, "possession_change": True, "clearance": False,
+                    "claim_type": None,
+                }
+            ]
+        )
+
+    def test_failed_fractional_carry_only_marks_final_segment_unsuccessful(self) -> None:
+        segments, _ = derive_carry_segments(self.control(163), self.canonical(), self.tracking())
+        self.assertEqual(segments["duration"].tolist(), [1.0, 1.52])
+        self.assertEqual(segments["success"].tolist(), [True, False])
+        self.assertEqual(segments["return_event_index"].tolist(), [1, 1])
+        self.assertTrue((segments["carry_definition"] == CARRY_DEFINITION_VERSION).all())
+
+    def test_subsecond_failed_carry_is_discarded(self) -> None:
+        segments, audit = derive_carry_segments(self.control(120), self.canonical(130), self.tracking())
+        self.assertTrue(segments.empty)
+        self.assertFalse(bool(audit.iloc[0]["retained"]))
+
+    def test_pass_success_accepts_possessor_as_carry_target_only(self) -> None:
+        graph = Data(x=torch.zeros((2, config.NODE_FEATURE_MIN_EXTENDED_DIM), dtype=torch.float32))
+        graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] = 1
+        graph.x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
+        labels = torch.zeros(len(config.LABEL_COLUMNS), dtype=torch.float32)
+        labels[config.LABEL_INDEX["intent_index"]] = 0
+        labels[config.LABEL_INDEX["is_dribble"]] = 1
+        self.assertIsNone(pass_success_observed_target_invalid_reason(graph, labels))
+        labels[config.LABEL_INDEX["is_dribble"]] = 0
+        labels[config.LABEL_INDEX["is_pass"]] = 1
+        self.assertEqual(pass_success_observed_target_invalid_reason(graph, labels), "target_is_possessor")
+
+    def test_control_frame_mapping_uses_canonical_and_kpi_anchors_for_interpolation(self) -> None:
+        event_times = pd.to_datetime(
+            ["2023-08-18T18:00:00", "2023-08-18T18:00:01", "2023-08-18T18:00:02"]
+        )
+        control = pd.DataFrame(
+            {
+                "event_id": ["canonical", "control-only", "kpi"],
+                "period_id": [1, 1, 1],
+                "utc_timestamp": event_times,
+                "calculated_timestamp": [pd.NaT, pd.NaT, pd.NaT],
+                "calculated_frame": [10, 11, 12],
+            }
+        )
+        frame_ids = np.arange(1000, 1051)
+        frame_table = pd.DataFrame(
+            {
+                "frame_id": frame_ids,
+                "raw_frame_id": frame_ids,
+                "period_id": 1,
+                "utc_timestamp": pd.Timestamp("2023-08-18T20:00:00")
+                + pd.to_timedelta(np.arange(len(frame_ids)) / 25.0, unit="s"),
+            }
+        )
+        canonical = pd.DataFrame(
+            {"original_event_id": ["canonical"], "frame_id": [1000]}
+        )
+        kpi = pd.DataFrame(
+            {"EVENT_ID": ["canonical", "kpi"], "FRAME_NUMBER": [1040, 1050]}
+        )
+
+        mapped = _map_frames(
+            control,
+            frame_table,
+            kpi,
+            canonical_events=canonical,
+            fps=25.0,
+        )
+
+        self.assertEqual(mapped["frame_id"].tolist(), [1000, 1025, 1050])
+        self.assertEqual(mapped["frame_source"].tolist(), ["canonical", "event_time_interpolation", "kpi"])
+
+    def test_carry_outcome_uses_terminal_canonical_action_without_counting_carry_row(self) -> None:
+        match = object.__new__(Match)
+        match.action_type = "all"
+        match.fps = 25
+        match.include_goals = False
+        match.intended_receiver_stats = {}
+        match.tracking = pd.DataFrame(
+            [
+                {
+                    "home_1_x": 10.0,
+                    "home_1_y": 34.0,
+                    "home_2_x": 20.0,
+                    "home_2_y": 30.0,
+                    "away_3_x": 70.0,
+                    "away_3_y": 34.0,
+                }
+            ],
+            index=pd.Index([10], name="frame_id"),
+        )
+        labeled_events = pd.DataFrame(
+            {
+                "spadl_type": ["pass", "pass"],
+                "object_id": ["home_2", "away_3"],
+                "period_id": [1, 1],
+                "expected_goal": [0.0, 0.0],
+                "success": [True, True],
+                "scores": [0.1, 0.7],
+                "concedes": [0.2, 0.3],
+                "scores_xg": [0.11, 0.71],
+                "concedes_xg": [0.21, 0.31],
+                "scores_xT": [0.12, 0.72],
+                "concedes_xT": [0.22, 0.32],
+                "scores_goal_distance": [0.13, 0.73],
+                "concedes_goal_distance": [0.23, 0.33],
+                "scores_epv": [0.14, 0.74],
+                "concedes_epv": [0.24, 0.34],
+            },
+            index=[0, 1],
+        )
+        match.events = labeled_events.copy()
+        match._base_events = labeled_events.copy()
+        match._cached_events_by_return_type = {"next_1": labeled_events.copy()}
+        match._cached_diagnostic_events = labeled_events.copy()
+        actions = pd.DataFrame(
+            [
+                {
+                    "frame_id": 10,
+                    "receive_frame_id": 35,
+                    "object_id": "home_1",
+                    "receiver_id": "away_3",
+                    "intent_id": "home_1",
+                    "action_type": "dribble",
+                    "success": False,
+                    "blocked": False,
+                    "start_x": 10.0,
+                    "start_y": 34.0,
+                    "end_x": 15.0,
+                    "end_y": 34.0,
+                    "return_event_index": 1,
+                }
+            ],
+            index=[2],
+        )
+
+        labels = match.construct_labels(
+            relabel_intended_receivers=False,
+            resolved_actions=actions,
+            return_type="next_1",
+        )
+
+        self.assertAlmostEqual(float(labels[0, LABEL_INDEX["scores"]]), 0.3)
+        self.assertAlmostEqual(float(labels[0, LABEL_INDEX["concedes"]]), 0.7)
+        self.assertAlmostEqual(float(labels[0, LABEL_INDEX["scores_xt"]]), 0.32)
+        self.assertAlmostEqual(float(labels[0, LABEL_INDEX["concedes_xt"]]), 0.72)
 
 
 if __name__ == "__main__":

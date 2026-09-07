@@ -17,11 +17,22 @@ from datatools.utils import (
     sparsify_edges,
 )
 from physical_pass_model import (
+    EVALUATION_XPASS_DISTANCE_ATTR,
+    EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+    EVALUATION_XPASS_PASS_HEIGHT_ATTR,
+    EVALUATION_XPASS_PROB_ATTR,
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+    PHYSICAL_XPASS_BALL_Z_ATTR,
+    PHYSICAL_XPASS_DISTANCE_ATTR,
+    PHYSICAL_XPASS_LOGIT_ATTR,
+    PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+    PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+    PHYSICAL_XPASS_PROB_ATTR,
     append_pc_xpass_lane_survival_to_graph,
     attach_evaluation_xpass_to_graph,
     attach_pass_height_to_graph,
     attach_physical_xpass_to_graph,
+    graph_pass_distances,
     load_physical_xpass_match,
 )
 from project_config import get_pc_xpass_dir
@@ -60,6 +71,52 @@ def _increment_count(counts: dict[str, int], key: str) -> None:
     counts[key] = int(counts.get(key, 0)) + 1
 
 
+def _attach_neutral_physical_xpass(graph: Data) -> Data:
+    node_count = int(graph.x.shape[0])
+    dtype = graph.x.dtype
+    device = graph.x.device
+    setattr(graph, PHYSICAL_XPASS_PROB_ATTR, torch.full((node_count,), 0.5, dtype=dtype, device=device))
+    setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, torch.zeros(node_count, dtype=dtype, device=device))
+    setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
+    for name in (
+        PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+        PHYSICAL_XPASS_BALL_Z_ATTR,
+        PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+    ):
+        setattr(graph, name, torch.full((node_count,), float("nan"), dtype=dtype, device=device))
+    return graph
+
+
+def _attach_empty_pass_height(graph: Data) -> Data:
+    node_count = int(graph.x.shape[0])
+    setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
+    setattr(
+        graph,
+        PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
+        torch.full((node_count,), float("nan"), dtype=graph.x.dtype, device=graph.x.device),
+    )
+    return graph
+
+
+def _attach_empty_evaluation_xpass(graph: Data) -> Data:
+    node_count = int(graph.x.shape[0])
+    dtype = graph.x.dtype
+    device = graph.x.device
+    setattr(graph, EVALUATION_XPASS_PROB_ATTR, torch.full((node_count,), float("nan"), dtype=dtype, device=device))
+    setattr(graph, EVALUATION_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
+    setattr(
+        graph,
+        EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+        torch.full((node_count,), float("nan"), dtype=dtype, device=device),
+    )
+    setattr(
+        graph,
+        EVALUATION_XPASS_PASS_HEIGHT_ATTR,
+        torch.full((node_count,), float("nan"), dtype=dtype, device=device),
+    )
+    return graph
+
+
 def pass_success_observed_target_invalid_reason(graph: Data, labels: torch.Tensor) -> str | None:
     target_index = int(labels[LABEL_INDEX["intent_index"]].item())
     if target_index < 0 or target_index >= int(graph.x.shape[0]):
@@ -68,8 +125,12 @@ def pass_success_observed_target_invalid_reason(graph: Data, labels: torch.Tenso
     target = graph.x[target_index]
     if int(target[config.NODE_FEATURE_IS_TEAMMATE].item()) != 1:
         return "target_not_teammate"
-    if int(target[config.NODE_FEATURE_IS_POSSESSOR].item()) == 1:
+    is_dribble = bool(labels[LABEL_INDEX["is_dribble"]].item())
+    target_is_possessor = int(target[config.NODE_FEATURE_IS_POSSESSOR].item()) == 1
+    if not is_dribble and target_is_possessor:
         return "target_is_possessor"
+    if is_dribble and not target_is_possessor:
+        return "carry_target_is_not_possessor"
     if graph.x.shape[1] > config.NODE_FEATURE_IS_GOAL and int(target[config.NODE_FEATURE_IS_GOAL].item()) == 1:
         return "target_is_goal"
     if not bool(torch.isfinite(target[config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1]).all().item()):
@@ -514,22 +575,28 @@ class ActionDataset(Dataset):
                 graph = sparsify_edges(graph, "delaunay")
 
             if self.lane_survival:
-                match_id = feature_match_ids[int(i)]
-                if match_id not in lane_survival_rows_by_match:
-                    lane_survival_rows_by_match[match_id] = load_physical_xpass_match(
-                        lane_survival_cache_root,
-                        match_id,
-                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                if bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
+                    graph.x = torch.cat(
+                        [graph.x, torch.zeros((graph.x.shape[0], 1), dtype=graph.x.dtype, device=graph.x.device)],
+                        dim=-1,
                     )
-                graph = append_pc_xpass_lane_survival_to_graph(
-                    graph,
-                    graph_labels,
-                    lane_survival_rows_by_match[match_id],
-                    match_id=match_id,
-                    require_observed_target=True,
-                    possessor_index=int(possessor_index),
-                    mode=self.lane_survival_mode,
-                )
+                else:
+                    match_id = feature_match_ids[int(i)]
+                    if match_id not in lane_survival_rows_by_match:
+                        lane_survival_rows_by_match[match_id] = load_physical_xpass_match(
+                            lane_survival_cache_root,
+                            match_id,
+                            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        )
+                    graph = append_pc_xpass_lane_survival_to_graph(
+                        graph,
+                        graph_labels,
+                        lane_survival_rows_by_match[match_id],
+                        match_id=match_id,
+                        require_observed_target=True,
+                        possessor_index=int(possessor_index),
+                        mode=self.lane_survival_mode,
+                    )
 
             if task == "failure_receiver":
                 intent_onehot = torch.zeros(graph.x.shape[0])
@@ -537,53 +604,62 @@ class ActionDataset(Dataset):
                 graph.x = torch.cat([graph.x, intent_onehot.unsqueeze(1)], -1)
 
             if self.use_physical_xpass:
-                match_id = feature_match_ids[int(i)]
-                if match_id not in physical_rows_by_match:
-                    physical_rows_by_match[match_id] = load_physical_xpass_match(physical_cache_root, match_id)
-                graph = attach_physical_xpass_to_graph(
-                    graph,
-                    graph_labels,
-                    physical_rows_by_match[match_id],
-                    match_id=match_id,
-                    eps=self.physical_eps,
-                    floor=self.physical_xpass_floor,
-                    require_observed_target=True,
-                )
+                if bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
+                    graph = _attach_neutral_physical_xpass(graph)
+                else:
+                    match_id = feature_match_ids[int(i)]
+                    if match_id not in physical_rows_by_match:
+                        physical_rows_by_match[match_id] = load_physical_xpass_match(physical_cache_root, match_id)
+                    graph = attach_physical_xpass_to_graph(
+                        graph,
+                        graph_labels,
+                        physical_rows_by_match[match_id],
+                        match_id=match_id,
+                        eps=self.physical_eps,
+                        floor=self.physical_xpass_floor,
+                        require_observed_target=True,
+                    )
 
             if pass_height_cache_root is not None:
-                match_id = feature_match_ids[int(i)]
-                if match_id not in pass_height_rows_by_match:
-                    pass_height_rows_by_match[match_id] = load_physical_xpass_match(
-                        pass_height_cache_root,
-                        match_id,
-                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                if bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
+                    graph = _attach_empty_pass_height(graph)
+                else:
+                    match_id = feature_match_ids[int(i)]
+                    if match_id not in pass_height_rows_by_match:
+                        pass_height_rows_by_match[match_id] = load_physical_xpass_match(
+                            pass_height_cache_root,
+                            match_id,
+                            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        )
+                    graph = attach_pass_height_to_graph(
+                        graph,
+                        graph_labels,
+                        pass_height_rows_by_match[match_id],
+                        match_id=match_id,
+                        require_observed_target=self.require_observed_pass_height,
                     )
-                graph = attach_pass_height_to_graph(
-                    graph,
-                    graph_labels,
-                    pass_height_rows_by_match[match_id],
-                    match_id=match_id,
-                    require_observed_target=self.require_observed_pass_height,
-                )
 
             if evaluation_xpass_cache_root is not None:
-                match_id = feature_match_ids[int(i)]
-                if match_id not in evaluation_xpass_rows_by_match:
-                    evaluation_xpass_rows_by_match[match_id] = load_physical_xpass_match(
-                        evaluation_xpass_cache_root,
-                        match_id,
+                if bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
+                    graph = _attach_empty_evaluation_xpass(graph)
+                else:
+                    match_id = feature_match_ids[int(i)]
+                    if match_id not in evaluation_xpass_rows_by_match:
+                        evaluation_xpass_rows_by_match[match_id] = load_physical_xpass_match(
+                            evaluation_xpass_cache_root,
+                            match_id,
+                            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        )
+                    graph = attach_evaluation_xpass_to_graph(
+                        graph,
+                        graph_labels,
+                        evaluation_xpass_rows_by_match[match_id],
+                        match_id=match_id,
+                        metric=evaluation_xpass_metric,
                         frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+                        require_nearest_opponent_distance=self.evaluation_xpass_require_nearest,
+                        require_pass_height=self.evaluation_xpass_require_height,
                     )
-                graph = attach_evaluation_xpass_to_graph(
-                    graph,
-                    graph_labels,
-                    evaluation_xpass_rows_by_match[match_id],
-                    match_id=match_id,
-                    metric=evaluation_xpass_metric,
-                    frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
-                    require_nearest_opponent_distance=self.evaluation_xpass_require_nearest,
-                    require_pass_height=self.evaluation_xpass_require_height,
-                )
 
             self.features.append(graph)
             self.labels.append(graph_labels)

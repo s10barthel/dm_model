@@ -663,6 +663,50 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             ],
         )
 
+    def test_full_generation_can_add_two_carry_base_steps_without_changing_canonical_steps(self) -> None:
+        canonical_steps = generator.full_generation_commands("python")
+        carry_steps = generator.full_generation_commands("python", use_carries=True)
+
+        self.assertEqual(carry_steps[: len(canonical_steps)], canonical_steps)
+        self.assertEqual(len(carry_steps), len(canonical_steps) + 2)
+        self.assertTrue(all("--use-carries" in step.command for step in carry_steps[-2:]))
+        self.assertTrue(all("--post_action" in step.command for step in carry_steps[-2:]))
+
+    def test_carry_extension_steps_preserve_existing_run_configuration(self) -> None:
+        metadata = make_metadata(
+            return_types=["next_5", "in_3"],
+            modes=["original", "model"],
+            model_id="success_intent/42",
+            graph_schema={
+                "node_in_dim": 25,
+                "edge_in_dim": 5,
+                "add_v_edge_features": True,
+                "add_relative_speed_edge_features": True,
+            },
+            next_action_conditions_enabled=False,
+        )
+        metadata["train_split_percent"] = 60
+        args = make_args(run_id=None, in_place=True, num_workers="3", worker_thread_limit=2)
+
+        steps = generator.carry_extension_steps(args, metadata, "base")
+
+        self.assertEqual([step.description for step in steps], [
+            "train split carry-augmented base",
+            "test split carry-augmented base",
+        ])
+        for step in steps:
+            command = step.command
+            self.assertIn("--use-carries", command)
+            self.assertIn("--post_action", command)
+            self.assertIn("--relative-speed-edge-features", command)
+            self.assertIn("--next-action-conditions-off", command)
+            self.assertEqual(command[command.index("--train-split") + 1], "60")
+            self.assertEqual(command[command.index("--run-id") + 1], "base")
+            self.assertEqual(
+                [command[index + 1] for index, value in enumerate(command) if value == "--return_type"],
+                ["next_5", "in_3"],
+            )
+
 
 class FeatureRunExtensionExecutionTests(unittest.TestCase):
     def test_successful_extension_copies_base_artifacts_and_updates_latest_after_commands(self) -> None:

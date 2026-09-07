@@ -46,6 +46,7 @@ def make_action_args(output_dir: Path) -> SimpleNamespace:
         advanced_position=None,
         team_id=None,
         spadl_type=["pass"],
+        action_type=None,
         success=None,
         offside=None,
         next_type=None,
@@ -84,6 +85,7 @@ def make_selection_args(**overrides: object) -> SimpleNamespace:
         advanced_position=None,
         team_id=None,
         spadl_type=None,
+        action_type=None,
         success=None,
         offside=None,
         next_type=None,
@@ -285,6 +287,13 @@ class VisualizationVersioningTests(unittest.TestCase):
         )
         with patch.object(sys, "argv", ["run_relevant_models.py"]):
             self.assertIsNone(run_relevant_models.parse_args().output_dir)
+
+    def test_action_visualization_accepts_repeatable_action_type_filter(self) -> None:
+        args = visualize_action_components.parse_args(
+            ["--match-id", "DFL-MAT-1", "--action-type", "dribble", "--action-type", "pass"]
+        )
+
+        self.assertEqual(args.action_type, ["dribble", "pass"])
 
     def test_resolve_action_indices_first_limits_eligible_modeled_events(self) -> None:
         match = make_selection_match()

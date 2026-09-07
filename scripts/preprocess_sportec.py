@@ -16,7 +16,10 @@ import numpy as np
 import pandas as pd
 
 import datatools.preprocess as tracking_preprocess
+from datatools.ball_carries import build_synchronized_control_events, derive_carry_segments
 from project_config import (
+    CARRY_SEGMENTS_DIR,
+    CONTROL_EVENTS_SYNCED_DIR,
     EVENT_PATH,
     EVENT_SYNCED_DIR,
     LINEUP_PATH,
@@ -146,12 +149,79 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Rebuild existing outputs.")
     parser.add_argument("--skip-sync", action="store_true", help="Skip event-tracking synchronization.")
     parser.add_argument(
+        "--carry-artifacts-only",
+        action="store_true",
+        help="Add or refresh carry sidecars from existing canonical Sportec outputs without rebuilding them.",
+    )
+    parser.add_argument(
         "--sync-source",
         choices=SYNC_SOURCES,
         default="sportec_kpi",
         help="Synchronization source for canonical event outputs.",
     )
     return parser.parse_args()
+
+
+def write_carry_artifacts(
+    match_files: MatchFiles,
+    lineup: pd.DataFrame,
+    raw_events: pd.DataFrame,
+    tracking: pd.DataFrame,
+    fps: float,
+    canonical_events: pd.DataFrame,
+) -> dict[str, int]:
+    frame_table = build_tracking_frame_table(raw_events, tracking, fps)
+    try:
+        kpi = load_kpi_merged_table(match_files)
+    except (FileNotFoundError, ValueError):
+        kpi = None
+    control = build_synchronized_control_events(
+        match_files.event_path,
+        lineup,
+        frame_table,
+        kpi=kpi,
+        canonical_events=canonical_events,
+        fps=fps,
+    )
+    carries, audit = derive_carry_segments(control, canonical_events, tracking, fps=int(round(fps)))
+    CONTROL_EVENTS_SYNCED_DIR.mkdir(parents=True, exist_ok=True)
+    CARRY_SEGMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    audit_dir = CARRY_SEGMENTS_DIR / "audits"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    control.to_parquet(CONTROL_EVENTS_SYNCED_DIR / f"{match_files.match_id}.parquet", index=False)
+    carries.to_parquet(CARRY_SEGMENTS_DIR / f"{match_files.match_id}.parquet", index=False)
+    audit.to_parquet(audit_dir / f"{match_files.match_id}.parquet", index=False)
+    return {
+        "control_events": len(control),
+        "mapped_control_events": int(control.get("frame_id", pd.Series(dtype="float64")).notna().sum()),
+        "retained_spells": int(audit.get("retained", pd.Series(dtype="bool")).fillna(False).sum()),
+        "segments": len(carries),
+    }
+
+
+def run_carry_artifacts_only(args: argparse.Namespace, selected_matches: list[MatchFiles]) -> None:
+    if not LINEUP_PATH.exists():
+        raise FileNotFoundError(f"Carry-only preprocessing requires {LINEUP_PATH}.")
+    all_lineups = pd.read_parquet(LINEUP_PATH)
+    for index, match_files in enumerate(selected_matches, start=1):
+        print(f"[{index}/{len(selected_matches)}] {match_files.match_id}")
+        tracking_path = TRACKING_PROCESSED_DIR / f"{match_files.match_id}.parquet"
+        event_path = EVENT_SYNCED_DIR / f"{match_files.match_id}.csv"
+        if not tracking_path.exists() or not event_path.exists():
+            raise FileNotFoundError(
+                f"Carry-only preprocessing requires existing tracking and canonical events for {match_files.match_id}."
+            )
+        lineup = all_lineups.loc[all_lineups["stats_perform_match_id"].astype(str) == match_files.match_id].copy()
+        raw_events = load_match_raw_events(match_files)
+        tracking = pd.read_parquet(tracking_path)
+        canonical = pd.read_csv(event_path, parse_dates=["utc_timestamp"])
+        stats = write_carry_artifacts(match_files, lineup, raw_events, tracking, 25.0, canonical)
+        print(
+            "  Carries:",
+            f"control={stats['mapped_control_events']}/{stats['control_events']}",
+            f"spells={stats['retained_spells']}",
+            f"segments={stats['segments']}",
+        )
 
 
 def to_utc_naive(timestamp: str | pd.Timestamp) -> pd.Timestamp:
@@ -979,6 +1049,7 @@ def build_tracking_frame_table(events: pd.DataFrame, tracking: pd.DataFrame, fps
     if "raw_frame_id" not in tracking_frames.columns:
         tracking_frames["raw_frame_id"] = tracking_frames["frame_id"]
     tracking_frames = tracking_frames[["frame_id", "raw_frame_id", "period_id", "timestamp", "utc_timestamp"]]
+    tracking_frames = tracking_frames.reset_index(drop=True)
     tracking_frames = tracking_frames.drop_duplicates(["period_id", "frame_id"])
     tracking_frames["frame_id"] = pd.to_numeric(tracking_frames["frame_id"], errors="coerce").astype("Int64")
     tracking_frames["raw_frame_id"] = pd.to_numeric(tracking_frames["raw_frame_id"], errors="coerce").astype("Int64")
@@ -1418,6 +1489,11 @@ def main() -> None:
     selected_matches = filter_matches(all_matches, args.match_id, args.limit)
     if not selected_matches:
         raise ValueError("No matches selected for processing.")
+    if args.carry_artifacts_only:
+        run_carry_artifacts_only(args, selected_matches)
+        print(f"Saved synchronized control-event sidecars to {CONTROL_EVENTS_SYNCED_DIR}")
+        print(f"Saved carry-segment sidecars to {CARRY_SEGMENTS_DIR}")
+        return
 
     for index, match_files in enumerate(selected_matches, start=1):
         print(f"[{index}/{len(selected_matches)}] {match_files.match_id}")
@@ -1478,6 +1554,20 @@ def main() -> None:
                     f"elastic_frame_fallbacks={sync_audit.get('elastic_frame_fallbacks', 0)}",
                     f"elastic_receive_fallbacks={sync_audit.get('elastic_receive_fallbacks', 0)}",
                 )
+                carry_stats = write_carry_artifacts(
+                    match_files,
+                    finalized_lineup,
+                    raw_events,
+                    tracking,
+                    fps,
+                    synced_events,
+                )
+                print(
+                    "  Carries:",
+                    f"control={carry_stats['mapped_control_events']}/{carry_stats['control_events']}",
+                    f"spells={carry_stats['retained_spells']}",
+                    f"segments={carry_stats['segments']}",
+                )
 
             exported_lineup = export_lineup_table(finalized_lineup)
             metadata_record = {
@@ -1521,6 +1611,7 @@ def main() -> None:
     print(f"Saved unsynced event parquet to {EVENT_PATH}")
     if not args.skip_sync:
         print(f"Saved synced per-match CSV files to {EVENT_SYNCED_DIR}")
+        print(f"Saved carry-segment sidecars to {CARRY_SEGMENTS_DIR}")
     if skipped_matches:
         print(f"Skipped {len(skipped_matches)} matches during preprocessing.")
         for item in skipped_matches[:10]:

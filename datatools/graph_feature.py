@@ -24,11 +24,13 @@ from tqdm import tqdm
 import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.config import LABEL_INDEX
+from datatools.ball_carries import augment_match_actions_with_carries
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
 from project_config import (
     ACTION_GRAPH_DIR,
     ACTION_GRAPH_INTENT_TRAIN_DIR,
+    CARRY_SEGMENTS_DIR,
     FEATURE_DIR,
     INTENDED_RECEIVER_MODE_MODEL,
     POST_ACTION_GRAPH_DIR,
@@ -757,6 +759,7 @@ def build_labels_by_mode_and_return(
     feature_root: Path | None = None,
     match_id: str | None = None,
     prefer_existing_resolved_actions: bool = False,
+    use_carries: bool = False,
 ) -> tuple[dict[str, pd.DataFrame], dict[tuple[str, str], torch.Tensor], dict[str, dict[str, int]]]:
     if not return_types:
         raise ValueError("At least one return_type must be requested.")
@@ -775,6 +778,7 @@ def build_labels_by_mode_and_return(
                 match_id,
                 intended_receiver_mode=mode,
                 root=feature_root,
+                use_carries=use_carries,
             )
             if resolved_action_path.exists():
                 resolved_actions = pd.read_parquet(resolved_action_path)
@@ -1261,6 +1265,9 @@ def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
         "overwrite_labels": bool(args.overwrite_labels),
         "next_action_conditions_enabled": bool(args.next_action_conditions_enabled),
         "pass_height_threshold": args.pass_height_threshold,
+        "use_carries": bool(args.use_carries),
+        "add_v_edge_features": bool(args.add_v_edge_features),
+        "add_relative_speed_edge_features": bool(args.add_relative_speed_edge_features),
     }
 
 
@@ -1281,7 +1288,7 @@ def ensure_output_dirs(args: argparse.Namespace, feature_root: Path) -> FeatureG
             feature_dir = get_success_intent_graph_dir(feature_root)
             label_dir_builder = None
         else:
-            feature_dir = get_action_graph_dir(feature_root)
+            feature_dir = get_action_graph_dir(feature_root, use_carries=args.use_carries)
             label_dir_builder = get_action_label_dir
         Path(feature_dir).mkdir(parents=True, exist_ok=True)
         if args.feature_variant == "success_intent":
@@ -1289,18 +1296,23 @@ def ensure_output_dirs(args: argparse.Namespace, feature_root: Path) -> FeatureG
         else:
             for intended_receiver_mode in args.intended_receiver_modes:
                 for return_type in args.return_types:
+                    label_kwargs = {
+                        "intended_receiver_mode": intended_receiver_mode,
+                        "root": feature_root,
+                    }
+                    if args.feature_variant == "base":
+                        label_kwargs["use_carries"] = args.use_carries
                     Path(
                         label_dir_builder(
                             return_type,
-                            intended_receiver_mode=intended_receiver_mode,
-                            root=feature_root,
+                            **label_kwargs,
                         )
                     ).mkdir(parents=True, exist_ok=True)
 
         if args.post_action:
             if args.feature_variant != "base":
                 raise ValueError("Post-action features are only supported for base graphs.")
-            post_feature_dir = str(get_post_action_graph_dir(feature_root))
+            post_feature_dir = str(get_post_action_graph_dir(feature_root, use_carries=args.use_carries))
             os.makedirs(post_feature_dir, exist_ok=True)
 
     if args.augment_blocks or args.augment_blocks_from_existing_graphs:
@@ -1394,6 +1406,7 @@ def _save_action_type_all_match(
         feature_root=feature_root,
         match_id=match_id,
         prefer_existing_resolved_actions=args.labels_only,
+        use_carries=args.use_carries,
     )
 
     if args.labels_only:
@@ -1426,6 +1439,7 @@ def _save_action_type_all_match(
             match_id,
             intended_receiver_mode=mode,
             root=feature_root,
+            use_carries=args.use_carries,
         )
         resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
         resolved_actions.to_parquet(resolved_action_path)
@@ -1519,6 +1533,7 @@ def _save_action_type_all_match(
                 return_type,
                 intended_receiver_mode=mode,
                 root=feature_root,
+                use_carries=args.use_carries,
             )
             torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
 
@@ -1591,6 +1606,13 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
     events = pd.read_csv(f"data/event_synced/{task.match_id}.csv", header=0, parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    if args.use_carries:
+        carry_path = CARRY_SEGMENTS_DIR / f"{task.match_id}.parquet"
+        if not carry_path.exists():
+            raise FileNotFoundError(
+                f"Carry sidecar not found at {carry_path}. Run scripts/preprocess_sportec.py --carry-artifacts-only first."
+            )
+        augment_match_actions_with_carries(match, pd.read_parquet(carry_path))
     if task.show_progress:
         print(_match_heading(task, task.match_lineup))
 
@@ -1649,6 +1671,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
     parser.add_argument("--augment_blocks", action="store_true", default=False)
+    parser.add_argument(
+        "--use-carries",
+        action="store_true",
+        help="Generate a separate base artifact variant augmented with Sportec one-second carry segments.",
+    )
     parser.add_argument(
         "--feature_variant",
         type=str,
@@ -1770,6 +1797,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.use_carries and (args.action_type != "all" or args.feature_variant != "base"):
+        raise ValueError("--use-carries is supported only with --action_type all --feature_variant base.")
+    if args.use_carries and (args.labels_only or args.augment_blocks or args.augment_blocks_from_existing_graphs):
+        raise ValueError("Carry artifacts must be generated as standalone base graphs without label-only/block augmentation.")
     if args.labels_only and args.post_action:
         raise ValueError("--labels-only cannot be combined with --post_action.")
     if args.labels_only and args.feature_variant == "success_intent":

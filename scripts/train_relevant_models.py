@@ -746,6 +746,7 @@ def derive_bundle_shared_context(
         )
         return {
             "feature_run_id": resolved_feature_run_id or shared.get("feature_run_id"),
+            "use_carries": shared.get("use_carries"),
             "intended_receiver_mode": getattr(cli_args, "intended_receiver_mode", None),
             "return_type": cli_args.return_type,
             "target_family": cli_args.target_family,
@@ -766,6 +767,7 @@ def derive_bundle_shared_context(
     use_relative_speed_edge_features = use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode)
     return {
         "feature_run_id": resolved_feature_run_id,
+        "use_carries": bool(getattr(cli_args, "use_carries", False)),
         "intended_receiver_mode": None,
         "return_type": cli_args.return_type,
         "target_family": cli_args.target_family,
@@ -807,6 +809,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
+    parser.add_argument(
+        "--use-carries",
+        action="store_true",
+        help=(
+            "Use the feature run's carry-augmented artifacts for action_intent, pass_success, "
+            "outcome_scoring, and outcome_conceding. Pass-only tasks remain on canonical artifacts."
+        ),
+    )
     parser.add_argument(
         "--diagnostic-feature-run-id",
         default=None,
@@ -1229,6 +1239,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     except (ValueError, FileNotFoundError) as exc:
         parser.error(str(exc))
     feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
+    if args.use_carries and not bool((feature_metadata.get("carry_variant") or {}).get("available", False)):
+        parser.error(
+            f"Feature run {args.feature_run_id} does not advertise carry-augmented artifacts. "
+            "Extend it with generate_relevant_features.py --use-carries first."
+        )
     feature_split_id = feature_metadata.get("split_manifest_id")
     if feature_split_id and feature_split_id != split_manifest["manifest_id"]:
         parser.error(
@@ -1599,6 +1614,7 @@ def build_training_commands(
     mode = args.intended_receiver_mode if any(args.enabled_tasks.get(task, False) for task in MODE_DEPENDENT_TASKS) else None
     target_family = args.target_family if any(args.enabled_tasks.get(task, False) for task in OUTCOME_TASKS) else None
     effective_return_type = args.return_type
+    use_carries = bool(getattr(args, "use_carries", False))
     feature_flags = resolve_wrapper_feature_flags(args)
     batch_sizes = resolve_batch_sizes(args, args.enabled_tasks)
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
@@ -1665,6 +1681,15 @@ def build_training_commands(
         )
         augmented_feature_dir = str(get_augmented_feature_dir(intended_receiver_mode=mode, root=feature_root))
         augmented_label_dir = str(get_augmented_label_dir(intended_receiver_mode=mode, root=feature_root))
+        carry_feature_dir = str(get_action_graph_dir(feature_root, use_carries=True))
+        carry_label_dir = str(
+            get_action_label_dir(
+                effective_return_type,
+                intended_receiver_mode=mode,
+                root=feature_root,
+                use_carries=True,
+            )
+        )
 
         if args.enabled_tasks.get("pass_intent", False):
             commands.append(
@@ -1686,22 +1711,25 @@ def build_training_commands(
             trained_model_ids["pass_intent"] = model_ids["pass_intent"]
 
         if args.enabled_tasks.get("action_intent", False):
-            commands.append(
-                intent_command(
+            action_intent_command = intent_command(
                     "action_intent",
                     model_ids["action_intent"],
-                    base_feature_dir,
-                    base_label_dir,
-                    intent_train_feature_dir,
-                    intent_train_label_dir,
+                    carry_feature_dir if use_carries else base_feature_dir,
+                    carry_label_dir if use_carries else base_label_dir,
+                    carry_feature_dir if use_carries else intent_train_feature_dir,
+                    carry_label_dir if use_carries else intent_train_label_dir,
                     mode,
                     effective_return_type,
                     batch_sizes["action_intent"],
                     v_edge_feature_mode,
                     relative_speed_edge_feature_mode,
                     feature_flags,
-                )
             )
+            if use_carries:
+                min_pass_duration_index = action_intent_command.index("--min_pass_dur")
+                del action_intent_command[min_pass_duration_index : min_pass_duration_index + 2]
+                action_intent_command.append("--use-carries")
+            commands.append(action_intent_command)
             trained_model_ids["action_intent"] = model_ids["action_intent"]
 
         if args.enabled_tasks.get("pass_success", False):
@@ -1710,12 +1738,11 @@ def build_training_commands(
             ) if pass_success_ipw else None
             if pass_success_ipw and ipw_model_id is None:
                 raise ValueError("--pass-success requires --pass-intent or --pass-intent-model-id.")
-            commands.append(
-                pass_success_command(
+            carry_command = pass_success_command(
                     "pass_success",
                     model_ids["pass_success"],
-                    base_feature_dir,
-                    base_label_dir,
+                    carry_feature_dir if use_carries else base_feature_dir,
+                    carry_label_dir if use_carries else base_label_dir,
                     ipw_model_id,
                     mode,
                     effective_return_type,
@@ -1725,7 +1752,9 @@ def build_training_commands(
                     feature_flags,
                     args,
                 )
-            )
+            if use_carries:
+                carry_command.append("--use-carries")
+            commands.append(carry_command)
             trained_model_ids["pass_success"] = model_ids["pass_success"]
 
         if args.enabled_tasks.get("pass_height", False):
@@ -1752,12 +1781,11 @@ def build_training_commands(
             trained_model_ids["pass_height"] = model_ids["pass_height"]
 
         if args.enabled_tasks.get("outcome_scoring", False):
-            commands.append(
-                outcome_command(
+            carry_command = outcome_command(
                     "outcome_scoring",
                     model_ids["outcome_scoring"],
-                    base_feature_dir,
-                    base_label_dir,
+                    carry_feature_dir if use_carries else base_feature_dir,
+                    carry_label_dir if use_carries else base_label_dir,
                     target_family,
                     effective_return_type,
                     mode,
@@ -1767,16 +1795,17 @@ def build_training_commands(
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
-            )
+            if use_carries:
+                carry_command.append("--use-carries")
+            commands.append(carry_command)
             trained_model_ids["outcome_scoring"] = model_ids["outcome_scoring"]
 
         if args.enabled_tasks.get("outcome_conceding", False):
-            commands.append(
-                outcome_command(
+            carry_command = outcome_command(
                     "outcome_conceding",
                     model_ids["outcome_conceding"],
-                    base_feature_dir,
-                    base_label_dir,
+                    carry_feature_dir if use_carries else base_feature_dir,
+                    carry_label_dir if use_carries else base_label_dir,
                     target_family,
                     effective_return_type,
                     mode,
@@ -1786,7 +1815,9 @@ def build_training_commands(
                     feature_flags,
                     getattr(args, "diagnostic_feature_run_id", None),
                 )
-            )
+            if use_carries:
+                carry_command.append("--use-carries")
+            commands.append(carry_command)
             trained_model_ids["outcome_conceding"] = model_ids["outcome_conceding"]
 
         if args.enabled_tasks.get("failure_receiver", False):
@@ -2056,6 +2087,7 @@ def main() -> None:
                 "updated_at": timestamp,
                 "command": subprocess.list2cmdline(sys.argv),
                 "feature_run_id": resolved_feature_run_id,
+                "use_carries": bool(getattr(cli_args, "use_carries", False)),
                 "intended_receiver_mode": intended_receiver_mode,
                 "return_type": cli_args.return_type,
                 "target_family": cli_args.target_family,
@@ -2128,6 +2160,7 @@ def main() -> None:
         "updated_at": timestamp,
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": effective_feature_run_id,
+        "use_carries": bool(bundle_shared.get("use_carries", getattr(cli_args, "use_carries", False))),
         "train_split_percent": train_split,
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],

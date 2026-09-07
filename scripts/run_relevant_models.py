@@ -132,6 +132,7 @@ def load_match(
     feature_root: Path | None = None,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    use_carries: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -145,6 +146,7 @@ def load_match(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
         root=feature_root,
+        use_carries=use_carries,
     )
     if not resolved_action_path.exists():
         raise FileNotFoundError(
@@ -159,7 +161,7 @@ def load_match(
         return_type=return_type,
     )
 
-    graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
+    graph_path = get_action_graph_dir(feature_root, use_carries=use_carries) / f"{match_id}.pt"
     if graph_path.exists():
         try:
             match.graph_features_0 = torch.load(graph_path, weights_only=False)
@@ -194,7 +196,7 @@ def load_match(
         raise ValueError("No usable action graphs are available for this match.")
 
     match.actions = match.label_post_actions(match.actions)
-    post_graph_path = get_post_action_graph_dir(feature_root) / f"{match_id}.pt"
+    post_graph_path = get_post_action_graph_dir(feature_root, use_carries=use_carries) / f"{match_id}.pt"
     if post_graph_path.exists():
         try:
             match.graph_features_1 = torch.load(post_graph_path, weights_only=False)
@@ -655,6 +657,11 @@ def main() -> None:
             f"--train-split {requested_train_split} does not match the selected bundle/model split {recorded_train_split}."
         )
     feature_metadata = load_feature_run_metadata(feature_run_id, required=False) or {}
+    use_carries = bool(shared_context.get("use_carries", False))
+    if use_carries and not bool((feature_metadata.get("carry_variant") or {}).get("available", False)):
+        raise ValueError(
+            f"Selected checkpoints require carries, but feature run {feature_run_id} has no carry variant."
+        )
     bundle_split_id = (bundle or {}).get("split_manifest_id")
     feature_split_id = feature_metadata.get("split_manifest_id")
     if bundle_split_id and feature_split_id and bundle_split_id != feature_split_id:
@@ -662,7 +669,7 @@ def main() -> None:
     match_ids = resolve_match_ids(
         args.split,
         args.match_id,
-        get_action_graph_dir(feature_root),
+        get_action_graph_dir(feature_root, use_carries=use_carries),
         train_split=recorded_train_split,
     )
 
@@ -693,6 +700,7 @@ def main() -> None:
         "intended_receiver_mode": intended_receiver_mode,
         "return_type": return_type,
         "target_family": shared_context.get("target_family"),
+        "use_carries": use_carries,
         "graph_schema": graph_schema,
         "models": {
             "action_intent": resolved_model_ids["action_intent"],
@@ -748,6 +756,7 @@ def main() -> None:
                 feature_root=feature_root,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                use_carries=use_carries,
             )
             match_output_dir = output_dir / match_id
 

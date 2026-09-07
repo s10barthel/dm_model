@@ -301,6 +301,7 @@ parser.add_argument("--filter_blockers", action="store_true", default=False, hel
 parser.add_argument("--sparsify", type=str, choices=["distance", "delaunay", "none"], help="how to filter edges")
 parser.add_argument("--max_edge_dist", type=int, default=10, help="max distance between off-ball nodes")
 parser.add_argument("--feature_run_id", "--feature-run-id", dest="feature_run_id", type=str, default=None, help="Pinned feature-artifact run id.")
+parser.add_argument("--use-carries", action="store_true", help="Checkpoint was trained with Sportec carry-augmented artifacts.")
 parser.add_argument("--intended-receiver-mode", type=str, default="unknown", help="Resolved intended-receiver mode.")
 parser.add_argument("--label-source", type=str, default=None, help="Optional label provenance descriptor saved with the checkpoint.")
 parser.add_argument("--training-filter", type=str, default=None, help="Optional training-filter descriptor saved with the checkpoint.")
@@ -771,6 +772,7 @@ if __name__ == "__main__":
         "command": subprocess.list2cmdline(sys.argv),
         "resume_run_id": args.resume_run_id,
         "feature_run_id": args.feature_run_id,
+        "use_carries": bool(args.use_carries),
         "train_split_percent": args.train_split,
         "split_manifest_id": args.split_manifest["manifest_id"],
         "split_manifest": args.split_manifest["metadata"],
@@ -952,7 +954,10 @@ if __name__ == "__main__":
             device=device,
             pin_memory=args.pin_memory,
         )
-        train_ipw = inverse_propensity / inverse_propensity.mean()
+        carry_mask = train_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
+        pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
+        train_ipw = inverse_propensity / pass_normalizer
+        train_ipw[carry_mask] = 1.0
         train_dataset.set_inverse_propensity_weights(train_ipw)
 
         if ipw_valid_dataset is not None and valid_dataset is not None:
@@ -962,7 +967,10 @@ if __name__ == "__main__":
                 device=device,
                 pin_memory=args.pin_memory,
             )
-            valid_ipw = inverse_propensity / inverse_propensity.mean()
+            carry_mask = valid_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
+            pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
+            valid_ipw = inverse_propensity / pass_normalizer
+            valid_ipw[carry_mask] = 1.0
             valid_dataset.set_inverse_propensity_weights(valid_ipw)
 
     train_loader = DataLoader(train_dataset, **loader_args)

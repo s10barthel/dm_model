@@ -556,6 +556,8 @@ class Match(ABC):
             period_actions = actions[actions["period_id"] == period]
 
             for i in period_actions.index[:-1]:
+                if actions.at[i, "spadl_type"] == "ball_carry":
+                    continue
                 event_index = actions.at[i, "index"] if "index" in actions.columns else i
                 event_player = actions.at[i, "object_id"]
                 next_player = actions.at[i, "next_player_id"]
@@ -660,22 +662,41 @@ class Match(ABC):
         diagnostic_events = self._get_diagnostic_events()
         self.events = self._get_events_for_return_type(return_type, return_kind, return_value, skip_first)
 
-        self.actions["scores"] = self.events.loc[self.actions.index, "scores"]
-        self.actions["concedes"] = self.events.loc[self.actions.index, "concedes"]
+        return_indices = pd.to_numeric(
+            self.actions.get("return_event_index", pd.Series(self.actions.index, index=self.actions.index)),
+            errors="coerce",
+        )
+        return_indices = return_indices.where(return_indices.notna(), pd.Series(self.actions.index, index=self.actions.index)).astype(int)
+
+        def assign_return_pair(
+            score_name: str,
+            concede_name: str,
+            score_source: str,
+            concede_source: str,
+            source_events: pd.DataFrame,
+        ) -> None:
+            self.actions[score_name] = source_events.loc[return_indices.to_numpy(), score_source].to_numpy()
+            self.actions[concede_name] = source_events.loc[return_indices.to_numpy(), concede_source].to_numpy()
+            source_teams = source_events.loc[return_indices.to_numpy(), "object_id"].astype(str).str[:4].to_numpy()
+            action_teams = self.actions["object_id"].astype(str).str[:4].to_numpy()
+            swap_mask = source_teams != action_teams
+            if swap_mask.any():
+                scores = self.actions[score_name].to_numpy(copy=True)
+                concedes = self.actions[concede_name].to_numpy(copy=True)
+                self.actions.loc[swap_mask, score_name] = concedes[swap_mask]
+                self.actions.loc[swap_mask, concede_name] = scores[swap_mask]
+
+        assign_return_pair("scores", "concedes", "scores", "concedes", self.events)
         if return_kind in {"disc", "disc_max"}:
-            self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg_disc"]
-            self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg_disc"]
+            assign_return_pair("scores_xg", "concedes_xg", "scores_xg_disc", "concedes_xg_disc", self.events)
         else:
-            self.actions["scores_xg"] = self.events.loc[self.actions.index, "scores_xg"]
-            self.actions["concedes_xg"] = self.events.loc[self.actions.index, "concedes_xg"]
-        self.actions["scores_goal_distance"] = self.events.loc[self.actions.index, "scores_goal_distance"]
-        self.actions["concedes_goal_distance"] = self.events.loc[self.actions.index, "concedes_goal_distance"]
-        self.actions["scores_xt"] = self.events.loc[self.actions.index, "scores_xT"]
-        self.actions["concedes_xt"] = self.events.loc[self.actions.index, "concedes_xT"]
-        self.actions["scores_epv"] = self.events.loc[self.actions.index, "scores_epv"]
-        self.actions["concedes_epv"] = self.events.loc[self.actions.index, "concedes_epv"]
-        self.actions["scores_goal_next10"] = diagnostic_events.loc[self.actions.index, "scores"]
-        self.actions["concedes_goal_next10"] = diagnostic_events.loc[self.actions.index, "concedes"]
+            assign_return_pair("scores_xg", "concedes_xg", "scores_xg", "concedes_xg", self.events)
+        assign_return_pair(
+            "scores_goal_distance", "concedes_goal_distance", "scores_goal_distance", "concedes_goal_distance", self.events
+        )
+        assign_return_pair("scores_xt", "concedes_xt", "scores_xT", "concedes_xT", self.events)
+        assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
+        assign_return_pair("scores_goal_next10", "concedes_goal_next10", "scores", "concedes", diagnostic_events)
 
         labels_list = []
 
@@ -747,6 +768,19 @@ class Match(ABC):
                     intent_y = config.FIELD_SIZE[1] - intent_y
 
                 is_real = 1
+
+            elif self.actions.at[i, "action_type"] == "dribble":
+                receiver_index = -1
+                is_real = 1
+                start_x = self.actions.at[i, "start_x"]
+                start_y = self.actions.at[i, "start_y"]
+                end_x = self.actions.at[i, "end_x"]
+                end_y = self.actions.at[i, "end_y"]
+                if self.actions.at[i, "object_id"].startswith("away"):
+                    start_x = config.FIELD_SIZE[0] - start_x
+                    start_y = config.FIELD_SIZE[1] - start_y
+                    end_x = config.FIELD_SIZE[0] - end_x
+                    end_y = config.FIELD_SIZE[1] - end_y
 
             else:
                 duration = 0.0

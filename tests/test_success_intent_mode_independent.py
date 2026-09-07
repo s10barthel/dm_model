@@ -537,6 +537,50 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         self.assertEqual(set(model_ids.keys()), {"outcome_scoring", "outcome_conceding"})
         self.assertTrue(all("--use_xt" in command for command in commands))
 
+    def test_carry_training_routes_only_carry_sensitive_tasks_to_additive_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            feature_root = Path(tmpdir)
+            args = make_training_args(
+                "feature_run",
+                use_carries=True,
+                success_intent_only=False,
+                enabled_tasks=make_enabled_tasks(success_intent=False, failure_receiver=False),
+                trained_tasks=[
+                    "action_intent",
+                    "pass_intent",
+                    "pass_success",
+                    "outcome_scoring",
+                    "outcome_conceding",
+                ],
+            )
+
+            with (
+                patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+                patch.object(train_wrapper, "resolve_feature_root", return_value=feature_root),
+            ):
+                commands, _, _, _, _ = train_wrapper.build_training_commands(args)
+
+        commands_by_task = {command[1]: command for command in commands}
+        carry_tasks = {"action_intent", "pass_success", "outcome_scoring", "outcome_conceding"}
+        for task in carry_tasks:
+            command = commands_by_task[task]
+            self.assertEqual(
+                Path(command[command.index("--feature_dir") + 1]).name,
+                "action_graphs_carries",
+            )
+            self.assertTrue(Path(command[command.index("--label_dir") + 1]).name.endswith("_carries"))
+            self.assertIn("--use-carries", command)
+
+        pass_intent_command = commands_by_task["pass_intent"]
+        self.assertEqual(
+            Path(pass_intent_command[pass_intent_command.index("--feature_dir") + 1]).name,
+            "action_graphs",
+        )
+        self.assertFalse(Path(pass_intent_command[pass_intent_command.index("--label_dir") + 1]).name.endswith("_carries"))
+        self.assertNotIn("--use-carries", pass_intent_command)
+        self.assertIn("--min_pass_dur", pass_intent_command)
+        self.assertNotIn("--min_pass_dur", commands_by_task["action_intent"])
+
     def test_outcome_commands_pass_explicit_diagnostic_feature_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)
