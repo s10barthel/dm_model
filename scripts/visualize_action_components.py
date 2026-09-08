@@ -16,7 +16,7 @@ import pandas as pd
 import torch
 
 from datatools import config
-from datatools.graph_feature import construct_graph_features, summarize_ball_trajectory
+from datatools.graph_feature import construct_graph_features, construct_graph_for_action, summarize_ball_trajectory
 from datatools.match import Match
 from datatools.viz_helpers import compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
@@ -55,6 +55,7 @@ from project_config import (
     get_pc_xpass_dir,
     get_runtime_physical_xpass_dir,
     get_resolved_action_path,
+    get_success_intent_graph_dir,
     write_run_metadata,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
@@ -281,26 +282,51 @@ def run_success_intent_component(
     device: str,
     action_index: int,
 ) -> pd.Series:
-    labels = load_success_intent_labels(match, feature_root)
-    saved_action_indices = {int(action_index_i) for action_index_i in labels[:, 0].detach().cpu().numpy().astype(int)}
-    if int(action_index) not in saved_action_indices:
-        action = match.actions.loc[action_index]
-        action_id = action.get("action_id", action_index)
-        raise ValueError(
-            f"Action index {action_index} (action_id={action_id}) is not present in saved success-intent labels. "
-            "The success-intent component is only available for successful pass actions in the selected feature run."
-        )
-
-    original_labels = match.labels.clone() if isinstance(match.labels, torch.Tensor) else match.labels
-    original_runtime_feature_root = getattr(match, "runtime_feature_root", None)
+    if match.actions.at[action_index, "action_type"] != "pass":
+        raise ValueError("The success-intent component requires a pass action.")
     try:
-        match.runtime_feature_root = Path(feature_root)
-        match.labels = labels
-        probs, _ = inference_gnn(match, model, device=device, post_action=False, event_indices=[action_index])
-        return probs.loc[action_index]
-    finally:
-        match.labels = original_labels
-        match.runtime_feature_root = original_runtime_feature_root
+        labels = load_success_intent_labels(match, feature_root)
+    except FileNotFoundError:
+        labels = None
+
+    graph = None
+    selected_labels = None
+    if labels is not None:
+        positions = torch.nonzero(labels[:, 0] == int(action_index)).flatten()
+        if positions.numel() > 1:
+            raise ValueError(f"Duplicate success-intent labels for action {action_index}.")
+        graph_path = get_success_intent_graph_dir(feature_root) / f"{resolve_match_id(match)}.pt"
+        if positions.numel() and graph_path.exists():
+            saved_graphs = torch.load(graph_path, weights_only=False)
+            if not isinstance(saved_graphs, list) or len(saved_graphs) != len(labels):
+                raise ValueError("Saved success-intent graphs and labels are not row-aligned.")
+            position = int(positions[0].item())
+            graph = saved_graphs[position]
+            selected_labels = labels[position : position + 1]
+
+    if graph is None:
+        schema = validate_model_graph_schemas({"success_intent": model})
+        graph = construct_graph_for_action(
+            match,
+            action_index,
+            feature_variant="success_intent",
+            extend=False,
+            post_action=False,
+            add_v_edge_features=bool(schema["add_v_edge_features"]),
+            add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),
+        )
+        if graph is None:
+            raise ValueError(f"Could not construct a success-intent graph for action {action_index}.")
+        if graph.edge_attr.shape[1] != int(schema["edge_in_dim"]):
+            raise ValueError("Runtime success-intent graph edge schema does not match the checkpoint.")
+        selected_labels = torch.zeros((1, len(config.LABEL_COLUMNS)), dtype=torch.float32)
+        selected_labels[0, 0] = float(action_index)
+
+    probs, _ = inference_gnn(
+        match, model, device=device, post_action=False, event_indices=[action_index],
+        graph_override=[graph], label_override=selected_labels,
+    )
+    return probs.loc[action_index]
 
 
 def describe_action_subset_exclusion(match: Match, event_index: int) -> str:

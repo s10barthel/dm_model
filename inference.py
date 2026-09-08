@@ -795,7 +795,12 @@ def inference_gnn(
     post_action: bool = False,
     event_indices: pd.Index = None,
     pass_intent_probs: pd.DataFrame | None = None,
+    *,
+    graph_override: list | None = None,
+    label_override: torch.Tensor | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if (graph_override is None) != (label_override is None):
+        raise ValueError("graph_override and label_override must be supplied together.")
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
     include_goals = TASK_CONFIG.at[model.args["task"], "include_goals"]
     out_filter = TASK_CONFIG.at[model.args["task"], "out_filter"]
@@ -806,14 +811,21 @@ def inference_gnn(
         and pass_intent_probs is None
     ):
         raise ValueError("Physical xPass weight v5 requires aligned pass_intent probabilities from a pass-intent model.")
-    match_graphs, feature_action_indices = resolve_match_graphs(match, model, post_action)
+    if graph_override is None:
+        match_graphs, feature_action_indices = resolve_match_graphs(match, model, post_action)
+        source_labels = match.labels
+    else:
+        match_graphs, feature_action_indices = graph_override, None
+        source_labels = label_override
     graphs, labels = filter_features_and_labels(
         match_graphs,
-        match.labels,
+        source_labels,
         model.args,
         event_indices,
         feature_action_indices=feature_action_indices,
     )
+    if graph_override is not None and not graphs:
+        raise ValueError("No usable graphs remain for the selected inference actions.")
     if requires_physical_xpass_for_inference(model.args):
         graphs, labels = filter_missing_physical_xpass_rows_for_inference(
             match,
