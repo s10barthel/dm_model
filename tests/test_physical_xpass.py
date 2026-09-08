@@ -2804,10 +2804,13 @@ class PhysicalXPassTests(unittest.TestCase):
             "outcome_scoring": "outcome_scoring",
             "outcome_conceding": "outcome_conceding",
         }
-        inference_calls: list[tuple[str, list[int]]] = []
+        inference_calls: list[tuple[str, list[int], object | None]] = []
+        pass_intent_probs = pd.DataFrame({"home_1": [0.75]}, index=[frame_ids[0]])
 
         def fake_inference(_situation, model, **kwargs):
-            inference_calls.append((str(model), list(kwargs["event_indices"])))
+            inference_calls.append((str(model), list(kwargs["event_indices"]), kwargs.get("pass_intent_probs")))
+            if model == "pass_intent":
+                return pass_intent_probs, pd.DataFrame()
             empty = pd.DataFrame()
             return empty, empty
 
@@ -2861,7 +2864,10 @@ class PhysicalXPassTests(unittest.TestCase):
                     )
 
         self.assertEqual(len(inference_calls), len(model_specs))
-        self.assertEqual({tuple(frame_ids) for _model, frame_ids in inference_calls}, {tuple(expected_frame_ids)})
+        self.assertEqual({tuple(frame_ids) for _model, frame_ids, _intent in inference_calls}, {tuple(expected_frame_ids)})
+        intent_by_model = {model: intent for model, _frame_ids, intent in inference_calls}
+        self.assertIs(intent_by_model["pass_success"], pass_intent_probs)
+        self.assertTrue(all(intent is None for model, intent in intent_by_model.items() if model != "pass_success"))
 
     def test_run_and_visualize_hawkeye_inference_uses_png_selected_frames(self) -> None:
         self._assert_hawkeye_render_inference_frames(

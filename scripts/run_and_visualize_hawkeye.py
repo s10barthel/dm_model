@@ -342,7 +342,6 @@ def render_situation(
                 device=device,
                 post_action=False,
                 event_indices=inference_frame_ids,
-                pass_intent_probs=components.get("pass_intent"),
             )
         if "pass_intent" in model_specs:
             components["pass_intent"], _ = inference_gnn(
@@ -359,6 +358,7 @@ def render_situation(
                 device=device,
                 post_action=False,
                 event_indices=inference_frame_ids,
+                pass_intent_probs=components.get("pass_intent"),
             )
         if "pass_height" in model_specs:
             components["pass_height"], _ = inference_gnn(

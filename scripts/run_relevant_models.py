@@ -800,6 +800,7 @@ def main() -> None:
                     model_specs["pass_success"],
                     device=device,
                     post_action=True,
+                    pass_intent_probs=pass_intent_receive,
                 )
             except PhysicalXPassNoUsableRowsError as exc:
                 print(f"  WARN {match_id}: pass_success receive_frame_id export skipped: {summarize_exception(exc)}")
@@ -810,7 +811,6 @@ def main() -> None:
                     model_specs["pass_height"],
                     device=device,
                     post_action=True,
-                    pass_intent_probs=pass_intent_receive,
                 )
             scoring_failure, scoring_success = inference_gnn(
                 match,
