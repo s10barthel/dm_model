@@ -858,24 +858,73 @@ def load_match_universe() -> dict[str, Any]:
     return payload
 
 
+def split_selector(source: Any, *, default: int | None = 50) -> dict[str, int | None]:
+    """Normalize CLI arguments or artifact metadata without inventing a percentage."""
+    values = source if isinstance(source, dict) else vars(source)
+    count = values.get("train_count")
+    percent = values.get("train_split_percent")
+    if percent is None:
+        percent = values.get("train_split")
+    if count is not None and percent is not None:
+        raise ValueError("--train-split and --train-count are mutually exclusive.")
+    if count is None and percent is None:
+        percent = default
+    return {"train_split": percent, "train_count": count}
+
+
+def split_metadata(source: Any) -> dict[str, int | None]:
+    selector = split_selector(source)
+    return {"train_split_percent": selector["train_split"], "train_count": selector["train_count"]}
+
+
+def split_cli_args(source: Any) -> list[str]:
+    selector = split_selector(source)
+    if selector["train_count"] is not None:
+        return ["--train-count", str(selector["train_count"])]
+    return ["--train-split", str(selector["train_split"])]
+
+
+def checked_split_selector(requested: Any, recorded: Any) -> dict[str, int | None]:
+    """Infer an evaluation selector, or check an explicit request against provenance."""
+    actual = split_selector(recorded)
+    explicit = split_selector(requested, default=None)
+    if any(value is not None for value in explicit.values()) and explicit != actual:
+        raise ValueError(f"Requested split {explicit} does not match recorded split {actual}.")
+    return actual
+
+
+def add_split_arguments(parser: Any) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--train-split", type=int, default=None,
+                       help="Development percentage (integer 1-99, floor rounding); defaults to 50 for generation/training, inferred for evaluation.")
+    group.add_argument("--train-count", type=int, default=None,
+                       help="Exact development match count in canonical MatchId order, including validation; reserves the remainder for testing.")
+
+
 def split_manifest_id(train_split: int, universe_fingerprint: str) -> str:
     return f"train_{int(train_split):02d}pct_{universe_fingerprint[:12]}"
 
 
-def resolve_split_manifest(train_split: int = DEFAULT_TRAIN_SPLIT_PERCENT) -> dict[str, Any]:
-    """Resolve and immutably persist a percentage-based outer split."""
-    if isinstance(train_split, bool) or int(train_split) != train_split or not 1 <= int(train_split) <= 99:
+def resolve_split_manifest(train_split: int | None = None, *, train_count: int | None = None) -> dict[str, Any]:
+    """Resolve and immutably persist a percentage or exact-count outer split."""
+    selector = split_selector({"train_split": train_split, "train_count": train_count})
+    train_split = selector["train_split"]
+    if train_count is None and (isinstance(train_split, bool) or not isinstance(train_split, (int, np.integer)) or not 1 <= train_split <= 99):
         raise ValueError("--train-split must be an integer percentage from 1 to 99.")
-    train_split = int(train_split)
+    if train_split is not None:
+        train_split = int(train_split)
     universe = load_match_universe()
     match_ids = universe["match_ids"]
-    train_size = len(match_ids) * train_split // 100
+    if train_count is not None and (isinstance(train_count, bool) or not isinstance(train_count, (int, np.integer)) or not 1 <= train_count < len(match_ids)):
+        raise ValueError(f"--train-count must be an integer from 1 to {len(match_ids) - 1}.")
+    train_size = int(train_count) if train_count is not None else len(match_ids) * train_split // 100
     if train_size < 1 or train_size >= len(match_ids):
         raise ValueError(
             f"--train-split {train_split} resolves to {train_size} development and "
             f"{len(match_ids) - train_size} test matches; both sets must be non-empty."
         )
-    manifest_id = split_manifest_id(train_split, universe["fingerprint"])
+    manifest_id = (f"train_count_{train_size}_{universe['fingerprint'][:12]}" if train_count is not None
+                   else split_manifest_id(train_split, universe["fingerprint"]))
     payload = {
         "manifest_id": manifest_id,
         "train_split_percent": train_split,
@@ -884,12 +933,14 @@ def resolve_split_manifest(train_split: int = DEFAULT_TRAIN_SPLIT_PERCENT) -> di
         "metadata": {
             "train_size": train_size,
             "test_size": len(match_ids) - train_size,
-            "rounding": "floor",
+            "rounding": "exact" if train_count is not None else "floor",
             "ordering": "match_id",
             "universe_count": len(match_ids),
             "universe_fingerprint": universe["fingerprint"],
         },
     }
+    if train_count is not None:
+        payload["train_count"] = train_size
     SPLIT_MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
     path = SPLIT_MANIFESTS_DIR / f"{manifest_id}.json"
     if path.exists():
@@ -912,9 +963,9 @@ def save_split_manifest(train_ids: list[str], test_ids: list[str], metadata: dic
     SPLIT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def load_split_manifest(train_split: int | None = None) -> dict[str, Any]:
-    if train_split is not None:
-        return resolve_split_manifest(train_split)
+def load_split_manifest(train_split: int | None = None, *, train_count: int | None = None) -> dict[str, Any]:
+    if train_split is not None or train_count is not None:
+        return resolve_split_manifest(train_split, train_count=train_count)
     if not SPLIT_PATH.exists():
         raise FileNotFoundError(
             f"Split manifest not found at {SPLIT_PATH}. Run scripts/preprocess_sportec.py first."
@@ -935,8 +986,9 @@ def filter_available_match_ids(match_ids: list[str], feature_dir: str | Path | N
 def load_base_splits(
     feature_dir: str | Path | None = None,
     train_split: int | None = None,
+    *, train_count: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    manifest = load_split_manifest(train_split)
+    manifest = load_split_manifest(train_split, train_count=train_count)
     train_ids = filter_available_match_ids(manifest["train"], feature_dir)
     test_ids = filter_available_match_ids(manifest["test"], feature_dir)
     return train_ids, test_ids
@@ -974,8 +1026,9 @@ def load_model_splits(
     validation_mode: str = VALIDATION_MODE_HOLDOUT,
     validation_fold: int | None = None,
     final_refit: bool = False,
+    *, train_count: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    train_pool_ids, test_ids = load_base_splits(feature_dir, train_split=train_split)
+    train_pool_ids, test_ids = load_base_splits(feature_dir, train_split=train_split, train_count=train_count)
     if final_refit:
         return train_pool_ids, np.array([], dtype=str), test_ids
     if validation_mode == VALIDATION_MODE_HOLDOUT:

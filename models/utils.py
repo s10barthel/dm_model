@@ -48,6 +48,8 @@ from physical_pass_model import (
     resolved_residual_regularization_lambdas,
 )
 from project_config import (
+    split_selector,
+    split_metadata,
     FEATURE_RUNS_DIR,
     SAVED_DIR,
     get_action_graph_dir,
@@ -384,7 +386,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "timestamp": created_at,
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
-        "train_split_percent": metadata.get("train_split_percent", args.get("train_split", 50)),
+        **split_metadata(metadata if any(metadata.get(key) is not None for key in ("train_split_percent", "train_count")) else args),
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
@@ -573,11 +575,13 @@ def load_splits(
     validation_mode: str = "holdout_80_20",
     validation_fold: int | None = None,
     final_refit: bool = False,
+    *, train_count: int | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     del lineup_path
     return load_model_splits(
         feature_dir,
         train_split=train_split,
+        train_count=train_count,
         validation_mode=validation_mode,
         validation_fold=validation_fold,
         final_refit=final_refit,
@@ -921,15 +925,12 @@ def resolve_model_selection(
         require_target_family=require_target_family,
     )
     shared["model_records"] = model_records
-    split_values = {
-        int(record["train_split_percent"])
-        for record in model_records.values()
-        if record.get("train_split_percent") is not None
-    }
+    split_values = {tuple(split_selector(record).values()) for record in model_records.values()}
     if len(split_values) > 1:
-        raise ValueError(f"Selected model checkpoints do not agree on train_split_percent: {sorted(split_values)}.")
+        raise ValueError("Selected model checkpoints do not agree on train_split_percent/train_count.")
     if split_values:
-        shared["train_split_percent"] = next(iter(split_values))
+        percent, count = next(iter(split_values))
+        shared.update(train_split_percent=percent, train_count=count)
     split_manifest_ids = {
         str(record["split_manifest_id"])
         for record in model_records.values()
@@ -979,7 +980,10 @@ def resolve_model_selection(
         shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or bundle.get("intended_receiver_mode")
         shared["return_type"] = shared.get("return_type") or bundle.get("return_type")
         shared["target_family"] = shared.get("target_family") or bundle.get("target_family")
-        shared["train_split_percent"] = shared.get("train_split_percent") or bundle.get("train_split_percent")
+        if any(bundle.get(key) is not None for key in ("train_split_percent", "train_count")):
+            if split_selector(bundle) != split_selector(shared):
+                raise ValueError("Bundle split selector does not match selected model checkpoints.")
+        shared.update(split_metadata(shared))
         if bundle.get("split_manifest_id") and shared.get("split_manifest_id") and bundle["split_manifest_id"] != shared["split_manifest_id"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} split_manifest_id={bundle['split_manifest_id']!r} does not match selected "

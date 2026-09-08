@@ -52,6 +52,9 @@ from physical_pass_model import (
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
 from project_config import (
+    add_split_arguments,
+    split_selector,
+    split_metadata,
     DEFAULT_INTENDED_RECEIVER_MODE,
     generate_model_run_id,
     get_action_graph_dir,
@@ -85,7 +88,7 @@ parser.add_argument("--task", type=str, required=True)
 parser.add_argument("--trial", type=int, required=False, default=None)
 parser.add_argument("--run-id", type=str, default=None, help="Checkpoint run id. Auto-generated when omitted.")
 parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing checkpoint run id.")
-parser.add_argument("--train-split", type=int, default=50)
+add_split_arguments(parser)
 parser.add_argument("--validation-mode", choices=["holdout_80_20", "expanding"], default="holdout_80_20")
 parser.add_argument("--validation-fold", type=int, choices=[1, 2, 3], default=None)
 parser.add_argument("--final-refit", action="store_true", help="Train on the complete development pool without validation.")
@@ -429,6 +432,7 @@ parser.add_argument("--training-step-index", type=int, default=None, help=argpar
 parser.add_argument("--training-step-total", type=int, default=None, help=argparse.SUPPRESS)
 
 args, _ = parser.parse_known_args()
+vars(args).update(split_selector(args))
 normalize_v_edge_feature_args(vars(args))
 args.learn_physical_scale = not bool(args.freeze_beta1)
 args.lane_survival = args.lane_survival_mode is not None
@@ -635,10 +639,12 @@ if __name__ == "__main__":
     args.model_id = f"{args.task}/{args.run_id}"
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
-    args.split_manifest = resolve_split_manifest(args.train_split)
+    args.split_manifest = resolve_split_manifest(**split_selector(args))
     args.split_manifest_id = args.split_manifest["manifest_id"]
+    feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    if not feature_metadata.get("split_manifest_id") and split_selector(args) != split_selector({}):
+        raise ValueError("Legacy feature runs without split metadata can only be used with --train-split 50.")
     if args.feature_run_id:
-        feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
         feature_split_id = feature_metadata.get("split_manifest_id")
         if feature_split_id and feature_split_id != args.split_manifest["manifest_id"]:
             raise ValueError(
@@ -773,7 +779,7 @@ if __name__ == "__main__":
         "resume_run_id": args.resume_run_id,
         "feature_run_id": args.feature_run_id,
         "use_carries": bool(args.use_carries),
-        "train_split_percent": args.train_split,
+        **split_metadata(args),
         "split_manifest_id": args.split_manifest["manifest_id"],
         "split_manifest": args.split_manifest["metadata"],
         "validation_mode": args.validation_mode,
@@ -865,7 +871,7 @@ if __name__ == "__main__":
 
     train_match_ids, valid_match_ids, _ = load_splits(
         feature_dir=feature_dir,
-        train_split=args.train_split,
+        **split_selector(args),
         validation_mode=args.validation_mode,
         validation_fold=args.validation_fold,
         final_refit=args.final_refit,

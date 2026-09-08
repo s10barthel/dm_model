@@ -74,6 +74,25 @@ def make_args(
 
 
 class FeatureRunExtensionPlanTests(unittest.TestCase):
+    def test_count_extension_preserves_selector_and_rejects_incompatible_base(self) -> None:
+        args = make_args(requested_return_types=["next_5"])
+        args.train_split = None
+        args.train_count = 765
+        metadata = make_metadata()
+        metadata.update(train_count=765, train_split_percent=None, split_manifest_id="count-765")
+        with patch.object(generator, "resolve_split_manifest", return_value={"manifest_id": "count-765"}):
+            plan = self.build_plan(args, metadata)
+            self.assertTrue(plan.command_steps)
+            for step in plan.command_steps:
+                self.assertNotIn("--train-split", step.command)
+                self.assertEqual(step.command[step.command.index("--train-count") + 1], "765")
+            metadata["split_manifest_id"] = "percent-83"
+            with self.assertRaisesRegex(ValueError, "different split"):
+                self.build_plan(args, metadata)
+            metadata.pop("split_manifest_id")
+            with self.assertRaisesRegex(ValueError, "Legacy feature runs"):
+                self.build_plan(args, metadata)
+
     def build_plan(
         self,
         args: SimpleNamespace,

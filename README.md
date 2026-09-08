@@ -233,9 +233,9 @@ The current pipeline now follows an explicit-artifact contract:
 
 ## Split Definition
 
-Preprocessing records every successfully preprocessed Sportec match in a canonical sequence sorted by `MatchId`. The user-facing `--train-split <percentage>` option assigns the first percentage to model development and retains the chronologically later remainder as the independent test set. The percentage is an integer from 1 through 99 and uses floor rounding.
+Preprocessing records every successfully preprocessed Sportec match in a canonical sequence sorted by `MatchId`. The user-facing `--train-split <percentage>` option assigns the first percentage to model development and retains the chronologically later remainder as the independent test set. The percentage is an integer from 1 through 99 and uses floor rounding. Alternatively, `--train-count <int>` selects an exact development match count, including validation matches, before filtering for available features. The two options are mutually exclusive; the count must be at least 1 and less than the total match count.
 
-Resolved match assignments are stored as immutable, fingerprinted manifests under `data/splits/manifests`. Feature runs, model runs, bundles, and evaluations record that manifest identity so incompatible artifacts cannot be mixed. Existing commands default to `--train-split 50`, which gives 306 development and 306 test matches for the current 612-match universe. The recommended out-of-time protocol uses `--train-split 75`, giving 459 development and 153 test matches.
+Resolved match assignments are stored as immutable, fingerprinted manifests under `data/splits/manifests`. Feature runs, model runs, bundles, and evaluations record that manifest identity so incompatible artifacts cannot be mixed. Generation and training commands default to `--train-split 50`, which gives 459 development and 459 test matches for the current 918-match universe. For the first two and a half seasons as development data, use `--train-count 765`: this gives 765 development matches (2022/23, 2023/24, and 2024/25 matchdays 1-17) and 153 test matches (2024/25 matchdays 18-34). Count and percentage selections have distinct manifest identities even if their assignments coincide. Evaluation infers the selector from model provenance; an explicit selector must match its mode and value.
 
 `--validation-mode holdout_80_20` is the backward-compatible default and uses the first 80% of development matches for training and the remaining 20% for validation. `--validation-mode expanding` creates three chronological folds with development-set boundaries at 50%, 66⅔%, 83⅓%, and 100%, then refits each selected model on the complete development set for the median best-fold epoch count. For 459 development matches, the folds are 229/77, 306/76, and 382/77 training/validation matches. The final 153 matches are used only by the subsequent evaluation stage.
 
@@ -1278,6 +1278,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/main.py`
 
+- `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+- `--validation-mode {holdout_80_20,expanding}`: use a chronological 80/20 development holdout or three expanding validation folds followed by a full-development refit using the median best-fold epoch count. Default: `holdout_80_20`.
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required unless `--skip-train` is set.
 - `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
@@ -1297,6 +1300,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/preprocess_sportec.py`
 
+- `--carry-artifacts-only`: build or refresh control-event, carry-segment, and carry-audit sidecars from existing canonical outputs without rerunning preprocessing. Default: off.
+- `--skip-carry-artifacts`: skip carry sidecar generation during normal preprocessing. Default: off; mutually exclusive with `--carry-artifacts-only`.
 - `--match-id <id>`: process only one or more specific Sportec match ids. Default: all discovered matches.
 - `--limit <N>`: process only the first `N` discovered matches. Default: no limit.
 - `--overwrite`: rebuild existing outputs. Default: off.
@@ -1305,6 +1310,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_xt.py`
 
+- `--train-split <percentage>`: development percentage (integer 1-99) used to fit the xT surface. Default: `50`.
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - `--match-id <id>`: export xT sidecars only for one or more specific match ids. Default: all available synced matches.
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
 - `--source-grid-l <N>`: socceraction source-grid length bins. Default: `12`.
@@ -1333,7 +1340,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend only the `pass_success` inference used inside EPV calculation with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches from `data/pc_xpass/sportec` instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1342,6 +1351,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
+- `--train-split <percentage>`: development percentage (integer 1-99) used for Sportec `--split` selection. Default: `50`.
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>`.
 - `--feature-run-id <feature_run_id>`: enable legacy Sportec feature-run sidecar mode under `data/features/runs/<feature_run_id>/physical_xpass`.
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
@@ -1386,11 +1397,14 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_relevant_features.py`
 
+- `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+- `--use-carries`: generate additive Sportec carry-augmented base graphs and labels for both splits. Requires preprocessed carry sidecars. Default: off. With `--extend-feature-run-id`, create a derived run or use `--in-place` to add carries to a completed run; incompatible with `--overwrite-feature-run`. Canonical artifacts are preserved.
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: write labels for one or more return semantics in the same feature run. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to additionally include the `model` intended-receiver variant.
 - `--run-id <feature_run_id>`: pin the feature run id instead of auto-generating one.
 - `--extend-feature-run-id <feature_run_id>`: create a new derived feature run from an existing completed run, copying existing artifacts and generating only newly requested return types, refreshed target labels, or the model intended-receiver variant.
-- `--in-place`: with `--extend-feature-run-id`, mutate the existing feature run only for additive extensions that add missing return types or a missing `model` intended-receiver variant. Incompatible with `--run-id`, target refreshes, pass-height refreshes, and model replacement.
+- `--in-place`: with `--extend-feature-run-id`, mutate the existing feature run only for additive extensions that add missing return types, a missing `model` intended-receiver variant, or carry artifacts with `--use-carries`. Incompatible with `--run-id`, target refreshes, pass-height refreshes, and model replacement.
 - `--overwrite-feature-run`: with `--extend-feature-run-id`, mutate the existing feature run for regenerative extensions such as target refreshes, pass-height backfills, or intended-receiver model replacement. Incompatible with `--run-id`.
 - `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
 - `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
@@ -1401,6 +1415,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/train_relevant_models.py`
 
+- `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
+- `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+- `--validation-mode {holdout_80_20,expanding}`: use a chronological 80/20 development holdout or three expanding validation folds followed by a full-development refit using the median best-fold epoch count. Default: `holdout_80_20`.
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
 - `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
@@ -1459,8 +1477,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
   physical pc-xPass. Requires a selected `pass_success` model, `--xpass-version`, and `--xpass-weight`.
 - `--xpass-version <max|topN>`: cached pc-xPass metric to evaluate, for example `top25`. Required by
   `--evaluate-xpass` and `--evaluate-combined-success`; the requested metric must be present in the read-only cache.
-- `--xpass-weight {v1,v2,v3,v4}`: blend weighting rule for `--evaluate-combined-success`. `v4` also requires explicit
+- `--xpass-weight {v1,v2,v3,v4,v5}`: blend weighting rule for `--evaluate-combined-success`. `v4` also requires explicit
   `--discount`, `--v4-power`, and `--v4-zero`; those arguments are rejected for other combined-weight versions.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for combined-v5 evaluation. Default: `0.01`; requires explicit `--pass-intent-model-id` and cached per-player pass-height probabilities.
+- `--v5-discount <true|false>`: apply the pass-intent discount during combined-v5 evaluation. Default: `true`; `false` uses `w = pass_height`. Both v5 options are valid only with `--evaluate-combined-success --xpass-weight v5`.
 - `--pc-xpass-cache-dir <path>`: optional enriched pc-xPass cache directory for weighted pass-success evaluation;
   physical-xPass evaluation, or combined pass-success evaluation; default: the Sportec pc-xPass cache.
 - `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
@@ -1469,6 +1489,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/run_relevant_models.py`
 
+- `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.
+- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+- Carry-augmented inference is selected automatically from checkpoint metadata and requires a feature run with carry artifacts; there is no runtime `--use-carries` flag.
 - `--split {train,test,all}`: choose which Sportec split to export. Default: `test`.
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
 - `--device <device>`: inference device. Default: `cuda:0`.
@@ -1486,7 +1509,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1517,7 +1542,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1544,7 +1571,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1572,7 +1601,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1599,7 +1630,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1686,7 +1719,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.

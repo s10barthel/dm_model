@@ -32,6 +32,10 @@ from models.utils import (
 )
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
 from project_config import (
+    add_split_arguments,
+    split_selector,
+    split_metadata,
+    split_cli_args,
     generate_model_run_id,
     generate_run_id,
     get_action_label_dir,
@@ -614,11 +618,11 @@ def validate_external_pass_intent_model_id(
         mismatches.append(f"task={record.get('task')!r}")
     if not record.get("has_weights"):
         mismatches.append("missing best_weights.pt or best_model.json")
-    requested_train_split = int(getattr(args, "train_split", 50))
-    if int(record.get("train_split_percent", 50)) != requested_train_split:
-        mismatches.append(
-            f"train_split_percent={record.get('train_split_percent')!r}, expected {requested_train_split}"
-        )
+    if split_selector(record) != split_selector(args):
+        mismatches.append(f"split={split_selector(record)!r}, expected {split_selector(args)!r}")
+    requested_manifest = getattr(args, "split_manifest", None)
+    if requested_manifest and record.get("split_manifest_id") and record["split_manifest_id"] != requested_manifest["manifest_id"]:
+        mismatches.append("split_manifest_id does not match requested split")
 
     if runtime_schema is None:
         feature_root = resolve_feature_root(resolved_feature_run_id)
@@ -785,7 +789,7 @@ def derive_bundle_shared_context(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train-split", type=int, default=50, help="Development percentage of canonical MatchId order.")
+    add_split_arguments(parser)
     parser.add_argument(
         "--validation-mode",
         choices=["holdout_80_20", "expanding"],
@@ -1189,6 +1193,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional long-pass override for pass_success residual clipping.",
     )
     args = parser.parse_args(argv)
+    vars(args).update(split_selector(args))
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
@@ -1235,7 +1240,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(str(exc))
 
     try:
-        split_manifest = resolve_split_manifest(args.train_split)
+        split_manifest = resolve_split_manifest(**split_selector(args))
     except (ValueError, FileNotFoundError) as exc:
         parser.error(str(exc))
     feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
@@ -1247,14 +1252,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     feature_split_id = feature_metadata.get("split_manifest_id")
     if feature_split_id and feature_split_id != split_manifest["manifest_id"]:
         parser.error(
-            f"Feature run {args.feature_run_id} uses split {feature_split_id}, but --train-split "
-            f"{args.train_split} resolves to {split_manifest['manifest_id']}."
+            f"Feature run {args.feature_run_id} uses split {feature_split_id}, but requested split "
+            f"{split_cli_args(args)} resolves to {split_manifest['manifest_id']}."
         )
     if not feature_split_id and args.train_split != 50:
         parser.error("Legacy feature runs without split metadata can only be used with --train-split 50.")
     if args.validation_mode == "expanding":
         try:
-            development_ids, _ = load_base_splits(train_split=args.train_split)
+            development_ids, _ = load_base_splits(**split_selector(args))
             derive_expanding_folds(development_ids)
         except ValueError as exc:
             parser.error(str(exc))
@@ -1931,9 +1936,8 @@ def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> di
 
 def main() -> None:
     cli_args = parse_args()
-    train_split = int(getattr(cli_args, "train_split", 50))
     validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
-    split_manifest = getattr(cli_args, "split_manifest", None) or resolve_split_manifest(train_split)
+    split_manifest = getattr(cli_args, "split_manifest", None) or resolve_split_manifest(**split_selector(cli_args))
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
     relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(cli_args)
     python = sys.executable
@@ -1972,7 +1976,7 @@ def main() -> None:
                 command.extend(low_level_args)
                 command.extend(
                     [
-                        "--train-split", str(train_split),
+                        *split_cli_args(cli_args),
                         "--validation-mode", "expanding",
                         "--validation-fold", str(fold),
                         "--artifact-stage", f"fold_{fold}",
@@ -1994,7 +1998,7 @@ def main() -> None:
                         {
                             "bundle_id": bundle_id,
                             "feature_run_id": resolved_feature_run_id,
-                            "train_split_percent": train_split,
+                            **split_metadata(cli_args),
                             "split_manifest_id": split_manifest["manifest_id"],
                             "validation_mode": validation_mode,
                             "failed_command": command,
@@ -2018,7 +2022,7 @@ def main() -> None:
             command.extend(_replace_cli_value(low_level_args, "--n_epochs", fixed_epochs))
             command.extend(
                 [
-                    "--train-split", str(train_split),
+                    *split_cli_args(cli_args),
                     "--validation-mode", "expanding",
                     "--final-refit",
                     "--artifact-stage", "final_refit",
@@ -2040,7 +2044,7 @@ def main() -> None:
                     {
                         "bundle_id": bundle_id,
                         "feature_run_id": resolved_feature_run_id,
-                        "train_split_percent": train_split,
+                        **split_metadata(cli_args),
                         "split_manifest_id": split_manifest["manifest_id"],
                         "validation_mode": validation_mode,
                         "failed_command": command,
@@ -2062,7 +2066,7 @@ def main() -> None:
         if resolved_feature_run_id:
             command.extend(["--feature-run-id", str(resolved_feature_run_id)])
         command.extend(args)
-        command.extend(["--train-split", str(train_split), "--validation-mode", validation_mode])
+        command.extend([*split_cli_args(cli_args), "--validation-mode", validation_mode])
         command = append_runtime_flags(
             command,
             device=getattr(cli_args, "device", None),
@@ -2161,7 +2165,7 @@ def main() -> None:
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": effective_feature_run_id,
         "use_carries": bool(bundle_shared.get("use_carries", getattr(cli_args, "use_carries", False))),
-        "train_split_percent": train_split,
+        **split_metadata(cli_args),
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],
         "validation_mode": validation_mode,

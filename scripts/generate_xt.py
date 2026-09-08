@@ -26,12 +26,21 @@ from datatools.xt import (
     save_xt_xy_surface_plot,
     validate_xt_grid_shape,
 )
-from project_config import EVENT_SYNCED_DIR, XT_DIR, XT_MATCH_DIR, ensure_project_dirs, load_split_manifest
+from project_config import (
+    add_split_arguments,
+    split_selector,
+    split_metadata,
+    EVENT_SYNCED_DIR,
+    XT_DIR,
+    XT_MATCH_DIR,
+    ensure_project_dirs,
+    load_split_manifest,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train-split", type=int, default=50, help="Development percentage used to fit the xT surface.")
+    add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--source-grid-l", type=int, default=None, help="Socceraction source-grid length bins. Default: 12.")
@@ -56,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing xT outputs.")
     args = parser.parse_args()
+    vars(args).update(split_selector(args))
     if args.reuse_source_grid and (args.source_grid_l is not None or args.source_grid_w is not None):
         parser.error("--source-grid-l/--source-grid-w cannot be combined with --reuse-source-grid; reuse infers dimensions from the CSV.")
     args.source_grid_l = XT_GRID_L if args.source_grid_l is None else args.source_grid_l
@@ -222,7 +232,7 @@ def ignored_export_filters(args: argparse.Namespace) -> dict[str, object]:
 def main() -> None:
     args = parse_args()
     ensure_project_dirs()
-    manifest = load_split_manifest(args.train_split)
+    manifest = load_split_manifest(**split_selector(args))
 
     output_csv = XT_DIR / "xT.csv"
     output_grid = XT_DIR / "xT_grid.csv"
@@ -245,7 +255,7 @@ def main() -> None:
         if existing_metadata.get("split_manifest_id") != manifest.get("manifest_id"):
             raise ValueError(
                 "Existing xT artifacts were fitted with a different or legacy split. "
-                "Use --overwrite to rebuild them for the requested --train-split."
+                "Use --overwrite to rebuild them for the requested split."
             )
         print(f"xT outputs already exist in {XT_DIR}. Use --overwrite to rebuild them.")
         return
@@ -286,7 +296,7 @@ def main() -> None:
         "created_at_utc": datetime.now(UTC).isoformat(),
         "xt_model_type": "xy_logit_glm",
         "fit_only": bool(args.fit_only),
-        "train_split_percent": args.train_split,
+        **split_metadata(args),
         "split_manifest_id": manifest["manifest_id"],
         "split_manifest": manifest["metadata"],
         "match_sidecars_written": not bool(args.fit_only),

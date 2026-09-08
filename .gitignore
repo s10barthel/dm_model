@@ -10,6 +10,7 @@ validation/**
 !validation/**/*.R
 !validation/**/*.md
 saved/
+/out/
 .venv/
 .pycache*/
 test*/

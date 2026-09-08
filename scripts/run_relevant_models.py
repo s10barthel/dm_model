@@ -38,6 +38,9 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 from project_config import (
+    checked_split_selector,
+    add_split_arguments,
+    split_metadata,
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODES,
@@ -59,7 +62,7 @@ from project_config import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--split", default="test", choices=["train", "test", "all"])
-    parser.add_argument("--train-split", type=int, default=None)
+    add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id")
@@ -526,8 +529,9 @@ def resolve_match_ids(
     requested_match_ids: list[str] | None,
     feature_dir: Path,
     train_split: int | None = None,
+    *, train_count: int | None = None,
 ) -> list[str]:
-    train_ids, test_ids = load_base_splits(feature_dir, train_split=train_split)
+    train_ids, test_ids = load_base_splits(feature_dir, train_split=train_split, train_count=train_count)
 
     if split == "train":
         match_ids = train_ids.tolist()
@@ -660,19 +664,14 @@ def main() -> None:
         success_intent_feature_schema,
     ) = load_optional_success_intent_model(success_intent_model_id, device, feature_root)
 
-    recorded_train_split = int(shared_context.get("train_split_percent", 50))
-    requested_train_split = getattr(args, "train_split", None)
-    if requested_train_split is not None and int(requested_train_split) != recorded_train_split:
-        raise ValueError(
-            f"--train-split {requested_train_split} does not match the selected bundle/model split {recorded_train_split}."
-        )
+    recorded_selector = checked_split_selector(args, shared_context)
     feature_metadata = load_feature_run_metadata(feature_run_id, required=False) or {}
     use_carries = bool(shared_context.get("use_carries", False))
     if use_carries and not bool((feature_metadata.get("carry_variant") or {}).get("available", False)):
         raise ValueError(
             f"Selected checkpoints require carries, but feature run {feature_run_id} has no carry variant."
         )
-    bundle_split_id = (bundle or {}).get("split_manifest_id")
+    bundle_split_id = shared_context.get("split_manifest_id") or (bundle or {}).get("split_manifest_id")
     feature_split_id = feature_metadata.get("split_manifest_id")
     if bundle_split_id and feature_split_id and bundle_split_id != feature_split_id:
         raise ValueError(f"Bundle split {bundle_split_id} does not match feature-run split {feature_split_id}.")
@@ -680,7 +679,7 @@ def main() -> None:
         args.split,
         args.match_id,
         get_action_graph_dir(feature_root, use_carries=use_carries),
-        train_split=recorded_train_split,
+        **recorded_selector,
     )
 
     physical_lookup_config = (
@@ -694,7 +693,7 @@ def main() -> None:
         "command": " ".join(sys.argv),
         "output_parent": str(output_parent),
         "split": args.split,
-        "train_split_percent": recorded_train_split,
+        **split_metadata(shared_context),
         "requested_match_ids": match_ids,
         "feature_run_id": feature_run_id,
         "runtime_feature_run_id": feature_run_id,

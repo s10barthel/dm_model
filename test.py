@@ -41,6 +41,9 @@ from physical_pass_model import (
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
 from project_config import (
+    checked_split_selector,
+    add_split_arguments,
+    split_metadata,
     DEFAULT_INTENDED_RECEIVER_MODE,
     EVALUATION_RUNS_DIR,
     get_action_label_dir,
@@ -756,7 +759,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
     parser.add_argument("--feature-run-id", type=str, required=False, default=None)
-    parser.add_argument("--train-split", type=int, default=None)
+    add_split_arguments(parser)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
     parser.add_argument("--evaluation-timestamp", type=str, required=False, default=None)
@@ -879,11 +882,10 @@ if __name__ == "__main__":
         )
     validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
 
-    checkpoint_train_split = int(getattr(model_args, "train_split", getattr(model_args, "train_split_percent", 50)))
-    if args.train_split is not None and int(args.train_split) != checkpoint_train_split:
-        parser.error(
-            f"--train-split {args.train_split} does not match checkpoint split {checkpoint_train_split}."
-        )
+    try:
+        checkpoint_selector = checked_split_selector(args, model_args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if resolved_feature_run_id:
         feature_metadata = load_feature_run_metadata(resolved_feature_run_id, required=False) or {}
         checkpoint_split_id = getattr(model_args, "split_manifest_id", None)
@@ -892,7 +894,7 @@ if __name__ == "__main__":
             raise ValueError(
                 f"Checkpoint split {checkpoint_split_id} does not match feature-run split {feature_split_id}."
             )
-    _, _, test_match_ids = load_splits(feature_dir=feature_dir, train_split=checkpoint_train_split)
+    _, _, test_match_ids = load_splits(feature_dir=feature_dir, **checkpoint_selector)
 
     dataset_args = build_action_dataset_kwargs(
         model_args,
@@ -1005,6 +1007,8 @@ if __name__ == "__main__":
             diagnostic_feature_run_id=diagnostic_feature_run_id,
             evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
             evaluation_options={
+                **split_metadata(checkpoint_selector),
+                "split_manifest_id": getattr(model_args, "split_manifest_id", None),
                 "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
                 "evaluate_xpass": bool(args.evaluate_xpass),
                 "evaluate_combined_success": bool(args.evaluate_combined_success),

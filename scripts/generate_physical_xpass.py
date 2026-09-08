@@ -105,6 +105,8 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
 )
 from project_config import (
+    add_split_arguments,
+    split_selector,
     DEFAULT_INTENDED_RECEIVER_MODE,
     PROJECT_ROOT,
     get_action_graph_dir,
@@ -143,7 +145,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--split", choices=["train", "test", "all"], default="all", help="Sportec split subset.")
-    parser.add_argument("--train-split", type=int, default=50, help="Development percentage for Sportec split selection.")
+    add_split_arguments(parser)
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
     parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
     parser.add_argument(
@@ -390,6 +392,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(argv)
+    vars(args).update(split_selector(args))
     explicit_pc_only_flags = [
         name
         for name in [
@@ -649,7 +652,7 @@ def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
     if args.match_id:
         return [str(match_id) for match_id in args.match_id]
 
-    train_ids, test_ids = load_base_splits(feature_dir=graph_dir, train_split=args.train_split)
+    train_ids, test_ids = load_base_splits(feature_dir=graph_dir, **split_selector(args))
     if args.split == "train":
         return [str(match_id) for match_id in train_ids.tolist()]
     if args.split == "test":

@@ -28,6 +28,8 @@ from datatools.ball_carries import augment_match_actions_with_carries
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
 from project_config import (
+    add_split_arguments,
+    split_selector,
     ACTION_GRAPH_DIR,
     ACTION_GRAPH_INTENT_TRAIN_DIR,
     CARRY_SEGMENTS_DIR,
@@ -1652,12 +1654,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
-    parser.add_argument(
-        "--train-split",
-        type=int,
-        default=50,
-        help="Percentage of the canonical MatchId-ordered universe assigned to development data.",
-    )
+    add_split_arguments(parser)
     parser.add_argument(
         "--return_type",
         type=str,
@@ -1782,6 +1779,7 @@ def parse_args() -> argparse.Namespace:
         help="Thread limit propagated to each worker process for BLAS/OpenMP-backed libraries.",
     )
     args, _ = parser.parse_known_args()
+    vars(args).update(split_selector(args))
     args.return_types = resolve_requested_return_types(args.return_type)
     if args.only_intended_receiver_mode:
         args.intended_receiver_modes = []
@@ -1966,9 +1964,9 @@ def main() -> None:
     lineups["game_date"] = pd.to_datetime(lineups["game_date"])
 
     if args.split == "train":
-        match_ids, _ = load_base_splits(train_split=args.train_split)
+        match_ids, _ = load_base_splits(**split_selector(args))
     else:
-        _, match_ids = load_base_splits(train_split=args.train_split)
+        _, match_ids = load_base_splits(**split_selector(args))
 
     tasks = build_match_tasks(
         [str(match_id) for match_id in match_ids],

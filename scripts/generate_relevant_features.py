@@ -20,6 +20,10 @@ from datatools import config
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
+    add_split_arguments,
+    split_selector,
+    split_metadata,
+    split_cli_args,
     INTENDED_RECEIVER_MODE_MODEL,
     generate_run_id,
     get_action_label_dir,
@@ -95,12 +99,7 @@ class FeatureExtensionPlan:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--train-split",
-        type=int,
-        default=50,
-        help="Percentage of canonical MatchId order assigned to development data (default: 50).",
-    )
+    add_split_arguments(parser)
     parser.add_argument(
         "--return_type",
         action="append",
@@ -253,6 +252,7 @@ def parse_args() -> argparse.Namespace:
         help="Thread limit passed to each graph_feature worker process.",
     )
     args = parser.parse_args()
+    vars(args).update(split_selector(args))
     args.requested_return_types = resolve_requested_return_types(args.return_type) if args.return_type else []
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
@@ -302,7 +302,7 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
     if args.run_id:
         command.extend(["--run-id", args.run_id])
-    command.extend(["--train-split", str(getattr(args, "train_split", 50))])
+    command.extend(split_cli_args(args))
     command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
     command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
     command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
@@ -787,12 +787,13 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     base_metadata = load_feature_run_metadata(base_run_id, required=True)
     if base_metadata is None:
         raise FileNotFoundError(f"Feature run {base_run_id} does not have metadata.json.")
-    train_split = int(getattr(args, "train_split", 50))
-    requested_split = resolve_split_manifest(train_split)
+    requested_split = resolve_split_manifest(**split_selector(args))
     base_split_id = base_metadata.get("split_manifest_id")
+    if not base_split_id and split_selector(args) != split_selector({}):
+        raise ValueError("Legacy feature runs without split metadata can only be used with --train-split 50.")
     if base_split_id and base_split_id != requested_split["manifest_id"]:
         raise ValueError(
-            f"Feature run {base_run_id} uses split {base_split_id}, but --train-split {train_split} "
+            f"Feature run {base_run_id} uses split {base_split_id}, but requested split {split_cli_args(args)} "
             f"resolves to {requested_split['manifest_id']}. Create a new full feature run for a different split."
         )
     if base_metadata.get("status") != "completed":
@@ -939,7 +940,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     command_steps = [
         FeatureGenerationStep(
             step.description,
-            [*step.command, "--train-split", str(getattr(args, "train_split", 50))],
+            [*step.command, *split_cli_args(args)],
         )
         for step in command_steps
     ]
@@ -984,8 +985,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
 
 
 def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, status: str, error: str | None = None) -> dict[str, Any]:
-    train_split = int(getattr(args, "train_split", 50))
-    split_manifest = resolve_split_manifest(train_split)
+    split_manifest = resolve_split_manifest(**split_selector(args))
     metadata = {
         "run_id": plan.output_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1010,7 +1010,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "intended_receiver_model_id": plan.intended_receiver_model_id,
         "graph_schema": copy.deepcopy(plan.graph_schema),
         "splits": ["train", "test"],
-        "train_split_percent": train_split,
+        **split_metadata(args),
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],
         "return_types": plan.final_return_types,
@@ -1065,8 +1065,7 @@ def mutating_metadata(
     history_status: str | None = None,
 ) -> dict[str, Any]:
     metadata = copy.deepcopy(plan.base_metadata)
-    train_split = int(getattr(args, "train_split", 50))
-    split_manifest = resolve_split_manifest(train_split)
+    split_manifest = resolve_split_manifest(**split_selector(args))
     history = metadata.get("extension_history")
     if not isinstance(history, list):
         history = []
@@ -1086,7 +1085,7 @@ def mutating_metadata(
     metadata.update(
         {
             "run_id": plan.base_run_id,
-            "train_split_percent": train_split,
+            **split_metadata(args),
             "split_manifest_id": split_manifest["manifest_id"],
             "split_manifest": split_manifest["metadata"],
             "command": subprocess.list2cmdline(sys.argv),
@@ -1315,8 +1314,7 @@ def carry_extension_steps(
     common = [
         "--run-id",
         output_run_id,
-        "--train-split",
-        str(int(metadata.get("train_split_percent", getattr(args, "train_split", 50)))),
+        *split_cli_args(metadata),
         "--num-workers",
         str(getattr(args, "num_workers", "1")),
         "--worker-thread-limit",
@@ -1425,8 +1423,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
     run_generation_steps(command_steps)
 
     run_root = get_feature_run_root(args.run_id)
-    train_split = int(getattr(args, "train_split", 50))
-    split_manifest = resolve_split_manifest(train_split)
+    split_manifest = resolve_split_manifest(**split_selector(args))
     metadata = {
         "run_id": args.run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -1439,7 +1436,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "splits": ["train", "test"],
-        "train_split_percent": train_split,
+        **split_metadata(args),
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],
         "return_types": args.return_types,
