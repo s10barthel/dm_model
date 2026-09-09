@@ -13,6 +13,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Produced Data Layout](#produced-data-layout)
 - [Run-Id Workflow](#run-id-workflow)
 - [Split Definition](#split-definition)
+- [Endpoint repair, duration selection, and rollout](docs/endpoint_policy.md)
 - [Environment Setup](#environment-setup)
 - [Main Pipeline Runner](#main-pipeline-runner)
 - [End-to-End Workflow](#end-to-end-workflow)

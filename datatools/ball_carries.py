@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from datatools.endpoint_policy import sample_is_eligible, valid_interval
 
-CARRY_DEFINITION_VERSION = "sportec_fernandez_1s_v1"
+CARRY_DEFINITION_VERSION = "sportec_fernandez_1s_v2"
 RESTART_TAGS = {"KickOff", "ThrowIn", "GoalKick", "CornerKick", "FreeKick", "Penalty", "RefereeBall"}
 
 
@@ -315,6 +316,8 @@ def derive_carry_segments(
     fps: int = 25,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build one-second Fernandez-like carry segments and a spell-level audit table."""
+    if "frame_id" in tracking.columns:
+        tracking = tracking.set_index("frame_id")
     canonical = canonical_events.copy().reset_index(drop=True)
     canonical["frame_id"] = pd.to_numeric(canonical["frame_id"], errors="coerce").astype("Int64")
     timeline = control_events.loc[
@@ -326,6 +329,11 @@ def derive_carry_segments(
     pass_like = canonical["spadl_type"].isin(["pass", "cross"])
     for index, action in canonical.loc[pass_like].iterrows():
         receiver = action.get("receiver_id")
+        if not sample_is_eligible(action.get("training_sample_eligible", True)) or not valid_interval(
+            tracking, action.get("frame_id"), action.get("receive_frame_id"),
+            allow_equal=True, period=action["period_id"],
+        ):
+            continue
         if (
             pd.notna(action.get("receive_frame_id"))
             and _team(receiver) is not None
@@ -546,7 +554,18 @@ def derive_carry_segments(
     audit_table = pd.DataFrame.from_records(spells)
     if audit_table.empty:
         audit_table = pd.DataFrame(columns=audit_columns)
+    segment_table.attrs["carry_definition"] = CARRY_DEFINITION_VERSION
+    audit_table.attrs["carry_definition"] = CARRY_DEFINITION_VERSION
     return segment_table, audit_table
+
+
+def validate_carry_artifact_version(carries: pd.DataFrame) -> None:
+    versions = set(carries.get("carry_definition", pd.Series(dtype=str)).dropna())
+    if carries.empty:
+        versions = {carries.attrs.get("carry_definition")}
+    if versions != {CARRY_DEFINITION_VERSION}:
+        raise ValueError("Stale carry sidecar: rebuild synchronization and carry artifacts with "
+                         "scripts/preprocess_sportec.py before generating new carry features.")
 
 
 def augment_match_actions_with_carries(match: Any, carries: pd.DataFrame) -> None:

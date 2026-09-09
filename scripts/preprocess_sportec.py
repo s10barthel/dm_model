@@ -18,6 +18,7 @@ import pandas as pd
 
 import datatools.preprocess as tracking_preprocess
 from datatools.ball_carries import build_synchronized_control_events, derive_carry_segments
+from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION, valid_interval
 from project_config import (
     CARRY_SEGMENTS_DIR,
     CONTROL_EVENTS_SYNCED_DIR,
@@ -1037,16 +1038,22 @@ def _parse_kpi_xml_table(match_files: MatchFiles) -> pd.DataFrame:
             "RECFRM": pd.NA,
             "PUID2": receiver_id,
             "NORECEIVER": bool(sync_successful and reception_id is None and receiver_id is None),
+            "source_has_receiver_identifier": bool(receiver_id or reception_id),
+            "source_xml_success": {"successful": True, "unsuccessful": False}.get(node.attrib.get("Evaluation", "").lower(), pd.NA),
             "TRACKING_TIME": _parse_kpi_xml_time(node.attrib.get("SyncedEventTime")),
             "GDCP_EVENT_TIME": _parse_kpi_xml_time(node.attrib.get("SyncedEventTime")),
         }
 
     for event_id, record in records.items():
         reception = receptions.get(event_id)
+        record["source_has_reception"] = reception is not None
+        record["endpoint_source"] = "unresolved"
         if reception is not None:
             record["RECFRM"] = reception["RECFRM"]
+            record["endpoint_source"] = "reception"
         elif event_id in possession_fallbacks:
             record["RECFRM"] = possession_fallbacks[event_id]["RECFRM"]
+            record["endpoint_source"] = "possession_end"
 
     kpi = pd.DataFrame.from_records(list(records.values()))
     if kpi.empty:
@@ -1155,12 +1162,7 @@ def finalize_synced_output(output_events: pd.DataFrame, frame_table: pd.DataFram
     output_events["synced_ts"] = output_events["frame_id"].map(frame_lookup["synced_ts"])
     output_events["receive_ts"] = output_events["receive_frame_id"].map(frame_lookup["synced_ts"])
 
-    synced_mask = output_events["frame_id"].notna()
-    if synced_mask.any():
-        last_synced_idx = output_events.index[synced_mask][-1]
-        output_events = output_events.loc[:last_synced_idx].copy()
-
-    # Recompute next-action references after any truncation so they remain aligned to canonical object ids.
+    # Keep unresolved trailing events too: they still belong to the return history.
     output_events["next_player_id"] = output_events.groupby("period_id")["object_id"].shift(-1)
     output_events["next_type"] = output_events.groupby("period_id")["spadl_type"].shift(-1)
 
@@ -1192,6 +1194,9 @@ def finalize_synced_output(output_events: pd.DataFrame, frame_table: pd.DataFram
         "receive_frame_id",
         "receive_ts",
     ]
+    provenance_cols = {"endpoint_source", "training_sample_eligible", "sample_exclusion_reason", "endpoint_policy_version"}
+    ordered_cols.extend(col for col in output_events.columns
+                        if col not in ordered_cols and (col.startswith("source_") or col in provenance_cols))
     return output_events[ordered_cols].reset_index(drop=True)
 
 
@@ -1230,6 +1235,69 @@ def run_elastic_synchronization(
     return finalize_synced_output(output_events, frame_table)
 
 
+def missing_reception_policy_mask(events: pd.DataFrame) -> pd.Series:
+    required = ["source_has_reception", "source_has_receiver_identifier"]
+    if not all(col in events for col in required):
+        return pd.Series(False, index=events.index)
+    return (events["spadl_type"].isin(["pass", "cross"])
+            & events[required].notna().all(axis=1)
+            & events["source_has_reception"].eq(False)
+            & events["source_has_receiver_identifier"].eq(False))
+
+
+def apply_missing_reception_policy(events: pd.DataFrame, tracking: pd.DataFrame, fps: float) -> pd.DataFrame:
+    """Repair eligible out-of-play terminations without deleting canonical history."""
+    result = events.copy()
+    mask = missing_reception_policy_mask(result)
+    result["endpoint_policy_version"] = ENDPOINT_POLICY_VERSION
+    result["training_sample_eligible"] = True
+    result["sample_exclusion_reason"] = ""
+    if not mask.any():
+        return result
+    live = tracking
+    if "episode_id" not in live.columns:
+        live = tracking_preprocess.label_frames_and_episodes(
+            live.reset_index() if "frame_id" not in live.columns else live.copy(), fps=int(round(fps))
+        )
+    elif "frame_id" in live.columns:
+        live = live.set_index("frame_id")
+    ordered = result.sort_values(["period_id", "seconds", "action_id"])
+    next_type = ordered.groupby("period_id")["spadl_type"].shift(-1)
+    next_frame = ordered.groupby("period_id")["frame_id"].shift(-1)
+    for index in result.index[mask]:
+        action = result.loc[index]
+        result.at[index, "receive_frame_id"] = pd.NA
+        result.at[index, "receiver_id"] = pd.NA
+        result.at[index, "endpoint_source"] = "unresolved"
+        result.at[index, "training_sample_eligible"] = False
+        source_results = [action.get("source_xml_success"), action.get("source_event_success")]
+        known = [value for value in source_results if pd.notna(value)]
+        reason = "unknown_source_success"
+        if any(value == True for value in known):
+            reason = "source_successful"
+        elif any(value == False for value in known):
+            reason = "not_out_of_play_restart"
+            if next_type.at[index] in {"throw_in", "goalkick", "corner_short", "corner_crossed"}:
+                reason = "invalid_episode_termination"
+                start = action["frame_id"]
+                if pd.notna(start) and start in live.index and live.at[start, "ball_state"] == "alive":
+                    episode = live.at[start, "episode_id"]
+                    frames = live.index[(live["episode_id"] == episode)
+                                        & (live["period_id"] == action["period_id"])
+                                        & live["ball_state"].eq("alive")]
+                    end = frames.max() if len(frames) else None
+                    restart = next_frame.at[index]
+                    if (valid_interval(live, start, end, period=action["period_id"])
+                            and (pd.isna(restart) or end < restart)):
+                        result.at[index, "receive_frame_id"] = int(end)
+                        result.at[index, "receiver_id"] = "out"
+                        result.at[index, "endpoint_source"] = "tracking_episode_end"
+                        result.at[index, "training_sample_eligible"] = True
+                        reason = ""
+        result.at[index, "sample_exclusion_reason"] = reason
+    return result
+
+
 def run_kpi_synchronization(
     match_files: MatchFiles,
     lineup: pd.DataFrame,
@@ -1239,16 +1307,25 @@ def run_kpi_synchronization(
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     output_events = initialize_synced_output(events)
     frame_table = build_tracking_frame_table(events, tracking, fps)
-    frame_lookup = frame_table.set_index("frame_id")
     lineup_lookup = lineup[["player_id", "object_id"]].drop_duplicates().set_index("player_id")["object_id"].to_dict()
     kpi = load_kpi_merged_table(match_files)
 
     merged = output_events[["action_id", "original_event_id", "spadl_type"]].merge(
-        kpi[["EVENT_ID", "FRAME_NUMBER", "RECFRM", "PUID2", "NORECEIVER"]],
+        kpi[["EVENT_ID", "FRAME_NUMBER", "RECFRM", "PUID2", "NORECEIVER"] + [
+            col for col in kpi if col.startswith("source_") or col == "endpoint_source"
+        ]],
         left_on="original_event_id",
         right_on="EVENT_ID",
         how="left",
     )
+
+    output_events["source_event_success"] = events["success"].copy()
+    for col in merged:
+        if col.startswith("source_") or col == "endpoint_source":
+            output_events[col] = merged[col]
+    if "endpoint_source" not in output_events:
+        output_events["endpoint_source"] = "kpi_csv"
+    policy_mask = missing_reception_policy_mask(output_events)
 
     output_events["frame_id"] = map_period_raw_frames_to_tracking_ids(
         frame_table,
@@ -1263,6 +1340,9 @@ def run_kpi_synchronization(
         merged["RECFRM"],
     )
     output_events.loc[pass_like_mask, "receive_frame_id"] = receive_candidates.loc[pass_like_mask].astype("Int64")
+    # Possession-end candidates are never consumed for the policy-controlled group.
+    output_events.loc[policy_mask, "receive_frame_id"] = pd.NA
+    output_events.loc[policy_mask, "endpoint_source"] = "unresolved"
 
     kpi_receiver_ids = merged["PUID2"].map(lineup_lookup)
     output_events.loc[pass_like_mask & kpi_receiver_ids.notna(), "receiver_id"] = kpi_receiver_ids.loc[
@@ -1274,7 +1354,7 @@ def run_kpi_synchronization(
     needs_elastic_frame = output_events["frame_id"].isna()
     needs_elastic_receive = pass_like_mask & (
         output_events["receive_frame_id"].isna() | output_events["receiver_id"].isna()
-    )
+    ) & ~policy_mask
 
     audit: dict[str, object] = {
         "sync_source": "sportec_kpi",
@@ -1297,12 +1377,18 @@ def run_kpi_synchronization(
             receive_frame_fill, "action_id"
         ].map(elastic_output["receive_frame_id"])
 
-        receiver_fill = pass_like_mask & output_events["receiver_id"].isna() & output_events["action_id"].isin(elastic_output.index)
+        output_events.loc[receive_frame_fill, "endpoint_source"] = "elastic"
+        receiver_fill = pass_like_mask & ~policy_mask & output_events["receiver_id"].isna() & output_events["action_id"].isin(elastic_output.index)
         output_events.loc[receiver_fill, "receiver_id"] = output_events.loc[receiver_fill, "action_id"].map(
             elastic_output["receiver_id"]
         )
         audit["elastic_receive_fallbacks"] = int(receive_frame_fill.sum())
 
+    output_events.loc[pass_like_mask & output_events["receive_frame_id"].isna(), "endpoint_source"] = "unresolved"
+    output_events = apply_missing_reception_policy(output_events, tracking, fps)
+    audit["endpoint_policy_version"] = ENDPOINT_POLICY_VERSION
+    audit["sample_exclusions"] = output_events.loc[~output_events["training_sample_eligible"], "sample_exclusion_reason"].value_counts().to_dict()
+    audit["episode_termination_repairs"] = int(output_events["endpoint_source"].eq("tracking_episode_end").sum())
     finalized = finalize_synced_output(output_events, frame_table)
     audit["final_synced_rows"] = int(finalized["frame_id"].notna().sum())
     audit["final_receive_rows"] = int(finalized["receive_frame_id"].notna().sum())

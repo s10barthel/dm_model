@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from datatools import config
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
+from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
     add_split_arguments,
@@ -1432,6 +1433,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": graph_schema_from_args(args),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
+        "endpoint_consumer_version": ENDPOINT_POLICY_VERSION,
         "pass_height_threshold_meters": pass_height_threshold_meters(args),
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),

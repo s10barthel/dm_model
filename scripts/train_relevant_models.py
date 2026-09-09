@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
     infer_feature_graph_schema,
@@ -789,6 +790,8 @@ def derive_bundle_shared_context(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
+                        help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
     parser.add_argument(
         "--validation-mode",
@@ -1731,8 +1734,6 @@ def build_training_commands(
                     feature_flags,
             )
             if use_carries:
-                min_pass_duration_index = action_intent_command.index("--min_pass_dur")
-                del action_intent_command[min_pass_duration_index : min_pass_duration_index + 2]
                 action_intent_command.append("--use-carries")
             commands.append(action_intent_command)
             trained_model_ids["action_intent"] = model_ids["action_intent"]
@@ -1842,6 +1843,8 @@ def build_training_commands(
             )
             trained_model_ids["failure_receiver"] = model_ids["failure_receiver"]
 
+    duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
+    commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     return (
         commands,
         trained_model_ids,
@@ -1999,6 +2002,7 @@ def main() -> None:
                             "bundle_id": bundle_id,
                             "feature_run_id": resolved_feature_run_id,
                             **split_metadata(cli_args),
+                            "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
                             "split_manifest_id": split_manifest["manifest_id"],
                             "validation_mode": validation_mode,
                             "failed_command": command,
@@ -2045,6 +2049,7 @@ def main() -> None:
                         "bundle_id": bundle_id,
                         "feature_run_id": resolved_feature_run_id,
                         **split_metadata(cli_args),
+                        "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
                         "split_manifest_id": split_manifest["manifest_id"],
                         "validation_mode": validation_mode,
                         "failed_command": command,
@@ -2092,6 +2097,7 @@ def main() -> None:
                 "command": subprocess.list2cmdline(sys.argv),
                 "feature_run_id": resolved_feature_run_id,
                 "use_carries": bool(getattr(cli_args, "use_carries", False)),
+                "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
                 "intended_receiver_mode": intended_receiver_mode,
                 "return_type": cli_args.return_type,
                 "target_family": cli_args.target_family,
@@ -2166,6 +2172,7 @@ def main() -> None:
         "feature_run_id": effective_feature_run_id,
         "use_carries": bool(bundle_shared.get("use_carries", getattr(cli_args, "use_carries", False))),
         **split_metadata(cli_args),
+        "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],
         "validation_mode": validation_mode,

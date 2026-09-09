@@ -579,7 +579,7 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         self.assertFalse(Path(pass_intent_command[pass_intent_command.index("--label_dir") + 1]).name.endswith("_carries"))
         self.assertNotIn("--use-carries", pass_intent_command)
         self.assertIn("--min_pass_dur", pass_intent_command)
-        self.assertNotIn("--min_pass_dur", commands_by_task["action_intent"])
+        self.assertIn("--min_pass_dur", commands_by_task["action_intent"])
 
     def test_outcome_commands_pass_explicit_diagnostic_feature_run_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

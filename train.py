@@ -19,6 +19,7 @@ from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
+from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
 from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
@@ -99,7 +100,7 @@ parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID t
 parser.add_argument("--weight_bce", action="store_true", default=False, help="use weighted BCE to balance classes")
 
 parser.add_argument("--augment_blocks", action="store_true", default=False, help="include augmented data")
-parser.add_argument("--min_pass_dur", type=float, default=0, help="min duration of a valid pass")
+parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5, help="minimum pass duration in seconds (default: 0.5)")
 parser.add_argument("--shot_success", type=str, required=False, default="unblocked", choices=["goal", "unblocked"])
 parser.add_argument("--xy_only", action="store_true", default=False, help="only use xy locations as features")
 parser.add_argument("--possessor_aware", action="store_true", default=False, help="use possessor features")
@@ -779,6 +780,7 @@ if __name__ == "__main__":
         "resume_run_id": args.resume_run_id,
         "feature_run_id": args.feature_run_id,
         "use_carries": bool(args.use_carries),
+        "min_pass_dur": args.min_pass_dur,
         **split_metadata(args),
         "split_manifest_id": args.split_manifest["manifest_id"],
         "split_manifest": args.split_manifest["metadata"],

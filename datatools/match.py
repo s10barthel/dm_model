@@ -13,6 +13,7 @@ import torch
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.endpoint_policy import sample_is_eligible, valid_interval
 from datatools.epv import merge_epv_annotations
 from datatools.goal_distance import merge_goal_distance_annotations
 from datatools.xt import merge_xt_annotations
@@ -434,6 +435,8 @@ class Match(ABC):
             return actions
 
         valid_mask = actions.apply(lambda row: self.has_valid_action_snapshot(row["frame_id"], row["object_id"]), axis=1)
+        if "training_sample_eligible" in actions:
+            valid_mask &= actions["training_sample_eligible"].map(sample_is_eligible)
         return actions[valid_mask].copy()
 
     # To make the home team always play from left to right (not needed for the current dataset)
@@ -459,6 +462,8 @@ class Match(ABC):
         pass_mask = self.events["spadl_type"].isin(config.PASS) & self.events[
             ["frame_id", "receive_frame_id"]
         ].notna().all(axis=1)
+        if "training_sample_eligible" in self.events:
+            pass_mask &= self.events["training_sample_eligible"].map(sample_is_eligible)
         if self.next_action_conditions_enabled:
             pass_mask &= (
                 (self.events["receiver_id"] == self.events["next_player_id"])
@@ -613,8 +618,8 @@ class Match(ABC):
 
         start_frame = int(frame)
         end_frame = int(receive_frame)
-        if end_frame < start_frame:
-            start_frame, end_frame = end_frame, start_frame
+        if not valid_interval(self.tracking, start_frame, end_frame):
+            return np.nan, np.nan
 
         ball_z = pd.to_numeric(self.tracking.loc[start_frame:end_frame, "ball_z"], errors="coerce")
         if ball_z.empty:
@@ -642,6 +647,8 @@ class Match(ABC):
 
         if resolved_actions is not None:
             self.actions = resolved_actions.copy()
+            if "training_sample_eligible" in self.actions:
+                self.actions = self.actions[self.actions["training_sample_eligible"].map(sample_is_eligible)].copy()
         elif relabel_intended_receivers:
             heuristic_mode = (
                 INTENDED_RECEIVER_MODE_ANGLE_ONLY

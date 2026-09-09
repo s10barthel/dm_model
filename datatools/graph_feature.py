@@ -23,8 +23,9 @@ from tqdm import tqdm
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from datatools.endpoint_policy import valid_interval
 from datatools.config import LABEL_INDEX
-from datatools.ball_carries import augment_match_actions_with_carries
+from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
 from project_config import (
@@ -417,8 +418,10 @@ def append_node_level_globals(graph: Data, global_features: np.ndarray | list[fl
     return graph
 
 
-def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to_ltr: bool = True) -> np.ndarray:
+def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to_ltr: bool = True) -> np.ndarray | None:
     action = match.actions.loc[action_index]
+    if not valid_interval(match.tracking, action.get("frame_id"), action.get("receive_frame_id"), period=action.get("period_id")):
+        return None
     start_x = float(action.get("start_x", np.nan))
     start_y = float(action.get("start_y", np.nan))
     end_x = float(action.get("end_x", np.nan))
@@ -445,8 +448,7 @@ def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to
     direction = disp / disp_norm if disp_norm > 1e-6 else np.zeros(3, dtype=float)
 
     frame = action.get("frame_id", np.nan)
-    end_frame = receive_frame if not pd.isna(receive_frame) else frame
-    duration = 0.0 if pd.isna(frame) or pd.isna(end_frame) else max((float(end_frame) - float(frame)) / match.fps, 1 / match.fps)
+    duration = (float(receive_frame) - float(frame)) / match.fps
     mean_speed = disp_norm / duration
     return np.array([mean_speed, *direction], dtype=float)
 
@@ -456,14 +458,14 @@ def summarize_ball_trajectory(
     action_index: int,
     fps: int | None = None,
     rotate_to_ltr: bool = True,
-) -> np.ndarray:
+) -> np.ndarray | None:
     fps = fps or match.fps
     action = match.actions.loc[action_index]
     frame = action.get("frame_id", np.nan)
     receive_frame = action.get("receive_frame_id", np.nan)
 
-    if pd.isna(frame):
-        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+    if not valid_interval(match.tracking, frame, receive_frame, period=action.get("period_id")):
+        return None
 
     frame = int(frame)
     end_frame = frame + max(int(round(fps * SUCCESS_INTENT_WINDOW_SECONDS)), 1)
@@ -473,8 +475,8 @@ def summarize_ball_trajectory(
             receive_frame = episode_end_frame
     if not pd.isna(receive_frame):
         end_frame = min(end_frame, int(receive_frame))
-    if end_frame <= frame:
-        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+    if not valid_interval(match.tracking, frame, end_frame, period=action.get("period_id")):
+        return None
 
     available_cols = [col for col in ["ball_x", "ball_y", "ball_z", "ball_speed", "ball_vz"] if col in match.tracking.columns]
     trajectory = match.tracking.loc[frame:end_frame, available_cols].copy()
@@ -627,6 +629,8 @@ def construct_graph_for_action(
     extra_node_features = None
     if feature_variant == "success_intent":
         extra_node_features = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=rotate_to_ltr)
+        if extra_node_features is None:
+            return None
 
     return construct_graph_for_frame(
         match,
@@ -1614,7 +1618,9 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
             raise FileNotFoundError(
                 f"Carry sidecar not found at {carry_path}. Run scripts/preprocess_sportec.py --carry-artifacts-only first."
             )
-        augment_match_actions_with_carries(match, pd.read_parquet(carry_path))
+        carries = pd.read_parquet(carry_path)
+        validate_carry_artifact_version(carries)
+        augment_match_actions_with_carries(match, carries)
     if task.show_progress:
         print(_match_heading(task, task.match_lineup))
 

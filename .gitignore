@@ -35,6 +35,7 @@ tests/AS_viz/
 !tests/test_hawkeye_target_clamping.py
 !tests/test_temporal_splits.py
 !tests/test_preprocess_sportec.py
+!tests/test_endpoint_policy.py
 test_kpi_final/
 test_nan_xg/
 test_smoke_2425

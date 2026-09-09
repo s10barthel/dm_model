@@ -201,11 +201,12 @@ def _copy_pass_height_diagnostics(
     pass_max_ball_z = diagnostic_labels[:, LABEL_INDEX["pass_max_ball_z"]]
     pass_high = diagnostic_labels[:, LABEL_INDEX["pass_high"]]
     pass_rows = diagnostic_labels[:, LABEL_INDEX["is_pass"]] == 1
-    if not bool(torch.isfinite(pass_max_ball_z[pass_rows]).all().item()) or not bool(
-        torch.isfinite(pass_high[pass_rows]).all().item()
-    ):
+    unavailable = torch.isnan(pass_max_ball_z) & torch.isnan(pass_high)
+    valid_height = torch.isfinite(pass_max_ball_z) & torch.isfinite(pass_high)
+    if not bool((valid_height[pass_rows] | unavailable[pass_rows]).all().item()):
         raise ValueError(f"Pass-height diagnostic labels for match {match_id} contain non-finite pass-row values.")
-    if not bool(((pass_high[pass_rows] == 0) | (pass_high[pass_rows] == 1)).all().item()):
+    available_passes = pass_rows & ~unavailable
+    if not bool(((pass_high[available_passes] == 0) | (pass_high[available_passes] == 1)).all().item()):
         raise ValueError(f"Pass-height diagnostic labels for match {match_id} contain non-binary pass-row pass_high values.")
     labels = _normalize_label_width(selected_labels)
     labels[pass_rows, LABEL_INDEX["pass_max_ball_z"]] = pass_max_ball_z[pass_rows].to(
