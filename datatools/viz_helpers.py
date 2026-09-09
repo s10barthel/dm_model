@@ -45,12 +45,39 @@ def _align_like(values: list[SeriesOrFrame]) -> list[SeriesOrFrame]:
     all_series = all(isinstance(value, pd.Series) for value in values)
     all_frames = all(isinstance(value, pd.DataFrame) for value in values)
     if not all_series and not all_frames:
-        raise TypeError("All pass-score inputs must be either Series or DataFrames.")
+        raise TypeError("All component inputs must be either Series or DataFrames.")
 
     index, columns = _union_indexes(values)
     if all_series:
         return [value.reindex(index) for value in values]
     return [value.reindex(index=index, columns=columns) for value in values]
+
+
+DERIVED_COMPONENT_INPUTS = {
+    "outcome_failure": ("outcome_scoring_failure", "outcome_conceding_failure"),
+    "outcome_success": ("outcome_scoring_success", "outcome_conceding_success"),
+    "pass_score": (
+        "pass_success", "outcome_scoring_success", "outcome_scoring_failure",
+        "outcome_conceding_success", "outcome_conceding_failure",
+    ),
+}
+
+
+def validate_derived_inputs(component_names: Iterable[str], components: dict[str, SeriesOrFrame]) -> None:
+    """Fail clearly when a derived plot's source component is unavailable."""
+    for component_name in component_names:
+        missing = [
+            name for name in DERIVED_COMPONENT_INPUTS.get(component_name, ())
+            if name not in components or components[name] is None or components[name].empty
+        ]
+        if missing:
+            raise ValueError(f"{component_name} visualization is missing required source components: {', '.join(missing)}")
+
+
+def compute_outcome(scoring: SeriesOrFrame, conceding: SeriesOrFrame) -> SeriesOrFrame:
+    """Subtract aligned outcome values, preserving missing operands."""
+    scoring, conceding = _align_like([scoring, conceding])
+    return scoring - conceding
 
 
 def compute_pass_score(

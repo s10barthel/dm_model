@@ -18,7 +18,11 @@ import torch
 from datatools import config
 from datatools.graph_feature import construct_graph_features, construct_graph_for_action, summarize_ball_trajectory
 from datatools.match import Match
-from datatools.viz_helpers import compute_pass_score
+from datatools.viz_helpers import (
+    compute_outcome,
+    compute_pass_score,
+    validate_derived_inputs,
+)
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import configure_lane_survival_runtime_cache, inference_gnn, load_success_intent_labels, resolve_match_id
 from models.utils import (
@@ -607,6 +611,8 @@ def render_action_components(
         "outcome_conceding_success",
         "outcome_conceding_failure",
         "pass_score",
+        "outcome_failure",
+        "outcome_success",
     ]
     component_prob_rows: dict[str, pd.Series] = {}
 
@@ -655,6 +661,14 @@ def render_action_components(
             x_pass_version=physical_xpass_version_name,
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
         )
+
+    validate_derived_inputs(rendered_components, component_prob_rows)
+    for case in ("failure", "success"):
+        if f"outcome_{case}" in rendered_components:
+            component_prob_rows[f"outcome_{case}"] = compute_outcome(
+                component_prob_rows[f"outcome_scoring_{case}"],
+                component_prob_rows[f"outcome_conceding_{case}"],
+            )
 
     if "pass_score" in rendered_components:
         component_prob_rows["pass_score"] = compute_pass_score(
@@ -781,9 +795,9 @@ def main() -> None:
             "outcome_scoring",
             "outcome_conceding",
         ]
-        if task in initial_component_selection.requested_component_groups
+        if task in initial_component_selection.required_component_groups
     ]
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in initial_component_selection.requested_component_groups:
+    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in initial_component_selection.required_component_groups:
         if "pass_intent" not in required_model_tasks:
             required_model_tasks.append("pass_intent")
     if required_model_tasks:
@@ -821,9 +835,9 @@ def main() -> None:
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
-        if name in component_selection.requested_component_groups
+        if name in component_selection.required_component_groups
     }
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.requested_component_groups:
+    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
         selected_model_ids = {"pass_intent": resolved_model_ids["pass_intent"], **selected_model_ids}
     loaded_models = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
     missing = [name for name, model in loaded_models.items() if model is None]

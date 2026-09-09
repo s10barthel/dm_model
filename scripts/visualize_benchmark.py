@@ -21,7 +21,12 @@ from datatools.benchmark import (
     load_benchmark_modification_data,
     resolve_benchmark_component_states,
 )
-from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image
+from datatools.viz_helpers import (
+    compute_outcome,
+    compute_pass_score,
+    figure_to_rgb_image,
+    validate_derived_inputs,
+)
 from datatools.viz_snapshot import SnapshotVisualizer
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -142,6 +147,14 @@ def _probs_for_component_frame(
     component_tables: dict[str, pd.DataFrame],
     frame_id: int,
 ) -> pd.Series:
+    validate_derived_inputs([component_name], component_tables)
+    if component_name in {"outcome_failure", "outcome_success"}:
+        case = component_name.removeprefix("outcome_")
+        return compute_outcome(
+            build_benchmark_visualization_probs(_row_for_frame(component_tables[f"outcome_scoring_{case}"], frame_id)),
+            build_benchmark_visualization_probs(_row_for_frame(component_tables[f"outcome_conceding_{case}"], frame_id)),
+        )
+
     if component_name == "pass_score":
         return compute_pass_score(
             pass_success=build_benchmark_visualization_probs(_row_for_frame(component_tables["pass_success"], frame_id)),

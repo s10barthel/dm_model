@@ -38,7 +38,13 @@ from physical_pass_model import (
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
-from datatools.viz_helpers import compute_pass_score, figure_to_rgb_image, save_animation
+from datatools.viz_helpers import (
+    compute_outcome,
+    compute_pass_score,
+    figure_to_rgb_image,
+    save_animation,
+    validate_derived_inputs,
+)
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
     HAWKEYE_VISUALIZATION_DIR,
@@ -389,21 +395,15 @@ def render_situation(
             components["outcome_conceding_success"] = conceding_success
             components["outcome_conceding_failure"] = conceding_failure
 
-    component_frames: dict[str, pd.DataFrame | None] = {
-        component_name: components.get(component_name)
-        for component_name in rendered_components
-        if component_name != "pass_score"
-    }
-    if "pass_score" in rendered_components and all(
-        component_frames[name] is not None
-        for name in [
-            "pass_success",
-            "outcome_scoring_success",
-            "outcome_scoring_failure",
-            "outcome_conceding_success",
-            "outcome_conceding_failure",
-        ]
-    ):
+    validate_derived_inputs(rendered_components, components)
+    component_frames = dict(components)
+    for case in ("failure", "success"):
+        if f"outcome_{case}" in rendered_components:
+            component_frames[f"outcome_{case}"] = compute_outcome(
+                component_frames[f"outcome_scoring_{case}"],
+                component_frames[f"outcome_conceding_{case}"],
+            )
+    if "pass_score" in rendered_components:
         component_frames["pass_score"] = compute_pass_score(
             pass_success=component_frames["pass_success"],
             outcome_scoring_success=component_frames["outcome_scoring_success"],
@@ -548,9 +548,9 @@ def main() -> None:
             "outcome_scoring",
             "outcome_conceding",
         ]
-        if task in component_selection.requested_component_groups
+        if task in component_selection.required_component_groups
     ]
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.requested_component_groups:
+    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
         if "pass_intent" not in required_model_tasks:
             required_model_tasks.append("pass_intent")
     model_ids, shared_context, _ = resolve_model_selection(
@@ -565,9 +565,9 @@ def main() -> None:
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
-        if name in component_selection.requested_component_groups
+        if name in component_selection.required_component_groups
     }
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.requested_component_groups:
+    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
         pass_intent_model_id = model_ids.get("pass_intent")
         if not pass_intent_model_id:
             raise ValueError("Physical xPass weight v5 requires a resolved pass-intent model ID.")

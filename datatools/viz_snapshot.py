@@ -27,6 +27,8 @@ COMPONENT_ANNOT_TYPES = (
     "outcome_scoring",
     "outcome_conceding",
     "pass_score",
+    "outcome_failure",
+    "outcome_success",
     "max_player_cum_prob",
 )
 

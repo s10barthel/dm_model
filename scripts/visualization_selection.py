@@ -10,6 +10,8 @@ COMPONENT_GROUPS = (
     "outcome_scoring",
     "outcome_conceding",
     "pass_score",
+    "outcome_failure",
+    "outcome_success",
 )
 OPTIONAL_COMPONENT_GROUPS = ("pass_height",)
 INTENDED_RECIPIENT_GROUP = "intended_recipient"
@@ -23,6 +25,8 @@ GROUP_TO_COMPONENTS = {
     "outcome_scoring": ("outcome_scoring_success", "outcome_scoring_failure"),
     "outcome_conceding": ("outcome_conceding_success", "outcome_conceding_failure"),
     "pass_score": ("pass_score",),
+    "outcome_failure": ("outcome_failure",),
+    "outcome_success": ("outcome_success",),
     "intended_recipient": ("intended_recipient",),
 }
 
@@ -33,6 +37,15 @@ class ComponentSelection:
     disabled_component_groups: list[str]
     rendered_components: list[str]
     disabled_components: list[str]
+
+    @property
+    def required_component_groups(self) -> list[str]:
+        required = set(self.requested_component_groups)
+        if "pass_score" in required:
+            required.update(PASS_SCORE_DEPENDENCIES)
+        if required & {"outcome_failure", "outcome_success"}:
+            required.update({"outcome_scoring", "outcome_conceding"})
+        return [group for group in GROUP_TO_COMPONENTS if group in required]
 
 
 def add_component_selection_args(parser: argparse.ArgumentParser, *, include_intended_recipient: bool = False) -> None:
@@ -78,14 +91,6 @@ def resolve_component_selection(
     selected = set(only_groups) if only_groups else set(default_groups)
     selected.update(group for group in OPTIONAL_COMPONENT_GROUPS if getattr(args, f"show_{group}", False))
     selected -= no_groups
-
-    if "pass_score" in selected and not PASS_SCORE_DEPENDENCIES <= selected:
-        missing = sorted(PASS_SCORE_DEPENDENCIES - selected)
-        raise ValueError(
-            "pass_score visualization requires pass_success, outcome_scoring, and outcome_conceding. "
-            "Also select/enable: "
-            + ", ".join(missing)
-        )
 
     rendered_components = [
         component

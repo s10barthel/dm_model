@@ -683,6 +683,8 @@ Outputs:
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_failure.png`
+- `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_success.png`
 - optionally `intended_recipient.png` when a `success_intent` checkpoint is supplied
 - `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 
@@ -695,7 +697,10 @@ Useful options:
 - `--show-pass-height` to include the optional pass-height component when a `pass_height` checkpoint is selected
 - `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
 - `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
-- `--only-pass-score` also requires pass-success, outcome-scoring, and outcome-conceding to be selected, because pass score is derived from those components
+- `outcome_failure` and `outcome_success` are rendered by default across Sportec, Benchmark, SkillCorner, Hawkeye, and the combined Hawkeye inference/visualization command, in each command's supported output formats. They subtract conceding from scoring for the corresponding failure/success case, using three-decimal numerical annotations (including negatives and zero), without value-based colour coding.
+- `--no-outcome-failure` and `--no-outcome-success` remove the new plots; `--only-outcome-failure` and `--only-outcome-success` select them alone or together. There are no `--show-outcome-*` flags. Existing `--only-*` selections do not implicitly add the new plots.
+- `--only-pass-score` automatically loads its required pass-success, scoring, and conceding inputs without displaying their plots. Combined outcome plots likewise load their inputs independently; `--no-*` suppresses plots, not dependency computation.
+- Derived values align by player/action/frame identifiers. Missing operands remain missing; an unavailable source component produces a clear error. Derived plots use the existing output directories and metadata, with component names `outcome_failure` and `outcome_success`; no additional model or saved component table is required.
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
 - `--show-physical-xpass` to render the cached physical xPass metric itself
@@ -746,7 +751,7 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --selections --selection-format percentages
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2>
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --run-id hawkeye_visualization_20260414T123456_abcdef12
-python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --only-pass-success --only-outcome-scoring --only-outcome-conceding --only-pass-score
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --only-pass-score
 ```
 
 `scripts/visualize_hawkeye.py` reads the probabilities from `scripts/run_hawkeye.py` outputs and rebuilds only the raw HawkEye geometry for rendering. Each invocation writes to `data/visualizations/hawkeye/<visualization_run_id>/` and records the source component run in `metadata.json`. If you want the old direct-inference behavior, use:
@@ -1916,6 +1921,8 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_failure.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_failure.png`
+  - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_success.png`
   - optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/intended_recipient.png`
   - `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 

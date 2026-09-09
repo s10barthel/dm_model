@@ -1499,39 +1499,14 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["selected_model_ids"], {"outcome_scoring": "outcome_scoring/1"})
             self.assertEqual(metadata["rendered_components"], ["outcome_scoring_success", "outcome_scoring_failure"])
 
-    def test_only_pass_score_without_dependencies_raises_clear_error(self) -> None:
-        args = SimpleNamespace(
-            situation_id=["sit1"],
-            action_id=None,
-            tracking_csv="tracking.csv",
-            ball_csv="ball.csv",
-            freeze_ballreceipt=True,
-            device="cpu",
-            show_trajectories=False,
-            output="png",
-            time_norm=[0.0],
-            action_intent_model_id="action_intent/1",
-            pass_intent_model_id="pass_intent/1",
-            pass_success_model_id="pass_success/1",
-            outcome_scoring_model_id="outcome_scoring/1",
-            outcome_conceding_model_id="outcome_conceding/1",
-            only_pass_score=True,
-            show_physical_xpass=False,
-            use_physical_xpass=False,
-            max_xpass=False,
-            top10mean_xpass=False,
-            physical_cache_dir=None,
-            no_physical_cache=False,
-            refresh_physical_cache=False,
-            physical_num_workers="auto",
-            physical_worker_thread_limit=1,
-            physical_batch_size=16,
-            run_id="bad",
-            output_dir="out",
-        )
-        with patch.object(run_and_visualize_hawkeye, "parse_args", return_value=args):
-            with self.assertRaisesRegex(ValueError, "pass_score visualization requires"):
-                run_and_visualize_hawkeye.main()
+    def test_only_pass_score_loads_dependencies_without_rendering_them(self) -> None:
+        from scripts.visualization_selection import resolve_component_selection
+
+        selection = resolve_component_selection(SimpleNamespace(only_pass_score=True))
+        self.assertEqual(selection.rendered_components, ["pass_score"])
+        self.assertEqual(set(selection.required_component_groups), {
+            "pass_score", "pass_success", "outcome_scoring", "outcome_conceding",
+        })
 
     def test_visualization_scripts_do_not_write_latest_pointers(self) -> None:
         script_paths = [
