@@ -126,6 +126,19 @@ def _renormalize_probabilities(probs: np.ndarray) -> np.ndarray:
     return np.asarray(probs, dtype=float)
 
 
+def _aligned_pass_intent_values(
+    pass_intent_probs: pd.DataFrame,
+    event_index: int,
+    player_indices: list[str],
+) -> np.ndarray:
+    if event_index not in pass_intent_probs.index:
+        raise ValueError(f"Physical xPass weight v5 has no pass_intent row for event {event_index}.")
+    intent_row = pass_intent_probs.loc[event_index]
+    if isinstance(intent_row, pd.DataFrame):
+        raise ValueError(f"Physical xPass weight v5 requires a unique pass_intent row for event {event_index}.")
+    return pd.to_numeric(intent_row.reindex(player_indices), errors="coerce").to_numpy(dtype=float)
+
+
 def _physical_xpass_blend_finite_mask(
     *,
     xpass: np.ndarray,
@@ -1025,17 +1038,7 @@ def inference_gnn(
                 )
                 pass_intent_i = None
                 if weight_version == "v5":
-                    if event_index not in pass_intent_probs.index:
-                        raise ValueError(f"Physical xPass weight v5 has no pass_intent row for event {event_index}.")
-                    missing_players = [player_id for player_id in player_indices_i if player_id not in pass_intent_probs.columns]
-                    if missing_players:
-                        raise ValueError(
-                            f"Physical xPass weight v5 has no pass_intent column for event {event_index} players {missing_players}."
-                        )
-                    intent_row = pass_intent_probs.loc[event_index, player_indices_i]
-                    if isinstance(intent_row, pd.DataFrame):
-                        raise ValueError(f"Physical xPass weight v5 requires a unique pass_intent row for event {event_index}.")
-                    pass_intent_i = np.asarray(intent_row, dtype=float)
+                    pass_intent_i = _aligned_pass_intent_values(pass_intent_probs, event_index, player_indices_i)
                 if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
                     raise ValueError(
                         "Physical xPass blend tensors do not match pass-success probabilities: "

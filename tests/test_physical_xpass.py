@@ -1056,6 +1056,36 @@ class PhysicalXPassTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive finite"):
             physical_xpass_blend_weight_v5(0.5, 0.01, intent_threshold=0.0)
 
+    def test_v5_alignment_allows_missing_possessor_intent_when_not_blend_eligible(self) -> None:
+        intent = pd.DataFrame({"home_2": [0.01]}, index=[300])
+        aligned = inference._aligned_pass_intent_values(intent, 300, ["home_1", "home_2"])
+
+        finite_mask, missing_mask = inference._physical_xpass_blend_finite_mask(
+            xpass=np.asarray([np.nan, 0.8]),
+            pass_distance=np.asarray([np.nan, 20.0]),
+            offside=np.asarray([False, False]),
+            weight_version="v5",
+            pass_height=np.asarray([np.nan, 0.5]),
+            pass_intent=aligned,
+        )
+
+        np.testing.assert_array_equal(finite_mask, [False, True])
+        np.testing.assert_array_equal(missing_mask, [True, False])
+
+    def test_v5_alignment_rejects_missing_intent_for_blend_eligible_receiver(self) -> None:
+        intent = pd.DataFrame({"home_2": [0.01]}, index=[300])
+        aligned = inference._aligned_pass_intent_values(intent, 300, ["home_2", "home_3"])
+
+        with self.assertRaisesRegex(ValueError, "finite pass_intent"):
+            inference._physical_xpass_blend_finite_mask(
+                xpass=np.asarray([0.8, 0.7]),
+                pass_distance=np.asarray([20.0, 25.0]),
+                offside=np.asarray([False, False]),
+                weight_version="v5",
+                pass_height=np.asarray([0.5, 0.5]),
+                pass_intent=aligned,
+            )
+
     def test_inference_physical_xpass_ball_z_limit_overrides_v5(self) -> None:
         self.assertAlmostEqual(
             float(
