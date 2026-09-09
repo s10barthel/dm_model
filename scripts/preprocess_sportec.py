@@ -1348,7 +1348,8 @@ def run_kpi_synchronization(
     output_events.loc[pass_like_mask & kpi_receiver_ids.notna(), "receiver_id"] = kpi_receiver_ids.loc[
         pass_like_mask & kpi_receiver_ids.notna()
     ]
-    no_receiver_mask = pass_like_mask & output_events["receiver_id"].isna() & merged["NORECEIVER"].fillna(False)
+    no_receiver = merged["NORECEIVER"].astype("boolean").fillna(False)
+    no_receiver_mask = pass_like_mask & output_events["receiver_id"].isna() & no_receiver
     output_events.loc[no_receiver_mask, "receiver_id"] = "out"
 
     needs_elastic_frame = output_events["frame_id"].isna()
