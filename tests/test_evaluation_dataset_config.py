@@ -36,6 +36,18 @@ from scripts import evaluate_relevant_models
 
 
 class EvaluationDatasetConfigTests(unittest.TestCase):
+    def test_velocity_node_setting_uses_dependency_checkpoint(self) -> None:
+        for target_value, checkpoint_value in [(False, True), (True, False), (False, None)]:
+            with self.subTest(target=target_value, checkpoint=checkpoint_value):
+                target = build_action_dataset_kwargs(
+                    dict(task="pass_success", edge_in_dim=2, vel_node_features_aware=target_value),
+                    train=False, diagnostic_label_dir=None)
+                dependency = build_ipw_dataset_kwargs(
+                    target, dict(edge_in_dim=2, vel_node_features_aware=checkpoint_value), None,
+                    diagnostic_label_dir=None, require_goal_next10_diagnostics=False)
+                self.assertEqual(target["vel_node_features_aware"], target_value)
+                self.assertEqual(dependency["vel_node_features_aware"], checkpoint_value is not False)
+
     def test_builder_covers_every_action_dataset_option(self) -> None:
         dataset_parameters = set(inspect.signature(ActionDataset.__init__).parameters)
         dataset_parameters.difference_update({"self", "match_ids", "feature_dir", "label_dir"})

@@ -675,6 +675,73 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertEqual(short_image.size, long_image.size)
 
+    def test_velocity_node_flag_precedence_and_forwarding(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            for flags in [[], ["--no-vel-node-features", "--accel", "--poss-vel-aware"],
+                          ["--accel", "--poss-vel-aware", "--no-vel-node-features"]]:
+                args = train_wrapper.parse_args(["--feature-run-id", "feature_run", "--success-intent-only", *flags])
+                resolved = train_wrapper.resolve_wrapper_feature_flags(args)
+                self.assertEqual(resolved["vel_node_features_aware"], not bool(flags))
+                command = train_wrapper.append_low_level_feature_flags([], resolved)
+                self.assertEqual("--no-vel-node-features" in command, bool(flags))
+                self.assertTrue(resolved["accel_aware"])
+                self.assertTrue(resolved["poss_vel_aware"])
+
+    def test_velocity_node_mask_matches_dataset_runtime_and_batch(self) -> None:
+        for xy_only in [False, True]:
+            for possessor_aware in [False, True]:
+                with self.subTest(xy_only=xy_only, possessor_aware=possessor_aware), tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    (root / "features").mkdir()
+                    (root / "labels").mkdir()
+                    source = make_graph(edge_dim=5)
+                    source.x[1, config.NODE_FEATURE_IS_TEAMMATE] = 0
+                    original = source.clone()
+                    torch.save([source], root / "features" / "match_1.pt")
+                    torch.save(make_labels(), root / "labels" / "match_1.pt")
+                    options = dict(task="action_intent", xy_only=xy_only, possessor_aware=possessor_aware,
+                                   keeper_aware=True, ball_z_aware=True, poss_vel_aware=True,
+                                   poss_rel_vel_aware=True, accel_aware=True, extend_features=False,
+                                   edge_in_dim=5, v_edge_feature_mode="all", relative_speed_edge_feature_mode="all")
+                    baseline = ActionDataset(["match_1"], feature_dir=str(root / "features"),
+                                             label_dir=str(root / "labels"), **options)[0][0]
+                    masked = ActionDataset(["match_1"], feature_dir=str(root / "features"),
+                                           label_dir=str(root / "labels"), vel_node_features_aware=False, **options)[0][0]
+                    expected = baseline.x.clone()
+                    expected[:, config.NODE_FEATURE_VX:config.NODE_FEATURE_ACCEL + 1] = 0
+                    self.assertTrue(torch.equal(masked.x, expected))
+                    self.assertTrue(torch.equal(masked.edge_attr, baseline.edge_attr))
+                    runtime, _ = filter_features_and_labels([source], make_labels(),
+                        dict(options, vel_node_features_aware=False, sparsify="none", max_edge_dist=10))
+                    self.assertTrue(torch.equal(runtime[0].x, expected))
+                    self.assertTrue(torch.equal(source.x, original.x))
+                    batch = Batch.from_data_list([baseline])
+                    adapted = model_utils.adapt_batch_graphs_for_model(batch, dict(options, vel_node_features_aware=False))
+                    self.assertTrue(torch.equal(adapted.x, expected))
+                    self.assertTrue(torch.equal(batch.x, baseline.x))
+                    self.assertTrue(torch.equal(adapted.edge_attr, baseline.edge_attr))
+
+    def test_velocity_node_checkpoint_roundtrip_and_legacy_defaults(self) -> None:
+        for value in [None, False, True]:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmpdir:
+                checkpoint_dir = Path(tmpdir) / "action_intent" / "velocity"
+                write_checkpoint(checkpoint_dir)
+                args_path = checkpoint_dir / "args.json"
+                args = json.loads(args_path.read_text())
+                args["vel_node_features_aware"] = value
+                args_path.write_text(json.dumps(args))
+                with patch.object(model_utils, "get_model_path", return_value=checkpoint_dir):
+                    record = model_utils.get_model_record("action_intent/velocity")
+                    model = model_utils.load_model("action_intent/velocity", device="cpu")
+                expected = value is not False
+                self.assertEqual(record["feature_signature"]["vel_node_features_aware"], expected)
+                self.assertEqual(model.args["vel_node_features_aware"], expected)
+        self.assertTrue(model_utils.extract_model_feature_signature({})["vel_node_features_aware"])
+
     def test_wrapper_parse_args_accepts_no_accel(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
@@ -796,6 +863,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 poss_vel_aware=None,
                 poss_rel_vel_aware=None,
                 accel_aware=False,
+                vel_node_features_aware=False,
                 extend_features=None,
             )
 
@@ -808,6 +876,11 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertFalse(feature_flags["accel_aware"])
         self.assertIn("--no-accel", commands[0])
         self.assertNotIn("--accel", commands[0])
+
+        self.assertFalse(feature_flags["vel_node_features_aware"])
+        self.assertIn("--no-vel-node-features", commands[0])
+        refit = train_wrapper._replace_cli_value(commands[0], "--n_epochs", 3)
+        self.assertIn("--no-vel-node-features", refit)
 
     def test_resolve_enabled_tasks_only_pass_height(self) -> None:
         args = SimpleNamespace(

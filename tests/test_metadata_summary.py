@@ -149,6 +149,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
                     "model_id": "pass_success/pass_success_1",
                     "feature_run_id": "feature_from_record",
                     "feature_signature": {
+                        "vel_node_features_aware": False,
                         "accel_aware": False,
                         "poss_geometry_aware": False,
                         "goal_features_aware": True,
@@ -171,6 +172,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
     assert row["run_id"] == "hawkeye_component_1"
     assert row["created_at"] == "2026-06-02T10:00:00"
     assert row["feature_run_id"] == "feature_from_record"
+    assert row["vel_node_features_aware"] == "false"
     assert row["accel_aware"] == "false"
     assert row["poss_geometry_aware"] == "false"
     assert row["goal_features_aware"] == "true"

@@ -75,6 +75,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "poss_geometry_aware": True,
     "goal_features_aware": True,
     "goal_nodes_aware": True,
+    "vel_node_features_aware": True,
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
@@ -92,6 +93,7 @@ LOW_LEVEL_FEATURE_FLAGS = {
 }
 
 LOW_LEVEL_FALSE_FLAGS = {
+    "vel_node_features_aware": "--no-vel-node-features",
     "poss_geometry_aware": "--no-poss-geometry",
     "goal_features_aware": "--no-goal-features",
     "goal_nodes_aware": "--no-goal-nodes",
@@ -1041,6 +1043,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "poss_rel_vel_aware",
         "Include player velocity relative to the ball possessor's velocity during training.",
         "Disable player velocity relative to the ball possessor's velocity during training.",
+    )
+    parser.add_argument(
+        "--no-vel-node-features",
+        dest="vel_node_features_aware",
+        action="store_false",
+        default=True,
+        help="Zero vx, vy, speed, and accel node features for every node, including the possessor; keep graph width unchanged.",
     )
     parser.add_argument(
         "--no-poss-geometry",

@@ -148,6 +148,13 @@ accel_group.add_argument(
     help="Ignore player-acceleration node features and zero that feature slot.",
 )
 parser.set_defaults(accel_aware=True)
+parser.add_argument(
+    "--no-vel-node-features",
+    dest="vel_node_features_aware",
+    action="store_false",
+    default=True,
+    help="Zero vx, vy, speed, and accel node features for every node, including the possessor; keep graph width unchanged.",
+)
 offside_group = parser.add_mutually_exclusive_group()
 offside_group.add_argument(
     "--offside",

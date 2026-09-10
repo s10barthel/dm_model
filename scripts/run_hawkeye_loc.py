@@ -487,6 +487,8 @@ def compatibility_warnings(model_ids: dict[str, str], model_specs: dict[str, obj
         signature = extract_model_feature_signature(model_args)
         incompatible: list[str] = []
         for name in ["poss_vel_aware", "poss_rel_vel_aware", "accel_aware"]:
+            if name != "poss_rel_vel_aware" and not signature["vel_node_features_aware"]:
+                continue
             if bool(signature.get(name, False)):
                 incompatible.append(name)
         if signature.get("v_edge_feature_mode") == "all":

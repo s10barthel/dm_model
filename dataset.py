@@ -266,6 +266,7 @@ class ActionDataset(Dataset):
         lane_survival=False,
         lane_survival_mode=None,
         lane_survival_cache_dir=None,
+        vel_node_features_aware=True,
     ):
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
@@ -479,7 +480,7 @@ class ActionDataset(Dataset):
             if graph is None:
                 _increment_count(self.skipped_rows, "graph_none")
                 continue
-            graph = adapt_graph_edge_features(graph, getattr(self, "edge_in_dim", None))
+            graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
 
             try:
                 possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
@@ -530,6 +531,9 @@ class ActionDataset(Dataset):
 
             if not goal_features_aware:  # Ignore player geometry relative to the attacking goal
                 graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
+
+            if vel_node_features_aware is not None and not vel_node_features_aware:
+                graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
 
             if not accel_aware:  # Ignore player-acceleration features without changing graph width
                 graph.x[:, config.NODE_FEATURE_ACCEL] = 0

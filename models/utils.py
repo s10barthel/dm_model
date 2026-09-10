@@ -76,6 +76,7 @@ FEATURE_SIGNATURE_KEYS = (
     "poss_geometry_aware",
     "goal_features_aware",
     "goal_nodes_aware",
+    "vel_node_features_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",
@@ -257,6 +258,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "poss_geometry_aware": bool(args.get("poss_geometry_aware", True)),
         "goal_features_aware": bool(args.get("goal_features_aware", True)),
         "goal_nodes_aware": bool(args.get("goal_nodes_aware", True)),
+        "vel_node_features_aware": True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"]),
         "accel_aware": True if args.get("accel_aware") is None else bool(args.get("accel_aware")),
         "offside_aware": True if args.get("offside_aware") is None else bool(args.get("offside_aware")),
         "extend_features": bool(args.get("extend_features", False)),
@@ -347,6 +349,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args.setdefault("edge_in_dim", 2)
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
     args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
+    args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
     enrich_model_args_from_metadata(args, metadata)
@@ -600,6 +603,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
         args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
+        args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
@@ -1238,6 +1242,11 @@ def adapt_batch_graphs_for_model(
     *,
     context: str = "Loaded model",
 ) -> Batch:
+    # Model-specific transforms must not affect inputs reused by another model.
+    batch_graphs = batch_graphs.clone()
+    if model_args.get("vel_node_features_aware") is not None and not model_args["vel_node_features_aware"]:
+        batch_graphs.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
+
     required_node_dim = int(model_args.get("node_in_dim", 0) or 0)
     actual_node_dim = int(batch_graphs.x.shape[1]) if getattr(batch_graphs, "x", None) is not None else 0
     if required_node_dim and actual_node_dim < required_node_dim:

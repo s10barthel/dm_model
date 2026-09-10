@@ -1574,6 +1574,9 @@ def filter_features_and_labels(
         if not args.get("goal_features_aware", True):
             graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
 
+        if args.get("vel_node_features_aware") is not None and not args["vel_node_features_aware"]:
+            graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
+
         if not args.get("accel_aware", True):
             graph.x[:, config.NODE_FEATURE_ACCEL] = 0
 
