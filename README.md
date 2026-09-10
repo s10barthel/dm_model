@@ -1423,6 +1423,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/train_relevant_models.py`
 
+- `--min_pass_dur <seconds>`: minimum pass duration applied to every selected component. Default: `0.5` seconds.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
