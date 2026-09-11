@@ -240,7 +240,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sigma-angle", "--sigma_angle", dest="sigma_angle", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_ANGLE_FACTOR)
     parser.add_argument("--sigma-speed", "--sigma_speed", dest="sigma_speed", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_SPEED_FACTOR)
     parser.add_argument("--sigma-distance", "--sigma_distance", dest="sigma_distance", type=float, default=PHYSICAL_XPASS_DEFAULT_SIGMA_DISTANCE_FACTOR)
-    parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=PHYSICAL_XPASS_DEFAULT_TOP_N)
+    parser.add_argument("--top-n", "--top_n", dest="top_n", type=int, default=None)
+    parser.add_argument("--top-pass", "--top_pass", dest="top_pass_values", type=int, nargs="+", default=None, help="pc-xPass only: export top-pass means for distinct speed-angle pairs after endpoint optimization.")
     parser.add_argument(
         "--top-xt",
         dest="top_xt",
@@ -534,7 +535,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--sigma-speed must be positive.")
     if args.sigma_distance <= 0:
         parser.error("--sigma-distance must be positive.")
-    if args.top_n < 1:
+    if not args.pc_xpass and args.top_n is None:
+        args.top_n = PHYSICAL_XPASS_DEFAULT_TOP_N
+    if args.top_pass_values is not None:
+        if not args.pc_xpass:
+            parser.error("--top-pass requires --pc-xpass.")
+        if any(n < 1 for n in args.top_pass_values):
+            parser.error("--top-pass must contain only positive integers.")
+        args.top_pass_values = sorted(set(args.top_pass_values))
+    if args.pc_xpass and not args.export_topmean and (args.top_n is not None or args.top_n_values is not None):
+        parser.error("--no-topmean conflicts with --top-n and --top-n-values.")
+    if args.top_n is not None and args.top_n < 1:
         parser.error("--top-n must be positive.")
     if args.top_n_values is not None and any(int(value) < 1 for value in args.top_n_values):
         parser.error("--top-n-values must contain only positive integers.")
@@ -580,7 +591,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         explicitly_ignored_teammates_lane_survival or bool(args.ignore_teammates_control)
     ):
         parser.error("--ignore-teammates-lane-survival and --ignore-teammates-control require --pc-xpass.")
-    if bool(args.pc_xpass) and not any([bool(args.export_max), bool(args.export_topmean)]):
+    if args.pc_xpass and not (args.export_max or (args.export_topmean and pc_top_n_values_from_args(args)) or args.top_pass_values):
         parser.error("At least one pc-xPass metric must be exported.")
     if not bool(args.pc_xpass) and not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one physical xPass metric must be exported.")
@@ -599,6 +610,7 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
         if bool(getattr(args, "export_topmean", True)):
             for top_n in pc_top_n_values_from_args(args):
                 metrics.append(f"top{int(top_n)}_xpass")
+        metrics.extend(f"top_pass{n}_xpass" for n in (getattr(args, "top_pass_values", None) or []))
         return normalize_physical_xpass_metrics(metrics)
     metrics: list[str] = []
     if bool(getattr(args, "export_noise_kernel", True)):
@@ -611,7 +623,8 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
 
 
 def pc_top_n_values_from_args(args: argparse.Namespace) -> list[int]:
-    values = [int(getattr(args, "top_n", PHYSICAL_XPASS_DEFAULT_TOP_N))]
+    top_n = getattr(args, "top_n", None)
+    values = [] if top_n is None else [int(top_n)]
     values.extend(int(value) for value in (getattr(args, "top_n_values", None) or []))
     return sorted(set(values))
 
@@ -799,7 +812,7 @@ def resolve_runtime_sportec_reuse_cache(
                 sigma_angle=args.sigma_angle,
                 sigma_speed=args.sigma_speed,
                 sigma_distance=args.sigma_distance,
-                top_n=int(args.top_n),
+                top_n=args.top_n,
                 available_metrics=enabled_physical_xpass_metrics_from_args(args),
                 physical_eps=float(args.physical_eps),
             ),
@@ -1230,8 +1243,9 @@ def prewarm_runtime_items(
         sigma_angle=float(args.sigma_angle),
         sigma_speed=float(args.sigma_speed),
         sigma_distance=float(args.sigma_distance),
-        top_n=int(args.top_n),
+        top_n=args.top_n,
         top_n_values=pc_top_n_values_from_args(args) if bool(getattr(args, "pc_xpass", False)) else None,
+        top_pass_values=getattr(args, "top_pass_values", None),
         available_metrics=enabled_physical_xpass_metrics_from_args(args),
         lane_power=float(args.lane_power),
         lane_inflection_point=float(args.lane_inflection_point),
@@ -1396,8 +1410,9 @@ def write_runtime_dataset_metadata(
             speed_step=args.speed_step,
             angle_step=args.angle_step,
             radial_gridsize=float(args.radial_gridsize),
-            top_n=int(args.top_n),
+            top_n=args.top_n,
             top_n_values=pc_top_n_values_from_args(args),
+            top_pass_values=getattr(args, "top_pass_values", None),
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
             lane_power=float(args.lane_power),
             lane_inflection_point=float(args.lane_inflection_point),
@@ -1431,7 +1446,7 @@ def write_runtime_dataset_metadata(
             sigma_angle=args.sigma_angle,
             sigma_speed=args.sigma_speed,
             sigma_distance=args.sigma_distance,
-            top_n=int(args.top_n),
+            top_n=args.top_n,
             available_metrics=enabled_physical_xpass_metrics_from_args(args),
         )
     )
@@ -1505,7 +1520,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             sigma_angle=args.sigma_angle,
             sigma_speed=args.sigma_speed,
             sigma_distance=args.sigma_distance,
-            top_n=int(args.top_n),
+            top_n=args.top_n,
             available_metrics=[PHYSICAL_XPASS_METRIC_MAX],
             physical_eps=float(args.physical_eps),
         )
@@ -1593,7 +1608,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
             sigma_angle=args.sigma_angle,
             sigma_speed=args.sigma_speed,
             sigma_distance=args.sigma_distance,
-            top_n=int(args.top_n),
+            top_n=args.top_n,
             default_metric="max_xpass",
             available_metrics=["max_xpass"],
             metric_schema_version=1,

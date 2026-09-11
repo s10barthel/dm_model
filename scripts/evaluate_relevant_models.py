@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from models.utils import load_bundle_record, resolve_model_selection
 from project_config import EVALUATION_RUNS_DIR
 
@@ -70,7 +71,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--v4-zero", type=float, default=None)
     parser.add_argument("--v5-intent-threshold", type=float, default=None)
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
-    return parser.parse_args(argv)
+    add_top_pass_selector(parser)
+    return resolve_top_pass_selector(parser, parser.parse_args(argv), pc_only=True)
 
 
 def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:

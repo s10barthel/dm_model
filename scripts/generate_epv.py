@@ -24,6 +24,7 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     format_physical_xpass_cache_summary,
     inference_uses_physical_xpass,
@@ -69,7 +70,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing EPV outputs.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with cached runtime physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for pass-success blending.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
+    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
     parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
@@ -78,7 +79,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--v5-discount", type=parse_physical_xpass_bool, default=None)
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
+    add_top_pass_selector(parser)
     args = parser.parse_args(argv)
+    resolve_top_pass_selector(parser, args)
     if args.v4_power is not None:
         if not math.isfinite(args.v4_power) or args.v4_power <= 0:
             parser.error("--v4-power must be positive.")

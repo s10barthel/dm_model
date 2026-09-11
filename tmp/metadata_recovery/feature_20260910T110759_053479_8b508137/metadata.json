@@ -1,0 +1,921 @@
+{
+  "run_id": "feature_20260910T110759_053479_8b508137",
+  "created_at": "2026-09-11T15:53:47+02:00",
+  "command": "python scripts/generate_relevant_features.py --use-carries --train-count 765 --return_type next_10 --return_type next_3 --return_type disc_poly_max_0.1_1 --intended-receiver-model-id success_intent/success_intent_20260424T100718_521940_7274e137 --next-action-conditions-off --v-edge-features --relative-speed-edge-features --pass-height --num-workers 8 --worker-thread-limit 1",
+  "intended_receiver_modes": [
+    "original",
+    "angle_only",
+    "model"
+  ],
+  "intended_receiver_model_id": "success_intent/success_intent_20260424T100718_521940_7274e137",
+  "graph_schema": {
+    "node_in_dim": 26,
+    "edge_in_dim": 5,
+    "add_v_edge_features": true,
+    "add_relative_speed_edge_features": true
+  },
+  "next_action_conditions_enabled": false,
+  "endpoint_consumer_version": "selective_reception_v1",
+  "pass_height_threshold_meters": 2.0,
+  "num_workers": "8",
+  "worker_thread_limit": 1,
+  "splits": [
+    "train",
+    "test"
+  ],
+  "train_split_percent": null,
+  "train_count": 765,
+  "split_manifest_id": "train_count_765_8018228599b2",
+  "split_manifest": {
+    "train_size": 765,
+    "test_size": 153,
+    "rounding": "exact",
+    "ordering": "match_id",
+    "universe_count": 918,
+    "universe_fingerprint": "8018228599b237df3862f619d45cd456d83f3ac229e2a206c949be6a65c14830"
+  },
+  "return_types": [
+    "next_10",
+    "next_3",
+    "disc_poly_max_0.1_1"
+  ],
+  "return_type": null,
+  "commands": [
+    [
+      "C:\\dm_model\\.venv\\Scripts\\python.exe",
+      "datatools/graph_feature.py",
+      "--action_type",
+      "all",
+      "--split",
+      "train",
+      "--post_action",
+      "--augment_blocks",
+      "--return_type",
+      "next_10",
+      "--return_type",
+      "next_3",
+      "--return_type",
+      "disc_poly_max_0.1_1",
+      "--intended-receiver-model-id",
+      "success_intent/success_intent_20260424T100718_521940_7274e137",
+      "--run-id",
+      "feature_20260910T110759_053479_8b508137",
+      "--train-count",
+      "765",
+      "--num-workers",
+      "8",
+      "--worker-thread-limit",
+      "1",
+      "--next-action-conditions-off",
+      "--v-edge-features",
+      "--relative-speed-edge-features",
+      "--pass-height-threshold",
+      "2.0"
+    ],
+    [
+      "C:\\dm_model\\.venv\\Scripts\\python.exe",
+      "datatools/graph_feature.py",
+      "--action_type",
+      "all",
+      "--split",
+      "test",
+      "--post_action",
+      "--return_type",
+      "next_10",
+      "--return_type",
+      "next_3",
+      "--return_type",
+      "disc_poly_max_0.1_1",
+      "--intended-receiver-model-id",
+      "success_intent/success_intent_20260424T100718_521940_7274e137",
+      "--run-id",
+      "feature_20260910T110759_053479_8b508137",
+      "--train-count",
+      "765",
+      "--num-workers",
+      "8",
+      "--worker-thread-limit",
+      "1",
+      "--next-action-conditions-off",
+      "--v-edge-features",
+      "--relative-speed-edge-features",
+      "--pass-height-threshold",
+      "2.0"
+    ],
+    [
+      "C:\\dm_model\\.venv\\Scripts\\python.exe",
+      "datatools/graph_feature.py",
+      "--action_type",
+      "all",
+      "--split",
+      "train",
+      "--feature_variant",
+      "intent_train_augmented",
+      "--return_type",
+      "next_10",
+      "--return_type",
+      "next_3",
+      "--return_type",
+      "disc_poly_max_0.1_1",
+      "--intended-receiver-model-id",
+      "success_intent/success_intent_20260424T100718_521940_7274e137",
+      "--run-id",
+      "feature_20260910T110759_053479_8b508137",
+      "--train-count",
+      "765",
+      "--num-workers",
+      "8",
+      "--worker-thread-limit",
+      "1",
+      "--next-action-conditions-off",
+      "--v-edge-features",
+      "--relative-speed-edge-features",
+      "--pass-height-threshold",
+      "2.0"
+    ],
+    [
+      "C:\\dm_model\\.venv\\Scripts\\python.exe",
+      "datatools/graph_feature.py",
+      "--action_type",
+      "all",
+      "--split",
+      "train",
+      "--feature_variant",
+      "success_intent",
+      "--return_type",
+      "next_10",
+      "--return_type",
+      "next_3",
+      "--return_type",
+      "disc_poly_max_0.1_1",
+      "--intended-receiver-model-id",
+      "success_intent/success_intent_20260424T100718_521940_7274e137",
+      "--run-id",
+      "feature_20260910T110759_053479_8b508137",
+      "--train-count",
+      "765",
+      "--num-workers",
+      "8",
+      "--worker-thread-limit",
+      "1",
+      "--next-action-conditions-off",
+      "--v-edge-features",
+      "--relative-speed-edge-features",
+      "--pass-height-threshold",
+      "2.0"
+    ],
+    [
+      "C:\\dm_model\\.venv\\Scripts\\python.exe",
+      "datatools/graph_feature.py",
+      "--action_type",
+      "all",
+      "--split",
+      "test",
+      "--feature_variant",
+      "success_intent",
+      "--return_type",
+      "next_10",
+      "--return_type",
+      "next_3",
+      "--return_type",
+      "disc_poly_max_0.1_1",
+      "--intended-receiver-model-id",
+      "success_intent/success_intent_20260424T100718_521940_7274e137",
+      "--run-id",
+      "feature_20260910T110759_053479_8b508137",
+      "--train-count",
+      "765",
+      "--num-workers",
+      "8",
+      "--worker-thread-limit",
+      "1",
+      "--next-action-conditions-off",
+      "--v-edge-features",
+      "--relative-speed-edge-features",
+      "--pass-height-threshold",
+      "2.0"
+    ]
+  ],
+  "status": "completed",
+  "carry_variant": {
+    "available": false,
+    "definition": "sportec_fernandez_1s_v2",
+    "artifact_suffix": "_carries"
+  },
+  "carry_variant_error": "ArrowInvalid: Could not convert carry:1:0 with type str: tried to convert to int64; conversion failed for original_event_id. Zero usable carry training matches; carry test stage not reached.",
+  "metadata_recovery": {
+    "recovered_at": "2026-09-11T21:43:12+02:00",
+    "scope": "Completed non-carry artifacts only; original full invocation failed in stage 6 of 7.",
+    "created_at_source": "Latest non-carry artifact modification time; original completion metadata was never written.",
+    "command_source": "Reconstructed from user-provided invocation and current command builder, not an original execution log.",
+    "version_source": "Endpoint/carry version identifiers reconstructed from current source; historical runtime values not independently recorded.",
+    "original_planned_commands": [
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "train",
+        "--post_action",
+        "--augment_blocks",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "test",
+        "--post_action",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "train",
+        "--feature_variant",
+        "intent_train_augmented",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "train",
+        "--feature_variant",
+        "success_intent",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "test",
+        "--feature_variant",
+        "success_intent",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "train",
+        "--post_action",
+        "--use-carries",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ],
+      [
+        "C:\\dm_model\\.venv\\Scripts\\python.exe",
+        "datatools/graph_feature.py",
+        "--action_type",
+        "all",
+        "--split",
+        "test",
+        "--post_action",
+        "--use-carries",
+        "--return_type",
+        "next_10",
+        "--return_type",
+        "next_3",
+        "--return_type",
+        "disc_poly_max_0.1_1",
+        "--intended-receiver-model-id",
+        "success_intent/success_intent_20260424T100718_521940_7274e137",
+        "--run-id",
+        "feature_20260910T110759_053479_8b508137",
+        "--train-count",
+        "765",
+        "--num-workers",
+        "8",
+        "--worker-thread-limit",
+        "1",
+        "--next-action-conditions-off",
+        "--v-edge-features",
+        "--relative-speed-edge-features",
+        "--pass-height-threshold",
+        "2.0"
+      ]
+    ],
+    "completed_stage_numbers": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "failed_stage_number": 6,
+    "not_started_stage_numbers": [
+      7
+    ],
+    "validation": {
+      "split_manifest_file": "data/splits/manifests/train_count_765_8018228599b2.json",
+      "directory_coverage": {
+        "action_graphs": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_graphs_carries": {
+          "files": 0
+        },
+        "action_graphs_intent_train": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_graphs_success_intent": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_disc_poly_max_0.1_1": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_disc_poly_max_0.1_1_angle_only": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_disc_poly_max_0.1_1_angle_only_carries": {
+          "files": 0
+        },
+        "action_labels_disc_poly_max_0.1_1_carries": {
+          "files": 0
+        },
+        "action_labels_disc_poly_max_0.1_1_model": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_disc_poly_max_0.1_1_model_carries": {
+          "files": 0
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1_angle_only": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1_model": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_10": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_10_angle_only": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_10_model": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_3": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_3_angle_only": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_intent_train_next_3_model": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_10": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_10_angle_only": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_10_angle_only_carries": {
+          "files": 0
+        },
+        "action_labels_next_10_carries": {
+          "files": 0
+        },
+        "action_labels_next_10_model": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_10_model_carries": {
+          "files": 0
+        },
+        "action_labels_next_3": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_3_angle_only": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_3_angle_only_carries": {
+          "files": 0
+        },
+        "action_labels_next_3_carries": {
+          "files": 0
+        },
+        "action_labels_next_3_model": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "action_labels_next_3_model_carries": {
+          "files": 0
+        },
+        "augmented_graphs": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "augmented_graphs_angle_only": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "augmented_graphs_model": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "augmented_labels": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "augmented_labels_angle_only": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "augmented_labels_model": {
+          "files": 765,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "post_action_graphs": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "post_action_graphs_carries": {
+          "files": 0
+        },
+        "resolved_actions_angle_only": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "resolved_actions_model": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "resolved_actions_original": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        },
+        "resolved_actions_original_carries": {
+          "files": 0
+        },
+        "success_intent_labels": {
+          "files": 918,
+          "missing": 0,
+          "unexpected": 0,
+          "zero_byte": 0
+        }
+      },
+      "loaded_samples": {
+        "action_graphs/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "action_graphs/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "action_graphs_intent_train/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "action_graphs_success_intent/DFL-MAT-J03WEL": {
+          "rows": 988,
+          "graph_dimensions": [
+            [
+              24,
+              5
+            ]
+          ]
+        },
+        "action_graphs_success_intent/DFL-MAT-J0407D": {
+          "rows": 1095,
+          "graph_dimensions": [
+            [
+              24,
+              5
+            ]
+          ]
+        },
+        "action_labels_disc_poly_max_0.1_1/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_disc_poly_max_0.1_1/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_disc_poly_max_0.1_1_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_disc_poly_max_0.1_1_angle_only/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_disc_poly_max_0.1_1_model/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_disc_poly_max_0.1_1_model/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1_angle_only/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_disc_poly_max_0.1_1_model/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_10/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_10_angle_only/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_10_model/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_3/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_3_angle_only/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_intent_train_next_3_model/DFL-MAT-J03WEL": {
+          "rows": 3056,
+          "columns": 31
+        },
+        "action_labels_next_10/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_10/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_next_10_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_10_angle_only/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_next_10_model/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_10_model/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_next_3/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_3/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_next_3_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_3_angle_only/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "action_labels_next_3_model/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 31
+        },
+        "action_labels_next_3_model/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 31
+        },
+        "augmented_graphs/DFL-MAT-J03WEL": {
+          "rows": 1402,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "augmented_graphs_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1405,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "augmented_graphs_model/DFL-MAT-J03WEL": {
+          "rows": 1407,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "augmented_labels/DFL-MAT-J03WEL": {
+          "rows": 1402,
+          "columns": 31
+        },
+        "augmented_labels_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1405,
+          "columns": 31
+        },
+        "augmented_labels_model/DFL-MAT-J03WEL": {
+          "rows": 1407,
+          "columns": 31
+        },
+        "post_action_graphs/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "post_action_graphs/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "graph_dimensions": [
+            [
+              26,
+              5
+            ]
+          ]
+        },
+        "resolved_actions_angle_only/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 51
+        },
+        "resolved_actions_angle_only/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 56
+        },
+        "resolved_actions_model/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 51
+        },
+        "resolved_actions_model/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 56
+        },
+        "resolved_actions_original/DFL-MAT-J03WEL": {
+          "rows": 1020,
+          "columns": 51
+        },
+        "resolved_actions_original/DFL-MAT-J0407D": {
+          "rows": 1113,
+          "columns": 56
+        },
+        "success_intent_labels/DFL-MAT-J03WEL": {
+          "rows": 988,
+          "columns": 31
+        },
+        "success_intent_labels/DFL-MAT-J0407D": {
+          "rows": 1095,
+          "columns": 31
+        }
+      },
+      "sample_alignment_passed": true,
+      "limitation": "All filenames and file sizes checked; deserialization and alignment checked for one training and one test match, not every match."
+    }
+  }
+}

@@ -29,6 +29,7 @@ from models.utils import (
     run_epoch,
 )
 from models.utils import validate_feature_graph_schema
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PC_XPASS_SOURCE,
     PHYSICAL_XPASS_SOURCE,
@@ -779,7 +780,15 @@ if __name__ == "__main__":
     parser.add_argument("--v4-zero", type=float, default=None)
     parser.add_argument("--v5-intent-threshold", type=float, default=None)
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
+    add_top_pass_selector(parser)
     args, _ = parser.parse_known_args()
+    resolve_top_pass_selector(parser, args, pc_only=True)
+    # This entrypoint tolerates unrelated model flags, but not extra selector counts.
+    for index, token in enumerate(sys.argv):
+        if token.split("=", 1)[0] in {"--top-pass", "--top_pass"}:
+            next_index = index + (1 if "=" in token else 2)
+            if next_index < len(sys.argv) and sys.argv[next_index].lstrip("-").isdigit():
+                parser.error("--top-pass selects exactly one integer.")
 
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)

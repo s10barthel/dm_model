@@ -13,7 +13,12 @@ import torch
 from torch_geometric.data import Batch, Data
 
 from datatools.benchmark import build_benchmark_export
-from datatools.ball_carries import CARRY_DEFINITION_VERSION, _map_frames, derive_carry_segments
+from datatools.ball_carries import (
+    CARRY_DEFINITION_VERSION,
+    _map_frames,
+    augment_match_actions_with_carries,
+    derive_carry_segments,
+)
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools import config
 from datatools import graph_feature
@@ -1200,6 +1205,46 @@ class ComponentExportRegressionTests(unittest.TestCase):
 
 
 class BallCarryRegressionTests(unittest.TestCase):
+    def test_augmented_event_ids_round_trip_through_parquet(self) -> None:
+        for event_ids in (
+            pd.Series([18196500000006, 9007199254740993], dtype="int64"),
+            pd.Series([9007199254740993, pd.NA], dtype="Int64"),
+            pd.Series(["source-pass", pd.NA], dtype="string"),
+        ):
+            with self.subTest(dtype=str(event_ids.dtype)):
+                actions = pd.DataFrame({
+                    "original_event_id": event_ids,
+                    "action_id": [0, 1],
+                    "action_type": ["pass", "pass"],
+                })
+                match = SimpleNamespace(
+                    actions=actions.copy(), events=actions.copy(),
+                    lineup=pd.DataFrame(), match_id="test-match", fps=25,
+                )
+                carries = pd.DataFrame([{
+                    "action_key": "carry:1:0", "period_id": 1,
+                    "frame_id": 100, "receive_frame_id": 125,
+                    "object_id": "home_2", "receiver_id": "home_2",
+                    "terminal_kind": "pass", "success": True,
+                    "start_x": 10.0, "start_y": 20.0,
+                    "end_x": 15.0, "end_y": 20.0,
+                    "return_event_index": 1,
+                    "carry_definition": CARRY_DEFINITION_VERSION,
+                }])
+                augment_match_actions_with_carries(match, carries)
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    path = Path(temp_dir) / "resolved_actions.parquet"
+                    match.actions.to_parquet(path)
+                    restored = pd.read_parquet(path)
+                expected_ids = pd.concat([
+                    event_ids.astype("string"), pd.Series(["carry:1:0"], dtype="string")
+                ], ignore_index=True).rename("original_event_id")
+                pd.testing.assert_series_equal(restored["original_event_id"], expected_ids)
+                self.assertEqual(restored.index.tolist(), [0, 1, 2])
+                self.assertEqual(restored["action_id"].tolist(), [0, 1, 2])
+                self.assertEqual(restored.loc[2, "return_event_index"], 1)
+                pd.testing.assert_frame_equal(match.events, actions)
+
     @staticmethod
     def tracking() -> pd.DataFrame:
         index = pd.Index(range(251), name="frame_id")

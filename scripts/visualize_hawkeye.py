@@ -35,6 +35,7 @@ from datatools.viz_helpers import (
     validate_derived_inputs,
 )
 from datatools.viz_snapshot import SnapshotVisualizer
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     PHYSICAL_XPASS_SOURCE,
@@ -102,7 +103,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Render pc-xPass cache values instead of runtime physical xPass.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to render: max, noise-kernel, or top<N> such as top10/top25/top50.")
+    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to render: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
     parser.add_argument(
         "--time-norm",
@@ -129,7 +130,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
+    add_top_pass_selector(parser)
     args = parser.parse_args(argv)
+    resolve_top_pass_selector(parser, args)
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     requested_ids = [str(value).strip() for value in (args.situation_id or [])]

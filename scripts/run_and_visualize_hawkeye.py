@@ -25,6 +25,7 @@ from datatools.hawkeye import (
 )
 from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
@@ -141,7 +142,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--outcome-conceding-model-id")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for inference blending and physical xPass rendering.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
+    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
     parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
@@ -160,7 +161,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
+    add_top_pass_selector(parser)
     args = parser.parse_args(argv)
+    resolve_top_pass_selector(parser, args)
     if args.output != "png" and args.time_norm is not None:
         parser.error("--time-norm is only valid with --output png.")
     if args.output == "png" and (args.time_norm_start is not None or args.time_norm_end is not None):

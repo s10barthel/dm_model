@@ -39,6 +39,7 @@ from models.utils import (
     resolve_model_selection,
     validate_model_graph_schemas,
 )
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     AS_DEFAULT_ANGLE_STEP_DEG,
     AS_DEFAULT_COARSE_N_ANGLES,
@@ -307,7 +308,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         pc_xpass=True,
         dry_run=False,
     )
+    add_top_pass_selector(parser)
     args = parser.parse_args(argv)
+    resolve_top_pass_selector(parser, args, pc_only=True)
     _validate_args(parser, args)
     return args
 
@@ -375,7 +378,10 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         if not math.isfinite(args.reaction_time) or args.reaction_time < 0:
             parser.error("--reaction-time must be a non-negative number or 'dist_pass'")
         args.reaction_time_mode = PC_XPASS_REACTION_TIME_MODE_FIXED
-    if args.x_pass_version.startswith("top"):
+    args.top_pass_values = []
+    if args.x_pass_version.startswith("top-pass"):
+        args.top_pass_values = [int(args.x_pass_version[8:])]
+    elif args.x_pass_version.startswith("top"):
         try:
             requested_top_n = int(args.x_pass_version[3:])
         except ValueError:
@@ -383,11 +389,11 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         args.top_n_values = sorted({*(args.top_n_values or []), requested_top_n})
     elif args.x_pass_version != "max":
         parser.error("--xpass-version must be max or top<N>")
-    if not args.export_max and not args.export_topmean:
+    if not args.export_max and not args.export_topmean and not args.top_pass_values:
         parser.error("At least one pc-xPass metric must be enabled")
     if args.x_pass_version == "max" and not args.export_max:
         parser.error("--xpass-version max cannot be combined with --no-max")
-    if args.x_pass_version.startswith("top") and not args.export_topmean:
+    if args.x_pass_version.startswith("top") and not args.x_pass_version.startswith("top-pass") and not args.export_topmean:
         parser.error("--xpass-version top<N> cannot be combined with --no-topmean")
     if args.v4_power is not None:
         if not math.isfinite(args.v4_power) or args.v4_power <= 0:

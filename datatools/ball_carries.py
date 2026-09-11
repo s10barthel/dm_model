@@ -636,3 +636,6 @@ def augment_match_actions_with_carries(match: Any, carries: pd.DataFrame) -> Non
     carry_actions = pd.DataFrame.from_records(records, index=indices)
     carry_actions = carry_actions.dropna(axis=1, how="all")
     match.actions = pd.concat([base_actions, carry_actions], axis=0, sort=False).sort_index()
+    # Provider IDs and synthetic carry keys share this provenance column.
+    # Use nullable strings so Arrow can serialize both without losing missing IDs.
+    match.actions["original_event_id"] = match.actions["original_event_id"].astype("string")

@@ -179,6 +179,8 @@ def _summary_xpass_metric(metadata: dict[str, Any]) -> str:
             return "noise_kernel"
         if version == "max":
             return "max_xpass"
+        if version.startswith("top-pass") and version[8:].isdigit():
+            return version
         if version.startswith("top") and version[3:].isdigit():
             return version
     metric = str(metadata.get("physical_xpass_metric") or "").strip().lower()

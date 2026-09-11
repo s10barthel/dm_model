@@ -26,6 +26,7 @@ from datatools.skillcorner import (
     summarize_skillcorner_stats,
 )
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
+from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
     format_physical_xpass_cache_summary,
@@ -73,7 +74,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lane-survival-cache-dir", help="Runtime pc-xPass lane-survival cache directory override.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for physical xPass inference blending.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, or top<N> such as top10/top25/top50.")
+    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
     parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
@@ -102,7 +103,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         const="all",
         help="Process every valid frame per possession.",
     )
+    add_top_pass_selector(parser)
     args = parser.parse_args(argv)
+    resolve_top_pass_selector(parser, args)
     try:
         resolve_physical_num_workers(args.physical_num_workers)
     except ValueError as exc:

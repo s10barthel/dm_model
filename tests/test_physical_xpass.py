@@ -7357,7 +7357,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertFalse(args.top_xt)
         self.assertTrue(generate_physical_xpass.pc_ignore_teammates_lane_survival_from_args(args))
         self.assertFalse(generate_physical_xpass.pc_ignore_teammates_control_from_args(args))
-        self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP10])
+        self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(args), [PHYSICAL_XPASS_METRIC_MAX])
 
         top25_args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-n", "25"])
         self.assertEqual(generate_physical_xpass.enabled_physical_xpass_metrics_from_args(top25_args), [PHYSICAL_XPASS_METRIC_MAX, PC_XPASS_METRIC_TOP25])
