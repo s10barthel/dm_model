@@ -1392,7 +1392,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--max-player-speed-def <m/s>`: pc-xPass only; override movement speed for defending players. Default: use `--max-player-speed`.
 - `--lane-power <float>` and `--lane-inflection-point <float>`: pc-xPass only; sigmoid parameters for lane-survival interception control. Defaults: `15` and `0.3`.
 - `--control-power <float>` and `--control-inflection-point <float>`: pc-xPass only; sigmoid parameters for endpoint receiver control. Defaults: `15` and `0.3`.
-- `--endpoint-normalization {normal,normal-one,subtract,subtract-one}`: pc-xPass only; endpoint receiver-control competition mode. Default: `normal`.
+- `--endpoint-normalization {share,normal,normal-one,subtract,subtract-one}` / `--endpoint_normalization {...}`: pc-xPass only; endpoint receiver-control competition mode. Default: `share`.
+  - `--endpoint-normalization share`: multiply the receiver's raw endpoint control by its share of the total eligible endpoint control: `receiver_control = p_receiver^2 / S` for `S > 0`, otherwise `0`. This is not simple division by the sum: the resulting controls need not sum to one.
+  - The eligible set contains the receiver, defenders, and other attacking teammates, excluding the passer. With `--ignore-teammates-control` (or `--ignore-teammates`), it contains only the receiver and defenders. For `share`, `S` sums finite raw controls clipped to `[0, 1]`; defender controls are multiplied by `--boost-def-endpoint-control` and clipped to `[0, 1]` before summation. Non-finite competitor controls contribute zero; a non-finite receiver control remains `NaN`.
+  - `normal`: retain the receiver's raw control when the eligible total is at most one; otherwise divide it by that total (`receiver_control = p_receiver / max(1, S)`). Unlike `share`, boosted defender controls are not clipped before this total is computed.
 - `--boost-def-endpoint-control <float>`: pc-xPass only; multiply defending-player endpoint raw controls before endpoint normalization. Default: `1.0`.
 - `--use-position-discount <true|false>`: pc-xPass only; apply the goal-distance target-position discount before max/top-N aggregation. Default: `true`.
 - `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
