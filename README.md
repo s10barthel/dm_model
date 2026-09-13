@@ -236,7 +236,7 @@ The current pipeline now follows an explicit-artifact contract:
 
 Preprocessing records every successfully preprocessed Sportec match in a canonical sequence sorted by `MatchId`. The user-facing `--train-split <percentage>` option assigns the first percentage to model development and retains the chronologically later remainder as the independent test set. The percentage is an integer from 1 through 99 and uses floor rounding. Alternatively, `--train-count <int>` selects an exact development match count, including validation matches, before filtering for available features. The two options are mutually exclusive; the count must be at least 1 and less than the total match count.
 
-Resolved match assignments are stored as immutable, fingerprinted manifests under `data/splits/manifests`. Feature runs, model runs, bundles, and evaluations record that manifest identity so incompatible artifacts cannot be mixed. Generation and training commands default to `--train-split 50`, which gives 459 development and 459 test matches for the current 918-match universe. For the first two and a half seasons as development data, use `--train-count 765`: this gives 765 development matches (2022/23, 2023/24, and 2024/25 matchdays 1-17) and 153 test matches (2024/25 matchdays 18-34). Count and percentage selections have distinct manifest identities even if their assignments coincide. Evaluation infers the selector from model provenance; an explicit selector must match its mode and value.
+Resolved match assignments are stored as immutable, fingerprinted manifests under `data/splits/manifests`. Feature runs, model runs, bundles, and evaluations record that manifest identity so incompatible artifacts cannot be mixed. Feature and xT generation default to `--train-split 50`, which gives 459 development and 459 test matches for the current 918-match universe. `train_relevant_models.py` infers the split from feature-run provenance; explicit flags assert that split, and only legacy runs without split provenance fall back to 50%. Physical xPass generation has no split selector. For the first two and a half seasons as development data, use `--train-count 765`: this gives 765 development matches (2022/23, 2023/24, and 2024/25 matchdays 1-17) and 153 test matches (2024/25 matchdays 18-34). Count and percentage selections have distinct manifest identities even if their assignments coincide. Evaluation infers the selector from model provenance; an explicit selector must match its mode and value.
 
 `--validation-mode holdout_80_20` is the backward-compatible default and uses the first 80% of development matches for training and the remaining 20% for validation. `--validation-mode expanding` creates three chronological folds with development-set boundaries at 50%, 66⅔%, 83⅓%, and 100%, then refits each selected model on the complete development set for the median best-fold epoch count. For 459 development matches, the folds are 229/77, 306/76, and 382/77 training/validation matches. The final 153 matches are used only by the subsequent evaluation stage.
 
@@ -1177,7 +1177,7 @@ python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id>
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite --speed-aggregation package_max --num-workers auto --physical-batch-size 16
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --overwrite --max-speed 20
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --match-id <match_id> --overwrite --num-workers 1
-python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --split train --limit 100 --num-workers 1
+python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --limit 100 --num-workers 1
 python scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> --reuse-cache-dir data/features/runs/<old_feature_run_id>/physical_xpass --overwrite
 ```
 
@@ -1373,8 +1373,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
-- `--train-split <percentage>`: development percentage (integer 1-99) used for Sportec `--split` selection. Default: `50`.
-- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+Sportec generation processes the canonical match universe in order, or the explicit `--match-id` selection, skipping matches with missing required artifacts. It does not resolve a train/test split. `--split`, `--train-split`, and `--train-count` are no longer accepted.
 - default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>`.
 - `--feature-run-id <feature_run_id>`: enable legacy Sportec feature-run sidecar mode under `data/features/runs/<feature_run_id>/physical_xpass`.
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
@@ -1382,7 +1381,6 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`, `--skillcorner-frames-all`: SkillCorner runtime selectors.
 - `--benchmark-input-dir`, `--benchmark-modification`, `--benchmark-limit`: benchmark runtime selectors.
 - `--hawkeye-tracking-csv`, `--hawkeye-ball-csv`, `--hawkeye-situation-id`, `--hawkeye-limit`: Hawkeye runtime selectors.
-- `--split {train,test,all}`: match split to precompute when `--match-id` is omitted. Default: `all`.
 - `--limit <N>`: in Sportec/legacy mode, process only the first `N` pass actions across selected matches. Default: no limit.
 - `--overwrite`: legacy feature-run mode only. Runtime caches are updated in place.
 - `--reuse-cache-dir <path>`: reuse compatible Sportec rows from another `physical_xpass` directory and compute only misses. Reuse requires matching source, teammate policy, AS-default parameters, and `physical_eps`.
@@ -1441,10 +1439,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/train_relevant_models.py`
 
+When split flags are omitted, training infers the selector from feature-run metadata, recovering it from the recorded immutable manifest if needed. Explicit selectors are assertions and must match, including count versus percentage mode. Inconsistent modern provenance or a changed match-universe identity fails. Only runs with no split provenance assume the historical 50% split. The resolved selector, match counts, and source are printed and forwarded to training commands.
+
 - `--min_pass_dur <seconds>`: minimum pass duration applied to every selected component. Default: `0.5` seconds.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
-- `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
-- `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
+- `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
+- `--train-count <int>`: optional assertion of the feature run's exact development match count, including validation. Mutually exclusive with `--train-split`.
 - `--validation-mode {holdout_80_20,expanding}`: use a chronological 80/20 development holdout or three expanding validation folds followed by a full-development refit using the median best-fold epoch count. Default: `holdout_80_20`.
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family. Required when `outcome_scoring` or `outcome_conceding` is enabled.
 - `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics for the selected label directory. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when an outcome model is enabled; otherwise the wrapper falls back to the first available return type in the selected feature run.

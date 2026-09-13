@@ -108,8 +108,6 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
 )
 from project_config import (
-    add_split_arguments,
-    split_selector,
     DEFAULT_INTENDED_RECEIVER_MODE,
     PROJECT_ROOT,
     get_action_graph_dir,
@@ -121,7 +119,7 @@ from project_config import (
     get_runtime_physical_xpass_dir,
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
-    load_base_splits,
+    load_match_universe,
     resolve_feature_root,
     resolve_feature_run_id,
     write_run_metadata,
@@ -147,8 +145,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
-    parser.add_argument("--split", choices=["train", "test", "all"], default="all", help="Sportec split subset.")
-    add_split_arguments(parser)
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
     parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
     parser.add_argument(
@@ -402,7 +398,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         pc_versions.prepare_generation_args(parser, args, argv)
     elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id"} for token in (sys.argv[1:] if argv is None else argv)):
         parser.error("--ball-dec and --pc-xpass-id require --pc-xpass")
-    vars(args).update(split_selector(args))
     explicit_pc_only_flags = [
         name
         for name in [
@@ -674,12 +669,7 @@ def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
     if args.match_id:
         return [str(match_id) for match_id in args.match_id]
 
-    train_ids, test_ids = load_base_splits(feature_dir=graph_dir, **split_selector(args))
-    if args.split == "train":
-        return [str(match_id) for match_id in train_ids.tolist()]
-    if args.split == "test":
-        return [str(match_id) for match_id in test_ids.tolist()]
-    return [str(match_id) for match_id in train_ids.tolist()] + [str(match_id) for match_id in test_ids.tolist()]
+    return [str(match_id) for match_id in load_match_universe()["match_ids"]]
 
 
 def teammate_policy_from_args(args: argparse.Namespace) -> str:
@@ -1635,7 +1625,6 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "graph_dir": str(graph_dir),
         "label_dir": str(label_dir),
-        "split": args.split,
         "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
         "output_root": str(output_root),
         "match_ids": written_match_ids,
@@ -1780,7 +1769,6 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
             "label_dir": str(label_dir),
             "return_type": return_type,
             "intended_receiver_mode": intended_receiver_mode,
-            "split": args.split,
             "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION, PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE],
             "match_window": int(args.sportec_runtime_match_window),
             "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,

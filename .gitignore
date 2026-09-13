@@ -37,6 +37,7 @@ tests/AS_viz/
 !tests/test_combined_outcome_visualization.py
 !tests/test_hawkeye_target_clamping.py
 !tests/test_temporal_splits.py
+!tests/test_split_inference.py
 !tests/test_preprocess_sportec.py
 !tests/test_endpoint_policy.py
 test_kpi_final/

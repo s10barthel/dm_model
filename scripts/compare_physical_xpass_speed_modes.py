@@ -26,6 +26,7 @@ from physical_pass_model import (
 from project_config import (
     get_action_graph_dir,
     get_physical_xpass_dir,
+    load_base_splits,
     resolve_feature_root,
     resolve_feature_run_id,
     write_run_metadata,
@@ -33,10 +34,17 @@ from project_config import (
 from scripts.generate_physical_xpass import (
     compute_match_rows,
     configure_worker_thread_limit,
-    resolve_match_ids,
     resolve_num_workers,
     resolve_reference_label_dir,
 )
+
+
+def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
+    if args.match_id:
+        return [str(match_id) for match_id in args.match_id]
+    train, test = load_base_splits(graph_dir, train_split=50)
+    ids = train.tolist() if args.split == "train" else test.tolist() if args.split == "test" else train.tolist() + test.tolist()
+    return [str(match_id) for match_id in ids]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

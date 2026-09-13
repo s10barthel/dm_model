@@ -36,6 +36,7 @@ import pc_xpass_versions as pc_versions
 
 from project_config import (
     add_split_arguments,
+    SPLIT_MANIFESTS_DIR,
     split_selector,
     split_metadata,
     split_cli_args,
@@ -795,11 +796,61 @@ def derive_bundle_shared_context(
     }
 
 
+def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[dict, str]:
+    """Infer the outer split while preserving feature-run provenance assertions."""
+    if not isinstance(metadata, dict):
+        raise ValueError("Feature-run metadata must be an object.")
+    explicit = split_selector(args, default=None)
+    fields = ("split_manifest_id", "train_split_percent", "train_count", "split_manifest")
+    manifest_id = metadata.get("split_manifest_id")
+    legacy = not any(field in metadata for field in fields)
+    if legacy:
+        recorded = {"train_split": 50, "train_count": None}
+    else:
+        if not isinstance(manifest_id, str) or not manifest_id or Path(manifest_id).name != manifest_id:
+            raise ValueError("Feature run has incomplete or invalid split_manifest_id provenance.")
+        recorded = split_selector(metadata, default=None)
+        path = SPLIT_MANIFESTS_DIR / f"{manifest_id}.json"
+        stored = None
+        if path.exists():
+            stored = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(stored, dict):
+                raise ValueError("Recorded split manifest must be an object.")
+            if stored.get("manifest_id") != manifest_id:
+                raise ValueError("Recorded split manifest has a conflicting identity.")
+            stored_selector = split_selector(stored, default=None)
+            if not any(value is not None for value in stored_selector.values()):
+                raise ValueError("Recorded split manifest has no selector.")
+            if any(value is not None for value in recorded.values()) and recorded != stored_selector:
+                raise ValueError("Feature split selector conflicts with its recorded manifest.")
+            recorded = stored_selector
+        if not any(value is not None for value in recorded.values()):
+            raise ValueError(f"Feature split selector is missing and cannot be recovered from {path}.")
+    if any(value is not None for value in explicit.values()) and explicit != recorded:
+        raise ValueError(f"Requested split {explicit} does not match feature-run split {recorded}.")
+    manifest = resolve_split_manifest(**recorded)
+    if not legacy:
+        if manifest["manifest_id"] != manifest_id:
+            raise ValueError(f"Feature split {manifest_id} does not match the current match universe ({manifest['manifest_id']}).")
+        if stored is not None and any(stored.get(key) != manifest.get(key) for key in ("train", "test", "metadata")):
+            raise ValueError("Recorded split manifest conflicts with resolved match assignments.")
+        embedded = metadata.get("split_manifest")
+        if embedded is not None and embedded != manifest["metadata"]:
+            raise ValueError("Feature split metadata conflicts with the resolved manifest.")
+    vars(args).update(recorded)
+    source = "legacy 50% fallback (split metadata absent)" if legacy else (
+        "explicit assertion" if any(value is not None for value in explicit.values()) else "inferred from feature run"
+    )
+    return manifest, source
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
+    parser._option_string_actions["--train-split"].help = "Optional development percentage assertion; defaults to the feature-run split (50 for legacy runs)."
+    parser._option_string_actions["--train-count"].help = "Optional exact development match count assertion; defaults to the feature-run split."
     parser.add_argument(
         "--validation-mode",
         choices=["holdout_80_20", "expanding"],
@@ -1212,7 +1263,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
-    vars(args).update(split_selector(args))
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
@@ -1259,23 +1309,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(str(exc))
 
     try:
-        split_manifest = resolve_split_manifest(**split_selector(args))
+        feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False)
+        if feature_metadata is None:
+            feature_metadata = {}
+        split_manifest, split_source = resolve_training_split(args, feature_metadata)
     except (ValueError, FileNotFoundError) as exc:
         parser.error(str(exc))
-    feature_metadata = load_feature_run_metadata(args.feature_run_id, required=False) or {}
+    print(f"Using {' '.join(split_cli_args(args))}: {len(split_manifest['train'])} development, "
+          f"{len(split_manifest['test'])} test matches ({split_source}).")
     if args.use_carries and not bool((feature_metadata.get("carry_variant") or {}).get("available", False)):
         parser.error(
             f"Feature run {args.feature_run_id} does not advertise carry-augmented artifacts. "
             "Extend it with generate_relevant_features.py --use-carries first."
         )
-    feature_split_id = feature_metadata.get("split_manifest_id")
-    if feature_split_id and feature_split_id != split_manifest["manifest_id"]:
-        parser.error(
-            f"Feature run {args.feature_run_id} uses split {feature_split_id}, but requested split "
-            f"{split_cli_args(args)} resolves to {split_manifest['manifest_id']}."
-        )
-    if not feature_split_id and args.train_split != 50:
-        parser.error("Legacy feature runs without split metadata can only be used with --train-split 50.")
     if args.validation_mode == "expanding":
         try:
             development_ids, _ = load_base_splits(**split_selector(args))
