@@ -66,6 +66,7 @@ from physical_pass_model import (
     validate_x_pass_version_available,
     validate_physical_xpass_cache_metadata,
 )
+import pc_xpass_versions as pc_versions
 from project_config import get_pc_xpass_dir, get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
@@ -322,12 +323,12 @@ def _lane_survival_cache_dir_for_inference(match: Match, model: GNN) -> str:
 
     runtime_source_name = _runtime_physical_xpass_source_name(match)
     if runtime_source_name is not None:
-        return str(get_pc_xpass_dir(runtime_source_name))
+        return str(pc_versions.model_cache_dir(runtime_source_name, model.args))
 
-    checkpoint_cache_dir = model.args.get("lane_survival_cache_dir")
-    if checkpoint_cache_dir:
-        return str(checkpoint_cache_dir)
-    return str(get_pc_xpass_dir("sportec"))
+    explicit_legacy = model.args.get("lane_survival_cache_dir")
+    if explicit_legacy and not model.args.get("pc_xpass_id"):
+        return str(explicit_legacy)
+    return str(pc_versions.model_cache_dir("sportec", model.args))
 
 
 def attach_lane_survival_for_inference(
@@ -453,7 +454,7 @@ def attach_physical_xpass_for_inference(
         if inference_uses_physical_xpass(model.args):
             runtime_source_name = _runtime_physical_xpass_source_name(match)
             physical_cache_dir = str(
-                get_pc_xpass_dir(runtime_source_name or "sportec")
+                pc_versions.model_cache_dir(runtime_source_name or "sportec", model.args)
                 if pc_xpass_enabled(model.args)
                 else get_runtime_physical_xpass_dir(runtime_source_name or "sportec")
             )
@@ -507,7 +508,7 @@ def _physical_xpass_cache_dir_for_inference(match: Match, model: GNN) -> str:
     if inference_uses_physical_xpass(model.args):
         runtime_source_name = _runtime_physical_xpass_source_name(match)
         return str(
-            get_pc_xpass_dir(runtime_source_name or "sportec")
+            pc_versions.model_cache_dir(runtime_source_name or "sportec", model.args)
             if pc_xpass_enabled(model.args)
             else get_runtime_physical_xpass_dir(runtime_source_name or "sportec")
         )

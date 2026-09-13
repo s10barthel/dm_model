@@ -36,6 +36,8 @@ from physical_pass_model import (
     load_runtime_physical_xpass_visualization_table,
     physical_xpass_metric,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     BENCHMARK_VISUALIZATION_DIR,
     PROJECT_ROOT,
@@ -65,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(BENCHMARK_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     return resolve_top_pass_selector(parser, parser.parse_args())
 
 
@@ -204,7 +207,7 @@ def main() -> None:
     )
 
     physical_cache_dir = args.physical_cache_dir or str(
-        get_pc_xpass_dir("benchmark") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
+        pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
     )
     selected_physical_xpass_metric = physical_xpass_metric(args)
     component_names = list(component_selection.rendered_components)
@@ -319,6 +322,8 @@ def main() -> None:
         "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
         "x_pass_version": getattr(args, "x_pass_version", "top10"),
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,

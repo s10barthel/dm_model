@@ -13,7 +13,9 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
-from models.utils import load_bundle_record, resolve_model_selection
+from models.utils import get_model_record, load_bundle_record, resolve_model_selection
+import pc_xpass_versions as pc_versions
+
 from project_config import EVALUATION_RUNS_DIR
 
 
@@ -72,7 +74,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--v5-intent-threshold", type=float, default=None)
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     add_top_pass_selector(parser)
-    return resolve_top_pass_selector(parser, parser.parse_args(argv), pc_only=True)
+    pc_versions.add_selection_argument(parser)
+    args = parser.parse_args(argv)
+    pc_versions.check_selectors(args)
+    return resolve_top_pass_selector(parser, args, pc_only=True)
 
 
 def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
@@ -119,6 +124,8 @@ def add_weighted_pass_success_options(command: list[str], args: argparse.Namespa
             str(0.7 if args.v4_zero is None else args.v4_zero),
         ]
     )
+    if getattr(args, "pc_xpass_id", None):
+        command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
     if args.pc_xpass_cache_dir:
         command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
     return command
@@ -197,6 +204,8 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
         if args.evaluate_combined_success:
             command.append("--evaluate-combined-success")
         command.extend(["--xpass-version", str(args.xpass_version)])
+        if getattr(args, "pc_xpass_id", None):
+            command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
         if args.pc_xpass_cache_dir:
             command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
         if args.evaluate_combined_success:
@@ -253,6 +262,8 @@ def update_model_metadata(output_dir: Path, wrapper_context: dict) -> None:
 
 def main() -> None:
     args = parse_args()
+    if not args.pc_xpass_cache_dir and (args.pc_xpass_id or args.weighted_pass_success_metrics or args.evaluate_xpass or args.evaluate_combined_success):
+        pc_versions.cache_dir("sportec", args)
     validate_pass_success_predictor_args(args)
     required_tasks, explicit_ids, selected_bundle = requested_evaluation_tasks(args)
     validate_selected_task_options(args, required_tasks)
@@ -265,6 +276,9 @@ def main() -> None:
         require_return_type=False,
         require_target_family=False,
     )
+    if not args.pc_xpass_cache_dir and not getattr(args, "_pc_version_root", None):
+        if any(get_model_record(model_id)["args"].get("lane_survival", False) for model_id in resolved_model_ids.values()):
+            pc_versions.cache_dir("sportec", args)
     python = sys.executable
     models_to_evaluate = [(task, resolved_model_ids[task]) for task in required_tasks]
 
@@ -303,6 +317,7 @@ def main() -> None:
             "discount": args.discount,
             "v4_power": args.v4_power,
             "v4_zero": args.v4_zero,
+            "pc_xpass_id": getattr(args, "pc_xpass_id", None),
             "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
         },
         "evaluation_base_dir": str(evaluation_base_dir.resolve()),

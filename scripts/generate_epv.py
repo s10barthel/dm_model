@@ -15,7 +15,7 @@ import pandas as pd
 import torch
 
 from datatools.epv import annotate_match_epv, build_epv_action_values, compute_epv_values
-from inference import inference_gnn
+from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.utils import (
     get_model_provenance,
     load_model,
@@ -33,6 +33,8 @@ from physical_pass_model import (
     physical_xpass_inference_lookup_config,
     summarize_physical_xpass_cache_usage,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     EPV_DIR,
     EPV_MATCH_DIR,
@@ -80,7 +82,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ball-z-limit", dest="ball_z_limit", default="none", help="If set to a float, use 100%% pass-success model weight when cached ball_z exceeds this value. Use 'none' to disable.")
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     if args.v4_power is not None:
         if not math.isfinite(args.v4_power) or args.v4_power <= 0:
@@ -151,8 +155,9 @@ def load_epv_models(resolved_model_ids: dict[str, str], device: str) -> dict[str
 
 
 def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str, object]) -> str:
+    configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("sportec", args, model_specs))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     )
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
@@ -392,6 +397,8 @@ def main() -> None:
     )
 
     metadata = {
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "created_at_utc": datetime.now(UTC).isoformat(),
         "export_match_ids": processed_export_ids,
         "eligible_action_types": ["pass", "cross", "shot"],

@@ -37,7 +37,10 @@ from datatools.skillcorner import (
     discover_skillcorner_matches,
 )
 from models.utils import get_model_provenance, load_model, parse_model_id, validate_model_graph_schemas
+import pc_xpass_versions as pc_versions
+
 from physical_pass_model import (
+    PC_XPASS_DEFAULT_BALL_DEC,
     AS_DEFAULT_V0_MIN,
     AS_DEFAULT_ANGLE_STEP_DEG,
     AS_DEFAULT_COARSE_N_ANGLES,
@@ -223,6 +226,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Legacy/Sportec intended-receiver mode. Defaults to angle_only when available.",
     )
+    parser.add_argument("--ball-dec", type=float, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass initial-speed deceleration in m/s^2; 0 disables slowing.")
     parser.add_argument("--physical-eps", type=float, default=1e-4)
     parser.add_argument(
         "--speed-aggregation",
@@ -392,7 +396,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         export_topmean=True,
     )
 
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    if args.pc_xpass:
+        pc_versions.prepare_generation_args(parser, args, argv)
+    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id"} for token in (sys.argv[1:] if argv is None else argv)):
+        parser.error("--ball-dec and --pc-xpass-id require --pc-xpass")
     vars(args).update(split_selector(args))
     explicit_pc_only_flags = [
         name
@@ -427,7 +436,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "--use-position-discount, --position-discount-power, and --position-discount-distance require --pc-xpass."
         )
     explicitly_ignored_teammates_lane_survival = hasattr(args, "ignore_teammates_lane_survival")
-    if not explicitly_ignored_teammates_lane_survival:
+    if not explicitly_ignored_teammates_lane_survival and not hasattr(args, "_pc_existing_metadata"):
         args.ignore_teammates_lane_survival = True
     if not hasattr(args, "reaction_time"):
         args.reaction_time = PC_XPASS_DEFAULT_REACTION_TIME
@@ -1234,6 +1243,7 @@ def prewarm_runtime_items(
         reuse_cache_dir=reuse_cache_dir,
         max_speed=args.max_speed,
         min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
+        ball_dec=float(getattr(args, "ball_dec", PC_XPASS_DEFAULT_BALL_DEC)),
         speed_step=args.speed_step,
         coarse_n_angles=int(args.coarse_n_angles),
         refine_top_k_angles=int(args.refine_top_k_angles),
@@ -1407,6 +1417,7 @@ def write_runtime_dataset_metadata(
             ignore_teammates_control=pc_ignore_teammates_control_from_args(args),
             max_speed=args.max_speed,
             min_speed=float(args.min_speed),
+            ball_dec=float(args.ball_dec),
             speed_step=args.speed_step,
             angle_step=args.angle_step,
             radial_gridsize=float(args.radial_gridsize),
@@ -1493,6 +1504,13 @@ def write_runtime_dataset_metadata(
                 "pass_height_device": str(getattr(args, "pass_height_device", "cpu")),
             }
         )
+    if (cache_dir / "metadata.json").exists():
+        existing = pc_versions.read_metadata(cache_dir)
+        metadata = {**existing, **metadata}
+        if "generation_settings" in existing:
+            metadata["created_at"] = existing["created_at"]
+    if getattr(args, "pc_xpass_id", None):
+        metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=getattr(args, "pc_xpass_namespace", "normal"))
     write_run_metadata(cache_dir, metadata)
 
 
@@ -1639,7 +1657,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
 
 
 def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+    cache_dir = pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     try:
         feature_run_id = resolve_feature_run_id(None, required=True, allow_latest=True)
     except (FileNotFoundError, ValueError) as exc:
@@ -1775,7 +1793,7 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_pc_xpass_dir("benchmark") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
+    cache_dir = pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     row_window = resolve_runtime_row_window(args, "benchmark_runtime_row_window")
@@ -1902,7 +1920,7 @@ def filter_hawkeye_runtime_graphs_by_time_norm(
 
 
 def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
+    cache_dir = pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     resolved_time_norms: dict[str, list[dict[str, object]]] = {}
@@ -1966,7 +1984,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
-    cache_dir = get_pc_xpass_dir("skillcorner") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
+    cache_dir = pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     row_window = resolve_runtime_row_window(args, "skillcorner_runtime_row_window")
@@ -2088,6 +2106,7 @@ def selected_runtime_datasets(args: argparse.Namespace) -> list[str]:
 
 
 def run_runtime_mode(args: argparse.Namespace) -> None:
+    pc_versions.start_generation(args)
     if args.overwrite:
         warnings.warn("--overwrite is ignored in runtime mode; runtime physical xPass caches are updated in place.")
     if not args.normalize:
@@ -2106,6 +2125,8 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
     for dataset in selected_runtime_datasets(args):
         print(f"Generating runtime {cache_label} cache for {dataset}...")
         summaries.append(runners[dataset](args))
+    success = bool(summaries) and all(not _flatten_skip_reasons(item.get("skipped") or {}) and not int(item["stats"].get("skipped_all_nan", 0)) for item in summaries)
+    pc_versions.finish_generation(args, success=success, coverage={item["dataset"]: item for item in summaries})
     print(f"Runtime {cache_label} cache generation complete.")
     for summary in summaries:
         stats = summary["stats"]
@@ -2129,7 +2150,11 @@ def main() -> None:
         configure_physical_worker_thread_limit(int(args.worker_thread_limit))
         run_legacy_feature_mode(args)
     else:
-        run_runtime_mode(args)
+        try:
+            run_runtime_mode(args)
+        except Exception:
+            pc_versions.finish_generation(args, success=False)
+            raise
 
 
 if __name__ == "__main__":

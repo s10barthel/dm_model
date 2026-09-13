@@ -1843,6 +1843,7 @@ class PhysicalXPassTests(unittest.TestCase):
                 eps=1e-12,
                 max_speed=3.0,
                 min_speed=3.0,
+                ball_dec=0.0,
                 speed_step=1.0,
                 angle_step=90.0,
                 radial_gridsize=20.0,
@@ -1855,6 +1856,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     eps=1e-12,
                     max_speed=3.0,
                     min_speed=3.0,
+                ball_dec=0.0,
                     speed_step=1.0,
                     angle_step=90.0,
                     radial_gridsize=20.0,
@@ -6072,7 +6074,7 @@ class PhysicalXPassTests(unittest.TestCase):
                             "resolve_reference_label_context",
                             return_value=(label_dir, "disc_0.7", "model"),
                         ):
-                            with patch.object(generate_physical_xpass, "get_pc_xpass_dir", return_value=pc_cache_dir):
+                            with patch.object(generate_physical_xpass.pc_versions, "cache_dir", return_value=pc_cache_dir):
                                 with patch.object(generate_physical_xpass, "get_physical_xpass_dir", return_value=feature_cache_dir):
                                     with patch.object(generate_physical_xpass, "resolve_match_ids", return_value=[]):
                                         with patch.object(generate_physical_xpass, "write_runtime_dataset_metadata") as metadata_mock:
@@ -6120,7 +6122,7 @@ class PhysicalXPassTests(unittest.TestCase):
                                 return_value=(label_dir, "disc_0.7", "model"),
                             ):
                                 with patch.object(generate_physical_xpass, "get_resolved_action_path", return_value=resolved_path):
-                                    with patch.object(generate_physical_xpass, "get_pc_xpass_dir", return_value=root / "cache"):
+                                    with patch.object(generate_physical_xpass.pc_versions, "cache_dir", return_value=root / "cache"):
                                         with patch.object(
                                             generate_physical_xpass,
                                             "resolve_runtime_sportec_reuse_cache",

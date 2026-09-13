@@ -184,6 +184,9 @@ class VisualizationVersioningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             component_root = root / "components" / "loc-run"
+            cache_root = root / "pc_xpass" / "hawkeye_loc" / "loc-cache"
+            cache_root.mkdir(parents=True)
+            (cache_root / "metadata.json").write_text("{}", encoding="utf-8")
             args = visualize_hawkeye.parse_args(
                 [
                     "--mode", "loc",
@@ -217,10 +220,11 @@ class VisualizationVersioningTests(unittest.TestCase):
             )
             overlays = OverlayData(pd.DataFrame(), pd.DataFrame(), {})
             with (
+                patch.object(visualize_hawkeye.pc_versions.config, "PC_XPASS_DIR", root / "pc_xpass"),
                 patch.object(visualize_hawkeye, "parse_args", return_value=args),
                 patch.object(visualize_hawkeye, "resolve_named_component_run_id", return_value="loc-run") as resolve_run,
                 patch.object(visualize_hawkeye, "get_hawkeye_loc_component_run_root", return_value=component_root),
-                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run", "inference_mode": "loc"})),
+                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run", "inference_mode": "loc", "pc_xpass_id": "loc-cache"})),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=tracking),
                 patch.object(visualize_hawkeye, "clean_hawkeye_tracking", side_effect=lambda value: value),
                 patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
@@ -259,6 +263,8 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(load_physical.call_args.args[1], "action__loc__7__hash")
             metadata = json.loads((root / "visualizations" / "loc-viz" / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["visualization_mode"], "loc")
+            self.assertEqual(metadata["pc_xpass_id"], "loc-cache")
+            self.assertEqual(Path(load_physical.call_args.args[0]), cache_root)
             self.assertEqual(metadata["rendered_selection_row_ids"], [7])
 
     def test_location_visualization_rejects_component_mode_mismatch(self) -> None:

@@ -50,6 +50,8 @@ from physical_pass_model import (
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     DATA_ROOT,
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -152,7 +154,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     if args.first is not None and args.first < 1:
         parser.error("--first must be positive.")
@@ -871,9 +875,9 @@ def main() -> None:
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = args.physical_cache_dir or str(
-        get_pc_xpass_dir("sportec") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     )
-    lane_survival_cache_dir = getattr(args, "lane_survival_cache_dir", None) or str(get_pc_xpass_dir("sportec"))
+    lane_survival_cache_dir = pc_versions.lane_cache_dir("sportec", args, loaded_models)
     configure_lane_survival_runtime_cache(loaded_models, lane_survival_cache_dir)
     selected_physical_xpass_metric = physical_xpass_metric(args)
     pass_success_model = loaded_models.get("pass_success")
@@ -1001,6 +1005,8 @@ def main() -> None:
         "show_physical_xpass": bool(args.show_physical_xpass),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "physical_cache_dir": str(physical_cache_dir),
         "lane_survival_cache_dir": lane_survival_cache_dir,
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],

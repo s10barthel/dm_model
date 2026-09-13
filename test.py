@@ -41,6 +41,8 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     checked_split_selector,
     add_split_arguments,
@@ -97,7 +99,7 @@ def resolve_weighted_pass_success_cache(args: argparse.Namespace, model_args: ar
     if not math.isfinite(v4_zero) or v4_zero <= 0.0:
         raise ValueError("--v4-zero must be a positive finite float.")
 
-    cache_dir = Path(args.pc_xpass_cache_dir)
+    cache_dir = Path(args.pc_xpass_cache_dir) if args.pc_xpass_cache_dir else pc_versions.cache_dir("sportec", args)
     metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
     cached_model_id = metadata.get("pass_height_model_id")
     if not cached_model_id:
@@ -145,7 +147,7 @@ def resolve_evaluation_xpass_cache(
     ):
         raise ValueError("v5 options are only valid with combined --xpass-weight v5.")
 
-    cache_dir = Path(args.pc_xpass_cache_dir)
+    cache_dir = Path(args.pc_xpass_cache_dir) if args.pc_xpass_cache_dir else pc_versions.cache_dir("sportec", args)
     metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
     metric = physical_xpass_metric_for_version(args.xpass_version, pc_xpass=True)
     available = {str(value) for value in metadata.get("available_metrics", [])}
@@ -317,14 +319,13 @@ def resolve_physical_xpass_context(
     return str(cache_dir)
 
 
-def resolve_lane_survival_context(model_args: argparse.Namespace) -> str | None:
+def resolve_lane_survival_context(model_args: argparse.Namespace, selection_args: argparse.Namespace | None = None) -> str | None:
     if not bool(getattr(model_args, "lane_survival", False)):
         return None
 
-    recorded_cache_value = getattr(model_args, "lane_survival_cache_dir", None)
-    recorded_cache_dir = Path(recorded_cache_value) if recorded_cache_value else None
-    canonical_cache_dir = get_pc_xpass_dir("sportec")
-    cache_dir = canonical_cache_dir if canonical_cache_dir.exists() else recorded_cache_dir or canonical_cache_dir
+    selection_args = selection_args or argparse.Namespace(pc_xpass_id=None)
+    explicit = getattr(selection_args, "pc_xpass_cache_dir", None)
+    cache_dir = Path(explicit) if explicit else pc_versions.cache_dir("sportec", selection_args)
     metadata_path = cache_dir / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(
@@ -774,14 +775,16 @@ if __name__ == "__main__":
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
     parser.add_argument("--pass-height-model-id", type=str, default=None)
     parser.add_argument("--pass-intent-model-id", type=str, default=None)
-    parser.add_argument("--pc-xpass-cache-dir", type=str, default=str(get_pc_xpass_dir("sportec")))
+    parser.add_argument("--pc-xpass-cache-dir", type=str, default=None)
     parser.add_argument("--discount", type=parse_bool_text, default=None)
     parser.add_argument("--v4-power", type=float, default=None)
     parser.add_argument("--v4-zero", type=float, default=None)
     parser.add_argument("--v5-intent-threshold", type=float, default=None)
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args, _ = parser.parse_known_args()
+    pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args, pc_only=True)
     # This entrypoint tolerates unrelated model flags, but not extra selector counts.
     for index, token in enumerate(sys.argv):
@@ -870,7 +873,7 @@ if __name__ == "__main__":
             args.feature_run_id and args.feature_run_id != getattr(model_args, "feature_run_id", None)
         ),
     )
-    lane_survival_cache_dir = resolve_lane_survival_context(model_args)
+    lane_survival_cache_dir = resolve_lane_survival_context(model_args, args)
     feature_schema = infer_feature_graph_schema(feature_dir)
     model_schema = {
         "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
@@ -1046,6 +1049,7 @@ if __name__ == "__main__":
                 "v5_intent_threshold": model_args.v5_intent_threshold if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
                 "v5_discount": model_args.v5_discount if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
                 "pass_intent_model_id": args.pass_intent_model_id if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
+                "pc_xpass_id": getattr(args, "pc_xpass_id", None),
                 "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
             },
             test_metrics=test_metrics,

@@ -43,6 +43,8 @@ from physical_pass_model import (
     load_runtime_physical_xpass_visualization_table,
     physical_xpass_metric,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     HAWKEYE_VISUALIZATION_DIR,
     PROJECT_ROOT,
@@ -131,7 +133,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created Hawkeye visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
@@ -468,7 +472,9 @@ def run_location_visualization(
     )
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    physical_cache_dir = args.physical_cache_dir or str(get_pc_xpass_dir("hawkeye_loc"))
+    if not args.physical_cache_dir and not getattr(args, "pc_xpass_id", None):
+        args.pc_xpass_id = component_metadata.get("pc_xpass_id")
+    physical_cache_dir = args.physical_cache_dir or str(pc_versions.cache_dir("hawkeye_loc", args))
     selected_physical_xpass_metric = physical_xpass_metric(args)
     overlay_data = load_overlay_data(
         include_coach_ratings=bool(args.coach_ratings),
@@ -608,6 +614,8 @@ def run_location_visualization(
         "physical_xpass_runtime_source": PC_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
         "x_pass_version": args.x_pass_version,
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "disabled_components": component_selection.disabled_components,
@@ -664,7 +672,7 @@ def main() -> None:
     )
     freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", True))
     physical_cache_dir = args.physical_cache_dir or str(
-        get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
+        pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     )
     selected_physical_xpass_metric = physical_xpass_metric(args)
     overlay_data = load_overlay_data(
@@ -850,6 +858,8 @@ def main() -> None:
         "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         "physical_xpass_metric": selected_physical_xpass_metric,
         "x_pass_version": getattr(args, "x_pass_version", "top10"),
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "physical_cache_dir": str(physical_cache_dir),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,

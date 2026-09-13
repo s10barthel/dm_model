@@ -210,7 +210,7 @@ class HawkeyeTargetClampingTest(unittest.TestCase):
         )
 
         options = metadata["effective_cli_options"]
-        self.assertEqual(set(options), set(vars(args)))
+        self.assertEqual(set(options), {key for key in vars(args) if not key.startswith("_")})
         self.assertEqual(metadata["schema_version"], 1)
         self.assertEqual(metadata["argv"], argv)
         self.assertEqual(metadata["working_directory"], str(Path("C:/dm_model").resolve()))

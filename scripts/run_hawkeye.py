@@ -49,6 +49,8 @@ from physical_pass_model import (
     resolve_physical_num_workers,
     summarize_physical_xpass_cache_usage,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     HAWKEYE_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
@@ -117,7 +119,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--physical-batch-size", type=int, default=16)
     parser.set_defaults(freeze_ballreceipt=True)
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args()
+    pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     try:
         resolve_physical_num_workers(args.physical_num_workers)
@@ -302,9 +306,9 @@ def main() -> None:
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        get_pc_xpass_dir("hawkeye") if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
+        pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     )
-    lane_survival_cache_dir = getattr(args, "lane_survival_cache_dir", None) or str(get_pc_xpass_dir("hawkeye"))
+    lane_survival_cache_dir = pc_versions.lane_cache_dir("hawkeye", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
@@ -398,6 +402,8 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "run_id": component_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": " ".join(sys.argv),

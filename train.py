@@ -52,6 +52,8 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -439,7 +441,9 @@ parser.add_argument("--best_acc", type=float, required=False, default=0, help="b
 parser.add_argument("--training-step-index", type=int, default=None, help=argparse.SUPPRESS)
 parser.add_argument("--training-step-total", type=int, default=None, help=argparse.SUPPRESS)
 
+pc_versions.add_selection_argument(parser)
 args, _ = parser.parse_known_args()
+pc_versions.check_selectors(args)
 vars(args).update(split_selector(args))
 normalize_v_edge_feature_args(vars(args))
 args.learn_physical_scale = not bool(args.freeze_beta1)
@@ -659,9 +663,9 @@ if __name__ == "__main__":
                 f"Feature run {args.feature_run_id} uses split {feature_split_id}, but training resolved "
                 f"{args.split_manifest['manifest_id']}."
             )
+    args.lane_survival_cache_dir = str(pc_versions.cache_dir("sportec", args)) if args.lane_survival else None
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
-    args.lane_survival_cache_dir = str(get_pc_xpass_dir("sportec")) if args.lane_survival else None
     args.lane_survival_cache_fingerprint = None
     if args.lane_survival:
         lane_metadata_path = Path(args.lane_survival_cache_dir) / "metadata.json"

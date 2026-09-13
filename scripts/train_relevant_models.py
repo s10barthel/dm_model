@@ -32,6 +32,8 @@ from models.utils import (
     validate_model_record_consistency,
 )
 from datatools.success_intent import SUCCESS_INTENT_LABEL_SOURCE, SUCCESS_INTENT_TRAINING_FILTER
+import pc_xpass_versions as pc_versions
+
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -253,6 +255,8 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
 
 def append_physical_xpass_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
+    if getattr(args, "pc_xpass_id", None):
+        command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
     if bool(getattr(args, "use_physical_xpass", False)):
         command.append("--use_physical_xpass")
     command.extend(["--model-variant", str(getattr(args, "model_variant", "gat_phys_logit_offset"))])
@@ -297,6 +301,7 @@ def physical_xpass_settings(args: argparse.Namespace) -> dict[str, object]:
         "use_physical_xpass": bool(getattr(args, "use_physical_xpass", False)),
         "model_variant": str(getattr(args, "model_variant", "gat_phys_logit_offset")),
         "source": PHYSICAL_XPASS_SOURCE,
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "physical_cache_dir": getattr(args, "physical_cache_dir", None),
         "physical_eps": float(getattr(args, "physical_eps", 1e-4)),
         "physical_xpass_floor": getattr(args, "physical_xpass_floor", None),
@@ -1204,7 +1209,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional long-pass override for pass_success residual clipping.",
     )
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    pc_versions.check_selectors(args)
     vars(args).update(split_selector(args))
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
@@ -1948,6 +1955,8 @@ def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> di
 
 def main() -> None:
     cli_args = parse_args()
+    if getattr(cli_args, "lane_survival_mode", None) or getattr(cli_args, "pc_xpass_id", None):
+        pc_versions.cache_dir("sportec", cli_args)
     validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
     split_manifest = getattr(cli_args, "split_manifest", None) or resolve_split_manifest(**split_selector(cli_args))
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
@@ -1958,6 +1967,10 @@ def main() -> None:
     commands, trained_model_ids, intended_receiver_mode, resolved_feature_run_id, feature_flags = build_training_commands(
         cli_args
     )
+    if getattr(cli_args, "pc_xpass_id", None):
+        for command in commands:
+            if "--pc-xpass-id" not in command:
+                command.extend(["--pc-xpass-id", str(cli_args.pc_xpass_id)])
     executed_commands: list[list[str]] = []
     completed_model_ids: dict[str, str] = {}
     existing_bundle = load_model_bundle_metadata(bundle_id, required=False) or {}
@@ -2122,7 +2135,7 @@ def main() -> None:
                 "lane_survival": {
                     "enabled": bool(feature_flags.get("lane_survival", False)),
                     "mode": feature_flags.get("lane_survival_mode"),
-                    "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
+                    "cache_dir": str(pc_versions.cache_dir("sportec", cli_args)) if feature_flags.get("lane_survival", False) else None,
                 },
                 "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
                 "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
@@ -2202,7 +2215,7 @@ def main() -> None:
         "lane_survival": {
             "enabled": bool(feature_flags.get("lane_survival", False)),
             "mode": feature_flags.get("lane_survival_mode"),
-            "cache_dir": str(get_pc_xpass_dir("sportec")) if feature_flags.get("lane_survival", False) else None,
+            "cache_dir": str(pc_versions.cache_dir("sportec", cli_args)) if feature_flags.get("lane_survival", False) else None,
         },
         "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
         "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),

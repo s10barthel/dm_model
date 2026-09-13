@@ -277,7 +277,7 @@ class ActionDataset(Dataset):
         physical_cache_root = Path(physical_cache_dir) if physical_cache_dir else None
         pass_height_cache_root = Path(pass_height_cache_dir) if pass_height_cache_dir else None
         evaluation_xpass_cache_root = Path(evaluation_xpass_cache_dir) if evaluation_xpass_cache_dir else None
-        lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else get_pc_xpass_dir("sportec")
+        lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else (get_pc_xpass_dir("sportec") if lane_survival else None)
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}

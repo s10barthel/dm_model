@@ -359,9 +359,14 @@ def get_runtime_physical_xpass_dir(source: str, root: Path | None = None) -> Pat
     return cache_root / str(source)
 
 
-def get_pc_xpass_dir(source: str, root: Path | None = None) -> Path:
-    cache_root = Path(root) if root is not None else PC_XPASS_DIR
-    return cache_root / str(source)
+def get_pc_xpass_dir(source: str, root: Path | None = None, *, pc_xpass_id: str | None = None) -> Path:
+    if root is not None:
+        if pc_xpass_id is not None:
+            raise ValueError("Cannot combine an explicit cache root and pc_xpass_id.")
+        return Path(root) / str(source)
+    from argparse import Namespace
+    from pc_xpass_versions import cache_dir
+    return cache_dir(source, Namespace(pc_xpass_id=pc_xpass_id))
 
 
 def get_feature_run_root(run_id: str) -> Path:

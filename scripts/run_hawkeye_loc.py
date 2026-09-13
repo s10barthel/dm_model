@@ -40,7 +40,10 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+import pc_xpass_versions as pc_versions
+
 from physical_pass_model import (
+    PC_XPASS_DEFAULT_BALL_DEC,
     AS_DEFAULT_ANGLE_STEP_DEG,
     AS_DEFAULT_COARSE_N_ANGLES,
     AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
@@ -94,7 +97,7 @@ from scripts.run_hawkeye import resolve_optional_model_id
 
 DEFAULT_INPUT_FILE = REPOSITORY_ROOT / "data_analysis" / "data" / "dm_processed.csv"
 DEFAULT_TIME_TOLERANCE = 0.1
-DEFAULT_PC_XPASS_CACHE_DIR = get_pc_xpass_dir("hawkeye_loc")
+DEFAULT_PC_XPASS_CACHE_DIR = PROJECT_ROOT / "data" / "pc_xpass" / "hawkeye_loc"
 REQUIRED_INPUT_COLUMNS = [
     "selection_row_id",
     "action_id",
@@ -224,7 +227,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--pc-xpass-cache-dir",
         "--physical-cache-dir",
         dest="pc_xpass_cache_dir",
-        default=str(DEFAULT_PC_XPASS_CACHE_DIR),
+        default=None,
     )
     parser.add_argument("--lane-survival-cache-dir")
 
@@ -241,6 +244,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ball-z-limit", default="none")
 
     # Applicable pc-xPass generation flags from generate_physical_xpass.py.
+    parser.add_argument("--ball-dec", type=float, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass initial-speed deceleration in m/s^2; 0 disables slowing.")
     parser.add_argument("--physical-eps", type=float, default=1e-4)
     parser.add_argument(
         "--speed-aggregation",
@@ -309,7 +313,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dry_run=False,
     )
     add_top_pass_selector(parser)
+    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    pc_versions.prepare_generation_args(parser, args, argv, location=True)
     resolve_top_pass_selector(parser, args, pc_only=True)
     _validate_args(parser, args)
     return args
@@ -739,6 +745,15 @@ def _cache_stats_have_unusable_rows(stats: dict[str, object] | None) -> bool:
 
 def main() -> None:
     args = parse_args()
+    pc_versions.start_generation(args, location=True)
+    try:
+        _run_location(args)
+    except Exception:
+        pc_versions.finish_generation(args, success=False)
+        raise
+
+
+def _run_location(args: argparse.Namespace) -> None:
     invocation_metadata = build_invocation_metadata(args)
     input_path = Path(args.input_file)
     if not input_path.exists():
@@ -960,6 +975,10 @@ def main() -> None:
             if args.mode == "freeze"
             else "centroid_x + PositionX/100; centroid_y - PositionY/100"
         ),
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "pc_xpass_namespace": "hawkeye_loc",
+        "pc_xpass_settings": pc_versions.settings(args),
+        "pc_xpass_overrides": getattr(args, "pc_xpass_overrides", []),
         "pc_xpass_cache_dir": str(Path(args.pc_xpass_cache_dir).resolve()),
         "pc_xpass_stats": pc_stats,
         "pc_xpass_batch_errors": batch_errors,
@@ -1004,6 +1023,7 @@ def main() -> None:
         },
         skipped={str(record["selection_row_id"]): record["loc_missing_reason"] for record in missing_records},
     )
+    pc_versions.finish_generation(args, success=missing_report.empty, coverage={"hawkeye_loc": {"component_run_id": run_id, "processed_rows": processed_rows, "stats": pc_stats}})
     print(f"Hawkeye location component run id: {run_id}")
     print(f"Processed selection rows: {len(processed_rows)}; missing: {len(missing_report)}")
     print(f"Saved component run to: {output_dir}")

@@ -32,6 +32,8 @@ _PC_XPASS_XT_SURFACE_CACHE: dict[Path, dict[str, Any]] = {}
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
 PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
 PC_XPASS_SOURCE = "pc_xpass"
+PC_XPASS_DEFAULT_BALL_DEC = 0.45
+PC_XPASS_PHYSICS_VERSION = 2
 PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE, PC_XPASS_SOURCE}
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
@@ -372,6 +374,7 @@ def pc_xpass_metadata(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -429,6 +432,7 @@ def pc_xpass_metadata(
     available_versions.extend(_pc_xpass_metric_version(metric) for metric in metrics if metric.startswith("top_pass"))
     max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
+    validate_ball_dec(ball_dec)
     min_speed_value = float(min_speed)
     radial_gridsize_value = float(radial_gridsize)
     reaction_time_mode = str(reaction_time_mode)
@@ -494,6 +498,8 @@ def pc_xpass_metadata(
         "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
         "min_speed": min_speed_value,
+        "ball_dec": float(ball_dec),
+        "physics_version": PC_XPASS_PHYSICS_VERSION,
         "speed_step": speed_step_value,
         "angle_step": float(angle_step),
         "radial_gridsize": radial_gridsize_value,
@@ -530,6 +536,8 @@ PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS = (
     "position_discount_distance",
     "max_speed",
     "min_speed",
+    "ball_dec",
+    "physics_version",
     "speed_step",
     "angle_step",
     "radial_gridsize",
@@ -538,7 +546,10 @@ PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS = (
 
 def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> str:
     """Fingerprint only pc-xPass settings that determine the lane-survival feature."""
-    payload = {key: metadata.get(key) for key in PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS}
+    payload = {
+        key: metadata.get(key) for key in PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS
+        if key not in {"ball_dec", "physics_version"} or key in metadata
+    }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -3016,6 +3027,29 @@ def _pc_xpass_dist_pass_reaction_times(
     return np.clip(dist_pass / float(dist_pass_div), float(dist_pass_min), float(dist_pass_max)).astype(float)
 
 
+def validate_ball_dec(ball_dec: float) -> None:
+    if not math.isfinite(float(ball_dec)) or float(ball_dec) < 0:
+        raise ValueError("ball_dec must be a finite non-negative value.")
+
+
+def pc_xpass_ball_arrival_times(distances: np.ndarray, speeds: np.ndarray, ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC) -> tuple[np.ndarray, np.ndarray]:
+    """Arrival times and reachability, shaped speed x 1 x distance."""
+    validate_ball_dec(ball_dec)
+    distance = np.asarray(distances, dtype=float)[None, None, :]
+    speed = np.asarray(speeds, dtype=float)[:, None, None]
+    if ball_dec == 0:
+        times = distance / speed
+        return times, np.ones_like(times, dtype=bool)
+    squared = speed ** 2
+    loss = 2 * ball_dec * distance
+    discriminant = squared - loss
+    tolerance = 4 * np.finfo(float).eps * np.maximum(squared, loss)
+    reachable = discriminant >= -tolerance
+    times = 2 * distance / (speed + np.sqrt(np.maximum(discriminant, 0)))
+    # Finite placeholders avoid invalid sigmoid arithmetic; callers mask scores.
+    return np.where(reachable, times, 0.0), reachable
+
+
 def compute_graph_pc_xpass_metrics(
     graph: Data,
     *,
@@ -3025,6 +3059,7 @@ def compute_graph_pc_xpass_metrics(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -3051,6 +3086,7 @@ def compute_graph_pc_xpass_metrics(
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
 ) -> pd.Series:
+    validate_ball_dec(ball_dec)
     ignore_lane_teammates, ignore_control_teammates = _resolve_pc_xpass_ignore_teammate_flags(
         consider_teammates=consider_teammates,
         ignore_teammates_lane_survival=ignore_teammates_lane_survival,
@@ -3106,7 +3142,8 @@ def compute_graph_pc_xpass_metrics(
     # computed, avoiding several full speed x angle x distance copies.
     target_x = target_x_base
     target_y = target_y_base
-    t_ball = distances[np.newaxis, np.newaxis, :] / speeds[:, np.newaxis, np.newaxis]
+    t_ball, reachable = pc_xpass_ball_arrival_times(distances, speeds, ball_dec)
+    valid_targets = on_pitch[np.newaxis, :, :] & reachable
     effective_off_speed = float(max_player_speed if max_player_speed_off is None else max_player_speed_off)
     effective_def_speed = float(max_player_speed if max_player_speed_def is None else max_player_speed_def)
     max_player_speed_by_player = np.where(player_teams == "attack", effective_off_speed, effective_def_speed).astype(float)
@@ -3146,9 +3183,9 @@ def compute_graph_pc_xpass_metrics(
             power=control_power,
             inflection_point=control_inflection_point,
         )
-    lane_raw_all[:, :, ~on_pitch] = np.nan
-    if control_raw_all is not lane_raw_all:
-        control_raw_all[:, :, ~on_pitch] = np.nan
+    shared_control = control_raw_all is lane_raw_all
+    lane_raw_all = np.where(valid_targets[np.newaxis, ...], lane_raw_all, np.nan)
+    control_raw_all = lane_raw_all if shared_control else np.where(valid_targets[np.newaxis, ...], control_raw_all, np.nan)
     attack_mask = player_teams == "attack"
     defense_mask = player_teams == "defense"
 
@@ -3156,7 +3193,7 @@ def compute_graph_pc_xpass_metrics(
     lane_raw[passer_sim_index] = 0.0
     lane_raw[attack_mask] = 0.0
     lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
-    lane_survival = np.where(on_pitch[np.newaxis, :, :], lane_survival, np.nan)
+    lane_survival = np.where(valid_targets, lane_survival, np.nan)
 
     share_receiver_control: dict[int, np.ndarray] = {}
     if endpoint_normalization == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
@@ -3296,6 +3333,7 @@ def compute_graphs_pc_xpass_metrics(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -3332,6 +3370,7 @@ def compute_graphs_pc_xpass_metrics(
             ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
             min_speed=min_speed,
+            ball_dec=ball_dec,
             speed_step=speed_step,
             angle_step=angle_step,
             radial_gridsize=radial_gridsize,
@@ -4174,6 +4213,7 @@ def _runtime_cache_metadata(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -4213,6 +4253,7 @@ def _runtime_cache_metadata(
             ignore_teammates_control=ignore_teammates_control,
             max_speed=max_speed,
             min_speed=min_speed,
+            ball_dec=ball_dec,
             speed_step=speed_step,
             angle_step=angle_step,
             radial_gridsize=radial_gridsize,
@@ -4296,6 +4337,7 @@ def _ensure_runtime_physical_xpass_cache(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -4339,6 +4381,7 @@ def _ensure_runtime_physical_xpass_cache(
         ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
         min_speed=min_speed,
+        ball_dec=ball_dec,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
         refine_top_k_angles=refine_top_k_angles,
@@ -4375,6 +4418,13 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
+            if "generation_settings" in metadata and "source" not in metadata:
+                metadata = {**metadata, **expected_metadata}
+                if create_if_missing:
+                    from pc_xpass_versions import atomic_json
+                    atomic_json(metadata_path, metadata)
+            if float(metadata.get("ball_dec", 0.0)) != float(ball_dec):
+                raise ValueError("Cache ball deceleration differs; select matching settings or create a new pc-xPass version.")
             mismatches = []
             for key in [
                 "source",
@@ -4432,11 +4482,13 @@ def _ensure_runtime_physical_xpass_cache(
                 "position_discount_distance",
                 "max_speed",
                 "min_speed",
+                "ball_dec",
+                "physics_version",
                 "speed_step",
                 "angle_step",
                 "radial_gridsize",
             ]:
-                actual_value = metadata.get(key)
+                actual_value = metadata.get(key, 0.0 if key == "ball_dec" else (PC_XPASS_PHYSICS_VERSION if key == "physics_version" else None))
                 expected_value = expected_metadata.get(key)
                 if expected_value is None:
                     values_match = actual_value is None
@@ -4481,6 +4533,8 @@ def _ensure_runtime_physical_xpass_cache(
                     f"got {metadata.get('available_metrics')!r}"
                 )
             if mismatches:
+                if "generation_settings" in metadata or (cache_root.parent / "metadata.json").exists():
+                    raise ValueError(f"Versioned pc-xPass settings cannot change: {'; '.join(mismatches)}")
                 if not create_if_missing:
                     raise ValueError(f"pc-xPass cache at {cache_root} is incompatible: {'; '.join(mismatches)}")
                 metadata = {
@@ -5058,6 +5112,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     ignore_teammates_control = task.get("ignore_teammates_control", None)
     max_speed = task.get("max_speed", None)
     min_speed = float(task.get("min_speed", PC_XPASS_DEFAULT_MIN_SPEED))
+    ball_dec = float(task.get("ball_dec", PC_XPASS_DEFAULT_BALL_DEC))
     speed_step = task.get("speed_step", None)
     coarse_n_angles = int(task.get("coarse_n_angles", AS_DEFAULT_COARSE_N_ANGLES))
     refine_top_k_angles = int(task.get("refine_top_k_angles", AS_DEFAULT_REFINE_TOP_K_ANGLES))
@@ -5122,6 +5177,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             ignore_teammates_control=None if ignore_teammates_control is None else bool(ignore_teammates_control),
             max_speed=max_speed,
             min_speed=min_speed,
+            ball_dec=ball_dec,
             speed_step=speed_step,
             angle_step=angle_step,
             radial_gridsize=radial_gridsize,
@@ -5269,6 +5325,7 @@ def prewarm_physical_xpass_runtime_cache(
     pass_height_device: str = "cpu",
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
+    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -5346,6 +5403,7 @@ def prewarm_physical_xpass_runtime_cache(
         ignore_teammates_control=ignore_teammates_control,
         max_speed=max_speed,
         min_speed=min_speed,
+        ball_dec=ball_dec,
         speed_step=speed_step,
         coarse_n_angles=coarse_n_angles,
         refine_top_k_angles=refine_top_k_angles,
@@ -5662,6 +5720,7 @@ def prewarm_physical_xpass_runtime_cache(
             "physical_batch_size": int(physical_batch_size),
             "max_speed": max_speed,
             "min_speed": float(min_speed),
+            "ball_dec": float(ball_dec),
             "speed_step": speed_step,
             "coarse_n_angles": int(coarse_n_angles),
             "refine_top_k_angles": int(refine_top_k_angles),

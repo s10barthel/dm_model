@@ -160,7 +160,7 @@ class EvaluationDatasetConfigTests(unittest.TestCase):
                 lane_survival_cache_fingerprint=pc_xpass_lane_survival_metadata_fingerprint(metadata),
             )
 
-            with patch.object(evaluation_script, "get_pc_xpass_dir", return_value=cache_dir):
+            with patch.object(evaluation_script.pc_versions, "cache_dir", return_value=cache_dir):
                 resolved = evaluation_script.resolve_lane_survival_context(args)
 
             self.assertEqual(resolved, str(cache_dir))
@@ -253,7 +253,7 @@ class EvaluationDatasetConfigTests(unittest.TestCase):
                 lane_survival_cache_fingerprint="different",
             )
 
-            with patch.object(evaluation_script, "get_pc_xpass_dir", return_value=cache_dir):
+            with patch.object(evaluation_script.pc_versions, "cache_dir", return_value=cache_dir):
                 with self.assertRaisesRegex(ValueError, "fingerprint"):
                     evaluation_script.resolve_lane_survival_context(args)
 
