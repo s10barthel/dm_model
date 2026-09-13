@@ -288,7 +288,7 @@ Useful options:
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` to control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely; default: on
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
-- `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes` are available on `scripts/train_relevant_models.py` for targeted feature ablations; call the training wrapper directly when you need these switches.
+- `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes` are available on `scripts/train_relevant_models.py` for targeted feature ablations; call the training wrapper directly when you need these switches. `--no-vel-node-features` zeros `vx`, `vy`, `speed`, and `accel` for every node without changing graph width.
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
 - `--overwrite` to rebuild supported preprocessing and target-artifact outputs
 - `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
@@ -980,13 +980,14 @@ The existing low-level feature toggles on `train.py` are:
 - `--ball_z_aware`
 - `--poss_vel_aware`
 - `--poss_rel_vel_aware`
+- `--no-vel-node-features`
 - `--no-poss-geometry`
 - `--no-goal-features`
 - `--no-goal-nodes`
 - `--offside` / `--no-offside`
 - `--extend_features`
 
-Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
+Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
 
 `--no-vel-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `vx`, `vy`, `speed`, and `accel` for every node, including the possessor. It preserves graph width and cached features, overrides `--accel` and possessor velocity enablement, and is saved with the checkpoint for evaluation and inference. Relative velocity-angle node features and velocity-related edge features remain independently controlled. Without this flag, existing behavior is preserved.
 
@@ -1312,7 +1313,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the training feature profile.
-- `--no-poss-geometry`, `--no-goal-features`, `--no-goal-nodes`: targeted ablations available on `scripts/train_relevant_models.py`, not on `scripts/main.py`.
+- `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, `--no-goal-nodes`: targeted ablations available on `scripts/train_relevant_models.py`, not on `scripts/main.py`. `--no-vel-node-features` zeros raw `vx`, `vy`, `speed`, and `accel` node features for every node while preserving graph width.
 - `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
 - `--device <device>`: device passed to evaluation and inference stages.
@@ -1463,6 +1464,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--lane-survival [{max,top_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects the `max` cache, while `--lane-survival top_25` selects the top-25 cache.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
+- `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
 - `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.
 - `--no-goal-nodes`: remove goal nodes and their incident edges even for tasks that normally keep goal nodes. Default: off, so task defaults decide goal-node handling.
