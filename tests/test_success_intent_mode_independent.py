@@ -99,6 +99,10 @@ def command_batch_size(command: list[str]) -> int:
 
 
 class SuccessIntentModeIndependentTests(unittest.TestCase):
+    def setUp(self):
+        from split_fixture import install_wrapper_split
+        install_wrapper_split(self)
+
     def test_default_parse_args_enables_failure_receiver_off(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),

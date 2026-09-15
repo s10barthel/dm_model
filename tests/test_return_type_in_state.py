@@ -821,6 +821,10 @@ class OutcomeTargetSelectionTests(unittest.TestCase):
 
 
 class WrapperValidationTests(unittest.TestCase):
+    def setUp(self):
+        from split_fixture import install_wrapper_split
+        install_wrapper_split(self)
+
     def test_train_wrapper_accepts_xt_polynomial_max_return_type(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),

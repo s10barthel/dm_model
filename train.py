@@ -74,7 +74,8 @@ from project_config import (
     resolve_effective_return_type,
     resolve_feature_root,
     resolve_feature_run_id,
-    resolve_split_manifest,
+    resolve_artifact_split,
+    split_dataset_provenance,
     write_run_metadata,
 )
 
@@ -444,7 +445,7 @@ parser.add_argument("--training-step-total", type=int, default=None, help=argpar
 pc_versions.add_selection_argument(parser)
 args, _ = parser.parse_known_args()
 pc_versions.check_selectors(args)
-vars(args).update(split_selector(args))
+vars(args).update(split_selector(args, default=None))
 normalize_v_edge_feature_args(vars(args))
 args.learn_physical_scale = not bool(args.freeze_beta1)
 args.lane_survival = args.lane_survival_mode is not None
@@ -649,20 +650,38 @@ if __name__ == "__main__":
         args.run_id = args.resume_run_id
     args.run_id = args.run_id or (f"{args.trial:02d}" if args.trial is not None else generate_model_run_id(args.task))
     args.model_id = f"{args.task}/{args.run_id}"
+    resume_record = None
+    if args.resume_run_id or args.cont:
+        resume_root = get_model_run_root(args.task, args.run_id)
+        if args.artifact_stage:
+            resume_root = resume_root / args.artifact_stage
+        resume_args = json.loads((resume_root / "args.json").read_text(encoding="utf-8"))
+        resume_meta = load_existing_metadata(str(resume_root))
+        resume_record = {**resume_args, **resume_meta}
+        if args.feature_run_id is None:
+            args.feature_run_id = resume_record.get("feature_run_id")
+        elif resume_record.get("feature_run_id") != args.feature_run_id:
+            raise ValueError("Resumed checkpoint feature run does not match requested feature run.")
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
-    args.split_manifest = resolve_split_manifest(**split_selector(args))
-    args.split_manifest_id = args.split_manifest["manifest_id"]
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
-    if not feature_metadata.get("split_manifest_id") and split_selector(args) != split_selector({}):
-        raise ValueError("Legacy feature runs without split metadata can only be used with --train-split 50.")
-    if args.feature_run_id:
-        feature_split_id = feature_metadata.get("split_manifest_id")
-        if feature_split_id and feature_split_id != args.split_manifest["manifest_id"]:
-            raise ValueError(
-                f"Feature run {args.feature_run_id} uses split {feature_split_id}, but training resolved "
-                f"{args.split_manifest['manifest_id']}."
-            )
+    args.split_manifest, args.split_resolution_source = resolve_artifact_split(
+        args, feature_metadata, feature_run_id=args.feature_run_id, checkpoint=resume_record,
+    )
+    vars(args).update(split_selector(args.split_manifest))
+    args.split_manifest_id = args.split_manifest["manifest_id"]
+    if args.ipw_model_id != "none":
+        dependency = get_model_record(args.ipw_model_id)
+        dependency_feature_id = dependency.get("feature_run_id")
+        dependency_manifest, _ = resolve_artifact_split(
+            {}, (load_feature_run_metadata(dependency_feature_id, required=False) or {}) if dependency_feature_id else {},
+            feature_run_id=dependency_feature_id,
+            checkpoint={**dependency["args"], **dependency.get("metadata", {})},
+        )
+        if dependency_manifest["manifest_id"] != args.split_manifest_id:
+            raise ValueError("Inverse-propensity checkpoint split does not match training split.")
+    print(f"Using split {args.split_manifest_id} ({args.split_resolution_source}): "
+          f"{len(args.split_manifest['train'])} development, {len(args.split_manifest['test'])} test matches.")
     args.lane_survival_cache_dir = str(pc_versions.cache_dir("sportec", args)) if args.lane_survival else None
     if args.use_physical_xpass and args.physical_cache_dir is None:
         args.physical_cache_dir = str(get_physical_xpass_dir(feature_root))
@@ -795,6 +814,7 @@ if __name__ == "__main__":
         **split_metadata(args),
         "split_manifest_id": args.split_manifest["manifest_id"],
         "split_manifest": args.split_manifest["metadata"],
+        "split_resolution_source": args.split_resolution_source,
         "validation_mode": args.validation_mode,
         "validation_fold": args.validation_fold,
         "final_refit": bool(args.final_refit),
@@ -883,8 +903,8 @@ if __name__ == "__main__":
         unwrap_model(model).load_state_dict(state_dict)
 
     train_match_ids, valid_match_ids, _ = load_splits(
-        feature_dir=feature_dir,
-        **split_selector(args),
+        feature_dir=None,
+        manifest=args.split_manifest,
         validation_mode=args.validation_mode,
         validation_fold=args.validation_fold,
         final_refit=args.final_refit,
@@ -921,6 +941,13 @@ if __name__ == "__main__":
         **common_dataset_args,
     )
     log_skipped_matches("training", train_dataset, trial_path)
+    metadata["split_datasets"] = {"train": split_dataset_provenance(train_match_ids, train_dataset)}
+    if valid_dataset is not None:
+        metadata["split_datasets"]["validation"] = split_dataset_provenance(valid_match_ids, valid_dataset)
+    write_run_metadata(Path(trial_path), metadata)
+    for name, provenance in metadata["split_datasets"].items():
+        print(f"{name}: {provenance['requested_match_count']} requested, "
+              f"{provenance['loaded_match_count']} loaded, {provenance['contributing_match_count']} contributing matches")
     if valid_dataset is not None:
         log_skipped_matches("validation", valid_dataset, trial_path)
     log_skipped_rows("training", train_dataset, trial_path)

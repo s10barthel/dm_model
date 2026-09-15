@@ -272,6 +272,10 @@ def make_model_record(
 
 
 class BenchmarkNoAccelTests(unittest.TestCase):
+    def setUp(self):
+        from split_fixture import install_wrapper_split
+        install_wrapper_split(self)
+
     @staticmethod
     def _make_runtime_feature_run(root: Path, run_id: str, *, mode: str = "model", with_resolved_actions: bool = True) -> Path:
         feature_root = root / run_id
@@ -1272,6 +1276,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_main_records_accel_flag_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
@@ -1330,6 +1335,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_forwards_runtime_flags_to_train(self) -> None:
         captured_command: list[str] = []
         cli_args = SimpleNamespace(
+            split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
@@ -1390,6 +1396,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_records_failed_metadata_for_access_violation(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
@@ -1440,6 +1447,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
             bundle_id="bundle_under_test",
+            split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9", "in_3"],
             use_v_edge_features=True,
@@ -1540,6 +1548,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
             bundle_id="bundle_under_test",
+            split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
             use_v_edge_features=True,
@@ -1606,6 +1615,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
             bundle_id="bundle_under_test",
+            split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
             available_return_types=["disc_0.9"],
             use_v_edge_features=True,

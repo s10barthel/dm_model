@@ -31,26 +31,24 @@ def test_inference_and_assertion(universe, selector):
         assert project_config.split_cli_args(requested) == project_config.split_cli_args(selector)
     recovered, source = training.resolve_training_split(args(), {"split_manifest_id": manifest["manifest_id"]})
     assert recovered == manifest
-    assert source == "inferred from feature run"
+    assert source == "feature-run manifest"
     opposite = args(train_split=70) if "train_count" in selector else args(train_count=7)
     with pytest.raises(ValueError, match="does not match"):
         training.resolve_training_split(opposite, metadata)
     project_config.save_match_universe([f"m{i:02}" for i in range(11)])
-    with pytest.raises(ValueError, match="current match universe"):
-        training.resolve_training_split(args(), metadata)
+    assert training.resolve_training_split(args(), metadata)[0] == manifest
 
 
 def test_legacy_and_malformed(universe):
-    manifest, source = training.resolve_training_split(args(), {})
-    assert len(manifest["train"]) == 5
-    assert "legacy" in source
+    with pytest.raises(ValueError, match="unmapped legacy"):
+        training.resolve_training_split(args(), {})
     with pytest.raises(ValueError):
         training.resolve_training_split(args(train_count=5), {})
     for metadata in ({"train_count": 7}, {"split_manifest": {}}, {"split_manifest_id": "missing"}):
-        with pytest.raises(ValueError):
+        with pytest.raises((ValueError, FileNotFoundError)):
             training.resolve_training_split(args(), metadata)
     manifest = project_config.resolve_split_manifest(train_count=7)
-    with pytest.raises(ValueError, match="conflicts"):
+    with pytest.raises(ValueError, match="does not match"):
         training.resolve_training_split(args(), {"split_manifest_id": manifest["manifest_id"], "train_count": 6})
     with pytest.raises(ValueError, match="conflicts"):
         training.resolve_training_split(args(), {"split_manifest_id": manifest["manifest_id"], "split_manifest": {}})

@@ -6651,6 +6651,8 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertNotIn("--fixed-physical-scale", command)
 
     def test_wrapper_physical_xpass_floor_validation(self) -> None:
+        from split_fixture import install_wrapper_split
+        install_wrapper_split(self)
         base_args = [
             "--feature-run-id",
             "feature_run",

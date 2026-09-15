@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -45,9 +46,11 @@ from physical_pass_model import (
 import pc_xpass_versions as pc_versions
 
 from project_config import (
-    checked_split_selector,
+    resolve_artifact_split,
+    split_dataset_provenance,
     add_split_arguments,
     split_metadata,
+    split_selector,
     DEFAULT_INTENDED_RECEIVER_MODE,
     EVALUATION_RUNS_DIR,
     get_action_label_dir,
@@ -57,6 +60,22 @@ from project_config import (
     resolve_feature_root,
     resolve_feature_run_id,
 )
+
+
+def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_id):
+    """Resolve checkpoint membership independently of diagnostic label selection."""
+    original_id = checkpoint_record.get("feature_run_id")
+    feature_metadata = (load_feature_run_metadata(original_id, required=False) or {}) if original_id else {}
+    checkpoint_provenance = {**checkpoint_record["args"], **checkpoint_record.get("metadata", {})}
+    manifest, source = resolve_artifact_split(
+        cli_args, feature_metadata, feature_run_id=original_id, checkpoint=checkpoint_provenance,
+    )
+    if selected_feature_run_id != original_id:
+        resolve_artifact_split(
+            cli_args, load_feature_run_metadata(selected_feature_run_id, required=True),
+            feature_run_id=selected_feature_run_id, checkpoint={"split_manifest_id": manifest["manifest_id"]},
+        )
+    return manifest, source
 
 
 def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
@@ -703,6 +722,7 @@ def write_model_evaluation_artifacts(
     evaluation_options: dict,
     test_metrics: dict,
     outcome_metrics: pd.DataFrame | None = None,
+    split_provenance: dict | None = None,
     pass_height_diagnostic_feature_run_id: str | None = None,
     pass_height_diagnostic_label_dir: str | None = None,
     observed_pass_height_threshold_meters: float | None = None,
@@ -726,6 +746,8 @@ def write_model_evaluation_artifacts(
     }
     if outcome_metrics is not None and "outcome_bootstrap" in outcome_metrics.attrs:
         metadata["outcome_bootstrap"] = outcome_metrics.attrs["outcome_bootstrap"]
+    if split_provenance is not None:
+        metadata["split_provenance"] = split_provenance
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
     metric_record = {
         "evaluation_timestamp": timestamp,
@@ -910,19 +932,12 @@ if __name__ == "__main__":
         )
     validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
 
-    try:
-        checkpoint_selector = checked_split_selector(args, model_args)
-    except ValueError as exc:
-        parser.error(str(exc))
-    if resolved_feature_run_id:
-        feature_metadata = load_feature_run_metadata(resolved_feature_run_id, required=False) or {}
-        checkpoint_split_id = getattr(model_args, "split_manifest_id", None)
-        feature_split_id = feature_metadata.get("split_manifest_id")
-        if checkpoint_split_id and feature_split_id and checkpoint_split_id != feature_split_id:
-            raise ValueError(
-                f"Checkpoint split {checkpoint_split_id} does not match feature-run split {feature_split_id}."
-            )
-    _, _, test_match_ids = load_splits(feature_dir=feature_dir, **checkpoint_selector)
+    checkpoint_record = utils.get_model_record(args.model_id)
+    evaluation_manifest, split_source = resolve_evaluation_split(args, checkpoint_record, resolved_feature_run_id)
+    checkpoint_selector = split_selector(evaluation_manifest)
+    test_match_ids = np.asarray(evaluation_manifest["test"])
+    print(f"Using split {evaluation_manifest['manifest_id']} ({split_source}): "
+          f"{len(test_match_ids)} requested test matches.")
 
     dataset_args = build_action_dataset_kwargs(
         model_args,
@@ -977,7 +992,10 @@ if __name__ == "__main__":
         num_workers=0,
         pin_memory=bool(getattr(model_args, "pin_memory", False)),
     )
-    print(f"Evaluating {args.model_id} on {len(test_match_ids)} matches with {len(test_dataset)} samples")
+    test_split_provenance = split_dataset_provenance(test_match_ids, test_dataset)
+    print(f"Evaluating {args.model_id}: {len(test_match_ids)} requested, "
+          f"{test_split_provenance['loaded_match_count']} loaded, "
+          f"{test_split_provenance['contributing_match_count']} contributing matches with {len(test_dataset)} samples")
     collect_outcome_evaluation = bool(
         args.evaluation_output_dir and getattr(model_args, "task", None) in {"outcome_scoring", "outcome_conceding"}
     )
@@ -1038,7 +1056,7 @@ if __name__ == "__main__":
             evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
             evaluation_options={
                 **split_metadata(checkpoint_selector),
-                "split_manifest_id": getattr(model_args, "split_manifest_id", None),
+                "split_manifest_id": evaluation_manifest["manifest_id"],
                 "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
                 "evaluate_xpass": bool(args.evaluate_xpass),
                 "evaluate_combined_success": bool(args.evaluate_combined_success),
@@ -1072,6 +1090,9 @@ if __name__ == "__main__":
             },
             test_metrics=test_metrics,
             outcome_metrics=outcome_metrics,
+            split_provenance={"manifest_id": evaluation_manifest["manifest_id"],
+                              "universe_fingerprint": evaluation_manifest["metadata"]["universe_fingerprint"],
+                              "resolution_source": split_source, "test": test_split_provenance},
             pass_height_diagnostic_feature_run_id=pass_height_diagnostic_feature_run_id,
             pass_height_diagnostic_label_dir=pass_height_diagnostic_label_dir,
             observed_pass_height_threshold_meters=observed_pass_height_threshold_meters,

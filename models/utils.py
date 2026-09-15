@@ -578,13 +578,14 @@ def load_splits(
     validation_mode: str = "holdout_80_20",
     validation_fold: int | None = None,
     final_refit: bool = False,
-    *, train_count: int | None = None,
+    *, train_count: int | None = None, manifest: dict | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     del lineup_path
     return load_model_splits(
         feature_dir,
         train_split=train_split,
         train_count=train_count,
+        manifest=manifest,
         validation_mode=validation_mode,
         validation_fold=validation_fold,
         final_refit=final_refit,

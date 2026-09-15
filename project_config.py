@@ -968,6 +968,96 @@ def save_split_manifest(train_ids: list[str], test_ids: list[str], metadata: dic
     SPLIT_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+LEGACY_FEATURE_SPLIT_MANIFESTS = {
+    "feature_20260628T024614_842494_f7e03958": "train_50pct_910f288a826f",
+    "feature_20260827T004621_803230_f03ded3f": "train_50pct_910f288a826f",
+}
+
+
+def load_recorded_split_manifest(manifest_id: str) -> dict[str, Any]:
+    """Read and validate saved assignments without consulting the current universe."""
+    if not isinstance(manifest_id, str) or not manifest_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in manifest_id):
+        raise ValueError("Invalid split_manifest_id.")
+    path = SPLIT_MANIFESTS_DIR / f"{manifest_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict) or payload.get("manifest_id") != manifest_id:
+        raise ValueError("Recorded split manifest has a conflicting identity.")
+    train, test = payload.get("train"), payload.get("test")
+    if any(not isinstance(ids, list) or not ids or any(not isinstance(v, str) or not v.strip() for v in ids)
+           for ids in (train, test)):
+        raise ValueError("Recorded split must contain nonempty train and test match lists.")
+    universe = train + test
+    if len(set(universe)) != len(universe):
+        raise ValueError("Recorded split contains duplicate or overlapping match IDs.")
+    metadata = payload.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("Recorded split metadata must be an object.")
+    fingerprint = _match_universe_fingerprint(universe)
+    if universe != sorted(universe) or metadata.get("ordering") != "match_id":
+        raise ValueError("Recorded split does not preserve canonical match ordering.")
+    if any(metadata.get(key) != value for key, value in {
+        "train_size": len(train), "test_size": len(test), "universe_count": len(universe),
+        "universe_fingerprint": fingerprint,
+    }.items()):
+        raise ValueError("Recorded split counts or universe fingerprint are invalid.")
+    selector = split_selector(payload, default=None)
+    count, percent = selector["train_count"], selector["train_split"]
+    if count is not None:
+        valid = type(count) is int and count == len(train) and metadata.get("rounding") == "exact"
+        expected_id = f"train_count_{count}_{fingerprint[:12]}"
+    else:
+        valid = type(percent) is int and 1 <= percent <= 99 and len(universe) * percent // 100 == len(train) and metadata.get("rounding") == "floor"
+        expected_id = f"train_{percent:02d}pct_{fingerprint[:12]}" if type(percent) is int else ""
+    if not valid or expected_id != manifest_id:
+        raise ValueError("Recorded split selector conflicts with its assignments or identity.")
+    return {**payload, "path": str(path)}
+
+
+def resolve_artifact_split(requested: Any, feature_metadata: dict, *, feature_run_id: str | None,
+                           checkpoint: dict | None = None) -> tuple[dict, str]:
+    """Pin existing artifacts to saved manifests; selectors are assertions only."""
+    if not isinstance(feature_metadata, dict):
+        raise ValueError("Feature-run metadata must be an object.")
+    feature_id = feature_metadata.get("split_manifest_id")
+    legacy_id = LEGACY_FEATURE_SPLIT_MANIFESTS.get(feature_run_id)
+    if feature_id and legacy_id and feature_id != legacy_id:
+        raise ValueError("Feature split conflicts with its verified legacy assignment.")
+    checkpoint = checkpoint or {}
+    checkpoint_id = checkpoint.get("split_manifest_id")
+    resolved_feature_id = feature_id or legacy_id
+    if checkpoint_id and resolved_feature_id and checkpoint_id != resolved_feature_id:
+        raise ValueError("Checkpoint split does not match feature-run split.")
+    manifest_id = checkpoint_id or resolved_feature_id
+    if not manifest_id:
+        raise ValueError(f"No recorded split manifest for feature run {feature_run_id!r}; unmapped legacy artifacts require verified split provenance.")
+    manifest = load_recorded_split_manifest(manifest_id)
+    actual = split_selector(manifest, default=None)
+    for name, record in (("feature", feature_metadata), ("checkpoint", checkpoint), ("requested", requested)):
+        explicit = split_selector(record, default=None)
+        if any(value is not None for value in explicit.values()) and explicit != actual:
+            raise ValueError(f"{name.capitalize()} split {explicit} does not match recorded split {actual}.")
+        if isinstance(record, dict) and "split_manifest" in record:
+            embedded = record["split_manifest"]
+            if not isinstance(embedded, dict):
+                raise ValueError(f"{name} split metadata is invalid.")
+            expected = manifest if "train" in embedded else manifest["metadata"]
+            if any(embedded.get(k) != v for k, v in expected.items() if k != "path"):
+                raise ValueError(f"{name} split metadata conflicts with recorded manifest.")
+    source = "checkpoint manifest" if checkpoint_id else "feature-run manifest" if feature_id else "explicit legacy mapping"
+    return manifest, source
+
+
+def split_dataset_provenance(requested_ids, dataset) -> dict[str, Any]:
+    """Report requested, loaded and contributing matches, including missing files."""
+    requested = [str(v) for v in requested_ids]
+    loaded = list(dataset.loaded_match_ids)
+    contributing = sorted({graph.evaluation_match_id for graph in dataset.features})
+    return {"requested_match_ids": requested, "requested_match_count": len(requested),
+            "loaded_match_ids": loaded, "loaded_match_count": len(loaded),
+            "contributing_match_ids": contributing, "contributing_match_count": len(contributing),
+            "skipped_matches": dict(dataset.skipped_matches), "skipped_rows": dict(dataset.skipped_rows)}
+
+
 def load_split_manifest(train_split: int | None = None, *, train_count: int | None = None) -> dict[str, Any]:
     if train_split is not None or train_count is not None:
         return resolve_split_manifest(train_split, train_count=train_count)
@@ -991,9 +1081,9 @@ def filter_available_match_ids(match_ids: list[str], feature_dir: str | Path | N
 def load_base_splits(
     feature_dir: str | Path | None = None,
     train_split: int | None = None,
-    *, train_count: int | None = None,
+    *, train_count: int | None = None, manifest: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    manifest = load_split_manifest(train_split, train_count=train_count)
+    manifest = manifest if manifest is not None else load_split_manifest(train_split, train_count=train_count)
     train_ids = filter_available_match_ids(manifest["train"], feature_dir)
     test_ids = filter_available_match_ids(manifest["test"], feature_dir)
     return train_ids, test_ids
@@ -1031,12 +1121,13 @@ def load_model_splits(
     validation_mode: str = VALIDATION_MODE_HOLDOUT,
     validation_fold: int | None = None,
     final_refit: bool = False,
-    *, train_count: int | None = None,
+    *, train_count: int | None = None, manifest: dict | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    train_pool_ids, test_ids = load_base_splits(feature_dir, train_split=train_split, train_count=train_count)
+    train_pool_ids, test_ids = load_base_splits(None if manifest is not None else feature_dir,
+                                              train_split=train_split, train_count=train_count, manifest=manifest)
     if final_refit:
-        return train_pool_ids, np.array([], dtype=str), test_ids
-    if validation_mode == VALIDATION_MODE_HOLDOUT:
+        train_ids, valid_ids = train_pool_ids, np.array([], dtype=str)
+    elif validation_mode == VALIDATION_MODE_HOLDOUT:
         train_ids, valid_ids = derive_model_train_valid(train_pool_ids)
     elif validation_mode == VALIDATION_MODE_EXPANDING:
         folds = derive_expanding_folds(train_pool_ids)
@@ -1045,4 +1136,6 @@ def load_model_splits(
         train_ids, valid_ids = folds[int(validation_fold) - 1]
     else:
         raise ValueError(f"Unknown validation mode {validation_mode!r}; expected one of {VALIDATION_MODES}.")
+    if manifest is not None:
+        return tuple(filter_available_match_ids(list(ids), feature_dir) for ids in (train_ids, valid_ids, test_ids))
     return train_ids, valid_ids, test_ids

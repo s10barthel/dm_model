@@ -61,7 +61,7 @@ from project_config import (
     load_base_splits,
     resolve_feature_run_id,
     resolve_feature_root,
-    resolve_split_manifest,
+    resolve_artifact_split,
     validate_intended_receiver_mode,
     validate_return_type,
     validate_return_type_for_target_family,
@@ -627,11 +627,19 @@ def validate_external_pass_intent_model_id(
         mismatches.append(f"task={record.get('task')!r}")
     if not record.get("has_weights"):
         mismatches.append("missing best_weights.pt or best_model.json")
-    if split_selector(record) != split_selector(args):
-        mismatches.append(f"split={split_selector(record)!r}, expected {split_selector(args)!r}")
     requested_manifest = getattr(args, "split_manifest", None)
-    if requested_manifest and record.get("split_manifest_id") and record["split_manifest_id"] != requested_manifest["manifest_id"]:
-        mismatches.append("split_manifest_id does not match requested split")
+    if requested_manifest:
+        dependency_feature_id = record.get("feature_run_id")
+        dependency_metadata = load_feature_run_metadata(dependency_feature_id, required=False) or {} if dependency_feature_id else {}
+        dependency_manifest, _ = resolve_artifact_split(
+            {}, dependency_metadata, feature_run_id=dependency_feature_id,
+            checkpoint={**record.get("args", {}), **record.get("metadata", {}),
+                        **({"split_manifest_id": record["split_manifest_id"]} if record.get("split_manifest_id") else {})},
+        )
+        if dependency_manifest["manifest_id"] != requested_manifest["manifest_id"]:
+            mismatches.append("split_manifest_id does not match requested split")
+    elif split_selector(record) != split_selector(args):
+        mismatches.append(f"split={split_selector(record)!r}, expected {split_selector(args)!r}")
 
     if runtime_schema is None:
         feature_root = resolve_feature_root(resolved_feature_run_id)
@@ -797,50 +805,11 @@ def derive_bundle_shared_context(
 
 
 def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[dict, str]:
-    """Infer the outer split while preserving feature-run provenance assertions."""
-    if not isinstance(metadata, dict):
-        raise ValueError("Feature-run metadata must be an object.")
-    explicit = split_selector(args, default=None)
-    fields = ("split_manifest_id", "train_split_percent", "train_count", "split_manifest")
-    manifest_id = metadata.get("split_manifest_id")
-    legacy = not any(field in metadata for field in fields)
-    if legacy:
-        recorded = {"train_split": 50, "train_count": None}
-    else:
-        if not isinstance(manifest_id, str) or not manifest_id or Path(manifest_id).name != manifest_id:
-            raise ValueError("Feature run has incomplete or invalid split_manifest_id provenance.")
-        recorded = split_selector(metadata, default=None)
-        path = SPLIT_MANIFESTS_DIR / f"{manifest_id}.json"
-        stored = None
-        if path.exists():
-            stored = json.loads(path.read_text(encoding="utf-8-sig"))
-            if not isinstance(stored, dict):
-                raise ValueError("Recorded split manifest must be an object.")
-            if stored.get("manifest_id") != manifest_id:
-                raise ValueError("Recorded split manifest has a conflicting identity.")
-            stored_selector = split_selector(stored, default=None)
-            if not any(value is not None for value in stored_selector.values()):
-                raise ValueError("Recorded split manifest has no selector.")
-            if any(value is not None for value in recorded.values()) and recorded != stored_selector:
-                raise ValueError("Feature split selector conflicts with its recorded manifest.")
-            recorded = stored_selector
-        if not any(value is not None for value in recorded.values()):
-            raise ValueError(f"Feature split selector is missing and cannot be recovered from {path}.")
-    if any(value is not None for value in explicit.values()) and explicit != recorded:
-        raise ValueError(f"Requested split {explicit} does not match feature-run split {recorded}.")
-    manifest = resolve_split_manifest(**recorded)
-    if not legacy:
-        if manifest["manifest_id"] != manifest_id:
-            raise ValueError(f"Feature split {manifest_id} does not match the current match universe ({manifest['manifest_id']}).")
-        if stored is not None and any(stored.get(key) != manifest.get(key) for key in ("train", "test", "metadata")):
-            raise ValueError("Recorded split manifest conflicts with resolved match assignments.")
-        embedded = metadata.get("split_manifest")
-        if embedded is not None and embedded != manifest["metadata"]:
-            raise ValueError("Feature split metadata conflicts with the resolved manifest.")
-    vars(args).update(recorded)
-    source = "legacy 50% fallback (split metadata absent)" if legacy else (
-        "explicit assertion" if any(value is not None for value in explicit.values()) else "inferred from feature run"
+    """Resolve the saved feature-run manifest and assert explicit selectors."""
+    manifest, source = resolve_artifact_split(
+        args, metadata, feature_run_id=getattr(args, "feature_run_id", None) or metadata.get("run_id"),
     )
+    vars(args).update(split_selector(manifest))
     return manifest, source
 
 
@@ -849,7 +818,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
-    parser._option_string_actions["--train-split"].help = "Optional development percentage assertion; defaults to the feature-run split (50 for legacy runs)."
+    parser._option_string_actions["--train-split"].help = "Optional development percentage assertion against the saved feature-run manifest."
     parser._option_string_actions["--train-count"].help = "Optional exact development match count assertion; defaults to the feature-run split."
     parser.add_argument(
         "--validation-mode",
@@ -1156,8 +1125,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const="max",
         type=parse_lane_survival_mode,
-        metavar="{max,top_N}",
-        help="Append cached pc-xPass lane survival: max (default) or top_N such as top_10.",
+        metavar="{max,top_N,top_pass_N}",
+        help=(
+            "Append cached pc-xPass lane survival: max (default), top_N such as top_10, "
+            "or top_pass_N such as top_pass_10."
+        ),
     )
     lane_survival_group.add_argument(
         "--no-lane-survival",
@@ -1324,7 +1296,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.validation_mode == "expanding":
         try:
-            development_ids, _ = load_base_splits(**split_selector(args))
+            development_ids, _ = load_base_splits(manifest=split_manifest)
             derive_expanding_folds(development_ids)
         except ValueError as exc:
             parser.error(str(exc))
@@ -2004,7 +1976,9 @@ def main() -> None:
     if getattr(cli_args, "lane_survival_mode", None) or getattr(cli_args, "pc_xpass_id", None):
         pc_versions.cache_dir("sportec", cli_args)
     validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
-    split_manifest = getattr(cli_args, "split_manifest", None) or resolve_split_manifest(**split_selector(cli_args))
+    split_manifest = getattr(cli_args, "split_manifest", None)
+    if split_manifest is None:
+        split_manifest, _ = resolve_training_split(cli_args, load_feature_run_metadata(cli_args.feature_run_id, required=True))
     v_edge_feature_mode = cli_v_edge_feature_mode(cli_args)
     relative_speed_edge_feature_mode = cli_relative_speed_edge_feature_mode(cli_args)
     python = sys.executable
