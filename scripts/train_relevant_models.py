@@ -457,32 +457,28 @@ def resolve_enabled_tasks(args: argparse.Namespace) -> OrderedDict[str, bool]:
         for task, option_name, _, _ in MODEL_TOGGLE_SPECS
         if getattr(args, task) is not None
     ]
-    if args.success_intent_only or getattr(args, "only_pass_height", False):
-        only_flag = "--success-intent-only" if args.success_intent_only else "--only-pass-height"
-        only_task = "success_intent" if args.success_intent_only else "pass_height"
-        if args.success_intent_only and getattr(args, "pass_intent_model_id", None):
-            raise ValueError("--pass-intent-model-id requires --pass-success and cannot be combined with --success-intent-only.")
-        if args.success_intent_only and getattr(args, "pass_height_ipw_model_id", None):
-            raise ValueError("--pass-height-ipw-model-id requires --pass-height and cannot be combined with --success-intent-only.")
+    only_tasks = [
+        task
+        for task, _, _, _ in MODEL_TOGGLE_SPECS
+        if bool(getattr(args, f"only_{task}", False))
+    ]
+    legacy_success_intent_only = bool(getattr(args, "success_intent_only", False))
+    if legacy_success_intent_only:
+        if only_tasks:
+            raise ValueError("--success-intent-only cannot be combined with canonical --only-* flags.")
+        only_tasks = ["success_intent"]
+
+    if only_tasks:
         if explicit_toggles:
             toggles = ", ".join(flag for _, flag in explicit_toggles)
-            raise ValueError(f"{only_flag} cannot be combined with explicit per-model toggles: {toggles}.")
-        if args.success_intent_only and getattr(args, "only_pass_height", False):
-            raise ValueError("--success-intent-only cannot be combined with --only-pass-height.")
-        if getattr(args, "only_pass_height", False):
-            if getattr(args, "pass_intent_model_id", None):
-                raise ValueError("--pass-intent-model-id requires --pass-success and cannot be combined with --only-pass-height.")
-            pass_height_ipw = bool(getattr(args, "pass_height_ipw", False))
-            if getattr(args, "pass_height_ipw_model_id", None) and not pass_height_ipw:
-                raise ValueError("--pass-height-ipw-model-id requires --pass-height-ipw.")
-            if pass_height_ipw and not getattr(args, "pass_height_ipw_model_id", None):
-                raise ValueError("--only-pass-height --pass-height-ipw requires --pass-height-ipw-model-id.")
-        return OrderedDict((task, task == only_task) for task, _, _, _ in MODEL_TOGGLE_SPECS)
-
-    enabled_tasks = OrderedDict(
-        (task, MODEL_TOGGLE_DEFAULTS[task] if getattr(args, task) is None else bool(getattr(args, task)))
-        for task, _, _, _ in MODEL_TOGGLE_SPECS
-    )
+            only_flags = ", ".join(f"--only-{task.replace('_', '-')}" for task in only_tasks)
+            raise ValueError(f"{only_flags} cannot be combined with explicit per-model toggles: {toggles}.")
+        enabled_tasks = OrderedDict((task, task in only_tasks) for task, _, _, _ in MODEL_TOGGLE_SPECS)
+    else:
+        enabled_tasks = OrderedDict(
+            (task, MODEL_TOGGLE_DEFAULTS[task] if getattr(args, task) is None else bool(getattr(args, task)))
+            for task, _, _, _ in MODEL_TOGGLE_SPECS
+        )
     if not any(enabled_tasks.values()):
         raise ValueError("At least one model must be enabled.")
     pass_success_ipw = bool(getattr(args, "pass_success_ipw", True))
@@ -866,18 +862,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--intended-receiver-mode",
         choices=["original", "angle_only", "model"],
         default=None,
-        help="Intended-receiver variant to train against. Not used with --success-intent-only.",
+        help="Intended-receiver variant to train against. Not used with --only-success-intent.",
     )
-    parser.add_argument(
-        "--success-intent-only",
-        action="store_true",
-        help="Only train the mode-independent success_intent model from observed successful-pass receivers.",
-    )
-    parser.add_argument(
-        "--only-pass-height",
-        action="store_true",
-        help="Only train the pass_height checkpoint.",
-    )
+    for task, option_name, _, _ in MODEL_TOGGLE_SPECS:
+        parser.add_argument(
+            f"--only-{option_name}",
+            dest=f"only_{task}",
+            action="store_true",
+            help=f"Train only the {task} checkpoint; repeat with other --only-* flags to select multiple models.",
+        )
+    parser.add_argument("--success-intent-only", action="store_true", help=argparse.SUPPRESS)
     for task, option_name, enable_help, disable_help in MODEL_TOGGLE_SPECS:
         add_bool_override(parser, option_name, task, enable_help, disable_help)
     parser.add_argument(
@@ -1325,11 +1319,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     requires_mode = any(args.enabled_tasks.get(task, False) for task in MODE_DEPENDENT_TASKS)
     requires_outcome_config = any(args.enabled_tasks.get(task, False) for task in OUTCOME_TASKS)
 
-    if args.success_intent_only:
+    has_only_selection = args.success_intent_only or any(
+        bool(getattr(args, f"only_{task}", False)) for task, _, _, _ in MODEL_TOGGLE_SPECS
+    )
+    args.only_tasks = [task for task, enabled in args.enabled_tasks.items() if enabled] if has_only_selection else []
+    success_intent_only = args.only_tasks == ["success_intent"]
+
+    if success_intent_only:
         if args.intended_receiver_mode:
-            parser.error("--success-intent-only is mode-independent and does not accept --intended-receiver-mode.")
+            parser.error("--only-success-intent is mode-independent and does not accept --intended-receiver-mode.")
         if args.target_family is not None:
-            parser.error("--success-intent-only does not accept --target-family.")
+            parser.error("--only-success-intent does not accept --target-family.")
         args.intended_receiver_mode = None
         args.target_family = None
     elif requires_mode:
@@ -2173,8 +2173,9 @@ def main() -> None:
                 "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
                 "training_feature_flags": feature_flags,
                 "batch_sizes": trained_batch_sizes,
-                "success_intent_only": bool(cli_args.success_intent_only),
-                "only_pass_height": bool(getattr(cli_args, "only_pass_height", False)),
+                "only_tasks": list(getattr(cli_args, "only_tasks", [])),
+                "success_intent_only": list(getattr(cli_args, "only_tasks", [])) == ["success_intent"],
+                "only_pass_height": list(getattr(cli_args, "only_tasks", [])) == ["pass_height"],
                 "planned_tasks": list(trained_model_ids.keys()),
                 "completed_tasks": list(completed_model_ids.keys()),
                 "completed_model_ids": completed_model_ids,
@@ -2274,8 +2275,9 @@ def main() -> None:
             relative_speed_edge_feature_mode,
         ),
         "graph_schema": dict(bundle_shared.get("graph_schema", {})),
-        "success_intent_only": bool(cli_args.success_intent_only),
-        "only_pass_height": bool(getattr(cli_args, "only_pass_height", False)),
+        "only_tasks": list(getattr(cli_args, "only_tasks", [])),
+        "success_intent_only": list(getattr(cli_args, "only_tasks", [])) == ["success_intent"],
+        "only_pass_height": list(getattr(cli_args, "only_tasks", [])) == ["pass_height"],
         "trained_tasks": list(trained_model_ids.keys()),
         "success_intent_label_source": (
             SUCCESS_INTENT_LABEL_SOURCE

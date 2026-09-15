@@ -56,6 +56,19 @@ WRAPPER_OVERRIDE_FLAGS = {
     "pass_lane_features": ("--pass-lane-features", "--no-pass-lane-features"),
 }
 
+MODEL_SELECTION_SPECS = (
+    ("action_intent", "action-intent"),
+    ("pass_intent", "pass-intent"),
+    ("success_intent", "success-intent"),
+    ("pass_success", "pass-success"),
+    ("pass_height", "pass-height"),
+    ("outcome_scoring", "outcome-scoring"),
+    ("outcome_conceding", "outcome-conceding"),
+    ("failure_receiver", "failure-receiver"),
+)
+OUTCOME_TASKS = {"outcome_scoring", "outcome_conceding"}
+MODE_DEPENDENT_TASKS = {task for task, _ in MODEL_SELECTION_SPECS} - {"success_intent"}
+
 
 def add_bool_override(
     parser: argparse.ArgumentParser,
@@ -83,6 +96,19 @@ def resolve_training_feature_overrides(args: argparse.Namespace) -> dict[str, bo
             "disable them or enable --possessor-aware."
         )
     return resolved_flags
+
+
+def resolve_only_tasks(args: argparse.Namespace) -> list[str]:
+    only_tasks = [
+        task for task, _ in MODEL_SELECTION_SPECS if bool(getattr(args, f"only_{task}", False))
+    ]
+    if bool(getattr(args, "success_intent_only", False)):
+        if only_tasks:
+            raise ValueError("--success-intent-only cannot be combined with canonical --only-* flags.")
+        only_tasks = ["success_intent"]
+    if only_tasks and bool(getattr(args, "pass_height", False)):
+        raise ValueError("--only-* flags cannot be combined with the per-model toggle --pass-height.")
+    return only_tasks
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,7 +157,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional success_intent checkpoint for evaluation; defaults to --intended-receiver-model-id when present.",
     )
     parser.add_argument("--pass-height", action="store_true", help="Also train the pass_height model.")
-    parser.add_argument("--only-pass-height", action="store_true", help="Only train the pass_height model.")
+    for task, option_name in MODEL_SELECTION_SPECS:
+        parser.add_argument(
+            f"--only-{option_name}",
+            dest=f"only_{task}",
+            action="store_true",
+            help=f"Train only the {task} checkpoint; repeat with other --only-* flags to select multiple models.",
+        )
+    parser.add_argument("--success-intent-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--pass-height-ipw-model-id",
         default=None,
@@ -299,8 +332,11 @@ def parse_args() -> argparse.Namespace:
     if not args.skip_train:
         try:
             resolve_training_feature_overrides(args)
+            args.only_tasks = resolve_only_tasks(args)
         except ValueError as exc:
             parser.error(str(exc))
+    else:
+        args.only_tasks = []
 
     args.success_intent_model_id = args.success_intent_model_id or args.intended_receiver_model_id
     needs_training_config = not args.skip_train
@@ -317,12 +353,19 @@ def parse_args() -> argparse.Namespace:
     )
 
     if needs_training_config:
-        if not args.only_pass_height and not args.target_family:
-            parser.error("--target-family is required unless --skip-train is set.")
-        if not args.return_type:
-            parser.error("--return_type is required unless --skip-train is set.")
-        if not args.intended_receiver_mode:
-            parser.error("--intended-receiver-mode is required unless --skip-train is set.")
+        selected_tasks = set(args.only_tasks)
+        outcomes_selected = not selected_tasks or bool(selected_tasks & OUTCOME_TASKS)
+        mode_dependent_selected = not selected_tasks or bool(selected_tasks & MODE_DEPENDENT_TASKS)
+        if outcomes_selected and not args.target_family:
+            parser.error("--target-family is required when outcome models are selected.")
+        if outcomes_selected and not args.return_type:
+            parser.error("--return_type is required when outcome models are selected.")
+        if mode_dependent_selected and not args.intended_receiver_mode:
+            parser.error("--intended-receiver-mode is required when a mode-dependent model is selected.")
+        if args.only_tasks == ["success_intent"] and args.intended_receiver_mode:
+            parser.error("--only-success-intent is mode-independent and does not accept --intended-receiver-mode.")
+        if args.only_tasks == ["success_intent"] and args.target_family:
+            parser.error("--only-success-intent does not accept --target-family.")
 
     if needs_feature_generation and not args.return_type:
         parser.error("--return_type is required when scripts/main.py generates feature artifacts.")
@@ -652,9 +695,10 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         train_command = append_return_type_flag(train_command, args)
         train_command = append_edge_feature_flag(train_command, args)
         train_command = append_training_feature_flags(train_command, args)
-        if args.only_pass_height:
-            train_command.append("--only-pass-height")
-        elif args.pass_height:
+        for task, option_name in MODEL_SELECTION_SPECS:
+            if task in getattr(args, "only_tasks", []):
+                train_command.append(f"--only-{option_name}")
+        if args.pass_height:
             train_command.append("--pass-height")
         if args.pass_height_ipw is True:
             train_command.append("--pass-height-ipw")

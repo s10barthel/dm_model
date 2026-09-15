@@ -903,6 +903,70 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
         self.assertEqual([task for task, value in enabled.items() if value], ["pass_height"])
 
+    def _only_selection_args(self, **overrides) -> SimpleNamespace:
+        values = {
+            "success_intent_only": False,
+            "pass_intent_model_id": None,
+            "pass_height_ipw_model_id": None,
+            "pass_success_ipw": False,
+            "pass_height_ipw": False,
+            "outcome_scoring_trial": None,
+            "outcome_conceding_trial": None,
+        }
+        for task, _, _, _ in train_wrapper.MODEL_TOGGLE_SPECS:
+            values[task] = None
+            values[f"only_{task}"] = False
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_every_only_flag_selects_exactly_its_model(self) -> None:
+        for task, _, _, _ in train_wrapper.MODEL_TOGGLE_SPECS:
+            with self.subTest(task=task):
+                enabled = train_wrapper.resolve_enabled_tasks(
+                    self._only_selection_args(**{f"only_{task}": True})
+                )
+                self.assertEqual([name for name, selected in enabled.items() if selected], [task])
+
+    def test_only_flags_are_additive(self) -> None:
+        enabled = train_wrapper.resolve_enabled_tasks(
+            self._only_selection_args(only_outcome_scoring=True, only_outcome_conceding=True)
+        )
+        self.assertEqual(
+            [name for name, selected in enabled.items() if selected],
+            ["outcome_scoring", "outcome_conceding"],
+        )
+
+    def test_legacy_success_only_alias_matches_canonical_and_cannot_mix(self) -> None:
+        legacy = train_wrapper.resolve_enabled_tasks(self._only_selection_args(success_intent_only=True))
+        canonical = train_wrapper.resolve_enabled_tasks(self._only_selection_args(only_success_intent=True))
+        self.assertEqual(legacy, canonical)
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            train_wrapper.resolve_enabled_tasks(
+                self._only_selection_args(success_intent_only=True, only_success_intent=True)
+            )
+
+    def test_only_flags_reject_per_model_toggles_and_preserve_ipw_dependencies(self) -> None:
+        for toggle in (True, False):
+            with self.subTest(toggle=toggle), self.assertRaisesRegex(ValueError, "explicit per-model toggles"):
+                train_wrapper.resolve_enabled_tasks(
+                    self._only_selection_args(only_pass_intent=True, action_intent=toggle)
+                )
+        with self.assertRaisesRegex(ValueError, "requires --pass-intent or --pass-intent-model-id"):
+            train_wrapper.resolve_enabled_tasks(
+                self._only_selection_args(only_pass_success=True, pass_success_ipw=True)
+            )
+        enabled = train_wrapper.resolve_enabled_tasks(
+            self._only_selection_args(
+                only_pass_intent=True,
+                only_pass_success=True,
+                pass_success_ipw=True,
+            )
+        )
+        self.assertEqual(
+            [name for name, selected in enabled.items() if selected],
+            ["pass_intent", "pass_success"],
+        )
+
     def test_build_training_commands_emit_pass_height_only_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             feature_root = Path(tmpdir)

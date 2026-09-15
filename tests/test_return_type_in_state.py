@@ -1061,6 +1061,38 @@ class WrapperValidationTests(unittest.TestCase):
         self.assertIn("--v-edge-features-no-poss", train_command)
         self.assertIn("--relative-speed-edge-features-no-poss", train_command)
 
+    def test_main_wrapper_forwards_additive_only_flags(self) -> None:
+        argv = [
+            "scripts/main.py",
+            "--skip-preprocess",
+            "--skip-xt",
+            "--skip-goal-distance",
+            "--skip-epv",
+            "--skip-features",
+            "--skip-evaluate",
+            "--skip-run-relevant",
+            "--skip-hawkeye",
+            "--skip-benchmark",
+            "--skip-skillcorner",
+            "--feature-run-id",
+            "feature_run",
+            "--target-family",
+            "goal",
+            "--return_type",
+            "disc_0.9",
+            "--intended-receiver-mode",
+            "angle_only",
+            "--only-outcome-scoring",
+            "--only-outcome-conceding",
+        ]
+        with patch.object(sys, "argv", argv):
+            args = main_script.parse_args()
+
+        train_command = main_script.build_commands(args)[0]
+
+        self.assertIn("--only-outcome-scoring", train_command)
+        self.assertIn("--only-outcome-conceding", train_command)
+
 
 def _source_xt_grid(invert_x: bool = False) -> np.ndarray:
     grid = np.zeros((xt.XT_GRID_W, xt.XT_GRID_L), dtype=float)

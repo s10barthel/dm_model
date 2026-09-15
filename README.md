@@ -531,12 +531,13 @@ Action labels also carry pass-height columns. `pass_high` is `1` for passes whos
 
 ```powershell
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --success-intent-only
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode original --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver --bundle-id model_bundle_20260414T123456_abcdef12
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --no-v-edge-features
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --return_type disc_0.9 --intended-receiver-mode model --no-action-intent --no-pass-intent --no-success-intent --no-outcome-scoring --no-outcome-conceding --pass-intent-model-id pass_intent/<model_run_id>
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --intended-receiver-mode angle_only --only-pass-height
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only --only-outcome-scoring --only-outcome-conceding
 ```
 
 Inputs:
@@ -561,8 +562,8 @@ Behavior:
 - `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--pass-height` / `--no-pass-height`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, and `--failure-receiver` / `--no-failure-receiver` let you rerun only the subset you need
 - `--target-family` and `--return_type` are required only when `outcome_scoring` or `outcome_conceding` is enabled
 - `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
-- `--success-intent-only` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
-- `--success-intent-only` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
+- `--only-success-intent` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
+- `--only-success-intent` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
 - `--only-pass-height` trains only the `pass_height` checkpoint; its target is `pass_high`, defined by `pass_max_ball_z >= 2.0`
 - `pass_success` uses inverse propensity weighting by default via `--pass-success-ipw`; it uses a `pass_intent` checkpoint as its IPW model, either from the same wrapper run or from `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>`
 - `--no-pass-success-ipw` trains `pass_success` without inverse propensity weighting; use `--no-pass-success-ipw --no-pass-intent` when you want pass-success only and do not want to train or supply a propensity model
@@ -960,7 +961,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --targ
 
 The direct wrapper also supports partial reruns:
 
-- retrain only `success_intent`: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --success-intent-only`
+- retrain only `success_intent`: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent`
 - rerun only the two outcome models with a different target configuration: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode angle_only --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver`
 - rerun everything except `success_intent` after you already trained it once: `python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only --no-success-intent`
 
@@ -1020,7 +1021,7 @@ Every feature run now includes `original` and `angle_only` automatically. The `m
 The learned workflow is now explicit:
 
 1. generate a feature run without `--intended-receiver-model-id`
-2. train `success_intent` with `scripts/train_relevant_models.py --success-intent-only --feature-run-id <feature_run_id>`
+2. train `success_intent` with `scripts/train_relevant_models.py --only-success-intent --feature-run-id <feature_run_id>`
 3. generate a derived model-mode feature run with `scripts/generate_relevant_features.py --extend-feature-run-id <feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>`
 4. train the retained models on that new feature run with `--intended-receiver-mode model`
 
@@ -1306,9 +1307,10 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--train-split <percentage>`: assign the first integer percentage (1-99, floor rounding) of canonical `MatchId` order to development data and reserve the remainder for independent testing. Default: `50`; see [Split Definition](#split-definition).
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - `--validation-mode {holdout_80_20,expanding}`: use a chronological 80/20 development holdout or three expanding validation folds followed by a full-development refit using the median best-fold epoch count. Default: `holdout_80_20`.
-- `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required unless `--skip-train` is set.
-- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when feature generation or training is enabled.
-- `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required unless `--skip-train` is set.
+- `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required when an outcome model is selected.
+- `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when feature generation or an outcome model is enabled.
+- `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required when a mode-dependent model is selected.
+- `--only-action-intent`, `--only-pass-intent`, `--only-success-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-failure-receiver`: train exactly the selected models. Repeated flags are additive and cannot be mixed with ordinary per-model toggles.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
 - `--bundle-id <bundle_id>`: explicit model bundle id to reuse or assign.
@@ -1456,8 +1458,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--feature-run-id <feature_run_id>`: pin the feature run used for training. Required.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional feature run containing compatible `action_labels_next_10*` labels for canonical goal-event diagnostics when the selected run lacks embedded `goal next_10` diagnostic columns.
 - `--intended-receiver-mode {original,angle_only,model}`: intended-receiver mode used for retained-model training. Required when any of `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver` is enabled.
-- `--success-intent-only`: train only the mode-independent `success_intent` model from successful pass receivers. This flag does not accept `--intended-receiver-mode`.
-- `--only-pass-height`: train only the mode-dependent `pass_height` model from the `pass_high` label.
+- `--only-action-intent`, `--only-pass-intent`, `--only-success-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-failure-receiver`: train exactly the selected models. Repeated flags are additive. They cannot be mixed with ordinary per-model toggles, and prerequisites such as an IPW `pass_intent` model are not enabled implicitly. The legacy `--success-intent-only` spelling remains accepted but is hidden from help.
 - `--action-intent` / `--no-action-intent`, `--pass-intent` / `--no-pass-intent`, `--success-intent` / `--no-success-intent`, `--pass-success` / `--no-pass-success`, `--pass-height` / `--no-pass-height`, `--outcome-scoring` / `--no-outcome-scoring`, `--outcome-conceding` / `--no-outcome-conceding`, `--failure-receiver` / `--no-failure-receiver`: enable or disable individual wrapper-managed checkpoints. Default: on for all except `pass_height` and `failure_receiver`.
 - `--pass-success-ipw` / `--no-pass-success-ipw`: enable or disable inverse propensity weighting for `pass_success` only. Default: enabled.
 - `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--pass-success-ipw --no-pass-intent` is set.
