@@ -218,7 +218,7 @@ Checkpoint runs also write metadata:
 - `saved/<task>/<model_run_id>/best_weights.pt`
 - `saved/bundles/<bundle_id>/metadata.json`
 
-The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `poss_rel_vel_aware`, `ball_z_aware`, `extend_features`, `v_edge_feature_mode`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
+The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `poss_rel_vel_aware`, `ball_z_aware`, `extend_features`, `pass_lane_features`, `v_edge_feature_mode`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
 
 ## Current Artifact Contract
 
@@ -288,7 +288,7 @@ Useful options:
 - `--bundle-id <bundle_id>` to pin or reuse a model bundle id; required when `scripts/main.py` generates EPV artifacts
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` to control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely; default: on
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, and `--extend-features` / `--no-extend-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, and `--pass-lane-features` / `--no-pass-lane-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
 - `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes` are available on `scripts/train_relevant_models.py` for targeted feature ablations; call the training wrapper directly when you need these switches. `--no-vel-node-features` zeros `vx`, `vy`, `speed`, and `accel` for every node without changing graph width.
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
 - `--overwrite` to rebuild supported preprocessing and target-artifact outputs
@@ -573,7 +573,7 @@ Behavior:
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
 - training chooses whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; default: on
 - wrapper batch-size defaults are `256` for `action_intent`, `pass_intent`, `success_intent`, and `failure_receiver`, and `512` for `pass_success`, `outcome_scoring`, and `outcome_conceding`; `--batch-size` overrides all defaults, and per-model `--<model>-batch-size` flags take highest precedence
-- unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, `poss_vel_aware`, `poss_geometry_aware`, `goal_features_aware`, and `goal_nodes_aware` on, with `poss_rel_vel_aware`, `extend_features`, and `xy_only` off
+- unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, `poss_vel_aware`, `poss_geometry_aware`, `goal_features_aware`, and `goal_nodes_aware` on, with `poss_rel_vel_aware`, `extend_features`, `pass_lane_features`, and `xy_only` off
 
 In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. It is trained independently of the `original` / `angle_only` / `model` intended-receiver modes. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
 
@@ -989,6 +989,7 @@ The existing low-level feature toggles on `train.py` are:
 - `--no-goal-nodes`
 - `--offside` / `--no-offside`
 - `--extend_features`
+- `--pass-lane-features` / `--no-pass-lane-features`: retain only `nearest_opponent_to_pass` and `potential_interceptors` from the fixed-width extended block. This requires possessor-aware features. `--extend_features` takes precedence and retains all six extended features.
 
 Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
 
@@ -1315,7 +1316,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the training feature profile.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the training feature profile.
 - `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, `--no-goal-nodes`: targeted ablations available on `scripts/train_relevant_models.py`, not on `scripts/main.py`. `--no-vel-node-features` zeros raw `vx`, `vy`, `speed`, and `accel` node features for every node while preserving graph width.
 - `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
@@ -1467,7 +1468,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--lane-survival [{max,top_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects the `max` cache, while `--lane-survival top_25` selects the top-25 cache.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`: override the wrapper training defaults.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the wrapper training defaults. Pass-lane mode retains only `nearest_opponent_to_pass` and `potential_interceptors`; full extended mode takes precedence.
 - `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
 - `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.

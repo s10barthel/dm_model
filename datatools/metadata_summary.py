@@ -39,6 +39,7 @@ SUMMARY_COLUMNS = [
     "accel_aware",
     "offside_aware",
     "extend_features",
+    "pass_lane_features",
     "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
@@ -67,6 +68,7 @@ FEATURE_COLUMNS = [
     "accel_aware",
     "offside_aware",
     "extend_features",
+    "pass_lane_features",
     "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
@@ -120,12 +122,15 @@ def _metadata_feature_signature(metadata: dict[str, Any], record: dict[str, Any]
     if record:
         signature = record.get("feature_signature")
         if isinstance(signature, dict):
-            return signature
+            return {"pass_lane_features": False, **signature}
     signature = metadata.get("feature_signature")
     if isinstance(signature, dict):
-        return signature
+        return {"pass_lane_features": False, **signature}
     args = _metadata_args(metadata)
-    return {key: args.get(key) for key in FEATURE_COLUMNS if key in args}
+    return {
+        "pass_lane_features": bool(args.get("pass_lane_features", False)),
+        **{key: args.get(key) for key in FEATURE_COLUMNS if key in args},
+    }
 
 
 def _model_name(metadata: dict[str, Any], record: dict[str, Any] | None = None) -> Any:

@@ -82,6 +82,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
+    "pass_lane_features": False,
     "lane_survival": False,
 }
 
@@ -105,6 +106,7 @@ LOW_LEVEL_FALSE_FLAGS = {
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
     "accel_aware": ("--accel", "--no-accel"),
     "offside_aware": ("--offside", "--no-offside"),
+    "pass_lane_features": ("--pass-lane-features", "--no-pass-lane-features"),
 }
 
 MODEL_TOGGLE_SPECS = (
@@ -222,9 +224,12 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
         name: WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
         for name in WRAPPER_FEATURE_DEFAULTS
     }
-    if not resolved_flags["possessor_aware"] and resolved_flags["extend_features"]:
+    if not resolved_flags["possessor_aware"] and (
+        resolved_flags["extend_features"] or resolved_flags["pass_lane_features"]
+    ):
         raise ValueError(
-            "--extend-features requires possessor-aware features; remove --extend-features or enable --possessor-aware."
+            "--extend-features and --pass-lane-features require possessor-aware features; "
+            "disable them or enable --possessor-aware."
         )
     lane_survival_mode = getattr(args, "lane_survival_mode", None)
     if lane_survival_mode is None and bool(getattr(args, "lane_survival", False)):
@@ -1117,6 +1122,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "extend_features",
         "Enable the extended handcrafted node features during training.",
         "Disable the extended handcrafted node features during training.",
+    )
+    add_bool_override(
+        parser,
+        "pass-lane-features",
+        "pass_lane_features",
+        "Enable only nearest-opponent-to-pass and potential-interceptor extended node features.",
+        "Disable the selective pass-lane node features.",
     )
     lane_survival_group = parser.add_mutually_exclusive_group()
     lane_survival_group.add_argument(

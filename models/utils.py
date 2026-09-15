@@ -80,6 +80,7 @@ FEATURE_SIGNATURE_KEYS = (
     "accel_aware",
     "offside_aware",
     "extend_features",
+    "pass_lane_features",
     "lane_survival",
     "lane_survival_mode",
     "filter_blockers",
@@ -262,6 +263,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "accel_aware": True if args.get("accel_aware") is None else bool(args.get("accel_aware")),
         "offside_aware": True if args.get("offside_aware") is None else bool(args.get("offside_aware")),
         "extend_features": bool(args.get("extend_features", False)),
+        "pass_lane_features": bool(args.get("pass_lane_features", False)),
         "lane_survival": bool(args.get("lane_survival", False)),
         "lane_survival_mode": (
             normalize_pc_xpass_lane_survival_mode(args.get("lane_survival_mode"))

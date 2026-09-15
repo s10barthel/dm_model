@@ -9,6 +9,7 @@ from datatools import config
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     adapt_graph_edge_features,
+    apply_extended_node_feature_mask,
     drop_goal_nodes,
     drop_non_blocker_nodes,
     drop_opponent_nodes,
@@ -51,11 +52,6 @@ OUTCOME_DIAGNOSTIC_TASKS = {
 DIAGNOSTIC_IDENTITY_COLUMNS = ("action_index", "is_pass", "is_dribble", "is_shot", "success")
 PASS_HEIGHT_LABEL_COLUMNS = ("pass_max_ball_z", "pass_high")
 PRE_PASS_HEIGHT_LABEL_WIDTH = len(LABEL_COLUMNS) - len(PASS_HEIGHT_LABEL_COLUMNS)
-
-
-def _zero_extended_node_features(graph: Data) -> None:
-    if graph.x.shape[1] >= config.NODE_FEATURE_MIN_EXTENDED_DIM:
-        graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
 def _zero_offside_node_feature(graph: Data) -> None:
@@ -240,6 +236,7 @@ class ActionDataset(Dataset):
         accel_aware=True,
         offside_aware=True,
         extend_features=True,
+        pass_lane_features=False,
         drop_non_blockers=False,
         sparsify="none",
         max_edge_dist=10.0,
@@ -507,7 +504,7 @@ class ActionDataset(Dataset):
                 graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
             if not possessor_aware:  # Do not refer to possessor-related features
-                assert not extend_features
+                assert not extend_features and not pass_lane_features
                 graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
             if not poss_vel_aware:  # Ignore the ball possessor's own velocity features
@@ -538,8 +535,12 @@ class ActionDataset(Dataset):
             if not accel_aware:  # Ignore player-acceleration features without changing graph width
                 graph.x[:, config.NODE_FEATURE_ACCEL] = 0
 
-            if not extend_features and task != "success_intent":
-                _zero_extended_node_features(graph)
+            apply_extended_node_feature_mask(
+                graph,
+                extend_features=bool(extend_features),
+                pass_lane_features=bool(pass_lane_features),
+                task=task,
+            )
 
             if not offside_aware:
                 _zero_offside_node_feature(graph)

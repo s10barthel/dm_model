@@ -173,6 +173,20 @@ offside_group.add_argument(
 )
 parser.set_defaults(offside_aware=True)
 parser.add_argument("--extend_features", action="store_true", default=False, help="handcraft more node features")
+pass_lane_feature_group = parser.add_mutually_exclusive_group()
+pass_lane_feature_group.add_argument(
+    "--pass-lane-features",
+    dest="pass_lane_features",
+    action="store_true",
+    help="Use only nearest-opponent-to-pass and potential-interceptor extended node features.",
+)
+pass_lane_feature_group.add_argument(
+    "--no-pass-lane-features",
+    dest="pass_lane_features",
+    action="store_false",
+    help="Disable the selective pass-lane node features.",
+)
+parser.set_defaults(pass_lane_features=False)
 lane_survival_group = parser.add_mutually_exclusive_group()
 lane_survival_group.add_argument(
     "--lane-survival",
@@ -622,6 +636,12 @@ if __name__ == "__main__":
     device = resolve_training_device(args.device)
     args.device = device
     args.pin_memory = resolve_pin_memory(args.pin_memory, device)
+    if args.task == "success_intent":
+        args.pass_lane_features = False
+    if not args.possessor_aware and (args.extend_features or args.pass_lane_features):
+        raise ValueError(
+            "--extend_features and --pass-lane-features require --possessor_aware."
+        )
     if args.early_stopping_patience < 1:
         raise ValueError("--early-stopping-patience must be at least 1.")
     if args.early_stopping_min_epochs < 1:

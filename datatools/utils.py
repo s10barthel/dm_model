@@ -1476,6 +1476,31 @@ def zero_extended_node_features(graph: Data) -> None:
         graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_EXTENDED_END] = 0
 
 
+def apply_extended_node_feature_mask(
+    graph: Data,
+    *,
+    extend_features: bool,
+    pass_lane_features: bool,
+    task: str | None,
+) -> None:
+    """Apply the configured fixed-width mask to the handcrafted feature slots."""
+    if task == "success_intent" or extend_features:
+        return
+    if pass_lane_features:
+        required_dim = config.NODE_FEATURE_POTENTIAL_INTERCEPTORS + 1
+        if graph.x.shape[1] < required_dim:
+            raise ValueError(
+                "Pass-lane features require graph node features containing "
+                "nearest_opponent_to_pass and potential_interceptors "
+                f"(at least {required_dim} columns); found {graph.x.shape[1]}."
+            )
+        graph.x[:, config.NODE_FEATURE_EXTENDED_START : config.NODE_FEATURE_NEAREST_OPPONENT_TO_PASS] = 0
+        if graph.x.shape[1] > config.NODE_FEATURE_POTENTIAL_INTERCEPTORS + 1:
+            graph.x[:, config.NODE_FEATURE_POTENTIAL_INTERCEPTORS + 1 : config.NODE_FEATURE_EXTENDED_END] = 0
+        return
+    zero_extended_node_features(graph)
+
+
 def zero_offside_node_feature(graph: Data) -> None:
     if graph.x.shape[1] in config.NODE_FEATURE_OFFSIDE_DIMS:
         graph.x[:, -1] = 0
@@ -1549,7 +1574,7 @@ def filter_features_and_labels(
             graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
         if not args["possessor_aware"]:
-            assert not args["extend_features"]
+            assert not args["extend_features"] and not args.get("pass_lane_features", False)
             graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
 
         if not args["poss_vel_aware"]:
@@ -1580,8 +1605,12 @@ def filter_features_and_labels(
         if not args.get("accel_aware", True):
             graph.x[:, config.NODE_FEATURE_ACCEL] = 0
 
-        if not args["extend_features"] and args.get("task") != "success_intent":
-            zero_extended_node_features(graph)
+        apply_extended_node_feature_mask(
+            graph,
+            extend_features=bool(args["extend_features"]),
+            pass_lane_features=bool(args.get("pass_lane_features", False)),
+            task=args.get("task"),
+        )
 
         if not args.get("offside_aware", True):
             zero_offside_node_feature(graph)

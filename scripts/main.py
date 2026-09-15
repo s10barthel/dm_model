@@ -41,6 +41,7 @@ TRAINING_WRAPPER_FEATURE_DEFAULTS = {
     "poss_rel_vel_aware": False,
     "offside_aware": True,
     "extend_features": False,
+    "pass_lane_features": False,
 }
 
 WRAPPER_OVERRIDE_FLAGS = {
@@ -52,6 +53,7 @@ WRAPPER_OVERRIDE_FLAGS = {
     "poss_rel_vel_aware": ("--poss-rel-vel-aware", "--no-poss-rel-vel-aware"),
     "offside_aware": ("--offside", "--no-offside"),
     "extend_features": ("--extend-features", "--no-extend-features"),
+    "pass_lane_features": ("--pass-lane-features", "--no-pass-lane-features"),
 }
 
 
@@ -73,9 +75,12 @@ def resolve_training_feature_overrides(args: argparse.Namespace) -> dict[str, bo
         name: TRAINING_WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
         for name in TRAINING_WRAPPER_FEATURE_DEFAULTS
     }
-    if not resolved_flags["possessor_aware"] and resolved_flags["extend_features"]:
+    if not resolved_flags["possessor_aware"] and (
+        resolved_flags["extend_features"] or resolved_flags["pass_lane_features"]
+    ):
         raise ValueError(
-            "--extend-features requires possessor-aware features; remove --extend-features or enable --possessor-aware."
+            "--extend-features and --pass-lane-features require possessor-aware features; "
+            "disable them or enable --possessor-aware."
         )
     return resolved_flags
 
@@ -274,6 +279,13 @@ def parse_args() -> argparse.Namespace:
         "extend_features",
         "Enable the extended handcrafted node features for downstream training.",
         "Disable the extended handcrafted node features for downstream training.",
+    )
+    add_bool_override(
+        parser,
+        "pass-lane-features",
+        "pass_lane_features",
+        "Enable only nearest-opponent-to-pass and potential-interceptor features for downstream training.",
+        "Disable the selective pass-lane features for downstream training.",
     )
     parser.set_defaults(v_edge_feature_mode="none", relative_speed_edge_feature_mode="none")
     args = parser.parse_args()

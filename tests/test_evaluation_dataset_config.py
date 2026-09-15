@@ -19,6 +19,7 @@ import dataset as dataset_module
 from dataset import ActionDataset
 from datatools import config
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
+from datatools.utils import apply_extended_node_feature_mask
 from models import dataset_config
 from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
 from models.utils import (
@@ -30,9 +31,100 @@ from models.utils import (
     calc_pass_success_height_metrics,
     calc_pass_success_predictor_metrics,
     calc_weighted_binary_probability_metrics,
+    extract_model_feature_signature,
 )
 from physical_pass_model import pc_xpass_lane_survival_metadata_fingerprint, physical_xpass_blend_weight_v4
-from scripts import evaluate_relevant_models
+from scripts import evaluate_relevant_models, main as pipeline, train_relevant_models as train_wrapper
+
+
+class PassLaneFeatureTests(unittest.TestCase):
+    @staticmethod
+    def graph(width: int = 26) -> Data:
+        return Data(x=torch.arange(width, dtype=torch.float32).repeat(2, 1))
+
+    def test_mask_retains_only_requested_extended_features(self) -> None:
+        graph = self.graph()
+        apply_extended_node_feature_mask(
+            graph, extend_features=False, pass_lane_features=True, task="pass_success"
+        )
+
+        self.assertTrue(torch.equal(graph.x[:, 19:22], torch.zeros_like(graph.x[:, 19:22])))
+        self.assertTrue(torch.equal(graph.x[:, 22], torch.full_like(graph.x[:, 22], 22)))
+        self.assertTrue(torch.equal(graph.x[:, 23], torch.full_like(graph.x[:, 23], 23)))
+        self.assertTrue(torch.equal(graph.x[:, 24], torch.zeros_like(graph.x[:, 24])))
+        self.assertTrue(torch.equal(graph.x[:, 25], torch.full_like(graph.x[:, 25], 25)))
+
+    def test_full_extended_features_take_precedence(self) -> None:
+        graph = self.graph()
+        original = graph.x.clone()
+        apply_extended_node_feature_mask(
+            graph, extend_features=True, pass_lane_features=True, task="pass_success"
+        )
+        self.assertTrue(torch.equal(graph.x, original))
+
+    def test_success_intent_trajectory_features_are_untouched(self) -> None:
+        graph = self.graph(width=24)
+        original = graph.x.clone()
+        apply_extended_node_feature_mask(
+            graph, extend_features=False, pass_lane_features=True, task="success_intent"
+        )
+        self.assertTrue(torch.equal(graph.x, original))
+
+    def test_mask_rejects_graph_without_required_slots(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Pass-lane features require graph node features"):
+            apply_extended_node_feature_mask(
+                self.graph(width=20),
+                extend_features=False,
+                pass_lane_features=True,
+                task="pass_success",
+            )
+
+    def test_wrapper_resolves_and_forwards_flag(self) -> None:
+        flags = train_wrapper.resolve_wrapper_feature_flags(
+            SimpleNamespace(pass_lane_features=True, lane_survival_mode=None)
+        )
+        command = train_wrapper.append_low_level_feature_flags(["train.py"], flags)
+        self.assertTrue(flags["pass_lane_features"])
+        self.assertIn("--pass-lane-features", command)
+        self.assertNotIn("--no-pass-lane-features", command)
+
+    def test_wrapper_requires_possessor_awareness(self) -> None:
+        args = SimpleNamespace(
+            possessor_aware=False,
+            pass_lane_features=True,
+            extend_features=False,
+            lane_survival_mode=None,
+        )
+        with self.assertRaisesRegex(ValueError, "require possessor-aware features"):
+            train_wrapper.resolve_wrapper_feature_flags(args)
+
+    def test_pipeline_forwards_public_override(self) -> None:
+        command = pipeline.append_training_feature_flags(
+            ["train_relevant_models.py"], SimpleNamespace(pass_lane_features=True)
+        )
+        self.assertEqual(command, ["train_relevant_models.py", "--pass-lane-features"])
+
+    def test_ipw_config_reconstructs_checkpoint_setting(self) -> None:
+        target = build_action_dataset_kwargs(
+            {"task": "pass_success", "edge_in_dim": 2, "pass_lane_features": False},
+            train=False,
+            diagnostic_label_dir=None,
+        )
+        dependency = build_ipw_dataset_kwargs(
+            target,
+            {"edge_in_dim": 2, "pass_lane_features": True},
+            None,
+            diagnostic_label_dir=None,
+            require_goal_next10_diagnostics=False,
+        )
+        self.assertFalse(target["pass_lane_features"])
+        self.assertTrue(dependency["pass_lane_features"])
+
+    def test_feature_signature_has_backward_compatible_default(self) -> None:
+        self.assertFalse(extract_model_feature_signature({})["pass_lane_features"])
+        self.assertTrue(
+            extract_model_feature_signature({"pass_lane_features": True})["pass_lane_features"]
+        )
 
 
 class EvaluationDatasetConfigTests(unittest.TestCase):
