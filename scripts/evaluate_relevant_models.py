@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from models.utils import get_model_record, load_bundle_record, resolve_model_selection
+from models.outcome_bootstrap import add_outcome_bootstrap_arguments
 import pc_xpass_versions as pc_versions
 
 from project_config import EVALUATION_RUNS_DIR
@@ -48,6 +49,7 @@ def probability_threshold(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
@@ -194,6 +196,9 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    if task in {"outcome_scoring", "outcome_conceding"}:
+        command.extend(["--outcome-bootstrap-resamples", str(getattr(args, "outcome_bootstrap_resamples", 2000)),
+                        "--outcome-bootstrap-seed", str(getattr(args, "outcome_bootstrap_seed", 42))])
     if task == "pass_success" and not args.no_observed_pass_height_stratification:
         command.append("--observed-pass-height-stratification")
     if task in {"pass_success", "pass_height"}:

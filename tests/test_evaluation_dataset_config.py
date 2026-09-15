@@ -1107,6 +1107,7 @@ class OutcomeEvaluationArtifactTests(unittest.TestCase):
 
     def test_outcome_artifacts_include_pooled_and_factual_strata(self) -> None:
         evaluation = {
+            "match_id": np.array(["a", "a", "b", "b"]),
             "prediction": np.array([0.1, 0.3, 0.7, 0.9]),
             "target": np.array([0.2, 0.2, 0.8, 0.9]),
             "diagnostic": np.array([0, 0, 1, 1]),
@@ -1118,6 +1119,7 @@ class OutcomeEvaluationArtifactTests(unittest.TestCase):
                 model_id="outcome_scoring/31",
                 task="outcome_scoring",
                 outcome_evaluation=evaluation,
+                outcome_bootstrap_resamples=4,
             )
             summary_dir = Path(tmpdir) / "evaluations"
             with patch.object(evaluation_script, "EVALUATION_RUNS_DIR", summary_dir):
@@ -1179,6 +1181,7 @@ class OutcomeEvaluationArtifactTests(unittest.TestCase):
                 task="outcome_scoring",
                 outcome_evaluation=evaluation,
                 f1_outcome_threshold=0.1,
+                outcome_bootstrap_resamples=0,
             )
         diagnostic = metrics.loc[metrics["evaluation_target"] == "goal_next10_diagnostic"]
         self.assertTrue({"precision", "recall", "f1"}.issubset(diagnostic.columns))

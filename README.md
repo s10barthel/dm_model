@@ -14,6 +14,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Run-Id Workflow](#run-id-workflow)
 - [Split Definition](#split-definition)
 - [Endpoint repair, duration selection, and rollout](docs/endpoint_policy.md)
+- [Empirical reachability circles for pc-xPass](docs/reachability.md)
 - [Environment Setup](#environment-setup)
 - [Main Pipeline Runner](#main-pipeline-runner)
 - [End-to-End Workflow](#end-to-end-workflow)
@@ -605,6 +606,8 @@ Evaluation loads each checkpoint's `best_weights.pt` (selected during training b
 Pass-success evaluation is stratified by the observed binary `pass_high` label by default. Use `--no-observed-pass-height-stratification` to disable this analysis. Feature runs without genuine pass-height label columns must be backfilled before stratification; they are rejected rather than interpreting padded labels as non-high passes.
 
 Use `--evaluate-xpass --top-pass N` (or `--evaluate-xpass --xpass-version <max|topN>`) to compare the learning predictor with receiver-specific probabilities already stored in the read-only pc-xPass cache. Use `--evaluate-combined-success` with an explicit `--xpass-weight`; v4 additionally requires explicit `--discount`, `--v4-power`, and `--v4-zero`. Missing match, action, receiver, or blend-input cache data aborts evaluation and is never generated or skipped. Comparable pooled and observed-height results are written to `pass_success_predictor_metrics.csv`.
+
+Outcome artifacts also include pooled 95% match-bootstrap confidence intervals by default (2,000 resamples, seed 42). Both evaluation CLIs accept `--outcome-bootstrap-resamples` and `--outcome-bootstrap-seed`; set resamples to `0` to disable. See [outcome bootstrap documentation](docs/outcome_bootstrap.md) for metrics, metadata, and interpretation.
 
 For `outcome_scoring` and `outcome_conceding`, the reported quantities have two target definitions:
 
@@ -1396,6 +1399,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--top-n-values <N...>`: pc-xPass only; export additional top-N columns in one run, for example `--top-n-values 5 10 25` writes `__top5_xpass`, `__top10_xpass`, and `__top25_xpass`. An explicitly supplied `--top-n` value is also included.
 - `--top-pass <N...>` / `--top_pass <N...>`: pc-xPass only; export `__top_pass<N>_xpass` and matching diagnostics for the best N distinct speed-angle pairs after endpoint optimization. Opt-in; accepts multiple positive integers.
 - `--pc-xpass`: generate pc-xPass caches under `data/pc_xpass/<dataset>` instead of runtime physical xPass caches.
+- `--margin {tta,reachability}`: pc-xPass only; choose the player-movement margin model. `tta` retains the reaction-time/max-speed model and is the default. `reachability` uses a fitted empirical reachability artifact and requires `--reachability-model-id`; see [Empirical reachability circles for pc-xPass](docs/reachability.md).
 - `--reaction-time <seconds|dist_pass>`: pc-xPass only; fixed player reaction time or distance-to-passer mode. With `dist_pass`, each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)`. Default: `0.25`.
 - `--dist-pass-div <float>`: pc-xPass only; divisor for `--reaction-time dist_pass`. Default: `50`.
 - `--dist-pass-min <seconds>`: pc-xPass only; minimum reaction time for `--reaction-time dist_pass`. Default: `0.2`.
@@ -1549,6 +1553,14 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--no-physical-cache`: compatibility flag that disables the runtime cache override; not recommended with `--use-physical-xpass`.
 - `--refresh-physical-cache`: deprecated and ignored for inference; run `scripts/generate_physical_xpass.py` to refresh/fill caches.
 - `--physical-num-workers <N|auto>` / `--num-workers <N|auto>`, `--physical-worker-thread-limit <N>` / `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: retained for CLI compatibility/metadata; inference does not compute xPass rows.
+
+### `scripts/fit_reachability.py`
+
+Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are stored under `data/pc_xpass/reachability/<model-id>`; run the commands in order. See [Empirical reachability circles for pc-xPass](docs/reachability.md) for data requirements and example commands.
+
+- `prepare --model-id <id> (--train-split <percentage> | --train-count <N>)`: resolve and save the training-pool manifest, reserve deterministic movement-holdout matches, and write resumable aligned-trajectory shards. `--frame-stride <N>` defaults to `1`; quality thresholds `--max-speed <m/s>`, `--max-acceleration <m/s2>`, and `--jump-tolerance <m>` default to `15`, `30`, and `0.5`.
+- `fit --model-id <id>`: fit circle tables from prepared shards. `--source-model-id <id>` reuses preparation shards from an existing model; `--envelopes 0.99 0.995 0.999 max` selects frontier variants (all by default); `--min-samples <N>` controls neighbouring speed-bin pooling and defaults to `10000`.
+- `diagnose --model-id <id>`: produce held-out movement diagnostics, tables, and figures. `--bootstrap <N>` controls match-bootstrap resamples (default `20`).
 
 ### `scripts/run_hawkeye.py`
 

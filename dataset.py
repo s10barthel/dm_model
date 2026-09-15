@@ -666,6 +666,7 @@ class ActionDataset(Dataset):
                         require_pass_height=self.evaluation_xpass_require_height,
                     )
 
+            graph.evaluation_match_id = str(feature_match_ids[int(i)])
             self.features.append(graph)
             self.labels.append(graph_labels)
 

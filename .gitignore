@@ -29,6 +29,7 @@ tests/AS_viz/
 !tests/test_feature_run_extension.py
 !tests/test_physical_xpass.py
 !tests/test_pc_xpass_versions.py
+!tests/test_reachability.py
 !tests/test_pc_top_pass.py
 !tests/test_skillcorner_postprocessing.py
 !tests/test_skillcorner_filter.py

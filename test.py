@@ -15,6 +15,7 @@ from torch_geometric.loader import DataLoader
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from datatools import config
 from models import utils
+from models.outcome_bootstrap import add_outcome_bootstrap_arguments, outcome_bootstrap
 from models.dataset_config import build_action_dataset_kwargs
 from models.utils import (
     calc_binary_metrics,
@@ -460,10 +461,21 @@ def write_outcome_evaluation_artifacts(
     outcome_evaluation: dict[str, np.ndarray],
     f1_outcome_threshold: float | None = None,
     n_bins: int = 10,
+    outcome_bootstrap_resamples: int = 2000,
+    outcome_bootstrap_seed: int = 42,
 ) -> tuple[Path, pd.DataFrame]:
     """Write factual outcome-model target-fidelity and external-validity artifacts."""
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    ci, bootstrap_metadata = outcome_bootstrap(
+        outcome_evaluation, model_id=model_id, task=task,
+        resamples=outcome_bootstrap_resamples, seed=outcome_bootstrap_seed,
+    )
+    if outcome_bootstrap_resamples:
+        ci.to_csv(output_dir / "outcome_bootstrap_ci.csv", index=False)
+    else:
+        (output_dir / "outcome_bootstrap_ci.csv").unlink(missing_ok=True)
 
     predictions = np.asarray(outcome_evaluation["prediction"], dtype=float).reshape(-1)
     targets = np.asarray(outcome_evaluation["target"], dtype=float).reshape(-1)
@@ -510,6 +522,7 @@ def write_outcome_evaluation_artifacts(
             metric_rows.append(row)
 
     metrics = pd.DataFrame(metric_rows)
+    metrics.attrs["outcome_bootstrap"] = bootstrap_metadata
     metrics.to_csv(output_dir / "outcome_metrics.csv", index=False)
     binned = pd.concat(bin_frames, ignore_index=True) if bin_frames else pd.DataFrame(
         columns=[
@@ -711,6 +724,8 @@ def write_model_evaluation_artifacts(
         "pass_height_diagnostic_ancestry_validated": bool(pass_height_diagnostic_ancestry_validated),
         "evaluation_options": _json_compatible(evaluation_options),
     }
+    if outcome_metrics is not None and "outcome_bootstrap" in outcome_metrics.attrs:
+        metadata["outcome_bootstrap"] = outcome_metrics.attrs["outcome_bootstrap"]
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
     metric_record = {
         "evaluation_timestamp": timestamp,
@@ -757,6 +772,7 @@ def write_model_evaluation_artifacts(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
@@ -986,6 +1002,8 @@ if __name__ == "__main__":
             task=model_args.task,
             outcome_evaluation=outcome_evaluation,
             f1_outcome_threshold=args.f1_outcome_threshold,
+            outcome_bootstrap_resamples=args.outcome_bootstrap_resamples,
+            outcome_bootstrap_seed=args.outcome_bootstrap_seed,
         )
         print(f"Saved outcome evaluation artifacts to {artifact_dir}")
     elif model_args.return_pass_success_height_evaluation or model_args.return_binary_diagnostics:

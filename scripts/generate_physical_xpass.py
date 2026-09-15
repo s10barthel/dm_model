@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+import reachability as reach
 import pandas as pd
 import torch
 from tqdm import tqdm
@@ -393,7 +394,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     pc_versions.add_selection_argument(parser)
+    reach.add_arguments(parser)
     args = parser.parse_args(argv)
+    if not args.pc_xpass and any(token.split('=', 1)[0] == '--margin' or token.startswith('--reachability-')
+                                for token in (sys.argv[1:] if argv is None else argv)):
+        parser.error('--margin and --reachability-* require --pc-xpass')
     if args.pc_xpass:
         pc_versions.prepare_generation_args(parser, args, argv)
     elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id"} for token in (sys.argv[1:] if argv is None else argv)):
@@ -441,6 +446,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.dist_pass_min = PC_XPASS_DEFAULT_DIST_PASS_MIN
     if not hasattr(args, "dist_pass_max"):
         args.dist_pass_max = PC_XPASS_DEFAULT_DIST_PASS_MAX
+    reach.configure_args(parser, args)
     raw_reaction_time = args.reaction_time
     if isinstance(raw_reaction_time, str) and raw_reaction_time.lower() == PC_XPASS_REACTION_TIME_MODE_DIST_PASS:
         args.reaction_time_mode = PC_XPASS_REACTION_TIME_MODE_DIST_PASS
@@ -1255,6 +1261,8 @@ def prewarm_runtime_items(
         boost_def_endpoint_control=float(args.boost_def_endpoint_control),
         reaction_time=None if args.reaction_time is None else float(args.reaction_time),
         reaction_time_mode=str(args.reaction_time_mode),
+        margin=getattr(args, "margin", "tta"),
+        reachability_config=getattr(args, "reachability_config", None),
         dist_pass_div=float(args.dist_pass_div),
         dist_pass_min=float(args.dist_pass_min),
         dist_pass_max=float(args.dist_pass_max),
@@ -1423,6 +1431,8 @@ def write_runtime_dataset_metadata(
             boost_def_endpoint_control=float(args.boost_def_endpoint_control),
             reaction_time=None if args.reaction_time is None else float(args.reaction_time),
             reaction_time_mode=str(args.reaction_time_mode),
+            margin=getattr(args, "margin", "tta"),
+            reachability_config=getattr(args, "reachability_config", None),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),

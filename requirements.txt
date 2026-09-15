@@ -11,6 +11,7 @@ statsmodels
 catboost
 xgboost
 matplotlib
+psutil
 seaborn
 shapely
 rdp

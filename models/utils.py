@@ -1371,7 +1371,7 @@ def calc_threshold_binary_metrics(y, y_hat, threshold: float) -> dict[str, float
     }
 
 
-def calc_binary_calibration_metrics(y, y_hat, n_bins: int = 10) -> dict[str, float]:
+def calc_binary_calibration_metrics(y, y_hat, n_bins: int = 10, *, include_ece: bool = True) -> dict[str, float]:
     """Return logistic calibration intercept/slope and equal-frequency ECE."""
     y_true = (np.asarray(y).reshape(-1) > 0).astype(int)
     y_score = np.asarray(y_hat, dtype=float).reshape(-1)
@@ -1392,6 +1392,8 @@ def calc_binary_calibration_metrics(y, y_hat, n_bins: int = 10) -> dict[str, flo
             slope = float(calibration.coef_[0, 0])
         except ValueError:
             pass
+    if not include_ece:
+        return {"calibration_intercept": intercept, "calibration_slope": slope}
     bins = calc_equal_frequency_bins(y_true, y_score, n_bins=n_bins)
     if len(bins):
         ece = float(np.sum(
@@ -1586,7 +1588,7 @@ def equal_frequency_slice_masks(values, prefix: str, n_slices: int = 5) -> list[
     return masks
 
 
-def calc_continuous_target_metrics(y, y_hat) -> dict[str, float]:
+def calc_continuous_target_metrics(y, y_hat, *, include_soft_bce: bool = True) -> dict[str, float]:
     """Summarize fidelity and linear calibration for a continuous [0, 1] target."""
     y_true = np.asarray(y, dtype=float).reshape(-1)
     y_score = np.asarray(y_hat, dtype=float).reshape(-1)
@@ -1602,15 +1604,20 @@ def calc_continuous_target_metrics(y, y_hat) -> dict[str, float]:
         target_ranks = pd.Series(y_true).rank(method="average").to_numpy()
         prediction_ranks = pd.Series(y_score).rank(method="average").to_numpy()
         spearman_rho = float(np.corrcoef(target_ranks, prediction_ranks)[0, 1])
-        calibration_slope, calibration_intercept = np.polyfit(y_score, y_true, deg=1)
+        try:
+            calibration_slope, calibration_intercept = np.polyfit(y_score, y_true, deg=1)
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError):
+            calibration_slope = calibration_intercept = np.nan
     else:
         pearson_r = np.nan
         spearman_rho = np.nan
         calibration_intercept = np.nan
         calibration_slope = np.nan
 
-    clipped_scores = np.clip(y_score, np.finfo(float).eps, 1.0 - np.finfo(float).eps)
-    soft_bce = -np.mean(y_true * np.log(clipped_scores) + (1.0 - y_true) * np.log(1.0 - clipped_scores))
+    soft_bce = np.nan
+    if include_soft_bce:
+        clipped_scores = np.clip(y_score, np.finfo(float).eps, 1.0 - np.finfo(float).eps)
+        soft_bce = -np.mean(y_true * np.log(clipped_scores) + (1.0 - y_true) * np.log(1.0 - clipped_scores))
     return {
         "mae": float(np.mean(np.abs(error))),
         "rmse": float(np.sqrt(np.mean(error**2))),
@@ -1875,6 +1882,7 @@ def run_epoch(
     outcome_targets: list[np.ndarray] = []
     outcome_diagnostics: list[np.ndarray] = []
     outcome_execution_branches: list[np.ndarray] = []
+    outcome_match_ids: list[np.ndarray] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
         batch_graphs: Batch = batch_graphs.to(device)
@@ -2231,6 +2239,12 @@ def run_epoch(
                 outcome_targets.append(target.cpu().detach().numpy().astype(float))
                 outcome_diagnostics.append(np.asarray(y, dtype=float))
                 outcome_execution_branches.append(outcome.cpu().detach().numpy().astype(int))
+                if return_outcome_evaluation:
+                    match_ids = getattr(batch_graphs, "evaluation_match_id", None)
+                    if match_ids is not None:
+                        if len(match_ids) != len(y_hat):
+                            raise ValueError("Outcome match IDs do not align with batch predictions.")
+                        outcome_match_ids.append(np.asarray(match_ids, dtype=object))
 
             elif args.task in ["intent_return", "intent_return_oppo_agn"]:
                 pred_s = []
@@ -2379,6 +2393,8 @@ def run_epoch(
             "diagnostic": np.concatenate(outcome_diagnostics),
             "execution_branch": np.concatenate(outcome_execution_branches),
         }
+        if outcome_match_ids:
+            outcome_evaluation["match_id"] = np.concatenate(outcome_match_ids)
         target_metrics = calc_continuous_target_metrics(
             outcome_evaluation["target"], outcome_evaluation["prediction"]
         )

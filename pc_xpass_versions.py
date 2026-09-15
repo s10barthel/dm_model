@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import project_config as config
+import reachability as reach
 
 SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle_step radial_gridsize
     top_n top_n_values top_pass_values top_xt reaction_time reaction_time_mode dist_pass_div dist_pass_min dist_pass_max
@@ -21,7 +22,8 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     position_discount_power position_discount_distance consider_teammates ignore_teammates_lane_survival
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
     pass_height_model_id""".split())
-RESERVED = {"hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
+SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
+RESERVED = {"reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
 
 def validate_id(value: str) -> str:
@@ -70,6 +72,8 @@ def check_selectors(args: Namespace) -> None:
 def settings(args: Namespace) -> dict[str, Any]:
     excluded = {"pass_height_model_id"} if getattr(args, "_pc_location", False) else set()
     result = {key: getattr(args, key) for key in sorted(SETTING_KEYS - excluded) if hasattr(args, key)}
+    if getattr(args, "margin", "tta") == "tta":
+        result = {k: v for k, v in result.items() if k != "margin" and not k.startswith("reachability_")}
     # Store the CLI representation so existing validation can be reused on load.
     if result.get("reaction_time_mode") == "dist_pass":
         result["reaction_time"] = "dist_pass"
@@ -115,6 +119,10 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
                     warnings.warn(message, stacklevel=2)
                     args.pc_xpass_overrides.append(message)
                 args.top_pass = None
+            recorded_margin = metadata["generation_settings"].get("margin", "tta")
+            if "margin" in explicit and args.margin != recorded_margin:
+                raise ValueError("Margin differs from selected pc-xPass version; create a new version.")
+            args.margin = recorded_margin
             args._pc_existing_metadata = metadata
         args._pc_version_root = str(root)
     elif directory:

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import reachability as reach
 import pandas as pd
 import torch
 from tqdm import tqdm
@@ -390,6 +391,8 @@ def pc_xpass_metadata(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -472,6 +475,7 @@ def pc_xpass_metadata(
             "interpolation": "bilinear_clamped_to_surface_extent",
             "coordinate_system": "pc_xpass_centered_to_spadl_0_105_x_0_68",
         },
+        **({"margin": margin, "reachability_config": reach.configuration(margin, reachability_config)} if margin != "tta" else {}),
         "reaction_time_mode": reaction_time_mode,
         "reaction_time": reaction_time_value,
         "dist_pass_div": float(dist_pass_div),
@@ -550,6 +554,8 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
         key: metadata.get(key) for key in PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS
         if key not in {"ball_dec", "physics_version"} or key in metadata
     }
+    if metadata.get("margin", "tta") != "tta":
+        payload.update(margin=metadata["margin"], reachability_config=metadata.get("reachability_config"))
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -3054,6 +3060,7 @@ def compute_graph_pc_xpass_metrics(
     graph: Data,
     *,
     eps: float = 1e-4,
+    diagnostic_details: dict | None = None,
     consider_teammates: bool = True,
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
@@ -3075,6 +3082,8 @@ def compute_graph_pc_xpass_metrics(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3161,15 +3170,18 @@ def compute_graph_pc_xpass_metrics(
     else:
         raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
 
-    margins = _pc_xpass_arrival_margins(
-        player_pos,
-        target_x,
-        target_y,
-        t_ball,
-        reaction_time=reaction_times,
-        max_player_speed=max_player_speed,
-        max_player_speed_by_player=max_player_speed_by_player,
-    )
+    if margin == "reachability":
+        rc = reach.configuration(margin, reachability_config)
+        margins = reach.spatial_margins(player_pos, target_x, target_y, t_ball, rc)
+        lane_power, lane_inflection_point = rc["lane_power"], rc["lane_inflection_point"]
+        control_power, control_inflection_point = rc["control_power"], rc["control_inflection_point"]
+    elif margin == "tta":
+        margins = _pc_xpass_arrival_margins(
+            player_pos, target_x, target_y, t_ball, reaction_time=reaction_times,
+            max_player_speed=max_player_speed, max_player_speed_by_player=max_player_speed_by_player,
+        )
+    else:
+        raise ValueError("margin must be tta or reachability")
     lane_raw_all = pc_xpass_raw_control_with_params(
         margins,
         power=lane_power,
@@ -3194,6 +3206,12 @@ def compute_graph_pc_xpass_metrics(
     lane_raw[attack_mask] = 0.0
     lane_survival = pc_xpass_lane_survival_from_raw(lane_raw)
     lane_survival = np.where(valid_targets, lane_survival, np.nan)
+
+    if diagnostic_details is not None:
+        diagnostic_details.update(target_x=target_x, target_y=target_y, ball_times=t_ball,
+            player_ids=player_ids, player_positions=player_pos, speeds=speeds,
+            raw_lane=lane_raw_all, raw_control=control_raw_all, lane_survival=lane_survival,
+            receiver_control={})
 
     share_receiver_control: dict[int, np.ndarray] = {}
     if endpoint_normalization == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
@@ -3268,6 +3286,8 @@ def compute_graph_pc_xpass_metrics(
         )
         position_discount = np.where(on_pitch, position_discount, np.nan)
         score = lane_survival * receiver_control * position_discount
+        if diagnostic_details is not None:
+            diagnostic_details['receiver_control'][node_id] = receiver_control
         if not np.isfinite(score).any():
             continue
 
@@ -3350,6 +3370,8 @@ def compute_graphs_pc_xpass_metrics(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3386,6 +3408,8 @@ def compute_graphs_pc_xpass_metrics(
             boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
+            margin=margin,
+            reachability_config=reachability_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4235,6 +4259,8 @@ def _runtime_cache_metadata(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4269,6 +4295,8 @@ def _runtime_cache_metadata(
             boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
+            margin=margin,
+            reachability_config=reachability_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4359,6 +4387,8 @@ def _ensure_runtime_physical_xpass_cache(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4403,6 +4433,8 @@ def _ensure_runtime_physical_xpass_cache(
         boost_def_endpoint_control=boost_def_endpoint_control,
         reaction_time=reaction_time,
         reaction_time_mode=reaction_time_mode,
+        margin=margin,
+        reachability_config=reachability_config,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -4440,6 +4472,10 @@ def _ensure_runtime_physical_xpass_cache(
             ]:
                 if metadata.get(key) != expected_metadata.get(key):
                     mismatches.append(f"{key}: expected {expected_metadata.get(key)!r}, got {metadata.get(key)!r}")
+            if metadata.get("margin", "tta") != expected_metadata.get("margin", "tta"):
+                raise ValueError("Incompatible margin; create a new pc-xPass version")
+            if metadata.get("reachability_config", {}) != expected_metadata.get("reachability_config", {}):
+                raise ValueError("Incompatible reachability artifact/settings; create a new pc-xPass version")
             actual_ranking_mode = metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
             if actual_ranking_mode != expected_metadata.get("ranking_mode"):
                 mismatches.append(
@@ -5135,6 +5171,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     reaction_time_value = task.get("reaction_time", PC_XPASS_DEFAULT_REACTION_TIME)
     reaction_time = None if reaction_time_value is None else float(reaction_time_value)
     reaction_time_mode = str(task.get("reaction_time_mode", PC_XPASS_REACTION_TIME_MODE_FIXED))
+    margin = task.get("margin", "tta")
+    reachability_config = task.get("reachability_config")
     dist_pass_div = float(task.get("dist_pass_div", PC_XPASS_DEFAULT_DIST_PASS_DIV))
     dist_pass_min = float(task.get("dist_pass_min", PC_XPASS_DEFAULT_DIST_PASS_MIN))
     dist_pass_max = float(task.get("dist_pass_max", PC_XPASS_DEFAULT_DIST_PASS_MAX))
@@ -5194,6 +5232,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             boost_def_endpoint_control=boost_def_endpoint_control,
             reaction_time=reaction_time,
             reaction_time_mode=reaction_time_mode,
+            margin=margin,
+            reachability_config=reachability_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -5347,6 +5387,8 @@ def prewarm_physical_xpass_runtime_cache(
     boost_def_endpoint_control: float = PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
     reaction_time: float | None = PC_XPASS_DEFAULT_REACTION_TIME,
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
+    margin: str = "tta",
+    reachability_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -5425,6 +5467,8 @@ def prewarm_physical_xpass_runtime_cache(
         boost_def_endpoint_control=boost_def_endpoint_control,
         reaction_time=reaction_time,
         reaction_time_mode=reaction_time_mode,
+        margin=margin,
+        reachability_config=reachability_config,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -5442,11 +5486,16 @@ def prewarm_physical_xpass_runtime_cache(
         reuse_metadata_path = Path(reuse_cache_dir) / "metadata.json"
         if reuse_metadata_path.is_file():
             reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
+            if (reuse_metadata.get("margin", "tta") != cache_metadata.get("margin", "tta")
+                    or reuse_metadata.get("reachability_config", {}) != cache_metadata.get("reachability_config", {})):
+                raise ValueError("pc-xPass reuse cache has incompatible reachability/margin settings.")
             reuse_ranking_mode = reuse_metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
             if reuse_ranking_mode != cache_metadata.get("ranking_mode") or reuse_metadata.get("xt_surface") != cache_metadata.get("xt_surface"):
                 raise ValueError(
                     f"pc-xPass reuse cache at {reuse_cache_dir} is incompatible with the requested xT ranking mode."
                 )
+        elif margin == "reachability":
+            raise ValueError("A reachability reuse cache requires metadata with matching artifact/settings.")
     pass_height_enabled = pass_height_model is not None
     if (
         pass_height_enabled
@@ -5742,6 +5791,8 @@ def prewarm_physical_xpass_runtime_cache(
             "boost_def_endpoint_control": float(boost_def_endpoint_control),
             "reaction_time": None if reaction_time is None else float(reaction_time),
             "reaction_time_mode": str(reaction_time_mode),
+            "margin": margin,
+            "reachability_config": reach.configuration(margin, reachability_config),
             "dist_pass_div": float(dist_pass_div),
             "dist_pass_min": float(dist_pass_min),
             "dist_pass_max": float(dist_pass_max),
