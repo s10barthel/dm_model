@@ -7502,18 +7502,39 @@ class PhysicalXPassTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--feature-run-id", "feature_run", flag, "0"])
 
-    def test_generate_physical_xpass_cli_rejects_non_positive_split_control_values(self) -> None:
-        for flag in ["--lane-power", "--lane-inflection-point", "--control-power", "--control-inflection-point"]:
+    def test_generate_physical_xpass_cli_rejects_non_positive_split_control_powers(self) -> None:
+        for flag in ["--lane-power", "--control-power"]:
             with self.subTest(flag=flag):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--pc-xpass", flag, "0"])
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args([flag, "1"])
 
+    def test_generate_physical_xpass_cli_rejects_legacy_control_flags(self) -> None:
         for old_flag in ["--control-function-power", "--control-function-inflection-point", "--control-function-gamma"]:
             with self.subTest(old_flag=old_flag):
                 with self.assertRaises(SystemExit):
                     generate_physical_xpass.parse_args(["--pc-xpass", old_flag, "1"])
+
+    def test_generate_physical_xpass_cli_accepts_zero_inflection_points(self) -> None:
+        args = generate_physical_xpass.parse_args(
+            [
+                "--pc-xpass",
+                "--lane-inflection-point",
+                "0",
+                "--control-inflection-point",
+                "0",
+            ]
+        )
+
+        self.assertEqual(args.lane_inflection_point, 0.0)
+        self.assertEqual(args.control_inflection_point, 0.0)
+
+    def test_generate_physical_xpass_cli_rejects_negative_inflection_points(self) -> None:
+        for flag in ["--lane-inflection-point", "--control-inflection-point"]:
+            with self.subTest(flag=flag):
+                with self.assertRaises(SystemExit):
+                    generate_physical_xpass.parse_args(["--pc-xpass", flag, "-0.1"])
 
         with self.assertRaises(SystemExit):
             generate_physical_xpass.parse_args(["--pc-xpass", "--endpoint-normalization", "bad"])

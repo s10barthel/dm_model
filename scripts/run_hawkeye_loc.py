@@ -351,9 +351,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.top_n_values is not None and any(int(value) < 1 for value in args.top_n_values):
         parser.error("--top-n-values must contain only positive integers")
-    for name in ["lane_power", "lane_inflection_point", "control_power", "control_inflection_point"]:
+    for name in ["lane_power", "control_power"]:
         if not math.isfinite(float(getattr(args, name))) or float(getattr(args, name)) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be a positive finite number")
+    for name in ["lane_inflection_point", "control_inflection_point"]:
+        if not math.isfinite(float(getattr(args, name))) or float(getattr(args, name)) < 0:
+            parser.error(f"--{name.replace('_', '-')} must be a non-negative finite number")
     if not math.isfinite(float(args.boost_def_endpoint_control)) or args.boost_def_endpoint_control < 0:
         parser.error("--boost-def-endpoint-control must be a non-negative finite number")
     for name in ["position_discount_power", "position_discount_distance", "dist_pass_div", "max_player_speed"]:

@@ -565,13 +565,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-xt requires --pc-xpass.")
     for attr_name, flag_name in [
         ("lane_power", "--lane-power"),
-        ("lane_inflection_point", "--lane-inflection-point"),
         ("control_power", "--control-power"),
-        ("control_inflection_point", "--control-inflection-point"),
     ]:
         value = float(getattr(args, attr_name))
         if not math.isfinite(value) or value <= 0:
             parser.error(f"{flag_name} must be a positive finite float.")
+    for attr_name, flag_name in [
+        ("lane_inflection_point", "--lane-inflection-point"),
+        ("control_inflection_point", "--control-inflection-point"),
+    ]:
+        value = float(getattr(args, attr_name))
+        if not math.isfinite(value) or value < 0:
+            parser.error(f"{flag_name} must be a non-negative finite float.")
     if not math.isfinite(float(args.boost_def_endpoint_control)) or float(args.boost_def_endpoint_control) < 0:
         parser.error("--boost-def-endpoint-control must be a non-negative finite float.")
     if args.position_discount_power <= 0:
