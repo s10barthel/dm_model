@@ -773,6 +773,16 @@ python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --only-outcome-scoring
 ```
 
+#### HawkEye visualization modes
+
+`scripts/visualize_hawkeye.py --mode` determines which component-run type is rendered:
+
+- `standard` (default) visualizes a regular `scripts/run_hawkeye.py` component run at the original tracking positions. It supports PNG, GIF, and MP4 output. For PNG, frames are selected relative to `BallReceipt` (default `--time-norm 0`); the component-run metadata determines whether BallReceipt was frozen.
+- `loc` visualizes a location-component run produced with `scripts/run_hawkeye_loc.py --mode loc`. For each selected location row, it moves the possessor/tracking geometry by `PositionX / 100` in x and `-PositionY / 100` in y (the stored coordinates are centimetres), reproducing the relocated hypothetical position used during inference. It exports one PNG per component at that row's `resolved_time_norm`.
+- `freeze` visualizes a location-component run produced with `scripts/run_hawkeye_loc.py --mode freeze`. It uses the same frozen-BallReceipt construction but applies no `PositionX`/`PositionY` displacement, preserving the original player location. It likewise exports PNG only at the row's `resolved_time_norm`.
+
+`loc` and `freeze` automatically use pc-xPass caches and require a matching location-component run: its `metadata.json` must have `inference_mode` equal to the requested visualization mode.
+
 ### 9. Run benchmark inference on local benchmark data
 
 ```powershell
@@ -1699,6 +1709,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/visualize_hawkeye.py`
 
+- `--mode {standard,loc,freeze}`: visualization source/geometry mode. `standard` (default) reads a regular Hawkeye component run and supports PNG, MP4, or GIF. `loc` reads a matching `hawkeye_loc_component` run and applies its `PositionX`/`PositionY` possessor offset; `freeze` reads a matching freeze location run and applies no offset. `loc` and `freeze` support PNG only, use pc-xPass, and require component metadata whose `inference_mode` matches the selected mode.
 - `--situation-id <id>`: restrict visualization to one or more Hawkeye situation ids from the selected component run. Default: all situations in the selected component run.
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.
 - `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `hawkeye_data/ball_data_selected.csv`.
