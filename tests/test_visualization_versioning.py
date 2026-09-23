@@ -1764,5 +1764,50 @@ class HawkeyeVisualizationOverlayTests(unittest.TestCase):
             self.assertEqual(titles[2], "action-1 | 1.000 | Pass Intent")
 
 
+class HawkeyeTrackingOnlyTests(unittest.TestCase):
+    def test_cli_defaults_to_frozen_ballreceipt_and_can_disable_it(self) -> None:
+        defaults = visualize_hawkeye.parse_args(["--only-tracking"])
+        unfrozen = visualize_hawkeye.parse_args(
+            ["--only-tracking", "--no-freeze-ballreceipt", "--output", "gif"]
+        )
+
+        self.assertTrue(defaults.only_tracking)
+        self.assertTrue(defaults.freeze_ballreceipt)
+        self.assertEqual(defaults.time_norm, [0.0])
+        self.assertFalse(unfrozen.freeze_ballreceipt)
+        self.assertEqual(unfrozen.output, "gif")
+
+    def test_cli_rejects_tracking_only_conflicts(self) -> None:
+        conflicts = [
+            ["--mode", "loc"],
+            ["--mode", "freeze"],
+            ["--coach-ratings"],
+            ["--selections"],
+            ["--show-physical-xpass"],
+            ["--only-pass-score"],
+            ["--component-run-id", "run-1"],
+            ["--component-dir", "components"],
+        ]
+        for extra_args in conflicts:
+            with self.subTest(extra_args=extra_args), self.assertRaises(SystemExit):
+                visualize_hawkeye.parse_args(["--only-tracking", *extra_args])
+
+    def test_situation_ids_preserve_source_or_requested_order(self) -> None:
+        tracking = pd.DataFrame({"id": ["second", "first", "second", None]})
+
+        self.assertEqual(
+            visualize_hawkeye.resolve_tracking_situation_ids(tracking, None),
+            ["second", "first"],
+        )
+        self.assertEqual(
+            visualize_hawkeye.resolve_tracking_situation_ids(
+                tracking, ["first", "second", "first"]
+            ),
+            ["first", "second"],
+        )
+        with self.assertRaisesRegex(KeyError, "missing"):
+            visualize_hawkeye.resolve_tracking_situation_ids(tracking, ["missing"])
+
+
 if __name__ == "__main__":
     unittest.main()

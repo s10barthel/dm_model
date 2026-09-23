@@ -62,7 +62,12 @@ from scripts.hawkeye_visualization_overlays import (
     filter_coach_rated_situation_ids,
     load_overlay_data,
 )
-from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
+from scripts.visualization_selection import (
+    COMPONENT_GROUPS,
+    OPTIONAL_COMPONENT_GROUPS,
+    add_component_selection_args,
+    resolve_component_selection,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -86,6 +91,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--component-run-id", default=None, help="Optional versioned Hawkeye component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
+    parser.add_argument(
+        "--only-tracking",
+        action="store_true",
+        help="Render tracking only, without component scores or overlays.",
+    )
+    parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
+    parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument(
         "--coach-ratings",
         action="store_true",
@@ -134,6 +146,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    parser.set_defaults(freeze_ballreceipt=True)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
@@ -153,6 +166,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.time_norm is not None or args.time_norm_start is not None or args.time_norm_end is not None:
             parser.error(f"--time-norm and time-range options are not supported with --mode {args.mode}")
         args.pc_xpass = True
+    if args.only_tracking:
+        if args.mode != "standard":
+            parser.error("--only-tracking is only supported with --mode standard")
+        component_flag_names = [
+            f"{prefix}_{group}"
+            for group in (*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS)
+            for prefix in ("only", "no", "show")
+        ]
+        conflicts = []
+        if args.component_run_id is not None:
+            conflicts.append("--component-run-id")
+        if args.component_dir is not None:
+            conflicts.append("--component-dir")
+        if args.coach_ratings:
+            conflicts.append("--coach-ratings")
+        if args.selections:
+            conflicts.append("--selections")
+        if args.selection_format != "counts":
+            conflicts.append("--selection-format")
+        if args.show_physical_xpass:
+            conflicts.append("--show-physical-xpass")
+        if args.pc_xpass:
+            conflicts.append("--pc-xpass")
+        conflicts.extend(
+            f"--{name.replace('_', '-')}"
+            for name in component_flag_names
+            if bool(getattr(args, name, False))
+        )
+        if conflicts:
+            parser.error("--only-tracking cannot be combined with score/component options: " + ", ".join(dict.fromkeys(conflicts)))
     if args.output != "png" and args.time_norm is not None:
         parser.error("--time-norm is only valid with --output png.")
     if args.output == "png" and (args.time_norm_start is not None or args.time_norm_end is not None):
@@ -625,14 +668,165 @@ def run_location_visualization(
     print(f"Hawkeye location visualization metadata: {metadata_path}")
 
 
+def resolve_tracking_situation_ids(tracking: pd.DataFrame, requested_ids: list[str] | None) -> list[str]:
+    if "id" not in tracking.columns:
+        raise KeyError("Hawkeye tracking is missing the required 'id' column.")
+    available_ids = tracking["id"].dropna().astype(str).drop_duplicates().tolist()
+    if not available_ids:
+        raise ValueError("No Hawkeye situations were found in the tracking CSV.")
+    if not requested_ids:
+        return available_ids
+
+    requested = list(dict.fromkeys(str(value) for value in requested_ids))
+    available = set(available_ids)
+    missing = [value for value in requested if value not in available]
+    if missing:
+        raise KeyError("Requested Hawkeye situation ids are not present in the tracking CSV: " + ", ".join(missing))
+    return requested
+
+
+def run_tracking_only_visualization(
+    args: argparse.Namespace,
+    output_parent: Path,
+    output_root: Path,
+    visualization_run_id: str,
+) -> None:
+    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    situation_ids = resolve_tracking_situation_ids(tracking, args.situation_id)
+    selected_output_mode = output_mode(args)
+    rendered_situations: list[dict[str, object]] = []
+    resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
+
+    for situation_id in situation_ids:
+        situation_tracking = tracking.loc[tracking["id"].astype(str).eq(str(situation_id))].copy()
+        situation, _, _ = build_hawkeye_situation(
+            situation_tracking,
+            ball,
+            freeze_ballreceipt=bool(args.freeze_ballreceipt),
+            build_graphs=False,
+        )
+        frame_ids = [int(frame_id) for frame_id in situation.frame_meta.index.tolist()]
+        output_dir = output_root / str(situation_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_paths: list[str] = []
+        selected_frames: list[dict[str, object]] = []
+        selected_range: dict[str, object] | None = None
+
+        if selected_output_mode == "png":
+            selected_frames = resolve_hawkeye_png_frames(
+                situation,
+                resolve_ballreceipt(situation_tracking),
+                requested_time_norms(args),
+            )
+            selected_frame_ids = [int(item["frame_id"]) for item in selected_frames]
+            for frame_selection in selected_frames:
+                frame_id = int(frame_selection["frame_id"])
+                image = render_frame_image(
+                    situation,
+                    frame_id,
+                    "tracking",
+                    None,
+                    show_trajectories=args.show_trajectories,
+                )
+                output_path = output_dir / f"tracking_{frame_selection['label']}.png"
+                image.save(output_path)
+                output_paths.append(str(output_path.resolve()))
+        else:
+            time_norm_start, time_norm_end = requested_time_norm_range(args)
+            if time_norm_start is None and time_norm_end is None:
+                selected_frame_ids = frame_ids
+            else:
+                selected_frame_ids, selected_range = resolve_hawkeye_time_norm_range(
+                    situation,
+                    resolve_ballreceipt(situation_tracking),
+                    time_norm_start,
+                    time_norm_end,
+                )
+                resolved_time_norm_ranges[str(situation_id)] = selected_range
+
+            def iter_tracking_images():
+                for frame_id in selected_frame_ids:
+                    yield render_frame_image(
+                        situation,
+                        frame_id,
+                        "tracking",
+                        None,
+                        show_trajectories=args.show_trajectories,
+                    )
+
+            output_path = output_dir / f"tracking.{selected_output_mode}"
+            save_animation(
+                iter_tracking_images(),
+                output_path,
+                fps=25.0,
+                gif=selected_output_mode == "gif",
+            )
+            output_paths.append(str(output_path.resolve()))
+
+        print(f"Saved Hawkeye tracking-only {selected_output_mode} visualizations to {output_dir}")
+        rendered_situations.append(
+            {
+                "situation_id": str(situation_id),
+                "frame_ids": frame_ids,
+                "selected_frames": selected_frames,
+                "selected_frame_ids": selected_frame_ids,
+                "selected_time_norm_range": selected_range,
+                "output_dir": str(output_dir.resolve()),
+                "output_paths": output_paths,
+            }
+        )
+
+    metadata = {
+        "run_id": visualization_run_id,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "command": " ".join(sys.argv),
+        "script": Path(__file__).name,
+        "output_parent": str(output_parent),
+        "output_dir": str(output_root.resolve()),
+        "status": "completed",
+        "only_tracking": True,
+        "component_run_id": None,
+        "component_dir": None,
+        "component_metadata_run_id": None,
+        "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
+        "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
+        "rendered_situations": rendered_situations,
+        "tracking_csv": str(Path(args.tracking_csv).resolve()),
+        "ball_csv": str(Path(args.ball_csv).resolve()),
+        "output": selected_output_mode,
+        "time_norm": requested_time_norms(args) if selected_output_mode == "png" else [],
+        "time_norm_start": requested_time_norm_range(args)[0] if selected_output_mode != "png" else None,
+        "time_norm_end": requested_time_norm_range(args)[1] if selected_output_mode != "png" else None,
+        "resolved_time_norm_ranges": resolved_time_norm_ranges,
+        "show_trajectories": bool(args.show_trajectories),
+        "freeze_ballreceipt": bool(args.freeze_ballreceipt),
+        "coach_ratings": False,
+        "selections": False,
+        "show_physical_xpass": False,
+        "source_models": {},
+        "requested_component_groups": [],
+        "disabled_component_groups": [],
+        "rendered_components": [],
+        "disabled_components": list(COMPONENT_COLUMNS),
+    }
+    metadata_path = write_run_metadata(output_root, metadata)
+    print(f"Hawkeye tracking-only visualization run id: {visualization_run_id}")
+    print(f"Hawkeye tracking-only visualization metadata: {metadata_path}")
+
+
 def main() -> None:
     args = parse_args()
     mode = str(getattr(args, "mode", "standard"))
-    component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
     output_root.mkdir(parents=True, exist_ok=True)
+    if bool(getattr(args, "only_tracking", False)):
+        run_tracking_only_visualization(args, output_parent, output_root, visualization_run_id)
+        return
+
+    component_selection = resolve_component_selection(args)
     component_run_id = None
     if args.component_dir:
         component_dir = Path(args.component_dir)
