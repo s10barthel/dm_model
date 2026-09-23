@@ -802,6 +802,7 @@ if __name__ == "__main__":
     add_split_arguments(parser)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
+    parser.add_argument("--learning-curve-rows", action="store_true")
     parser.add_argument("--evaluation-timestamp", type=str, required=False, default=None)
     parser.add_argument("--weighted-pass-success-metrics", action="store_true")
     parser.add_argument("--evaluate-xpass", action="store_true")
@@ -997,7 +998,8 @@ if __name__ == "__main__":
           f"{test_split_provenance['loaded_match_count']} loaded, "
           f"{test_split_provenance['contributing_match_count']} contributing matches with {len(test_dataset)} samples")
     collect_outcome_evaluation = bool(
-        args.evaluation_output_dir and getattr(model_args, "task", None) in {"outcome_scoring", "outcome_conceding"}
+        args.evaluation_output_dir and not args.learning_curve_rows
+        and getattr(model_args, "task", None) in {"outcome_scoring", "outcome_conceding"}
     )
     result = run_epoch(
         model_args,
@@ -1006,11 +1008,21 @@ if __name__ == "__main__":
         device=device,
         train=False,
         return_outcome_evaluation=collect_outcome_evaluation,
+        return_learning_curve_rows=args.learning_curve_rows,
         pass_intent_model=pass_intent_model,
     )
     outcome_metrics = None
     pass_success_height_rows = None
-    if collect_outcome_evaluation:
+    if args.learning_curve_rows:
+        if not args.evaluation_output_dir:
+            parser.error("--learning-curve-rows requires --evaluation-output-dir")
+        test_metrics, learning_rows = result
+        if not learning_rows:
+            raise ValueError("No learning-curve prediction rows were collected.")
+        output_path = Path(args.evaluation_output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(learning_rows).to_csv(output_path / "learning_curve_predictions.csv", index=False)
+    elif collect_outcome_evaluation:
         test_metrics, outcome_evaluation = result
         if outcome_evaluation is None:
             raise RuntimeError("Outcome evaluation artifacts were requested, but no outcome predictions were collected.")

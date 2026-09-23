@@ -11,6 +11,7 @@ validation/**
 !validation/**/*.md
 saved/
 /out/
+/tmp/intent_loader_verification/
 .venv/
 .pycache*/
 test*/
@@ -18,6 +19,8 @@ test*/*.csv
 test*/*.png
 !tests/
 tests/*.py
+!tests/test_prepared_dataset.py
+!tests/test_learning_curve.py
 tests/AS_viz/
 !tests/test_success_intent_mode_independent.py
 !tests/test_success_intent_visualization.py

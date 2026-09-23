@@ -18,6 +18,8 @@ from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
+from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
+from prepared_dataset import PreparedActionDataset
 from datatools import config
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
@@ -80,6 +82,7 @@ from project_config import (
 )
 
 parser = argparse.ArgumentParser()
+add_dataset_loading_arguments(parser)
 
 
 def parse_lane_survival_mode(value: str) -> str:
@@ -636,6 +639,7 @@ if __name__ == "__main__":
     device = resolve_training_device(args.device)
     args.device = device
     args.pin_memory = resolve_pin_memory(args.pin_memory, device)
+    args.resolved_dataset_loading = resolve_dataset_loading(args.dataset_loading, args.task, args.ipw_model_id)
     if args.task == "success_intent":
         args.pass_lane_features = False
     if not args.possessor_aware and (args.extend_features or args.pass_lane_features):
@@ -948,19 +952,30 @@ if __name__ == "__main__":
         physical_cache_dir=args.physical_cache_dir,
         lane_survival_cache_dir=args.lane_survival_cache_dir,
     )
-    train_dataset = ActionDataset(
+    dataset_class = PreparedActionDataset if args.resolved_dataset_loading == "disk" else ActionDataset
+    disk_args = ({"cache_dir": args.dataset_cache_dir, "buffer_matches": args.dataset_buffer_matches,
+                  "seed": args.seed} if args.resolved_dataset_loading == "disk" else {})
+    train_dataset = dataset_class(
         train_match_ids,
         feature_dir=args.train_feature_dir,
         label_dir=args.train_label_dir,
+        **disk_args,
+        **({"shuffle": True} if disk_args else {}),
         **common_dataset_args,
     )
-    valid_dataset = None if args.final_refit else ActionDataset(
+    valid_dataset = None if args.final_refit else dataset_class(
         valid_match_ids,
         feature_dir=args.valid_feature_dir,
         label_dir=args.valid_label_dir,
+        **disk_args,
         **common_dataset_args,
     )
     log_skipped_matches("training", train_dataset, trial_path)
+    metadata["dataset_loading"] = {
+        "requested": args.dataset_loading, "resolved": args.resolved_dataset_loading,
+        "train": train_dataset.metadata() if disk_args else {"mode": "memory"},
+        "validation": valid_dataset.metadata() if disk_args and valid_dataset is not None else None,
+    }
     metadata["split_datasets"] = {"train": split_dataset_provenance(train_match_ids, train_dataset)}
     if valid_dataset is not None:
         metadata["split_datasets"]["validation"] = split_dataset_provenance(valid_match_ids, valid_dataset)
@@ -988,7 +1003,7 @@ if __name__ == "__main__":
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
     #Adjust as needed for your environment.
     #loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 16, "pin_memory": True}
-    loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 0, "pin_memory": args.pin_memory}
+    loader_args = {"batch_size": args.batch_size, "shuffle": not bool(disk_args), "num_workers": 0, "pin_memory": args.pin_memory}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
         ipw_model_record = get_model_record(args.ipw_model_id)
@@ -1106,6 +1121,8 @@ if __name__ == "__main__":
         printlog(f"\nEpoch: {epoch:d}", trial_path)
         start_time = time.time()
 
+        if disk_args:
+            train_dataset.set_epoch(epoch)
         train_metrics = run_epoch(args, model, train_loader, optimizer, device, pos_weight, train=True)
         printlog("Train:\t" + get_losses_str(train_metrics), trial_path)
 
@@ -1114,6 +1131,12 @@ if __name__ == "__main__":
         )
         if valid_loader is not None:
             printlog("Valid:\t" + get_losses_str(valid_metrics), trial_path)
+        if disk_args:
+            metadata["dataset_loading"]["train"] = train_dataset.metadata()
+            if valid_dataset is not None:
+                metadata["dataset_loading"]["validation"] = valid_dataset.metadata()
+            printlog(f"Prepared graph loading: train {train_dataset.last_load_seconds:.1f}s, "
+                     f"validation {valid_dataset.last_load_seconds if valid_dataset is not None else 0:.1f}s", trial_path)
 
         epoch_time = time.time() - start_time
         printlog("Time:\t {:.2f}s".format(epoch_time), trial_path)

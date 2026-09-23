@@ -1051,7 +1051,9 @@ def split_dataset_provenance(requested_ids, dataset) -> dict[str, Any]:
     """Report requested, loaded and contributing matches, including missing files."""
     requested = [str(v) for v in requested_ids]
     loaded = list(dataset.loaded_match_ids)
-    contributing = sorted({graph.evaluation_match_id for graph in dataset.features})
+    recorded = getattr(dataset, "contributing_match_ids", None)
+    contributing = sorted(recorded if recorded is not None else
+                          {graph.evaluation_match_id for graph in dataset.features})
     return {"requested_match_ids": requested, "requested_match_count": len(requested),
             "loaded_match_ids": loaded, "loaded_match_count": len(loaded),
             "contributing_match_ids": contributing, "contributing_match_count": len(contributing),

@@ -5,6 +5,7 @@ import json
 import math
 import subprocess
 import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -13,8 +14,9 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+from scripts import learning_curve
 from models.utils import get_model_record, load_bundle_record, resolve_model_selection
-from models.outcome_bootstrap import add_outcome_bootstrap_arguments
+from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
 import pc_xpass_versions as pc_versions
 
 from project_config import EVALUATION_RUNS_DIR
@@ -51,6 +53,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--bundle-id", default=None)
+    parser.add_argument("--learning-curve", action="store_true")
+    parser.add_argument("--learning-curve-model-id", action="append", default=[])
+    parser.add_argument("--learning-curve-bootstrap-resamples", type=nonnegative_integer, default=2000)
+    parser.add_argument("--learning-curve-bootstrap-seed", type=nonnegative_integer, default=42)
     parser.add_argument("--action-intent-model-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--success-intent-model-id")
@@ -265,8 +271,116 @@ def update_model_metadata(output_dir: Path, wrapper_context: dict) -> None:
     metadata_path.write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def learning_curve_selection(args: argparse.Namespace) -> tuple[dict[str, list[str]], dict[str, str]]:
+    if args.evaluate_xpass or args.evaluate_combined_success or args.weighted_pass_success_metrics:
+        raise ValueError("Learning-curve mode compares learned checkpoints only; xPass and weighted options are unavailable.")
+    bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
+    anchors = {task: str(model_id) for task, model_id in dict((bundle or {}).get("model_ids") or {}).items()
+               if task in SUPPORTED_EVALUATION_TASKS}
+    anchors.update(explicit_model_ids(args))
+    direct: dict[str, list[str]] = defaultdict(list)
+    for model_id in args.learning_curve_model_id:
+        task, _ = learning_curve.parse_model_id(model_id)
+        if task not in SUPPORTED_EVALUATION_TASKS:
+            raise ValueError(f"Unsupported learning-curve task in {model_id!r}.")
+        direct[task].append(model_id)
+    if not anchors and not direct:
+        raise ValueError("--learning-curve requires --bundle-id, a --<task>-model-id, or --learning-curve-model-id.")
+    selected: dict[str, list[str]] = {}
+    skipped: dict[str, str] = {}
+    for task in SUPPORTED_EVALUATION_TASKS:
+        if task in direct:
+            selected[task] = direct[task]
+        elif task in anchors:
+            ids = learning_curve.discover(anchors[task])
+            if len(ids) < 2:
+                skipped[task] = f"Only {len(ids)} completed expanding checkpoints found."
+            else:
+                selected[task] = ids
+    return selected, skipped
+
+
+def run_learning_curve(args: argparse.Namespace) -> None:
+    selected, skipped = learning_curve_selection(args)
+    if not selected:
+        raise ValueError(f"No comparable checkpoint series found; skipped: {skipped}")
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    base_dir = Path(args.evaluation_output_dir) if args.evaluation_output_dir else EVALUATION_RUNS_DIR
+    output_root = base_dir / f"learning_curve_{timestamp}"
+    if output_root.exists():
+        raise FileExistsError(f"Learning-curve output already exists: {output_root}")
+    series = {}
+    direct_tasks = {learning_curve.parse_model_id(value)[0] for value in args.learning_curve_model_id}
+    for task, ids in selected.items():
+        try:
+            series[task] = learning_curve.validate_series(ids, expected_task=task)
+        except ValueError as exc:
+            if task in direct_tasks:
+                raise
+            skipped[task] = str(exc)
+    if not series:
+        raise ValueError(f"No comparable checkpoint series found; skipped: {skipped}")
+    output_root.mkdir(parents=True)
+    report = {"evaluation_timestamp": timestamp, "bundle_id": args.bundle_id,
+              "bootstrap_resamples": args.learning_curve_bootstrap_resamples,
+              "bootstrap_seed": args.learning_curve_bootstrap_seed,
+              "classification_threshold": args.classification_threshold,
+              "f1_outcome_threshold": args.f1_outcome_threshold,
+              "series": series, "skipped": skipped}
+    manifest_path = output_root / "experiment_manifest.json"
+    manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    for task, records in series.items():
+        task_dir = output_root / task
+        for record in records:
+            model_dir = task_dir / str(record["train_matches"])
+            command = [sys.executable, "test.py", "--model_id", record["model_id"], "--device", args.device,
+                       "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
+                       "--learning-curve-rows"]
+            if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
+                command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+            if task in {"pass_success", "pass_height"}:
+                command.extend(["--classification-threshold", str(args.classification_threshold)])
+            if task in {"outcome_scoring", "outcome_conceding"}:
+                command.extend(["--outcome-bootstrap-resamples", "0"])
+                if args.f1_outcome_threshold is not None:
+                    command.extend(["--f1-outcome-threshold", str(args.f1_outcome_threshold)])
+            print("Running:", " ".join(command), flush=True)
+            subprocess.run(command, cwd=ROOT, check=True)
+        frames = learning_curve.load_aligned_predictions(records, task_dir)
+        identity_columns = [name for name in ("match_id", "source_index", "target", "soft_target", "execution_branch")
+                            if name in frames[0].columns]
+        aligned = frames[0][identity_columns].copy()
+        for record, frame in zip(records, frames):
+            for name in ("prediction", "target_probability", "reciprocal_rank"):
+                if name in frame.columns:
+                    aligned[f"{name}_{record['train_matches']}"] = frame[name].to_numpy()
+        aligned.to_csv(task_dir / "aligned_predictions.csv", index=False)
+        report.setdefault("evaluated_cohorts", {})[task] = {
+            "example_count": len(frames[0]),
+            "contributing_match_ids": sorted(frames[0]["match_id"].unique().tolist()),
+        }
+        summary, differences = learning_curve.compare(
+            task, records, frames, resamples=args.learning_curve_bootstrap_resamples,
+            seed=args.learning_curve_bootstrap_seed,
+            threshold=(args.classification_threshold if task in {"pass_success", "pass_height"}
+                       else args.f1_outcome_threshold if task in {"outcome_scoring", "outcome_conceding"} else None),
+        )
+        summary.to_csv(task_dir / "learning_curve_metrics.csv", index=False)
+        differences.to_csv(task_dir / "learning_curve_differences.csv", index=False)
+        learning_curve.save_plot(summary, task_dir / "learning_curve.png", task)
+        manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(f"Learning-curve report saved to {output_root}")
+    for task, reason in skipped.items():
+        print(f"Skipped {task}: {reason}")
+
+
 def main() -> None:
     args = parse_args()
+    if args.learning_curve:
+        run_learning_curve(args)
+        return
+    if args.learning_curve_model_id:
+        raise ValueError("--learning-curve-model-id requires --learning-curve.")
     if not args.pc_xpass_cache_dir and (args.pc_xpass_id or args.weighted_pass_success_metrics or args.evaluate_xpass or args.evaluate_combined_success):
         pc_versions.cache_dir("sportec", args)
     validate_pass_success_predictor_args(args)

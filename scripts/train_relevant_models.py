@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
@@ -816,6 +817,7 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_dataset_loading_arguments(parser)
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
@@ -1891,6 +1893,7 @@ def build_training_commands(
 
     duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
+    commands = [command + dataset_loading_flags(args) for command in commands]
     return (
         commands,
         trained_model_ids,

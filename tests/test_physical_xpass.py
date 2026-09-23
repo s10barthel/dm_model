@@ -6540,6 +6540,8 @@ class PhysicalXPassTests(unittest.TestCase):
 
     def test_run_epoch_node_selection_accepts_singleton_column_logits(self) -> None:
         graph = make_graph(["home_1", "home_2", "away_3"])
+        graph.evaluation_match_id = "match_1"
+        graph.evaluation_source_row = 7
         label = make_label(intent_index=0)
         loader = DataLoader([(graph, label, torch.tensor(1.0, dtype=torch.float32))], batch_size=1)
         args = SimpleNamespace(
@@ -6565,6 +6567,18 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertAlmostEqual(metrics["accuracy"], 1.0, places=6)
         self.assertAlmostEqual(metrics["mrr"], 1.0, places=6)
+        _, rows = run_epoch(
+            args,
+            DummyColumnNodeSelectionModel([2.0, 1.0, -1.0]),
+            loader,
+            device="cpu",
+            train=False,
+            return_learning_curve_rows=True,
+        )
+        self.assertEqual(rows[0]["match_id"], "match_1")
+        self.assertEqual(rows[0]["source_index"], 7)
+        self.assertEqual(rows[0]["target"], 0)
+        self.assertEqual(rows[0]["prediction"], 0)
 
     def test_wrapper_physical_flags_reach_only_pass_success(self) -> None:
         args = SimpleNamespace(

@@ -318,6 +318,7 @@ class ActionDataset(Dataset):
 
         features = []
         feature_match_ids: list[str] = []
+        feature_source_indices: list[int] = []
         label_tensors: list[torch.Tensor] = []
 
         for match_id in tqdm(self.requested_match_ids):
@@ -392,6 +393,7 @@ class ActionDataset(Dataset):
 
             features.extend(match_features)
             feature_match_ids.extend([match_id] * len(match_features))
+            feature_source_indices.extend(range(len(match_features)))
             label_tensors.append(match_labels)
             self.loaded_match_ids.append(match_id)
 
@@ -668,6 +670,10 @@ class ActionDataset(Dataset):
                     )
 
             graph.evaluation_match_id = str(feature_match_ids[int(i)])
+            # Preserve the source row through task-specific filtering for paired evaluations.
+            # Avoid "index" in the graph attribute name: PyG offsets index-like
+            # attributes while batching, but this value is an immutable source row.
+            graph.evaluation_source_row = int(feature_source_indices[int(i)])
             self.features.append(graph)
             self.labels.append(graph_labels)
 

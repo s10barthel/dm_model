@@ -1843,6 +1843,7 @@ def run_epoch(
     pos_weight: float = 1.0,
     train: bool = False,
     return_outcome_evaluation: bool = False,
+    return_learning_curve_rows: bool = False,
     pass_intent_model: nn.Module | None = None,
 ):
     # torch.autograd.set_detect_anomaly(True)
@@ -1886,6 +1887,7 @@ def run_epoch(
     outcome_diagnostics: list[np.ndarray] = []
     outcome_execution_branches: list[np.ndarray] = []
     outcome_match_ids: list[np.ndarray] = []
+    learning_curve_rows: list[dict] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
         batch_graphs: Batch = batch_graphs.to(device)
@@ -2030,6 +2032,16 @@ def run_epoch(
 
                 rank = (pred_i.argsort(descending=True) == target_i).nonzero(as_tuple=True)[0].item() + 1
                 metrics["mrr"] += 1.0 / rank
+                if return_learning_curve_rows:
+                    gi = int(graph_index.item())
+                    learning_curve_rows.append({
+                        "match_id": str(batch_graphs.evaluation_match_id[gi]),
+                        "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                        "target": int(target_i.item()),
+                        "prediction": int(pred_i.argmax().item()),
+                        "reciprocal_rank": float(1.0 / rank),
+                        "target_probability": float(torch.softmax(pred_i, dim=0)[target_i].item()),
+                    })
 
             pred_loss /= index_range.shape[0]
             metrics["accuracy"] += accuracy.item()
@@ -2221,6 +2233,13 @@ def run_epoch(
                 binary_predictions.append(np.asarray(y_hat, dtype=float))
                 binary_targets.append(np.asarray(y, dtype=float))
                 binary_threshold = threshold
+                if return_learning_curve_rows:
+                    for gi, (prediction, observed) in enumerate(zip(y_hat, y)):
+                        learning_curve_rows.append({
+                            "match_id": str(batch_graphs.evaluation_match_id[gi]),
+                            "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                            "target": float(observed), "prediction": float(prediction),
+                        })
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
                 outcome = get_label_slice(batch_labels, "success").clone().long()
@@ -2242,6 +2261,16 @@ def run_epoch(
                 outcome_targets.append(target.cpu().detach().numpy().astype(float))
                 outcome_diagnostics.append(np.asarray(y, dtype=float))
                 outcome_execution_branches.append(outcome.cpu().detach().numpy().astype(int))
+                if return_learning_curve_rows:
+                    soft_targets = target.cpu().detach().numpy()
+                    branches = outcome.cpu().detach().numpy()
+                    for gi, (prediction, observed, soft_target, branch) in enumerate(zip(y_hat, y, soft_targets, branches)):
+                        learning_curve_rows.append({
+                            "match_id": str(batch_graphs.evaluation_match_id[gi]),
+                            "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                            "target": float(observed), "prediction": float(prediction),
+                            "soft_target": float(soft_target), "execution_branch": int(branch),
+                        })
                 if return_outcome_evaluation:
                     match_ids = getattr(batch_graphs, "evaluation_match_id", None)
                     if match_ids is not None:
@@ -2450,6 +2479,8 @@ def run_epoch(
                 }
             )
 
+    if return_learning_curve_rows:
+        return metrics, learning_curve_rows
     if return_outcome_evaluation:
         return metrics, outcome_evaluation
     if bool(getattr(args, "return_pass_success_height_evaluation", False)):

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -115,6 +116,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
+    add_dataset_loading_arguments(parser)
     parser.add_argument(
         "--target-family",
         choices=["goal", "xg", "xt", "goal_distance", "epv"],
@@ -706,6 +708,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             train_command.append("--no-pass-height-ipw")
         if args.pass_height_ipw_model_id:
             train_command.extend(["--pass-height-ipw-model-id", args.pass_height_ipw_model_id])
+        train_command.extend(dataset_loading_flags(args))
         commands.append(train_command)
 
     if not args.skip_evaluate:

@@ -13,6 +13,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Produced Data Layout](#produced-data-layout)
 - [Run-Id Workflow](#run-id-workflow)
 - [Split Definition](#split-definition)
+- [Prepared cache for intent training](docs/intent_dataset_loading.md)
 - [Endpoint repair, duration selection, and rollout](docs/endpoint_policy.md)
 - [Empirical reachability circles for pc-xPass](docs/reachability.md)
 - [Environment Setup](#environment-setup)
@@ -1501,6 +1502,10 @@ When split flags are omitted, training infers the selector from feature-run meta
 ### `scripts/evaluate_relevant_models.py`
 
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to evaluate.
+- `--learning-curve`: compare completed subset checkpoints on the same recorded test set. With a bundle or any existing `--<task>-model-id`, discover that run's completed expanding folds and promoted final refit. Tasks with fewer than two sizes are reported as skipped. The default single-model evaluation is unchanged.
+- `--learning-curve-model-id <task/run_id[/fold_N]>`: repeat to select checkpoint series directly for a task; these entries replace automatic discovery for that task. At least two distinct nested training sizes are required. Results include aligned predictions, match-bootstrap intervals and paired differences under `data/evaluation_runs/learning_curve_<timestamp>/` by default.
+- `--learning-curve-bootstrap-resamples <N>` and `--learning-curve-bootstrap-seed <N>`: paired whole-match bootstrap settings for learning curves. Defaults: 2000 resamples and seed 42.
+  Example: `python scripts/evaluate_relevant_models.py --learning-curve --outcome-scoring-model-id outcome_scoring/<run_id> --outcome-conceding-model-id outcome_conceding/<run_id>`.
 - At least one explicit model ID is required when `--bundle-id` is omitted. Bundle evaluation includes every supported task present in the bundle, while explicit IDs supplement or override its entries.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
