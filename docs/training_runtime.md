@@ -122,7 +122,5 @@ manually, is separate from these logs.
 
 The changes reduce avoidable GPU operations and improve recovery/diagnostics;
 they are not a confirmed fix for intermittent native driver crashes. A bounded
-GPU smoke test cannot establish overnight stability. The prepared-cache code
-fingerprint includes `models/utils.py`, so this update invalidates older prepared
-intent caches and the next full run will prepare a new cache. Old caches are not
-automatically removed.
+GPU smoke test cannot establish overnight stability. Training-loop changes in
+`models/utils.py` do not affect the preparation-specific cache fingerprint.

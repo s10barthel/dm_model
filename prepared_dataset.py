@@ -23,6 +23,26 @@ from dataset_loading import DEFAULT_CACHE_DIR, INTENT_TASKS
 
 CACHE_VERSION = 1
 DISK_RESERVE_BYTES = 10 * 1024**3
+BASE_PREPARATION_FILES = (
+    "prepared_dataset.py",
+    "dataset.py",
+    "models/dataset_config.py",
+    "models/edge_feature_config.py",
+    "datatools/config.py",
+    "datatools/utils.py",
+)
+PHYSICAL_PREPARATION_FILES = (
+    "physical_pass_model.py",
+    "reachability.py",
+)
+PHYSICAL_PREPARATION_OPTIONS = (
+    "use_physical_xpass",
+    "require_observed_pass_height",
+    "pass_height_cache_dir",
+    "evaluation_xpass_cache_dir",
+    "lane_survival",
+    "lane_survival_cache_dir",
+)
 
 
 def _digest(value):
@@ -46,20 +66,48 @@ def _signature(path):
         return [str(path), None, None]
 
 
-def preprocessing_fingerprint():
+def _uses_physical_preparation(options=None):
+    options = options or {}
+    return any(bool(options.get(name)) for name in PHYSICAL_PREPARATION_OPTIONS)
+
+
+def preparation_code_paths(options=None):
     root = Path(__file__).resolve().parent
-    # Include transitive preprocessing helpers; conservative invalidation is safer
-    # than reusing graphs produced by changed feature or label code.
-    paths = [root / name for name in ("dataset.py", "prepared_dataset.py", "project_config.py",
-                                      "physical_pass_model.py", "pc_xpass_versions.py")]
-    paths += list((root / "datatools").rglob("*.py"))
-    paths += [root / "models" / name for name in ("dataset_config.py", "utils.py")]
-    return _digest([(str(p.relative_to(root)), _file_digest(p)) for p in sorted(set(paths))])
+    names = list(BASE_PREPARATION_FILES)
+    if _uses_physical_preparation(options):
+        names.extend(PHYSICAL_PREPARATION_FILES)
+    return tuple(root / name for name in names)
 
 
-# Freeze identity when the preprocessing modules are imported. Reading edited
-# source files later must not label graphs from already-loaded old code as new.
-LOADED_PREPROCESSING_FINGERPRINT = preprocessing_fingerprint()
+def _fingerprint_from_digests(paths, digests):
+    root = Path(__file__).resolve().parent
+    return _digest([(str(path.relative_to(root)), digests[str(path.relative_to(root))]) for path in paths])
+
+
+def preprocessing_fingerprint(options=None):
+    paths = preparation_code_paths(options)
+    root = Path(__file__).resolve().parent
+    digests = {str(path.relative_to(root)): _file_digest(path) for path in paths}
+    return _fingerprint_from_digests(paths, digests)
+
+
+# Freeze every possible preparation dependency when imported. A dataset selects
+# the base subset or the physical-xPass subset from these frozen digests.
+_ROOT = Path(__file__).resolve().parent
+_ALL_PREPARATION_PATHS = preparation_code_paths(dict.fromkeys(PHYSICAL_PREPARATION_OPTIONS, True))
+LOADED_PREPARATION_FILE_DIGESTS = {
+    str(path.relative_to(_ROOT)): _file_digest(path) for path in _ALL_PREPARATION_PATHS
+}
+
+
+def loaded_preprocessing_fingerprint(options=None):
+    paths = preparation_code_paths(options)
+    return _fingerprint_from_digests(paths, LOADED_PREPARATION_FILE_DIGESTS)
+
+
+# Compatibility export for provenance that records the standard preparation
+# code. Dataset cache identities use the option-sensitive value below.
+LOADED_PREPROCESSING_FINGERPRINT = loaded_preprocessing_fingerprint()
 
 
 class PreparedActionDataset(IterableDataset):
@@ -72,8 +120,6 @@ class PreparedActionDataset(IterableDataset):
             raise ValueError("Prepared datasets support pass_intent and action_intent only.")
         if int(buffer_matches) < 1:
             raise ValueError("buffer_matches must be positive")
-        if preprocessing_fingerprint() != LOADED_PREPROCESSING_FINGERPRINT:
-            raise RuntimeError("Preprocessing code changed since import; restart cache preparation with stable code.")
         self.buffer_matches = int(buffer_matches) if shuffle else 1
         self.shuffle, self.seed, self.epoch = bool(shuffle), int(seed), 0
         self.requested_match_ids = [str(m) for m in match_ids]
@@ -92,7 +138,10 @@ class PreparedActionDataset(IterableDataset):
         if self.options.get("lane_survival") and not self.options.get("lane_survival_cache_dir"):
             from project_config import get_pc_xpass_dir
             self.options["lane_survival_cache_dir"] = str(get_pc_xpass_dir("sportec").resolve())
-        self.identity = {"version": CACHE_VERSION, "code": LOADED_PREPROCESSING_FINGERPRINT,
+        loaded_code = loaded_preprocessing_fingerprint(self.options)
+        if preprocessing_fingerprint(self.options) != loaded_code:
+            raise RuntimeError("Preprocessing code changed since import; restart cache preparation with stable code.")
+        self.identity = {"version": CACHE_VERSION, "code": loaded_code,
                          "feature_dir": str(self.feature_dir), "label_dir": str(self.label_dir),
                          "options": self.options}
         self.cache_id = _digest(self.identity)

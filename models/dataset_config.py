@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from dataset import requires_goal_next10_diagnostics
-from models.utils import (
+from models.edge_feature_config import (
     mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
     normalize_relative_speed_edge_feature_mode,
