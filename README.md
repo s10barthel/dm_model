@@ -14,6 +14,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Run-Id Workflow](#run-id-workflow)
 - [Split Definition](#split-definition)
 - [Prepared cache for intent training](docs/intent_dataset_loading.md)
+- [Training controls, checkpoints and monitoring](docs/training_runtime.md)
 - [Endpoint repair, duration selection, and rollout](docs/endpoint_policy.md)
 - [Empirical reachability circles for pc-xPass](docs/reachability.md)
 - [Environment Setup](#environment-setup)

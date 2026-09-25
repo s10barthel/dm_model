@@ -12,6 +12,7 @@ validation/**
 saved/
 /out/
 /tmp/intent_loader_verification/
+/tmp/training_runtime_verification/
 .venv/
 .pycache*/
 test*/
@@ -20,6 +21,7 @@ test*/*.png
 !tests/
 tests/*.py
 !tests/test_prepared_dataset.py
+!tests/test_training_runtime.py
 !tests/test_learning_curve.py
 tests/AS_viz/
 !tests/test_success_intent_mode_independent.py

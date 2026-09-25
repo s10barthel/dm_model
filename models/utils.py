@@ -1846,7 +1846,11 @@ def run_epoch(
     return_learning_curve_rows: bool = False,
     pass_intent_model: nn.Module | None = None,
 ):
-    # torch.autograd.set_detect_anomaly(True)
+    from training_state import GradientAccumulator
+    from models.node_selection import batch_identifiers, validate_graph_batch, selection_layout, selection_loss_metrics
+    monitor = getattr(args, "_monitor", None)
+    accumulator = GradientAccumulator(optimizer, unwrap_model(model).parameters(),
+                                      getattr(args, "accumulation_steps", 1), args.clip) if train else None
     model.train() if train else model.eval()
     n_batches = len(loader)
     pos_weight = torch.tensor(pos_weight)
@@ -1890,6 +1894,16 @@ def run_epoch(
     learning_curve_rows: list[dict] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
+        context = {"epoch": getattr(args, "_epoch", None), "batch": batch_index,
+                   "phase": "train" if train else "validation"}
+        if monitor is not None:
+            monitor.event("batch_loaded", device, **context, graphs=batch_graphs.num_graphs,
+                          nodes=batch_graphs.num_nodes, edges=batch_graphs.num_edges,
+                          **batch_identifiers(batch_graphs))
+        validate_graph_batch(batch_graphs)
+        layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out) if args.gnn_task == "node_selection" else None
+        if monitor is not None:
+            monitor.event("forward", device, **context)
         batch_graphs: Batch = batch_graphs.to(device)
         batch_ipw: torch.Tensor = batch_ipw.to(device)
         index_range = torch.unique(batch_graphs.batch)
@@ -1974,77 +1988,19 @@ def run_epoch(
                 with torch.no_grad():
                     out: torch.Tensor = model(batch_graphs, batch_dests)
 
-        if args.gnn_task == "node_selection":  # {pass/action}_intent, {success/failure}_receiver
-            if args.task.split("_")[1] == "intent":
-                target = batch_labels[:, 5].clone().long()
-            elif args.task.split("_")[1] == "receiver":
-                target = batch_labels[:, 6].clone().long()
-
-            loss_fn = nn.CrossEntropyLoss()
-            pred_loss = 0
-            accuracy = 0
-
-            for graph_index in index_range:
-                if args.task in [
-                    "pass_intent",
-                    "success_intent",
-                    "pass_intent_oppo_agn",
-                    "action_intent",
-                    "success_receiver",
-                ]:
-                    # Only take teammate nodes
-                    assert not args.include_out
-                    pred_i = out[
-                        (batch == graph_index)
-                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
-                    ]  # [N_i]
-                    target_i = target[graph_index]
-
-                elif args.task == "failure_receiver":
-                    # Only take opponent nodes
-                    if args.include_out:
-                        ball_out_mask = torch.ones(batch_graphs.num_graphs).bool().to(device)
-                        failure_mask = torch.cat(
-                            [batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0, ball_out_mask]
-                        )
-                    else:
-                        failure_mask = batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0
-                    pred_i = out[(batch == graph_index) & failure_mask]
-                    n_teammates = (
-                        (batch_graphs.batch == graph_index)
-                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
-                    ).sum()
-                    target_i = target[graph_index] - n_teammates
-
-                else:  # pass_receiver, dest_receiver
-                    pred_i = out[batch == graph_index]
-                    target_i = target[graph_index]
-
-                pred_i = pred_i.reshape(-1)
-                if target_i.numel() != 1:
-                    raise ValueError(
-                        f"Expected one node-selection target for graph {int(graph_index.item())}, "
-                        f"got shape {tuple(target_i.shape)}."
-                    )
-                target_i = target_i.reshape(())
-                pred_loss += loss_fn(pred_i.unsqueeze(0), target_i.unsqueeze(0))
-                accuracy += (pred_i.argmax() == target_i).float()
-
-                rank = (pred_i.argsort(descending=True) == target_i).nonzero(as_tuple=True)[0].item() + 1
-                metrics["mrr"] += 1.0 / rank
-                if return_learning_curve_rows:
-                    gi = int(graph_index.item())
+        if args.gnn_task == "node_selection":
+            pred_loss, predictions, targets, reciprocal_ranks, probabilities = selection_loss_metrics(out, layout)
+            metrics["accuracy"] += (predictions == targets).sum().item()
+            metrics["mrr"] += reciprocal_ranks.double().sum().item()
+            if return_learning_curve_rows:
+                rows = torch.stack((targets, predictions, reciprocal_ranks, probabilities), dim=1).detach().cpu().tolist()
+                for gi, (target_value, prediction, reciprocal_rank, probability) in enumerate(rows):
                     learning_curve_rows.append({
                         "match_id": str(batch_graphs.evaluation_match_id[gi]),
                         "source_index": int(batch_graphs.evaluation_source_row[gi]),
-                        "target": int(target_i.item()),
-                        "prediction": int(pred_i.argmax().item()),
-                        "reciprocal_rank": float(1.0 / rank),
-                        "target_probability": float(torch.softmax(pred_i, dim=0)[target_i].item()),
+                        "target": int(target_value), "prediction": int(prediction),
+                        "reciprocal_rank": reciprocal_rank, "target_probability": probability,
                     })
-
-            pred_loss /= index_range.shape[0]
-            metrics["accuracy"] += accuracy.item()
 
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
             intent = batch_labels[:, 5].clone().long()
@@ -2377,11 +2333,11 @@ def run_epoch(
         metrics["l1_loss"] += l1_loss.item() * batch_graphs.num_graphs
 
         if train:
-            optimizer.zero_grad()
-            loss = pred_loss + l1_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(unwrap_model(model).parameters(), args.clip)
-            optimizer.step()
+            if monitor is not None:
+                monitor.event("backward_update", device, **context)
+            accumulator.backward(pred_loss + l1_loss, batch_graphs.num_graphs)
+        if monitor is not None:
+            monitor.event("batch_complete", device, **context)
 
         if train and batch_index % args.print_freq == 0:
             interim_metrics = dict()
@@ -2399,6 +2355,9 @@ def run_epoch(
                 )
                 )
             print(f"[{batch_index:>{len(str(n_batches))}d}/{n_batches}]  {get_losses_str(interim_metrics)}")
+
+    if accumulator is not None:
+        accumulator.flush()
 
     for key, value in metrics.items():
         if key == "count":

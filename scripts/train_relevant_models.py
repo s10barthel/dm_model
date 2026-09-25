@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
 
 from datatools import config
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from training_state import (add_training_runtime_arguments, validate_learning_rates,
+                            resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts)
 from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
@@ -818,6 +820,10 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_dataset_loading_arguments(parser)
+    add_training_runtime_arguments(parser)
+    parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
+    parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
+    parser.add_argument("--resume-id", default=None, help="Resume one model with its saved training settings.")
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
@@ -1242,6 +1248,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    if args.resume_id:
+        supplied = sys.argv[1:] if argv is None else argv
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring")]
+        if invalid:
+            parser.error("--resume-id restores saved settings; only --monitoring may accompany it. Conflicts: " + ", ".join(invalid))
+        return args
+    try:
+        validate_learning_rates(args.start_lr, args.min_lr)
+    except ValueError as exc:
+        parser.error(str(exc))
     pc_versions.check_selectors(args)
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
@@ -1894,6 +1910,15 @@ def build_training_commands(
     duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     commands = [command + dataset_loading_flags(args) for command in commands]
+    for index, command in enumerate(commands):
+        for flag in ("--start_lr", "--min_lr"):
+            value = getattr(args, flag[2:], None)
+            if value is not None:
+                command = _replace_cli_value(command, flag, value)
+        validate_learning_rates(float(get_cli_value(command, "--start_lr")), float(get_cli_value(command, "--min_lr")))
+        command = _replace_cli_value(command, "--accumulation-steps", getattr(args, "accumulation_steps", 1))
+        command = _replace_cli_value(command, "--monitoring", getattr(args, "monitoring", "off"))
+        commands[index] = command
     return (
         commands,
         trained_model_ids,
@@ -1988,6 +2013,24 @@ def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> di
 
 def main() -> None:
     cli_args = parse_args()
+    if cli_args.resume_id:
+        checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
+        checkpoint = load_checkpoint(checkpoint_path)
+        publish_checkpoint_artifacts(checkpoint, checkpoint_path.parent)
+        if checkpoint["finished"]:
+            print(f"Model {cli_args.resume_id} is already completed; no retraining needed.")
+            return
+        command = [sys.executable, "train.py", "--resume-checkpoint", str(checkpoint_path.resolve()),
+                   "--monitoring", cli_args.monitoring]
+        print("Resuming:", subprocess.list2cmdline(command))
+        try:
+            subprocess.run(command, cwd=ROOT, check=True)
+        except subprocess.CalledProcessError as exc:
+            print(f"Training failed for {cli_args.resume_id}. Return code: {describe_returncode(exc.returncode)}")
+            print(f"Model log: {checkpoint_path.parent / 'log.txt'}")
+            print(f"Crash log: {checkpoint_path.parent / 'crash.log'}")
+            raise
+        return
     if getattr(cli_args, "lane_survival_mode", None) or getattr(cli_args, "pc_xpass_id", None):
         pc_versions.cache_dir("sportec", cli_args)
     validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
