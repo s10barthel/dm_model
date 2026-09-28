@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from datatools import config
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from ipw_options import add_ipw_arguments, ipw_flags
+from crash_capture import add_crash_capture_arguments, run_training
 from training_state import (add_training_runtime_arguments, validate_learning_rates,
                             resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts)
 from datatools.endpoint_policy import nonnegative_duration
@@ -822,6 +823,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_dataset_loading_arguments(parser)
     add_ipw_arguments(parser)
+    add_crash_capture_arguments(parser)
     add_training_runtime_arguments(parser)
     parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
     parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
@@ -1252,9 +1254,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path")]
         if invalid:
-            parser.error("--resume-id restores saved settings; only --monitoring may accompany it. Conflicts: " + ", ".join(invalid))
+            parser.error("--resume-id restores saved settings; only --monitoring, --crash-dump and --procdump-path may accompany it. Conflicts: " + ", ".join(invalid))
         return args
     try:
         validate_learning_rates(args.start_lr, args.min_lr)
@@ -2026,7 +2028,7 @@ def main() -> None:
                    "--monitoring", cli_args.monitoring]
         print("Resuming:", subprocess.list2cmdline(command))
         try:
-            subprocess.run(command, cwd=ROOT, check=True)
+            run_training(command, cwd=ROOT, options=cli_args)
         except subprocess.CalledProcessError as exc:
             print(f"Training failed for {cli_args.resume_id}. Return code: {describe_returncode(exc.returncode)}")
             print(f"Model log: {checkpoint_path.parent / 'log.txt'}")
@@ -2096,7 +2098,7 @@ def main() -> None:
                 command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
                 print("Running:", " ".join(command))
                 try:
-                    subprocess.run(command, cwd=ROOT, check=True)
+                    run_training(command, cwd=ROOT, options=cli_args)
                 except subprocess.CalledProcessError as exc:
                     write_run_metadata(
                         bundle_root,
@@ -2143,7 +2145,7 @@ def main() -> None:
             command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
             print("Running:", " ".join(command))
             try:
-                subprocess.run(command, cwd=ROOT, check=True)
+                run_training(command, cwd=ROOT, options=cli_args)
             except subprocess.CalledProcessError as exc:
                 write_run_metadata(
                     bundle_root,
@@ -2183,7 +2185,7 @@ def main() -> None:
         command.extend(["--training-step-index", str(index), "--training-step-total", str(total_commands)])
         print("Running:", " ".join(command))
         try:
-            subprocess.run(command, cwd=ROOT, check=True)
+            run_training(command, cwd=ROOT, options=cli_args)
         except subprocess.CalledProcessError as exc:
             failed_task = get_cli_value(command, "--task")
             failed_run_id = get_cli_value(command, "--run-id")

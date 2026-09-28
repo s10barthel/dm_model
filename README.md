@@ -1312,7 +1312,7 @@ If the source bundle is incomplete, pass explicit overrides to `scripts/generate
 
 ## CLI Reference
 
-This appendix covers every current `scripts/*.py` CLI entrypoint, including `scripts/main.py`. The legacy repo-root `main.py` is intentionally not included here because it is part of the upstream defensive-score path, not the scoped workflow described above.
+This appendix covers every current `scripts/*.py` CLI entrypoint, including `scripts/main.py`, plus the low-level `train.py` entrypoint used by the training wrapper. The legacy repo-root `main.py` is intentionally not included here because it is part of the upstream defensive-score path, not the scoped workflow described above.
 
 ### `scripts/main.py`
 
@@ -1461,6 +1461,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 When split flags are omitted, training infers the selector from feature-run metadata, recovering it from the recorded immutable manifest if needed. Explicit selectors are assertions and must match, including count versus percentage mode. Inconsistent modern provenance or a changed match-universe identity fails. Only runs with no split provenance assume the historical 50% split. The resolved selector, match counts, and source are printed and forwarded to training commands.
 
 - `--min_pass_dur <seconds>`: minimum pass duration applied to every selected component. Default: `0.5` seconds.
+- `--resume-id <task/run_id>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Only `--monitoring` may accompany this flag; bundle ids are not accepted.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
 - `--train-count <int>`: optional assertion of the feature run's exact development match count, including validation. Mutually exclusive with `--train-split`.
@@ -1476,6 +1477,9 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--pass-success-ipw --no-pass-intent` is set.
 - `--pass-height-ipw` / `--no-pass-height-ipw`: enable or disable inverse propensity weighting for `pass_height`. Default: disabled.
 - `--pass-height-ipw-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_height` IPW model when `--pass-height-ipw --no-pass-intent` is set.
+- `--ipw-batch-size <N>`: positive IPW inference batch size, independent of training batch size. Default: `256`.
+- `--ipw-probability-cache {on,off}`: reuse per-match propensity probabilities during IPW preparation. Default: `on`.
+- `--ipw-probability-cache-dir <path>`: location for the IPW probability cache. Default: `data/cache/ipw_probabilities` under the repository.
 - `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--pass-height-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
@@ -1499,6 +1503,12 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--short-residual-regularization-lambda <value>` / `--long-residual-regularization-lambda <value>`: optional short/long L2 overrides.
 - `--short-residual-clip-value <value>` / `--long-residual-clip-value <value>`: optional short/long clipping overrides.
 - `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
+
+### `train.py`
+
+`train.py` is the low-level training entrypoint normally launched by `scripts/train_relevant_models.py`. Use the wrapper for new and resumed runs because it restores the complete saved configuration.
+
+- `--resume-run-id <run_id>`: legacy resume selector. It is retained for CLI compatibility but is intentionally rejected; use `scripts/train_relevant_models.py --resume-id <task/run_id>` instead.
 
 ### `scripts/evaluate_relevant_models.py`
 

@@ -11,6 +11,7 @@ validation/**
 !validation/**/*.md
 saved/
 /out/
+/tmp/
 /tmp/intent_loader_verification/
 /tmp/training_runtime_verification/
 .venv/
@@ -22,6 +23,8 @@ test*/*.png
 tests/*.py
 !tests/test_prepared_dataset.py
 !tests/test_ipw_preparation.py
+!tests/test_crash_capture.py
+!tests/test_observed_selection.py
 !tests/test_training_runtime.py
 !tests/test_learning_curve.py
 tests/AS_viz/

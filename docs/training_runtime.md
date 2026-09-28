@@ -1,5 +1,53 @@
 # Training controls, recovery and monitoring
 
+## Optional Windows crash dumps
+
+The wrapper supports `--crash-dump on` (default: `off`) independently of
+`--monitoring`. Download and extract Microsoft
+[ProcDump](https://learn.microsoft.com/en-us/sysinternals/downloads/procdump),
+run `procdump64.exe` manually and accept its license. The wrapper never downloads
+the tool or accepts its license automatically. When capture is enabled, it first
+looks for `C:\Tools\ProcDump\procdump64.exe`, then searches PATH. Override the
+location with `--procdump-path PATH` when needed.
+
+For example, append these flags to a new training command:
+
+```powershell
+--crash-dump on
+```
+
+They may also accompany `--resume-id`; they do not change checkpoint training
+settings. Capture works for all wrapper training launches, including validation
+folds and final refits. Direct `train.py` launches retain their existing behavior.
+
+The child waits for confirmed debugger attachment before loading training data.
+Missing tools, unaccepted licenses or attachment failure stop the attempt before
+preparation. Attachment times out after 30 seconds. ProcDump captures one
+minidump on an unhandled native exception; it does not periodically dump memory
+or enable synchronous CUDA debugging. Capture may affect process timing.
+
+Each attempt writes to `crash_dumps/<timestamp>_<unique-id>/` inside its model or
+stage directory. This contains `procdump.log`, `capture.json` and any `.dmp` file.
+The wrapper also records capture results in model metadata and preserves the
+training child's exit code. After failure it waits up to 60 seconds for capture;
+incomplete capture is reported explicitly. Resumed attempts use new directories.
+Delete these directories manually when no longer needed.
+
+A minidump contains native exception, thread and module information for analysis
+with a Windows debugger. It is not a complete process/GPU memory snapshot and
+does not guarantee identification of the underlying fault. No dump analysis or
+system-wide Windows Error Reporting configuration is performed automatically.
+
+## Batched observed prediction selection
+
+Pass-success, pass-height, action-success and the node-based outcome/intent-return
+models select observed targets with batched indexing. Targets and execution
+branches are validated on CPU, including graph bounds and appended ball-out
+positions. Loss weighting, carry handling, metric history, learning-curve rows
+and global shuffle retain their existing semantics. Optional physical diagnostics
+and residual regularization reuse the selected indices. This change does not
+invalidate preparation or IPW probability caches.
+
 ## New runs
 
 `scripts/train_relevant_models.py` accepts these optional flags in addition to

@@ -1747,6 +1747,7 @@ def run_epoch(
 ):
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, validate_graph_batch, selection_layout, selection_loss_metrics
+    from models.observed_selection import observed_layout, select_observed
     monitor = getattr(args, "_monitor", None)
     accumulator = GradientAccumulator(optimizer, unwrap_model(model).parameters(),
                                       getattr(args, "accumulation_steps", 1), args.clip) if train else None
@@ -1801,11 +1802,16 @@ def run_epoch(
                           **batch_identifiers(batch_graphs))
         validate_graph_batch(batch_graphs)
         layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out) if args.gnn_task == "node_selection" else None
+        observed = None
+        if args.gnn_task in {"node_binary", "node_regression"}:
+            observed = observed_layout(batch_graphs, batch_labels, args.include_out,
+                                       args.task in {"outcome_scoring", "outcome_conceding", "outcome_return"})
         if monitor is not None:
             monitor.event("forward", device, **context)
         batch_graphs: Batch = batch_graphs.to(device)
         batch_ipw: torch.Tensor = batch_ipw.to(device)
-        index_range = torch.unique(batch_graphs.batch)
+        if observed is not None:
+            observed_positions, observed_branches = (v.to(device) if v is not None else None for v in observed)
 
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
@@ -1838,12 +1844,6 @@ def run_epoch(
                 candidate_logits = intent_logits[graph_mask][candidate_mask].reshape(-1)
                 candidate_probs = torch.softmax(candidate_logits, dim=0)
                 observed_v5_pass_intent.append(candidate_probs[target_candidate.item()])
-
-        if args.include_out:
-            # One node per player and one ball-out node per graph instance
-            batch = torch.cat([batch_graphs.batch, index_range])
-        else:
-            batch = batch_graphs.batch
 
         batch_labels[batch_labels[:, 6] == -1, 6] = batch_labels[batch_labels[:, 6] == -1, 4]  # -1 to n_players
 
@@ -1902,13 +1902,8 @@ def run_epoch(
                     })
 
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
-            intent = batch_labels[:, 5].clone().long()
-
             if args.task in ["pass_success", "pass_height", "action_success"]:
-                pred = []
-                for graph_index in index_range:
-                    pred.append(out[batch == graph_index][intent[graph_index]])
-                pred = torch.stack(pred)
+                pred = select_observed(out, observed_positions)
 
                 target_name = "pass_high" if args.task == "pass_height" else "success"
                 target = get_label_slice(batch_labels, target_name)
@@ -1924,15 +1919,8 @@ def run_epoch(
                     delta_gat = unwrap_model(model).decoder.latest_delta_gat
                     if delta_gat is None:
                         raise ValueError("Residual regularization requested, but decoder did not expose latest_delta_gat.")
-                    delta_observed = []
-                    distance_observed = []
-                    for graph_index in index_range:
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        delta_observed.append(delta_gat[graph_mask][target_index])
-                        distance_observed.append(batch_graphs.x[graph_mask][target_index, config.NODE_FEATURE_POSS_DIST])
-                    delta_observed = torch.stack(delta_observed)
-                    distance_observed = torch.stack(distance_observed).to(device=delta_observed.device, dtype=delta_observed.dtype)
+                    delta_observed = delta_gat[observed_positions]
+                    distance_observed = batch_graphs.x[observed_positions, config.NODE_FEATURE_POSS_DIST].to(delta_observed)
                     residual_l2 = delta_observed.pow(2).mean()
                     threshold = float(residual_distance_threshold(args))
                     residual_lambdas = torch.where(
@@ -1958,23 +1946,13 @@ def run_epoch(
                     height_values = getattr(batch_graphs, EVALUATION_XPASS_PASS_HEIGHT_ATTR, None)
                     if xpass_values is None or distance_values is None:
                         raise ValueError("Physical xPass evaluation requires cached xPass and pass-distance tensors.")
-                    observed_xpass = []
-                    observed_distance = []
-                    observed_nearest = []
-                    observed_height = []
-                    for graph_index in index_range:
-                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
-                            continue
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        observed_xpass.append(xpass_values[graph_mask][target_index])
-                        observed_distance.append(distance_values[graph_mask][target_index])
-                        if nearest_values is not None:
-                            observed_nearest.append(nearest_values[graph_mask][target_index])
-                        if height_values is not None:
-                            observed_height.append(height_values[graph_mask][target_index])
-                    xpass_array = torch.stack(observed_xpass).cpu().numpy().astype(float)
-                    distance_array = torch.stack(observed_distance).cpu().numpy().astype(float)
+                    pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
+                    observed_xpass = xpass_values[pass_positions]
+                    observed_distance = distance_values[pass_positions]
+                    observed_nearest = nearest_values[pass_positions] if nearest_values is not None else []
+                    observed_height = height_values[pass_positions] if height_values is not None else []
+                    xpass_array = observed_xpass.detach().cpu().numpy().astype(float)
+                    distance_array = observed_distance.detach().cpu().numpy().astype(float)
                     if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
                         raise ValueError("Physical xPass evaluation requires finite observed-target xPass and distance values.")
                     # The combined diagnostic needs the raw physical component as well.
@@ -1987,11 +1965,11 @@ def run_epoch(
                         if weight_version == "v2":
                             if len(observed_nearest) != len(observed_xpass):
                                 raise ValueError("Combined xPass weight v2 requires cached nearest-opponent distances.")
-                            blend_kwargs["distance_to_nearest_opponent"] = torch.stack(observed_nearest).cpu().numpy()
+                            blend_kwargs["distance_to_nearest_opponent"] = observed_nearest.detach().cpu().numpy()
                         if weight_version in {"v4", "v5"}:
                             if len(observed_height) != len(observed_xpass):
                                 raise ValueError(f"Combined xPass weight {weight_version} requires cached pass-height probabilities.")
-                            blend_kwargs["pass_height"] = torch.stack(observed_height).cpu().numpy()
+                            blend_kwargs["pass_height"] = observed_height.detach().cpu().numpy()
                         if weight_version == "v4":
                             blend_kwargs.update(
                                 v4_power=float(args.v4_power),
@@ -2045,18 +2023,12 @@ def run_epoch(
                         raise ValueError(
                             "Weighted pass-success evaluation requires cached pass-height probabilities and pass distances."
                         )
-                    observed_heights = []
-                    observed_distances = []
-                    for graph_index in index_range:
-                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
-                            continue
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        observed_heights.append(pass_heights[graph_mask][target_index])
-                        observed_distances.append(pass_distances[graph_mask][target_index])
+                    pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
+                    observed_heights = pass_heights[pass_positions]
+                    observed_distances = pass_distances[pass_positions]
                     effective_weights = physical_xpass_blend_weight_v4(
-                        torch.stack(observed_distances),
-                        torch.stack(observed_heights),
+                        observed_distances,
+                        observed_heights,
                         power=float(getattr(args, "v4_power", 4.0)),
                         zero_point=float(getattr(args, "v4_zero", 0.7)),
                         use_discount=bool(getattr(args, "discount", True)),
@@ -2098,10 +2070,7 @@ def run_epoch(
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
                 outcome = get_label_slice(batch_labels, "success").clone().long()
-                pred = []
-                for graph_index in index_range:
-                    pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
-                pred = torch.stack(pred)
+                pred = select_observed(out, observed_positions, observed_branches)
 
                 target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
@@ -2134,13 +2103,8 @@ def run_epoch(
                         outcome_match_ids.append(np.asarray(match_ids, dtype=object))
 
             elif args.task in ["intent_return", "intent_return_oppo_agn"]:
-                pred_s = []
-                pred_c = []
-                for graph_index in index_range:
-                    pred_s.append(out[batch == graph_index][intent[graph_index], 0])
-                    pred_c.append(out[batch == graph_index][intent[graph_index], 1])
-                pred_s = torch.stack(pred_s)
-                pred_c = torch.stack(pred_c)
+                selected = select_observed(out, observed_positions)
+                pred_s, pred_c = selected[:, 0], selected[:, 1]
 
                 pred_loss_s = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_s, outcome_scoring)
                 pred_loss_c = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_c, outcome_conceding)
@@ -2154,13 +2118,7 @@ def run_epoch(
                 binary_threshold = 0.1
 
         elif args.gnn_task == "node_regression":  # outcome_return
-            intent = batch_labels[:, 5].clone().long()
-            outcome = get_label_slice(batch_labels, "success").clone().long()
-
-            pred = []
-            for graph_index in index_range:
-                pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
-            pred = torch.stack(pred) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
+            pred = select_observed(out, observed_positions, observed_branches) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
 
             target = outcome_scoring - outcome_conceding
             pred_loss = nn.MSELoss()(pred, target)
