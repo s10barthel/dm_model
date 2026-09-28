@@ -21,6 +21,8 @@ from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
+from ipw_options import add_ipw_arguments, restore_ipw_defaults
+from ipw_preparation import IPWPreparer
 from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
 from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
     atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
@@ -38,7 +40,6 @@ from models.utils import (
     get_args_str,
     get_losses_str,
     infer_training_edge_schema,
-    estimate_propensity,
     is_validation_loss_improved,
     load_splits,
     mask_possessor_relative_speed_edge_features_for_mode,
@@ -90,6 +91,7 @@ from project_config import (
 
 parser = argparse.ArgumentParser()
 add_dataset_loading_arguments(parser)
+add_ipw_arguments(parser)
 add_training_runtime_arguments(parser)
 parser.add_argument("--resume-checkpoint", default=None, help=argparse.SUPPRESS)
 
@@ -490,6 +492,7 @@ else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+restore_ipw_defaults(args)
 validate_learning_rates(args.start_lr, args.min_lr)
 if args.batch_size < 1 or args.n_epochs < 1:
     parser.error("--batch_size and --n_epochs must be positive.")
@@ -875,6 +878,8 @@ if __name__ == "__main__":
         "accumulation_steps": args.accumulation_steps,
         "effective_batch_size": args.batch_size * args.accumulation_steps,
         "monitoring": args.monitoring,
+        "ipw_settings": {"batch_size": args.ipw_batch_size, "probability_cache": args.ipw_probability_cache,
+                         "probability_cache_dir": args.ipw_probability_cache_dir},
         "optimizer_policy": "persistent_adam_restore_best_optimizer_on_lr_reduction",
         "checkpoint_format": 1,
         "environment": environment_versions(),
@@ -1070,45 +1075,24 @@ if __name__ == "__main__":
             diagnostic_label_dir=args.diagnostic_label_dir,
             require_goal_next10_diagnostics=args.require_goal_next10_diagnostics,
         )
-        ipw_train_dataset = ActionDataset(
-            train_match_ids,
-            feature_dir=args.ipw_feature_dir,
-            label_dir=args.label_dir,
-            **ipw_dataset_args,
+        preparer = IPWPreparer(
+            model_id=args.ipw_model_id, model_args=ipw_model_record["args"],
+            feature_dir=args.ipw_feature_dir, label_dir=args.label_dir, options=ipw_dataset_args,
+            device=device, batch_size=args.ipw_batch_size, pin_memory=args.pin_memory,
+            cache=args.ipw_probability_cache, cache_dir=args.ipw_probability_cache_dir,
+            monitor=monitor,
         )
-        ipw_valid_dataset = None if args.final_refit else ActionDataset(
-            valid_match_ids,
-            feature_dir=args.ipw_feature_dir,
-            label_dir=args.label_dir,
-            **ipw_dataset_args,
-        )
-        if len(ipw_train_dataset) == 0 or (ipw_valid_dataset is not None and len(ipw_valid_dataset) == 0):
-            raise ValueError("No usable samples remained for inverse-propensity weighting.")
-
-        inverse_propensity = 1 / estimate_propensity(
-            ipw_train_dataset,
-            model_id=args.ipw_model_id,
-            device=device,
-            pin_memory=args.pin_memory,
-        )
-        carry_mask = train_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
-        pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
-        train_ipw = inverse_propensity / pass_normalizer
-        train_ipw[carry_mask] = 1.0
-        train_dataset.set_inverse_propensity_weights(train_ipw)
-
-        if ipw_valid_dataset is not None and valid_dataset is not None:
-            inverse_propensity = 1 / estimate_propensity(
-                ipw_valid_dataset,
-                model_id=args.ipw_model_id,
-                device=device,
-                pin_memory=args.pin_memory,
-            )
-            carry_mask = valid_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
-            pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
-            valid_ipw = inverse_propensity / pass_normalizer
-            valid_ipw[carry_mask] = 1.0
-            valid_dataset.set_inverse_propensity_weights(valid_ipw)
+        try:
+            train_ipw, train_ipw_stats = preparer.prepare(train_dataset, train_match_ids, split="training")
+            train_dataset.set_inverse_propensity_weights(train_ipw)
+            metadata["ipw_preparation"] = {"training": train_ipw_stats}
+            if valid_dataset is not None:
+                valid_ipw, valid_ipw_stats = preparer.prepare(valid_dataset, valid_match_ids, split="validation")
+                valid_dataset.set_inverse_propensity_weights(valid_ipw)
+                metadata["ipw_preparation"]["validation"] = valid_ipw_stats
+            write_run_metadata(Path(trial_path), metadata)
+        finally:
+            preparer.close()
 
     train_loader = DataLoader(train_dataset, **loader_args)
     valid_loader = None if valid_dataset is None else DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)

@@ -11,11 +11,49 @@ the existing model/feature selection options:
 | `--min_lr FLOAT` | Model-specific default | Minimum learning rate for every selected model |
 | `--accumulation-steps INT` | `1` | Physical batches per optimizer update, for every selected model |
 | `--monitoring {on,off}` | `off` | GPU and training telemetry |
+| `--ipw-batch-size INT` | `256` | IPW inference batch size, independent of training |
+| `--ipw-probability-cache {on,off}` | `on` | Reuse per-match propensity probabilities |
+| `--ipw-probability-cache-dir PATH` | `data/cache/ipw_probabilities` under the repository | Probability cache location |
 
 Either learning-rate override can be supplied independently. Resolved rates must
 be finite and positive, with minimum no greater than start. Existing per-model
 defaults remain in effect for omitted overrides. Accumulation must be a positive
 integer; there are no per-model accumulation overrides.
+
+## IPW preparation
+
+For models using inverse propensity weighting (including pass-success and
+pass-height), main training and validation graphs remain in memory. The IPW
+graph view is constructed one match at a time, used for pass-intent inference,
+and released. Peak additional graph memory therefore depends on the largest
+match and the inference batch. The main datasets must still fit in RAM.
+
+This preserves the global training shuffle. IPW processing restores Python,
+NumPy and PyTorch random state, so cache reuse does not change the subsequent
+training shuffle. Probabilities are aligned by match/source-row identity and
+duplicate occurrence, with target and carry labels checked before weighting.
+Existing teammate candidate semantics, the 0.01 probability floor, separate
+training/validation normalization and carry weights of 1 are preserved.
+
+The first run writes only raw probabilities and sample identities, not graphs.
+Each completed match is committed atomically. Interrupted preparation can reuse
+completed entries, and later runs using the same checkpoint and compatible data
+can skip both graph preparation and inference. A changed checkpoint, relevant
+preparation/inference code, resolved dataset options or source/sidecar signatures
+causes recomputation. Training-only changes such as learning rates, batch size,
+epochs and monitoring do not invalidate these entries. Split normalization is
+always recomputed for the current split.
+
+Use `--ipw-probability-cache off` to process matches without reading or writing
+probability entries. Cache directories can be deleted manually between runs;
+the next run will rebuild them. There is no automatic pruning or migration.
+The general inference exports are not used as IPW inputs.
+
+All three flags work in both training entry points. Settings are saved and
+restored when resuming; checkpoints lacking these settings use the defaults
+above. IPW progress reports cache hits, misses and elapsed time. With
+`--monitoring on`, preparation start/completion events are also recorded; no
+additional continuous debugger is enabled.
 
 For example, append the following to your normal wrapper command for a new
 pass-intent run:

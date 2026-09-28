@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from datatools import config
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from ipw_options import add_ipw_arguments, ipw_flags
 from training_state import (add_training_runtime_arguments, validate_learning_rates,
                             resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts)
 from datatools.endpoint_policy import nonnegative_duration
@@ -820,6 +821,7 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_dataset_loading_arguments(parser)
+    add_ipw_arguments(parser)
     add_training_runtime_arguments(parser)
     parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
     parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
@@ -1909,7 +1911,7 @@ def build_training_commands(
 
     duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
-    commands = [command + dataset_loading_flags(args) for command in commands]
+    commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
     for index, command in enumerate(commands):
         for flag in ("--start_lr", "--min_lr"):
             value = getattr(args, flag[2:], None)

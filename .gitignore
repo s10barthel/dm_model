@@ -21,6 +21,7 @@ test*/*.png
 !tests/
 tests/*.py
 !tests/test_prepared_dataset.py
+!tests/test_ipw_preparation.py
 !tests/test_training_runtime.py
 !tests/test_learning_curve.py
 tests/AS_viz/
