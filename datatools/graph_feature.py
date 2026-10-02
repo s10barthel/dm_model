@@ -25,6 +25,7 @@ import datatools.preprocess as proc
 from datatools import config, utils
 from datatools.endpoint_policy import valid_interval
 from datatools.config import LABEL_INDEX
+from models.pass_height import positive_height
 from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
@@ -1727,7 +1728,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pass-height-threshold",
-        type=float,
+        type=positive_height,
         default=None,
         help="Maximum-ball-height cutoff in metres used to classify a pass as high.",
     )

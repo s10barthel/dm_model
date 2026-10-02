@@ -13,17 +13,25 @@ def batch_identifiers(graphs):
 
 
 def validate_graph_batch(graphs):
+    from models.graph_diagnostics import validate_boundaries, edge_description
+    validate_boundaries(graphs)
     edges = graphs.edge_index
     if edges.dtype != torch.long or edges.ndim != 2 or edges.shape[0] != 2:
         raise ValueError("Graph edge_index must be an int64 [2, E] tensor.")
     if edges.numel() and (edges.min() < 0 or edges.max() >= graphs.num_nodes):
-        raise ValueError(f"Graph edge index out of bounds: {batch_identifiers(graphs)}")
+        edge = int(torch.where(((edges < 0) | (edges >= graphs.num_nodes)).any(dim=0))[0][0])
+        raise ValueError(f"Graph edge index out of bounds: {edge_description(graphs, edge)}")
     if edges.numel() and not torch.equal(graphs.batch[edges[0]], graphs.batch[edges[1]]):
-        raise ValueError(f"Edge crosses graph boundaries: {batch_identifiers(graphs)}")
+        edge = int(torch.where(graphs.batch[edges[0]] != graphs.batch[edges[1]])[0][0])
+        raise ValueError(f"Edge crosses graph boundaries: {edge_description(graphs, edge)}")
     for name in ("x", "edge_attr"):
         value = getattr(graphs, name, None)
         if value is not None and not bool(torch.isfinite(value).all()):
-            raise ValueError(f"Nonfinite graph {name}: {batch_identifiers(graphs)}")
+            from models.graph_diagnostics import sample_description
+            location = torch.nonzero(~torch.isfinite(value))[0].tolist()
+            sample = (sample_description(graphs, int(graphs.batch[location[0]])) if name == "x"
+                      else edge_description(graphs, location[0]))
+            raise ValueError(f"Nonfinite graph {name} at {location}: {sample}")
 
 
 def selection_layout(graphs, labels, task, include_out):

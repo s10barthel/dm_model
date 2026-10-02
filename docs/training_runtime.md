@@ -210,3 +210,21 @@ The changes reduce avoidable GPU operations and improve recovery/diagnostics;
 they are not a confirmed fix for intermittent native driver crashes. A bounded
 GPU smoke test cannot establish overnight stability. Training-loop changes in
 `models/utils.py` do not affect the preparation-specific cache fingerprint.
+
+## Graph validation failure evidence
+
+Training checks CPU graph boundaries and connectivity before transferring each
+batch to the GPU. On a validation failure, the error identifies the first bad
+edge and its endpoint samples (match and source row), or inconsistent boundary
+bookkeeping. The failing batch, labels, weights and epoch/batch context are saved
+under the model run's `batch_failures/` directory, with a JSON error summary.
+This failure-only capture also works with monitoring off; successful batches
+are not saved. Unique filenames preserve evidence across resumed attempts.
+Snapshot failures are reported without hiding the original validation error.
+
+These CPU snapshots can be replayed without training or loading a model. They
+contain the actual failing tensors, unlike reconstruction from source identities.
+Load only trusted snapshots with `torch.load(path, map_location="cpu",
+weights_only=False)`, then call `models.node_selection.validate_graph_batch` on
+the saved `graphs`. They do not contain GPU state and do not replace native
+crash dumps. Retain or delete these artifacts manually after investigation.

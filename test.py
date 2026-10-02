@@ -60,6 +60,8 @@ from project_config import (
     resolve_feature_root,
     resolve_feature_run_id,
 )
+from models.pass_height import (add_pass_height_argument, evaluation_height, check_height_probability,
+                               cached_height_definition, height_export_context, definition)
 
 
 def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_id):
@@ -569,19 +571,20 @@ def write_outcome_evaluation_artifacts(
     return output_dir, metrics
 
 
-def write_pass_success_height_metrics(output_root: str | Path, model_id: str, rows: list[dict]) -> Path:
+def write_pass_success_height_metrics(output_root: str | Path, model_id: str, rows: list[dict], height_context=None) -> Path:
     """Write observed-pass-height pass-success metrics as a portable table."""
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
     columns = [
         "model_id", "stratum", "sample_count", "positive_count", "success_prevalence", "roc_auc", "brier"
     ]
-    records = [{"model_id": model_id, **row} for row in rows]
+    columns.extend((height_context or {}).keys())
+    records = [{"model_id": model_id, **row, **(height_context or {})} for row in rows]
     pd.DataFrame(records, columns=columns).to_csv(output_dir / "pass_success_height_metrics.csv", index=False)
     return output_dir / "pass_success_height_metrics.csv"
 
 
-def write_pass_success_predictor_metrics(output_root: str | Path, model_id: str, rows: list[dict]) -> Path:
+def write_pass_success_predictor_metrics(output_root: str | Path, model_id: str, rows: list[dict], height_context=None) -> Path:
     """Write comparable learning, physical, and combined pass-success metrics."""
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -591,7 +594,8 @@ def write_pass_success_predictor_metrics(output_root: str | Path, model_id: str,
         "calibration_intercept", "calibration_slope", "ece", "precision", "recall", "f1",
         "true_positive", "false_positive", "true_negative", "false_negative",
     ]
-    pd.DataFrame([{"model_id": model_id, **row} for row in rows], columns=columns).to_csv(
+    columns.extend((height_context or {}).keys())
+    pd.DataFrame([{"model_id": model_id, **row, **(height_context or {})} for row in rows], columns=columns).to_csv(
         output_dir / "pass_success_predictor_metrics.csv", index=False
     )
     return output_dir / "pass_success_predictor_metrics.csv"
@@ -610,6 +614,7 @@ def write_pass_success_predictor_diagnostics(
     diagnostics: dict,
     *,
     threshold: float,
+    height_context: dict | None = None,
 ) -> list[dict]:
     """Write full comparable diagnostics for learning, physical, and combined pass-success scores."""
     output_dir = Path(output_root)
@@ -625,14 +630,16 @@ def write_pass_success_predictor_diagnostics(
     metric_rows, calibration_rows, curve_rows = calc_binary_diagnostic_rows(
         targets, predictors, strata, threshold=threshold
     )
-    write_pass_success_predictor_metrics(output_dir, model_id, metric_rows)
+    for row in metric_rows + calibration_rows + curve_rows:
+        row.update(height_context or {})
+    write_pass_success_predictor_metrics(output_dir, model_id, metric_rows, height_context)
     _write_rows(output_dir, "pass_success_predictor_calibration_bins.csv", model_id, calibration_rows)
     _write_rows(output_dir, "pass_success_predictor_threshold_curve.csv", model_id, curve_rows)
 
     distance_rows: list[dict] = []
     for name, mask, lower, upper in equal_frequency_slice_masks(diagnostics["pass_distance"], "distance"):
         rows, _, _ = calc_binary_diagnostic_rows(targets, predictors, ((name, mask),), threshold=threshold)
-        distance_rows.extend({"distance_lower": lower, "distance_upper": upper, **row} for row in rows)
+        distance_rows.extend({"distance_lower": lower, "distance_upper": upper, **row, **(height_context or {})} for row in rows)
     _write_rows(output_dir, "pass_success_predictor_distance_slices.csv", model_id, distance_rows)
 
     weight = diagnostics.get("combined_learning_weight")
@@ -654,6 +661,7 @@ def write_pass_success_predictor_diagnostics(
                     "mean_learning_probability": float(np.asarray(predictors["learning"])[mask].mean()) if mask.any() else np.nan,
                     "mean_physical_xpass": float(np.asarray(predictors[physical_names[0]])[mask].mean()) if mask.any() else np.nan,
                 })
+                row.update(height_context or {})
                 weight_rows.append(row)
     _write_rows(output_dir, "pass_success_combined_weight_slices.csv", model_id, weight_rows)
     return metric_rows
@@ -665,6 +673,8 @@ def write_pass_height_diagnostics(
     diagnostics: dict,
     *,
     threshold: float,
+    height_threshold: float | None = 2.0,
+    height_context: dict | None = None,
 ) -> list[dict]:
     """Write the same binary-probability diagnostic suite for pass-height predictions."""
     output_dir = Path(output_root)
@@ -672,17 +682,26 @@ def write_pass_height_diagnostics(
     targets = np.asarray(diagnostics["targets"])
     predictors = {"pass_height": np.asarray(diagnostics["predictions"])}
     metric_rows, calibration_rows, curve_rows = calc_binary_diagnostic_rows(targets, predictors, threshold=threshold)
+    for row in metric_rows + calibration_rows + curve_rows:
+        row.update(height_context or {})
     _write_rows(output_dir, "pass_height_metrics.csv", model_id, metric_rows)
     _write_rows(output_dir, "pass_height_calibration_bins.csv", model_id, calibration_rows)
     _write_rows(output_dir, "pass_height_threshold_curve.csv", model_id, curve_rows)
     heights = np.asarray(diagnostics["observed_pass_max_height"], dtype=float)
+    if height_threshold is None:
+        return metric_rows
+    low, middle, high = height_threshold - 0.5, height_threshold, height_threshold + 0.5
     bands = (
-        ("max_height_le_1_5m", heights <= 1.5),
-        ("max_height_1_5_to_2_0m", (heights > 1.5) & (heights <= 2.0)),
-        ("max_height_2_0_to_2_5m", (heights > 2.0) & (heights <= 2.5)),
-        ("max_height_gt_2_5m", heights > 2.5),
+        ("below_cutoff_neighborhood", heights < low),
+        ("below_cutoff", (heights >= low) & (heights < middle)),
+        ("above_cutoff", (heights >= middle) & (heights < high)),
+        ("above_cutoff_neighborhood", heights >= high),
     )
     slice_rows, _, _ = calc_binary_diagnostic_rows(targets, predictors, bands, threshold=threshold)
+    for row, (lower, upper) in zip(slice_rows, ((None, low), (low, middle), (middle, high), (high, None))):
+        row.update(height_context or {})
+        row.update(height_lower_meters=lower, height_upper_meters=upper,
+                   lower_inclusive=True, upper_inclusive=False)
     _write_rows(output_dir, "pass_height_observed_height_slices.csv", model_id, slice_rows)
     return metric_rows
 
@@ -753,6 +772,8 @@ def write_model_evaluation_artifacts(
         "evaluation_timestamp": timestamp,
         "model_id": str(model_id),
         "task": task,
+        "height_target_context": _json_compatible({key: value for key, value in evaluation_options.items()
+                                                   if "pass_height" in key}),
         "metrics": _json_compatible(test_metrics),
     }
     (artifact_dir / "metrics.json").write_text(json.dumps(metric_record, indent=2, allow_nan=False), encoding="utf-8")
@@ -794,6 +815,7 @@ def write_model_evaluation_artifacts(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_pass_height_argument(parser)
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
@@ -835,10 +857,20 @@ if __name__ == "__main__":
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    model_args.pass_height_threshold, height_context = evaluation_height(model_args, args.pass_height_threshold)
+    height_export = height_export_context(height_context)
+    if args.pass_height_threshold is not None:
+        print(f"Evaluation height target override: model={height_export['model_pass_height_threshold_meters']} m, "
+              f"evaluation={args.pass_height_threshold} m; prediction meaning is unchanged.")
     weighted_pc_xpass_cache_dir = resolve_weighted_pass_success_cache(args, model_args)
     evaluation_xpass_cache_dir, evaluation_xpass_metric, evaluation_xpass_metadata = (
         resolve_evaluation_xpass_cache(args, model_args)
     )
+    for cache_dir in (weighted_pc_xpass_cache_dir,
+                      evaluation_xpass_cache_dir if args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"} else None):
+        if cache_dir and model_args.pass_height_threshold is not None:
+            cache_meta = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
+            check_height_probability(cached_height_definition(cache_meta), model_args.pass_height_threshold)
     model_args.weighted_pass_success_metrics = bool(args.weighted_pass_success_metrics)
     model_args.observed_pass_height_stratification = bool(args.observed_pass_height_stratification)
     model_args.return_pass_success_height_evaluation = bool(
@@ -905,6 +937,11 @@ if __name__ == "__main__":
         resolved_feature_run_id,
         required=pass_height_diagnostics_required,
     )
+    if model_args.pass_height_threshold is None and pass_height_diagnostic_label_dir:
+        height_context["evaluation_pass_height_definition"] = definition(
+            observed_pass_height_threshold_meters, "diagnostic_feature_run")
+    height_export = height_export_context(height_context)
+    observed_pass_height_threshold_meters = height_export["evaluation_pass_height_threshold_meters"]
     physical_cache_dir = resolve_physical_xpass_context(
         model_args,
         feature_root,
@@ -1021,6 +1058,8 @@ if __name__ == "__main__":
             raise ValueError("No learning-curve prediction rows were collected.")
         output_path = Path(args.evaluation_output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
+        for row in learning_rows:
+            row.update(height_export)
         pd.DataFrame(learning_rows).to_csv(output_path / "learning_curve_predictions.csv", index=False)
     elif collect_outcome_evaluation:
         test_metrics, outcome_evaluation = result
@@ -1041,13 +1080,14 @@ if __name__ == "__main__":
         if model_args.return_pass_success_height_evaluation:
             pass_success_height_rows = binary_evaluation["height_rows"]
             if args.observed_pass_height_stratification:
-                write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows)
+                write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows, height_export)
             if binary_evaluation.get("predictor_diagnostics"):
                 write_pass_success_predictor_diagnostics(
                     args.evaluation_output_dir,
                     args.model_id,
                     binary_evaluation["predictor_diagnostics"],
                     threshold=args.classification_threshold,
+                    height_context=height_export,
                 )
         elif model_args.return_binary_diagnostics:
             write_pass_height_diagnostics(
@@ -1055,6 +1095,8 @@ if __name__ == "__main__":
                 args.model_id,
                 binary_evaluation,
                 threshold=args.classification_threshold,
+                height_threshold=height_export["evaluation_pass_height_threshold_meters"],
+                height_context=height_export,
             )
     else:
         test_metrics = result
@@ -1067,6 +1109,8 @@ if __name__ == "__main__":
             diagnostic_feature_run_id=diagnostic_feature_run_id,
             evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
             evaluation_options={
+                **height_context,
+                **height_export,
                 **split_metadata(checkpoint_selector),
                 "split_manifest_id": evaluation_manifest["manifest_id"],
                 "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),

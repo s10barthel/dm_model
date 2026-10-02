@@ -59,6 +59,8 @@ def atomic_json(path: str | Path, data: dict[str, Any]) -> None:
 
 
 def add_selection_argument(parser: ArgumentParser) -> None:
+    from models.pass_height import add_pass_height_argument
+    add_pass_height_argument(parser)
     parser.add_argument("--pc-xpass-id", help="pc-xPass cache version; normal consumers default to latest.")
 
 

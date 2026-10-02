@@ -113,6 +113,7 @@ def resolve_only_tasks(args: argparse.Namespace) -> list[str]:
 
 
 def parse_args() -> argparse.Namespace:
+    from models.pass_height import add_pass_height_argument
     parser = argparse.ArgumentParser(
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
@@ -323,6 +324,7 @@ def parse_args() -> argparse.Namespace:
         "Disable the selective pass-lane features for downstream training.",
     )
     parser.set_defaults(v_edge_feature_mode="none", relative_speed_edge_feature_mode="none")
+    add_pass_height_argument(parser)
     args = parser.parse_args()
     vars(args).update(split_selector(args))
     args.v_edge_feature_mode = normalize_v_edge_feature_mode(args.v_edge_feature_mode)
@@ -558,6 +560,8 @@ def maybe_validate_epv_skip(args: argparse.Namespace) -> None:
 
 def append_training_target_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command = list(command)
+    if getattr(args, "pass_height_threshold", None) is not None:
+        command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
     if args.target_family:
         command.extend(["--target-family", args.target_family])
     if args.intended_receiver_mode:
@@ -723,6 +727,8 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         )
         if args.success_intent_model_id:
             evaluate_command.extend(["--success-intent-model-id", args.success_intent_model_id])
+        if getattr(args, "pass_height_threshold", None) is not None:
+            evaluate_command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
         commands.append(evaluate_command)
 
     if not args.skip_run_relevant:
@@ -781,6 +787,12 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             )
         )
 
+    if getattr(args, "pass_height_threshold", None) is not None:
+        consumers = {"scripts/run_relevant_models.py", "scripts/run_hawkeye.py",
+                     "scripts/run_benchmark.py", "scripts/run_skillcorner.py"}
+        for command in commands:
+            if len(command) > 1 and command[1] in consumers:
+                command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
     return commands
 
 

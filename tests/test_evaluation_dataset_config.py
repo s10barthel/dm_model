@@ -640,7 +640,7 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             self.assertEqual(len(curves), 101)
             self.assertSetEqual(
                 set(slices["stratum"]),
-                {"max_height_le_1_5m", "max_height_1_5_to_2_0m", "max_height_2_0_to_2_5m", "max_height_gt_2_5m"},
+                {"below_cutoff_neighborhood", "below_cutoff", "above_cutoff", "above_cutoff_neighborhood"},
             )
 
     def test_pass_success_height_csv_has_stable_schema(self) -> None:

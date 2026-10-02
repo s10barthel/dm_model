@@ -820,6 +820,7 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from models.pass_height import add_pass_height_argument
     parser = argparse.ArgumentParser()
     add_dataset_loading_arguments(parser)
     add_ipw_arguments(parser)
@@ -1251,12 +1252,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional long-pass override for pass_success residual clipping.",
     )
     pc_versions.add_selection_argument(parser)
+    add_pass_height_argument(parser)
     args = parser.parse_args(argv)
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold")]
         if invalid:
-            parser.error("--resume-id restores saved settings; only --monitoring, --crash-dump and --procdump-path may accompany it. Conflicts: " + ", ".join(invalid))
+            parser.error("--resume-id restores saved settings; only --monitoring, --crash-dump, --procdump-path and a matching --pass-height-threshold may accompany it. Conflicts: " + ", ".join(invalid))
         return args
     try:
         validate_learning_rates(args.start_lr, args.min_lr)
@@ -1922,6 +1924,8 @@ def build_training_commands(
         validate_learning_rates(float(get_cli_value(command, "--start_lr")), float(get_cli_value(command, "--min_lr")))
         command = _replace_cli_value(command, "--accumulation-steps", getattr(args, "accumulation_steps", 1))
         command = _replace_cli_value(command, "--monitoring", getattr(args, "monitoring", "off"))
+        if getattr(args, "pass_height_threshold", None) is not None:
+            command = _replace_cli_value(command, "--pass-height-threshold", args.pass_height_threshold)
         commands[index] = command
     return (
         commands,
@@ -2020,6 +2024,10 @@ def main() -> None:
     if cli_args.resume_id:
         checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
         checkpoint = load_checkpoint(checkpoint_path)
+        if cli_args.pass_height_threshold is not None:
+            saved_height = checkpoint["args"].get("pass_height_definition")
+            if not saved_height or saved_height["threshold_meters"] != cli_args.pass_height_threshold:
+                raise ValueError("Resume pass-height cutoff conflicts with the checkpoint target definition.")
         publish_checkpoint_artifacts(checkpoint, checkpoint_path.parent)
         if checkpoint["finished"]:
             print(f"Model {cli_args.resume_id} is already completed; no retraining needed.")

@@ -19,7 +19,8 @@ from torch.utils.data import IterableDataset, get_worker_info
 from tqdm import tqdm
 
 from dataset import ActionDataset
-from dataset_loading import DEFAULT_CACHE_DIR, INTENT_TASKS
+from dataset_loading import DEFAULT_CACHE_DIR, PREPARED_TASKS
+from models.pass_height import positive_height, relabel_height
 
 CACHE_VERSION = 1
 DISK_RESERVE_BYTES = 10 * 1024**3
@@ -28,6 +29,7 @@ BASE_PREPARATION_FILES = (
     "dataset.py",
     "models/dataset_config.py",
     "models/edge_feature_config.py",
+    "models/pass_height.py",
     "datatools/config.py",
     "datatools/utils.py",
 )
@@ -116,8 +118,8 @@ class PreparedActionDataset(IterableDataset):
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
                  buffer_matches=4, shuffle=False, seed=100, progress=True, **options):
         super().__init__()
-        if options.get("task") not in INTENT_TASKS:
-            raise ValueError("Prepared datasets support pass_intent and action_intent only.")
+        if options.get("task") not in PREPARED_TASKS:
+            raise ValueError("Prepared datasets support pass_intent, action_intent and pass_height only.")
         if int(buffer_matches) < 1:
             raise ValueError("buffer_matches must be positive")
         self.buffer_matches = int(buffer_matches) if shuffle else 1
@@ -131,6 +133,11 @@ class PreparedActionDataset(IterableDataset):
         bound.apply_defaults()
         self.options = {k: v for k, v in bound.arguments.items()
                         if k not in {"self", "match_ids", "feature_dir", "label_dir"}}
+        self.pass_height_threshold = self.options.get("pass_height_threshold")
+        self.options["pass_height_threshold"] = None
+        if self.pass_height_threshold is not None:
+            self.pass_height_threshold = positive_height(self.pass_height_threshold)
+            self.options["defer_pass_height_relabel"] = True
         # Resolve path options before recording identity or reading their signatures.
         for key, value in self.options.items():
             if key.endswith("_dir") and value is not None:
@@ -274,6 +281,8 @@ class PreparedActionDataset(IterableDataset):
             raise RuntimeError(f"Source or prepared cache changed for {entry['match_id']}; restart preparation.")
         started = time.perf_counter()
         payload = torch.load(path, weights_only=False, map_location="cpu")
+        if self.pass_height_threshold is not None:
+            payload["labels"] = relabel_height(payload["labels"], self.pass_height_threshold)
         self.last_load_seconds += time.perf_counter() - started
         if len(payload["graphs"]) != entry["count"] or len(payload["labels"]) != entry["count"]:
             raise RuntimeError(f"Prepared sample count changed for {entry['match_id']}")
@@ -305,6 +314,7 @@ class PreparedActionDataset(IterableDataset):
 
     def metadata(self):
         return {"mode": "disk", "cache_id": self.cache_id, "cache_root": str(self.cache_root),
+                "pass_height_threshold_meters": self.pass_height_threshold,
                 "buffer_matches": self.buffer_matches, "shuffle": "match_groups" if self.shuffle else "sequential",
                 "sample_count": len(self), "preparation": dict(self.preparation),
                 "last_load_seconds": self.last_load_seconds}

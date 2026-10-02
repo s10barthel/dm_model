@@ -529,6 +529,8 @@ Every generated action-label tensor also carries canonical outcome diagnostic co
 These are binary goal labels over `next_10`, generated independently of the selected `--return_type`.
 Action labels also carry pass-height columns. `pass_high` is `1` for passes whose maximum `ball_z` between the pass frame and receive frame is at least the run's `pass_height_threshold_meters` metadata value (default `2.0` metres), and `0` otherwise; `pass_max_ball_z` stores that maximum height.
 
+Training and evaluation can select a different cutoff with `--pass-height-threshold` using the stored continuous height, without copying the feature run. See [pass-height target cutoffs](docs/pass_height_thresholds.md) for defaults, evaluation overrides, shared caches, and legacy compatibility.
+
 ### 4. Train the retained models
 
 ```powershell
@@ -566,7 +568,7 @@ Behavior:
 - `--intended-receiver-mode` is required only when a mode-dependent model is enabled: `action_intent`, `pass_intent`, `pass_success`, `pass_height`, `outcome_scoring`, `outcome_conceding`, or `failure_receiver`
 - `--only-success-intent` trains `success_intent` from the observed synced `receiver_id` on successful pass actions only
 - `--only-success-intent` is mode-independent, does not accept `--intended-receiver-mode`, and cannot be combined with the per-model toggles
-- `--only-pass-height` trains only the `pass_height` checkpoint; its target is `pass_high`, defined by `pass_max_ball_z >= 2.0`
+- `--only-pass-height` trains only the `pass_height` checkpoint. Its target is derived as `pass_max_ball_z >= T`, where `T` is the explicit `--pass-height-threshold` or the selected feature run's recorded cutoff.
 - `pass_success` uses inverse propensity weighting by default via `--pass-success-ipw`; it uses a `pass_intent` checkpoint as its IPW model, either from the same wrapper run or from `--no-pass-intent --pass-intent-model-id pass_intent/<model_run_id>`
 - `--no-pass-success-ipw` trains `pass_success` without inverse propensity weighting; use `--no-pass-success-ipw --no-pass-intent` when you want pass-success only and do not want to train or supply a propensity model
 - an external `--pass-intent-model-id` applies only when pass-success IPW is enabled and must match the selected feature run, intended-receiver mode, graph schema, velocity edge-feature mode, and feature flags; its return type and target family are ignored because `pass_intent` only supplies IPW propensities for `pass_success`
@@ -1312,7 +1314,11 @@ If the source bundle is incomplete, pass explicit overrides to `scripts/generate
 
 ## CLI Reference
 
-This appendix covers every current `scripts/*.py` CLI entrypoint, including `scripts/main.py`, plus the low-level `train.py` entrypoint used by the training wrapper. The legacy repo-root `main.py` is intentionally not included here because it is part of the upstream defensive-score path, not the scoped workflow described above.
+This appendix covers every current `scripts/*.py` CLI entrypoint, including `scripts/main.py`, plus the low-level `train.py` and `test.py` entrypoints used by the training and evaluation wrappers. The legacy repo-root `main.py` is intentionally not included here because it is part of the upstream defensive-score path, not the scoped workflow described above.
+
+#### Shared pass-height target option
+
+`--pass-height-threshold <meters>` accepts a finite, positive observed maximum-ball-height cutoff, with the inclusive definition `pass_max_ball_z >= cutoff`. It is distinct from `--classification-threshold`, which thresholds predicted probabilities. New `pass_height` training uses the explicit cutoff or, when omitted, the selected feature run's recorded cutoff; it fails if neither is known. Evaluation defaults to the checkpoint's saved target definition, while an explicit value relabels only the observed evaluation targets and diagnostics—not the meaning of its predictions. Legacy checkpoints keep their stored labels unless explicitly overridden. The option is available on `scripts/main.py`, `scripts/train_relevant_models.py`, `train.py`, `scripts/evaluate_relevant_models.py`, `test.py`, and the height-aware physical/xPass generation and inference commands below. In xPass consumers it asserts the selected predicted-height/cache definition where one is required; it cannot turn a model trained at one cutoff into a predictor for another.
 
 ### `scripts/main.py`
 
@@ -1322,6 +1328,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--target-family {goal,xg,xt,goal_distance,epv}`: retained outcome family passed to training. Required when an outcome model is selected.
 - `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>`: resolved return semantics passed to feature generation and training. `disc_max_gamma` and `in_N` are valid only for `xt`, `goal_distance`, and `epv`; polynomial max is valid only for `xt` and `goal_distance`. Required when feature generation or an outcome model is enabled.
 - `--intended-receiver-mode {original,angle_only,model}`: retained-model training mode. Required when a mode-dependent model is selected.
+- `--pass-height-threshold <meters>`: forward one observed pass-height cutoff to training, evaluation, and height-aware downstream stages. See [Shared pass-height target option](#shared-pass-height-target-option).
 - `--only-action-intent`, `--only-pass-intent`, `--only-success-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-failure-receiver`: train exactly the selected models. Repeated flags are additive and cannot be mixed with ordinary per-model toggles.
 - `--intended-receiver-model-id <model_id>`: optional `success_intent` checkpoint used to add the `model` intended-receiver variant during feature generation.
 - `--feature-run-id <feature_run_id>`: explicit feature run id to reuse or assign.
@@ -1369,6 +1376,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_epv.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--bundle-id <bundle_id>`: source model bundle containing `pass_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`.
 - `--pass-intent-model-id`, `--pass-success-model-id`, `--outcome-scoring-model-id`, `--outcome-conceding-model-id`: explicit source checkpoint overrides.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
@@ -1433,6 +1441,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
 - `--position-discount-distance <m>`: pc-xPass only; backward goal-distance delta where the target-position discount reaches zero. Default: `20.0`.
 - `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich existing or newly generated xPass rows with per-player `<player_id>__pass_height` probabilities from the selected `pass_height` checkpoint. If xPass metrics are already valid, only missing/stale pass-height columns are backfilled.
+- `--pass-height-threshold <meters>`: assert that an explicitly selected pass-height checkpoint predicts this cutoff before its probabilities are cached. It does not relabel or convert those probabilities.
 - `--pass-height-device <device>`: device used for `--pass-height-model-id`. Default: `cuda:0` when CUDA is available, otherwise `cpu`.
 - `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--xpass-version top<N>` during inference/visualization.
 - `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
@@ -1452,7 +1461,8 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
 - `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, overwrite copied label tensors in the derived run from current target sidecars without rebuilding graph tensors. Repeat to record multiple refreshed target families.
-- `--pass-height`: with `--extend-feature-run-id`, overwrite copied label tensors so `pass_max_ball_z` and `pass_high` are available for `pass_height` training. `pass_high` uses `pass_max_ball_z >= 2.0`.
+- `--pass-height`: with `--extend-feature-run-id`, overwrite copied label tensors so `pass_max_ball_z` and `pass_high` are available for `pass_height` training. The stored compatibility label uses the feature run's `--pass-height-threshold` (default `2.0`); training can derive a different label from `pass_max_ball_z` without copying this run.
+- `--pass-height-threshold <meters>`: with `--pass-height`, set the feature run's stored compatibility-label cutoff. Default: `2.0` metres.
 - `--replace-intended-receiver-model`: with `--extend-feature-run-id`, allow a different `--intended-receiver-model-id` when the base run already contains `model` artifacts; only model-mode artifacts are regenerated in the new derived run.
 - `--next-action-conditions-on` / `--next-action-conditions-off`: keep or disable the pass/cross next-action consistency filter. Default: on. Derived runs must match the base run's setting.
 
@@ -1476,6 +1486,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--pass-success-ipw` / `--no-pass-success-ipw`: enable or disable inverse propensity weighting for `pass_success` only. Default: enabled.
 - `--pass-intent-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_success` IPW model when `--pass-success-ipw --no-pass-intent` is set.
 - `--pass-height-ipw` / `--no-pass-height-ipw`: enable or disable inverse propensity weighting for `pass_height`. Default: disabled.
+- `--pass-height-threshold <meters>`: target cutoff for a new `pass_height` training run. Omit it to inherit the selected feature run's recorded cutoff. A resumed run inherits its checkpoint cutoff and rejects a conflicting explicit value.
 - `--pass-height-ipw-model-id <pass_intent/model_run_id>`: existing compatible `pass_intent` checkpoint to use as the `pass_height` IPW model when `--pass-height-ipw --no-pass-intent` is set.
 - `--ipw-batch-size <N>`: positive IPW inference batch size, independent of training batch size. Default: `256`.
 - `--ipw-probability-cache {on,off}`: reuse per-match propensity probabilities during IPW preparation. Default: `on`.
@@ -1509,6 +1520,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 `train.py` is the low-level training entrypoint normally launched by `scripts/train_relevant_models.py`. Use the wrapper for new and resumed runs because it restores the complete saved configuration.
 
 - `--resume-run-id <run_id>`: legacy resume selector. It is retained for CLI compatibility but is intentionally rejected; use `scripts/train_relevant_models.py --resume-id <task/run_id>` instead.
+- `--pass-height-threshold <meters>`: target cutoff for low-level new training. It is normally supplied by the training wrapper; see [Shared pass-height target option](#shared-pass-height-target-option).
 
 ### `scripts/evaluate_relevant_models.py`
 
@@ -1523,6 +1535,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
+- `--pass-height-threshold <meters>`: explicitly relabel observed pass-height targets and height-based diagnostics for every selected checkpoint. By default each checkpoint is evaluated against its saved cutoff; predictions always retain their saved meaning.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
@@ -1548,8 +1561,15 @@ When split flags are omitted, training infers the selector from feature-run meta
   weighted pass-success evaluation (defaults: `true`, `4`, and `0.7`) or required explicit settings for combined-v4
   evaluation.
 
+### `test.py`
+
+`test.py` is the low-level single-checkpoint evaluator normally launched by `scripts/evaluate_relevant_models.py`.
+
+- `--pass-height-threshold <meters>`: evaluate with relabelled observed height targets and cutoff-relative diagnostics. Omit it to use the checkpoint definition; this never changes the event predicted by the checkpoint.
+
 ### `scripts/run_relevant_models.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups. It does not change an exported `pass_height` checkpoint's probability meaning; compatible predicted-height cache provenance is required when relevant.
 - `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - Carry-augmented inference is selected automatically from checkpoint metadata and requires a feature run with carry artifacts; there is no runtime `--use-carries` flag.
@@ -1592,6 +1612,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_hawkeye.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.
 - `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `hawkeye_data/ball_data_selected.csv`.
 - `--situation-id <id>`: restrict inference to one or more specific Hawkeye situation ids. Default: all valid situations.
@@ -1626,6 +1647,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_benchmark.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--input-dir <path>`: local benchmark data root. Default: `benchmark`.
 - `--modification <id>`: restrict inference to one or more specific benchmark modifications. Default: all valid modifications.
 - `--limit <N>`: process only the first `N` selected modifications. Default: no limit.
@@ -1656,6 +1678,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_skillcorner.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--input-dir <path>`: SkillCorner data root. Default: `skillcorner_data`.
 - `--match-id <id>`: restrict inference to one or more specific SkillCorner match ids. Default: all discoverable valid matches.
 - `--frames-first-and-last`: restrict inference to first and last frame of a ball possession
@@ -1687,6 +1710,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/visualize_action_components.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--match-id <id>`: Sportec match id to visualize. Default: required.
 - `--action-id <action_id>`: CSV `action_id` from `data/event_synced/<match_id>.csv`. Default: one of the identifier options is required.
 - `--row-index <index>`: legacy modeled-action row index. Default: off.
@@ -1768,6 +1792,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_and_visualize_hawkeye.py`
 
+- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--situation-id <id>`: Hawkeye situation id to visualize. Default: one of `--situation-id` or `--action-id` is required at runtime.
 - `--action-id <id>`: alias for `--situation-id`. Default: off.
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.

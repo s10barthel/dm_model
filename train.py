@@ -90,6 +90,8 @@ from project_config import (
 )
 
 parser = argparse.ArgumentParser()
+from models.pass_height import add_pass_height_argument, resolve_training_height
+add_pass_height_argument(parser)
 add_dataset_loading_arguments(parser)
 add_ipw_arguments(parser)
 add_training_runtime_arguments(parser)
@@ -473,13 +475,18 @@ parser.add_argument("--training-step-total", type=int, default=None, help=argpar
 pc_versions.add_selection_argument(parser)
 resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
+add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "off"), default="off")
 resume_options, resume_extra = resume_probe.parse_known_args()
 resume_checkpoint = None
 if resume_options.resume_checkpoint:
     if resume_extra:
-        parser.error("Resume restores saved settings; only --monitoring may accompany --resume-checkpoint.")
+        parser.error("Resume restores saved settings; only --monitoring and a matching --pass-height-threshold may accompany --resume-checkpoint.")
     resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
+    if resume_options.pass_height_threshold is not None:
+        saved_height = resume_checkpoint["args"].get("pass_height_definition")
+        if not saved_height or saved_height["threshold_meters"] != resume_options.pass_height_threshold:
+            parser.error("Resume pass-height cutoff conflicts with the checkpoint target definition.")
     if resume_checkpoint["finished"]:
         publish_checkpoint_artifacts(resume_checkpoint, Path(resume_options.resume_checkpoint).parent)
         print("Model is already completed; no retraining needed.")
@@ -720,6 +727,7 @@ if __name__ == "__main__":
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    resolve_training_height(args, feature_metadata, resume=resume_record is not None)
     args.split_manifest, args.split_resolution_source = resolve_artifact_split(
         args, feature_metadata, feature_run_id=args.feature_run_id, checkpoint=resume_record,
     )
@@ -954,6 +962,7 @@ if __name__ == "__main__":
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
+        "pass_height_definition": getattr(args, "pass_height_definition", None),
         "early_stopping": bool(args.early_stopping),
         "early_stopping_patience": int(args.early_stopping_patience),
         "early_stopping_min_epochs": int(args.early_stopping_min_epochs),
@@ -1001,6 +1010,7 @@ if __name__ == "__main__":
     write_run_metadata(Path(trial_path), metadata)
 
     monitor = TrainingMonitor(trial_path, enabled=args.monitoring == "on")
+    args._batch_failure_dir = trial_path
     if monitor.enabled:
         args._monitor = monitor
     monitor.event("dataset_loading", device)
@@ -1056,9 +1066,13 @@ if __name__ == "__main__":
 
     if args.task in {"pass_success", "pass_height"} and args.weight_bce:
         target_column = "pass_high" if args.task == "pass_height" else "success"
-        n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
-        n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 0].shape[0]
-        pos_weight = n_negatives / n_positives
+        if disk_args:
+            n_positives = sum(int(label[LABEL_INDEX[target_column]] == 1) for _, label, _ in train_dataset)
+            n_negatives = len(train_dataset) - n_positives
+        else:
+            n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
+            n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 0].shape[0]
+        pos_weight = n_negatives / n_positives if n_positives and n_negatives else 1
     else:
         pos_weight = 1
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 

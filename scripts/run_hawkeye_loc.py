@@ -618,6 +618,8 @@ def _configure_models(args: argparse.Namespace):
         pass_model.args["v4_power"] = float(args.v4_power)
     if args.v4_zero is not None:
         pass_model.args["v4_zero"] = float(args.v4_zero)
+    if getattr(args, "pass_height_threshold", None) is not None:
+        pass_model.args["pass_height_threshold"] = args.pass_height_threshold
     configure_lane_survival_runtime_cache(specs, args.lane_survival_cache_dir or args.pc_xpass_cache_dir)
     args._runtime_graph_schema = schema
     args._pass_height_model = specs.get("pass_height")
@@ -626,6 +628,10 @@ def _configure_models(args: argparse.Namespace):
     )
     args.pass_height_device = device
     args.pass_height_model_id = resolved_ids.get("pass_height")
+    if args._pass_height_model_record is not None:
+        from models.pass_height import check_height_probability
+        check_height_probability(args._pass_height_model_record.get("pass_height_definition"),
+                                 getattr(args, "pass_height_threshold", None))
     return resolved_ids, shared_context, specs, schema, device
 
 

@@ -205,6 +205,8 @@ def dataset_signature(args):
         stat = path.stat()
         entries.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
     payload = {"files": entries, "split": getattr(args, "split_manifest", None)}
+    if getattr(args, "pass_height_definition", None) is not None:
+        payload["pass_height_definition"] = args.pass_height_definition
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 

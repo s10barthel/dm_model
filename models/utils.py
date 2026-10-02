@@ -207,6 +207,9 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 
 def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if (metadata or {}).get("pass_height_definition"):
+        args.setdefault("pass_height_definition", metadata["pass_height_definition"])
+        args.setdefault("pass_height_threshold", metadata["pass_height_definition"]["threshold_meters"])
     physical_metadata = (metadata or {}).get("physical_xpass")
     if isinstance(physical_metadata, dict):
         source = physical_metadata.get("source")
@@ -290,6 +293,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "timestamp": created_at,
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
+        "pass_height_definition": args.get("pass_height_definition"),
         **split_metadata(metadata if any(metadata.get(key) is not None for key in ("train_split_percent", "train_count")) else args),
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
@@ -315,6 +319,9 @@ def get_model_record(model_id: str) -> dict[str, Any]:
 
 def get_model_provenance(model_id: str) -> dict[str, Any]:
     record = get_model_record(model_id)
+    if record["task"] == "pass_height":
+        from models.pass_height import model_definition
+        record["pass_height_definition"] = model_definition(record["args"], record["metadata"])
     return {
         key: record[key]
         for key in [
@@ -324,6 +331,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "model_path",
             "created_at",
             "feature_run_id",
+            "pass_height_definition",
             "intended_receiver_mode",
             "target_family",
             "return_type",
@@ -1321,7 +1329,7 @@ def calc_binary_metrics(y, y_hat, threshold: float | None = 0.5, *, include_cali
         "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else np.nan,
         "pr_auc": average_precision_score(y_true, y_score) if has_positive else np.nan,
         "brier": brier_score_loss(y_true, y_score),
-        "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
+        "log_loss": log_loss(y_true, y_score, labels=[0, 1]),
     }
     if include_calibration:
         metrics.update(calc_binary_calibration_metrics(y_true, y_score))
@@ -1746,8 +1754,9 @@ def run_epoch(
     pass_intent_model: nn.Module | None = None,
 ):
     from training_state import GradientAccumulator
-    from models.node_selection import batch_identifiers, validate_graph_batch, selection_layout, selection_loss_metrics
+    from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
     from models.observed_selection import observed_layout, select_observed
+    from models.graph_diagnostics import validate_with_snapshot
     monitor = getattr(args, "_monitor", None)
     accumulator = GradientAccumulator(optimizer, unwrap_model(model).parameters(),
                                       getattr(args, "accumulation_steps", 1), args.clip) if train else None
@@ -1800,7 +1809,8 @@ def run_epoch(
             monitor.event("batch_loaded", device, **context, graphs=batch_graphs.num_graphs,
                           nodes=batch_graphs.num_nodes, edges=batch_graphs.num_edges,
                           **batch_identifiers(batch_graphs))
-        validate_graph_batch(batch_graphs)
+        validate_with_snapshot(batch_graphs, batch_labels, batch_ipw,
+                               directory=getattr(args, "_batch_failure_dir", None), context=context)
         layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out) if args.gnn_task == "node_selection" else None
         observed = None
         if args.gnn_task in {"node_binary", "node_regression"}:
