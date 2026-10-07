@@ -6102,7 +6102,7 @@ class PhysicalXPassTests(unittest.TestCase):
             torch.save([make_graph()], post_graph_dir / "m1.pt")
             torch.save(torch.stack([make_label(action_index=5)]), label_dir / "m1.pt")
             pd.DataFrame({"dummy": [1]}).to_parquet(resolved_path)
-            args = generate_physical_xpass.parse_args(["--pc-xpass", "--match-id", "m1"])
+            args = generate_physical_xpass.parse_args(["--match-id", "m1"])
             calls: list[tuple[int, object]] = []
 
             def fake_prewarm(items, **kwargs):

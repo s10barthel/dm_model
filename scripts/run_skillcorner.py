@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments
+
 import pandas as pd
 import torch
 from tqdm import tqdm
@@ -89,25 +91,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
     parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
     parser.add_argument("--physical-batch-size", type=int, default=16)
-    frame_group = parser.add_mutually_exclusive_group()
-    frame_group.add_argument(
-        "--frames-first-and-last",
-        dest="frames_mode",
-        action="store_const",
-        const="first_and_last",
-        default="first_and_last",
-        help="Process only the first and last valid frame per possession.",
-    )
-    frame_group.add_argument(
-        "--frames-all",
-        dest="frames_mode",
-        action="store_const",
-        const="all",
-        help="Process every valid frame per possession.",
-    )
+    add_frame_selection_arguments(parser)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
+    resolve_frame_selection_arguments(parser, args)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     try:
@@ -334,6 +322,7 @@ def main() -> None:
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     stats_by_match: dict[str, dict[str, int]] = {}
+    frame_selections = {}
     processed_matches: list[str] = []
     skipped_match_errors: list[dict[str, str]] = []
     skipped_possessions: dict[str, list[dict[str, str]]] = {}
@@ -376,8 +365,10 @@ def main() -> None:
                         int(event_index),
                         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
-                        frames_mode=args.frames_mode,
+                        scope=args.scope,
+                        frames=args.frames,
                     )
+                    frame_selections.setdefault(str(match_id), {})[str(event_index)] = getattr(possession, "frame_selection", {})
                     match_stats["possessions"] += 1
                     for key in [
                         "total_frames",
@@ -555,7 +546,10 @@ def main() -> None:
         "physical_batch_size": physical_batch_size,
         "requested_match_ids": args.match_id or [],
         "limit": args.limit,
-        "frames_mode": args.frames_mode,
+        "frame_selections": frame_selections,
+        "state_contract": "possession_states_v1",
+        "scope": args.scope,
+        "frames": args.frames,
         "processed_matches": processed_matches,
         "skipped_match_errors": skipped_match_errors,
         "skipped_possessions": skipped_possessions,

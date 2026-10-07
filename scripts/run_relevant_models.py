@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
+from datatools.sportec_possessions import build_sportec_possessions, sportec_component_table
+from datatools.skillcorner import infer_skillcorner_components
+
 import pandas as pd
 import torch
 
@@ -62,8 +66,9 @@ from project_config import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_frame_selection_arguments(parser)
     parser.add_argument("--split", default="test", choices=["train", "test", "all"])
     add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
@@ -99,7 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--physical-batch-size", type=int, default=16)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    resolve_frame_selection_arguments(parser, args)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     try:
@@ -151,6 +157,7 @@ def load_match(
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
     use_carries: bool = False,
+    load_endpoint_graphs: bool = True,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -178,6 +185,9 @@ def load_match(
         resolved_actions=resolved_actions,
         return_type=return_type,
     )
+
+    if not load_endpoint_graphs:
+        return match
 
     graph_path = get_action_graph_dir(feature_root, use_carries=use_carries) / f"{match_id}.pt"
     if graph_path.exists():
@@ -723,6 +733,9 @@ def main() -> None:
         "return_type": return_type,
         "target_family": shared_context.get("target_family"),
         "use_carries": use_carries,
+        "scope": args.scope,
+        "frames": args.frames,
+        "state_contract": STATE_CONTRACT,
         "graph_schema": graph_schema,
         "models": {
             "action_intent": resolved_model_ids["action_intent"],
@@ -784,101 +797,36 @@ def main() -> None:
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                 use_carries=use_carries,
+                load_endpoint_graphs=False,
             )
             match_output_dir = output_dir / match_id
 
-            action_intent, _ = inference_gnn(match, model_specs["action_intent"], device=device, post_action=False)
-            pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
-            pass_intent_receive, _ = inference_gnn(
-                match,
-                model_specs["pass_intent"],
-                device=device,
-                post_action=True,
-            )
-            pass_success = None
-            pass_success_receive = None
-            pass_height = None
-            pass_height_receive = None
-            try:
-                pass_success, _ = inference_gnn(
-                    match,
-                    model_specs["pass_success"],
-                    device=device,
-                    post_action=False,
-                    pass_intent_probs=pass_intent,
-                )
-            except PhysicalXPassNoUsableRowsError as exc:
-                print(f"  WARN {match_id}: pass_success frame_id export skipped: {summarize_exception(exc)}")
-            try:
-                pass_success_receive, _ = inference_gnn(
-                    match,
-                    model_specs["pass_success"],
-                    device=device,
-                    post_action=True,
-                    pass_intent_probs=pass_intent_receive,
-                )
-            except PhysicalXPassNoUsableRowsError as exc:
-                print(f"  WARN {match_id}: pass_success receive_frame_id export skipped: {summarize_exception(exc)}")
-            if "pass_height" in model_specs:
-                pass_height, _ = inference_gnn(match, model_specs["pass_height"], device=device, post_action=False)
-                pass_height_receive, _ = inference_gnn(
-                    match,
-                    model_specs["pass_height"],
-                    device=device,
-                    post_action=True,
-                )
-            scoring_failure, scoring_success = inference_gnn(
-                match,
-                model_specs["outcome_scoring"],
-                device=device,
-                post_action=False,
-            )
-            scoring_failure_receive, scoring_success_receive = inference_gnn(
-                match,
-                model_specs["outcome_scoring"],
-                device=device,
-                post_action=True,
-            )
-            conceding_failure, conceding_success = inference_gnn(
-                match,
-                model_specs["outcome_conceding"],
-                device=device,
-                post_action=False,
-            )
-            conceding_failure_receive, conceding_success_receive = inference_gnn(
-                match,
-                model_specs["outcome_conceding"],
-                device=device,
-                post_action=True,
-            )
-            if action_intent.empty:
-                raise ValueError("No usable inference rows were produced for this match.")
-
-            save_match_component_tables(
-                match_output_dir,
-                match.actions,
-                action_intent=action_intent,
-                pass_intent=pass_intent,
-                pass_intent_receive=pass_intent_receive,
-                pass_success=pass_success,
-                pass_success_receive=pass_success_receive,
-                pass_height=pass_height,
-                pass_height_receive=pass_height_receive,
-                scoring_success=scoring_success,
-                scoring_success_receive=scoring_success_receive,
-                scoring_failure=scoring_failure,
-                scoring_failure_receive=scoring_failure_receive,
-                conceding_success=conceding_success,
-                conceding_success_receive=conceding_success_receive,
-                conceding_failure=conceding_failure,
-                conceding_failure_receive=conceding_failure_receive,
-            )
-            physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
-            if physical_skip_stats:
-                metadata["physical_xpass_skipped_actions"][match_id] = physical_skip_stats
-            runtime_physical_stats = getattr(match, "physical_xpass_runtime_stats", None)
-            if runtime_physical_stats:
-                metadata["physical_xpass_runtime_stats"][match_id] = runtime_physical_stats
+            tables = {}
+            possession_report = None
+            for state, possession_report in build_sportec_possessions(
+                match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
+                add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
+                add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+            ):
+                try:
+                    components = infer_skillcorner_components(state, model_specs, device=device)
+                    for name, prediction in components.items():
+                        if prediction is not None and not prediction.empty:
+                            tables.setdefault(name, []).append(sportec_component_table(prediction, state))
+                except Exception as exc:
+                    error = summarize_exception(exc)
+                    metadata.setdefault("skipped_possessions", {}).setdefault(str(match_id), {})[str(state.event_index)] = error
+                    print(f"  SKIP {match_id} possession {state.event_index}: {error}")
+                for attr in ("physical_xpass_skipped_actions", "physical_xpass_runtime_stats"):
+                    value = getattr(state, attr, None)
+                    if value:
+                        metadata.setdefault(attr, {}).setdefault(str(match_id), {})[str(state.event_index)] = value
+            metadata.setdefault("possession_reports", {})[str(match_id)] = match.possession_report
+            if not tables.get("action_intent"):
+                raise ValueError("No valid possession states; check whole-spell artifacts and tracking coverage.")
+            match_output_dir.mkdir(parents=True, exist_ok=True)
+            for name, parts in tables.items():
+                pd.concat(parts, ignore_index=True).to_parquet(match_output_dir / f"{name}.parquet", index=False)
 
             if success_intent_model is not None:
                 try:

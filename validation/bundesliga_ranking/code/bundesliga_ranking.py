@@ -604,16 +604,20 @@ def normalize_component_identifiers(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def component_value_columns(component: pd.DataFrame, id_columns: list[str]) -> list[str]:
-    ignored_columns = set(id_columns) | IGNORED_COMPONENT_COLUMNS | {STATE_FRAME_ID_COLUMN}
+    from datatools.sportec_possessions import STATE_METADATA_COLUMNS
+
+    ignored_columns = set(id_columns) | IGNORED_COMPONENT_COLUMNS | set(STATE_METADATA_COLUMNS)
     return [column for column in component.columns if column not in ignored_columns]
 
 
 def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
+    from datatools.sportec_possessions import sportec_event_endpoint_view
+
     path = match_dir / f"{component_name}.parquet"
     if not path.exists():
         raise FileNotFoundError(f"Missing required component file: {path}")
 
-    component = pd.read_parquet(path)
+    component = sportec_event_endpoint_view(pd.read_parquet(path))
     required_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
     validate_required_columns(component, required_columns, str(path))
     component = normalize_component_identifiers(component)
@@ -651,11 +655,13 @@ def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataF
 
 
 def read_frame_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
+    from datatools.sportec_possessions import sportec_event_endpoint_view
+
     path = match_dir / f"{component_name}.parquet"
     if not path.exists():
         return pd.DataFrame(columns=COMPONENT_BASE_IDENTIFIER_COLUMNS + ["object_id", component_name])
 
-    component = pd.read_parquet(path)
+    component = sportec_event_endpoint_view(pd.read_parquet(path))
     validate_required_columns(component, COMPONENT_BASE_IDENTIFIER_COLUMNS, str(path))
     component = normalize_component_identifiers(component)
     if FRAME_SCOPE_COLUMN in component.columns:

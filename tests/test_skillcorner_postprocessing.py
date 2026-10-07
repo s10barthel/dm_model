@@ -158,7 +158,7 @@ def test_skillcorner_all_frame_mode_preserves_all_valid_frames(monkeypatch: pyte
     patch_skillcorner_graph_builder(monkeypatch)
     possession = make_skillcorner_possession([10, 11, 12, 13, 14])
 
-    actions, labels, graphs, stats = skillcorner._build_actions_and_labels(possession, frames_mode="all")
+    actions, labels, graphs, stats = skillcorner._build_actions_and_labels(possession, scope="frames")
 
     assert actions.index.tolist() == [10, 11, 12, 13, 14]
     assert labels[:, 0].tolist() == [10, 11, 12, 13, 14]
@@ -172,7 +172,7 @@ def test_skillcorner_first_last_frame_mode_dedupes_single_valid_frame(monkeypatc
     patch_skillcorner_graph_builder(monkeypatch)
     possession = make_skillcorner_possession([10, 11, 12], has_ball={10: False, 12: False})
 
-    actions, _labels, graphs, stats = skillcorner._build_actions_and_labels(possession, frames_mode="first_and_last")
+    actions, _labels, graphs, stats = skillcorner._build_actions_and_labels(possession, scope="actions")
 
     assert actions.index.tolist() == [11]
     assert len(graphs) == 1
@@ -192,7 +192,8 @@ def test_skillcorner_first_last_frame_mode_falls_back_from_invalid_boundaries(mo
 
     actions, _labels, _graphs, stats = skillcorner._build_actions_and_labels(
         possession,
-        frames_mode="first_and_last",
+        scope="actions",
+        frames=1,
     )
 
     assert actions.index.tolist() == [12, 14]
@@ -205,9 +206,9 @@ def test_skillcorner_first_last_frame_mode_falls_back_from_invalid_boundaries(mo
 
 
 def test_run_skillcorner_frame_mode_cli_defaults_and_flags() -> None:
-    assert run_skillcorner.parse_args([]).frames_mode == "first_and_last"
-    assert run_skillcorner.parse_args(["--frames-first-and-last"]).frames_mode == "first_and_last"
-    assert run_skillcorner.parse_args(["--frames-all"]).frames_mode == "all"
+    assert run_skillcorner.parse_args([]).scope == "actions"
+    assert run_skillcorner.parse_args(["--scope", "actions"]).scope == "actions"
+    assert run_skillcorner.parse_args(["--scope", "frames"]).frames == 1
 
     with pytest.raises(SystemExit):
         run_skillcorner.parse_args(["--frames-first-and-last", "--frames-all"])
@@ -265,7 +266,8 @@ def test_run_skillcorner_main_prints_match_centered_progress(
         outcome_conceding_model_id=None,
         run_id="test_run",
         output_dir=str(tmp_path),
-        frames_mode="first_and_last",
+        scope="actions",
+        frames=1,
         physical_cache_dir=None,
         no_physical_cache=False,
         refresh_physical_cache=False,

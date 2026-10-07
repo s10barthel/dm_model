@@ -35,7 +35,8 @@ REQUIRED_COMPONENTS = [
     "outcome_conceding_failure",
 ]
 REQUIRED_COMPONENT_IDENTIFIER_COLUMNS = ["match_id", "frame", "index", "player_id"]
-IGNORED_COMPONENT_COLUMNS = {"period", "attacking_side", "shot"}
+IGNORED_COMPONENT_COLUMNS = {"period", "attacking_side", "shot", "frame_role", "original_start_frame",
+                             "original_end_frame", "pc_cache_match_id"}
 MODEL_KEY_COLUMNS = ["match_id", "frame", "index", "player_id", "receiver_id"]
 GAME_STATE_KEY_COLUMNS = ["match_id", "index"]
 GAME_STATE_FRAME_KEY_COLUMNS = ["match_id", "index", "frame"]

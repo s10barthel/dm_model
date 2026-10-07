@@ -1404,12 +1404,50 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
+#### Matching inference and pc-xPass frame coverage
+
+For receipt 102, release 119, and `--scope frames --frames 5`, both paths select
+102, 107, 112, 117, and 119. Invalid endpoints fall back inward to the nearest
+valid state; missing interior samples do not shift the original sampling grid.
+The ball carrier remains the spell's player even at possession-loss endpoints.
+
+For example (replace the example feature run, bundle, and cache IDs):
+
+```bash
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --sportec-feature-run-id FEATURE_RUN --scope frames --frames 5 --no-skillcorner --no-benchmark --no-hawkeye
+python scripts/run_relevant_models.py --bundle-id BUNDLE --feature-run-id FEATURE_RUN --scope frames --frames 5 --use-physical-xpass --pc-xpass --pc-xpass-id frames_demo
+```
+
+Use the same `--scope`/`--frames` for SkillCorner inference and generation too;
+the generator takes `--skillcorner-input-dir` / `--skillcorner-match-id` while
+the inference runner takes `--input-dir` / `--match-id`.
+
+pc-xPass calculations are unchanged. New possession-state caches use the
+`possession_states_v1` identity: each possession/provenance has a separate cache
+partition, and rows inside it are keyed by actual frame ID. This also isolates
+lane-control data. Scope/stride are not part of identity, so expanding coverage
+reuses overlapping states without overwriting other frames. Sportec partitions
+include the feature-run ID and a fingerprint of the whole-spell artifact.
+Dataset cache metadata records the partition-to-match/possession mapping.
+Legacy event-endpoint pc-xPass caches must be regenerated for these inference
+paths; there is no ambiguous fallback. Inference remains cache-read-only.
+For Sportec possession-state inference, physical blending requires pc-xPass;
+legacy ordinary physical-xPass rows use event indexes and cannot safely supply
+these frame-indexed states. Inference without physical blending is unaffected.
+
+The old SkillCorner `--frames-first-and-last` / `--frames-all` switches and their
+generator-prefixed equivalents have been removed. Use `--scope actions` or
+`--scope frames --frames 1` instead. Ordinary physical-xPass generation, training
+features, carry generation, and Benchmark/Hawkeye frame selection are unchanged.
+
 Sportec generation processes the canonical match universe in order, or the explicit `--match-id` selection, skipping matches with missing required artifacts. It does not resolve a train/test split. `--split`, `--train-split`, and `--train-count` are no longer accepted.
 - default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>`.
 - `--feature-run-id <feature_run_id>`: enable legacy Sportec feature-run sidecar mode under `data/features/runs/<feature_run_id>/physical_xpass`.
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
 - `--match-id <id>`: restrict Sportec matches. Default: all matches in the selected split.
-- `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`, `--skillcorner-frames-all`: SkillCorner runtime selectors.
+- `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`: SkillCorner runtime selectors.
+- `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Default: possession endpoints (`actions`); `frames` samples every Nth frame ID, starting at possession start, plus both endpoints. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
+- `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass (default: latest). Select the **same feature run as inference**. Existing whole-spell audit artifacts are required; neither generator nor inference derives new control spells.
 - `--benchmark-input-dir`, `--benchmark-modification`, `--benchmark-limit`: benchmark runtime selectors.
 - `--hawkeye-tracking-csv`, `--hawkeye-ball-csv`, `--hawkeye-situation-id`, `--hawkeye-limit`: Hawkeye runtime selectors.
 - `--limit <N>`: in Sportec/legacy mode, process only the first `N` pass actions across selected matches. Default: no limit.
@@ -1577,6 +1615,22 @@ When split flags are omitted, training infers the selector from feature-run meta
 
 ### `scripts/run_relevant_models.py`
 
+Sportec state inference uses the existing control-spell audit artifacts under
+`data/carry_segments/audits/<match_id>.parquet`, not one-second carry segments.
+Short, reliable spells are included even when excluded from carry training or
+missing a return-event label. Ambiguous/incomplete spells are excluded. Feature
+runs remain required; this is not feature-run-independent inference.
+
+- `--scope {actions,frames}`: select spell endpoints (default: `actions`) or strided states.
+- `--frames N`: positive integer frame-ID stride, valid only with `--scope frames`; default 1.
+
+Both scopes evaluate all applicable state-based components, including action
+intent at possession start. Event-specific success intent remains event-based.
+Outputs identify the possession, possessor, actual frame, endpoint/interior role,
+original boundaries, and pc-xPass cache partition. Event-based ranking reads only
+unambiguously linked endpoints; intermediate predictions do not change scoring
+formulas or get averaged into action scores.
+
 - `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups. It does not change an exported `pass_height` checkpoint's probability meaning; compatible predicted-height cache provenance is required when relevant.
 - `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
@@ -1689,7 +1743,8 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--input-dir <path>`: SkillCorner data root. Default: `skillcorner_data`.
 - `--match-id <id>`: restrict inference to one or more specific SkillCorner match ids. Default: all discoverable valid matches.
-- `--frames-first-and-last`: restrict inference to first and last frame of a ball possession
+- `--scope {actions,frames}`: first/last valid possession states (default: `actions`), or strided states.
+- `--frames N`: process every Nth frame ID relative to the original possession start, plus both endpoints. Default 1 in frames scope; invalid with actions scope. This is a stride, **not a frame count per action**.
 - `--limit <N>`: process only the first `N` selected matches. Default: no limit.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.

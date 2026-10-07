@@ -130,6 +130,9 @@ from project_config import (
 from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_frames
 
 
+from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
+from datatools.sportec_possessions import build_sportec_possessions
+
 RUNTIME_DATASETS = ("sportec", "skillcorner", "benchmark", "hawkeye")
 
 
@@ -146,6 +149,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate physical xPass caches for inference, or legacy feature-run sidecars when --feature-run-id is set."
     )
+    add_frame_selection_arguments(parser)
+    parser.add_argument("--sportec-feature-run-id", help="Input feature run for Sportec pc-xPass possession states; defaults to latest. Use the same run as inference.")
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
@@ -180,21 +185,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skillcorner-input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--skillcorner-match-id", action="append", help="Restrict SkillCorner matches.")
     parser.add_argument("--skillcorner-limit", type=int, help="Only process the first N selected SkillCorner matches.")
-    skillcorner_frames = parser.add_mutually_exclusive_group()
-    skillcorner_frames.add_argument(
-        "--skillcorner-frames-first-and-last",
-        dest="skillcorner_frames_mode",
-        action="store_const",
-        const="first_and_last",
-        default="first_and_last",
-    )
-    skillcorner_frames.add_argument(
-        "--skillcorner-frames-all",
-        dest="skillcorner_frames_mode",
-        action="store_const",
-        const="all",
-    )
-
     parser.add_argument("--benchmark-input-dir", default=str(PROJECT_ROOT / "benchmark"))
     parser.add_argument("--benchmark-modification", "--modification", dest="benchmark_modification", action="append", type=int)
     parser.add_argument("--benchmark-limit", type=int, help="Only process the first N selected benchmark modifications.")
@@ -399,6 +389,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser)
     reach.add_arguments(parser)
     args = parser.parse_args(argv)
+    resolve_frame_selection_arguments(parser, args, pc_only=True)
+    if args.sportec_feature_run_id and (not args.pc_xpass or args.feature_run_id):
+        parser.error("--sportec-feature-run-id requires runtime --pc-xpass mode.")
     if not args.pc_xpass and any(token.split('=', 1)[0] == '--margin' or token.startswith('--reachability-')
                                 for token in (sys.argv[1:] if argv is None else argv)):
         parser.error('--margin and --reachability-* require --pc-xpass')
@@ -1512,6 +1505,12 @@ def write_runtime_dataset_metadata(
         ],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
+    if source_inputs.get("state_contract") == STATE_CONTRACT:
+        metadata.update(
+            state_contract=STATE_CONTRACT,
+            storage="wide_parquet_one_row_per_possession_frame_player_id_columns",
+            state_identity="state_partitions[cache_match_id] + action_index(actual_frame_id)",
+        )
     if bool(getattr(args, "export_lane_control", False)):
         metadata["lane_control_export"] = {
             "enabled": True,
@@ -1535,6 +1534,13 @@ def write_runtime_dataset_metadata(
         )
     if (cache_dir / "metadata.json").exists():
         existing = pc_versions.read_metadata(cache_dir)
+        # Preserve discoverability of partitions computed with other strides or
+        # match selections; a new invocation adds coverage, not a new identity.
+        previous_partitions = (existing.get("source_inputs") or {}).get("state_partitions", {})
+        if previous_partitions or source_inputs.get("state_partitions"):
+            metadata["source_inputs"]["state_partitions"] = {
+                **previous_partitions, **source_inputs.get("state_partitions", {})
+            }
         metadata = {**existing, **metadata}
         if "generation_settings" in existing:
             metadata["created_at"] = existing["created_at"]
@@ -1684,7 +1690,64 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
     print(f"Wrote legacy Sportec physical xPass sidecars at {output_root}: {total_computed} computed, {total_reused} reused.")
 
 
+def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
+    from scripts.run_relevant_models import load_match
+
+    if args.reuse_cache_dir:
+        raise ValueError("--reuse-cache-dir is not supported for pc-xPass; reuse a compatible --pc-xpass-id instead.")
+    feature_run_id = resolve_feature_run_id(getattr(args, "sportec_feature_run_id", None), required=True, allow_latest=True)
+    feature_root = resolve_feature_root(feature_run_id)
+    _, return_type, intended_receiver_mode = resolve_reference_label_context(str(feature_run_id), feature_root, args)
+    cache_dir = pc_versions.cache_dir("sportec", args)
+    stats = empty_runtime_stats(cache_dir)
+    skipped, reports, partitions = {}, {}, {}
+    selected = resolve_match_ids(args, get_action_graph_dir(feature_root))
+    for match_id in tqdm(selected, desc="sportec possession pc-xPass", unit="matches"):
+        try:
+            match = load_match(str(match_id), intended_receiver_mode=intended_receiver_mode,
+                               return_type=return_type, feature_root=feature_root, load_endpoint_graphs=False)
+            pending = []
+            pending_rows = 0
+            for state, report in build_sportec_possessions(
+                match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
+                add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+                add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+            ):
+                reports[str(match_id)] = report
+                partitions[state.pc_cache_match_id] = {"match_id": str(match_id), "possession_id": state.event_index,
+                    "possessor_id": str(state.actions.object_id.iloc[0]), "feature_run_id": str(feature_run_id),
+                    "spell_artifact_sha256": report["spell_artifact_sha256"]}
+                unit = make_runtime_buffer_unit(
+                    display_key=f"sportec {match_id}:spell:{state.event_index}",
+                    skip_keys=[f"{match_id}:spell:{state.event_index}"],
+                    items=runtime_cache_items_from_graphs(state.pc_cache_match_id, state.graph_features_0, state.labels,
+                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION, state_frame_ids=state.actions.index.tolist()),
+                )
+                if unit is not None:
+                    pending.append(unit)
+                    pending_rows += int(unit["row_count"])
+                if pending_rows >= resolve_runtime_row_window(args, "sportec_runtime_row_window"):
+                    flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
+                                         progress_desc=f"sportec {match_id}")
+                    pending_rows = 0
+            flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
+                                 progress_desc=f"sportec {match_id}")
+            reports[str(match_id)] = match.possession_report
+            if not any(v["selected_frames"] for v in match.possession_report["possessions"].values()):
+                skipped[str(match_id)] = "no_valid_possession_states"
+        except Exception as exc:
+            skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
+            tqdm.write(f"sportec {match_id}: {skipped[str(match_id)]}")
+    write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
+        source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,
+                       "state_contract": STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
+                       "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION]}, skipped=skipped)
+    return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
+
+
 def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
+    if bool(getattr(args, "pc_xpass", False)):
+        return run_runtime_sportec_possessions(args)
     cache_dir = pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
     try:
         feature_run_id = resolve_feature_run_id(None, required=True, allow_latest=True)
@@ -2014,6 +2077,8 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
     cache_dir = pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
+    state_partitions: dict[str, Any] = {}
+    frame_selections: dict[str, Any] = {}
     row_window = resolve_runtime_row_window(args, "skillcorner_runtime_row_window")
     selected, skipped_discovery = discover_skillcorner_matches(
         args.skillcorner_input_dir,
@@ -2062,15 +2127,24 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         int(event_index),
                         add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                         add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
-                        frames_mode=args.skillcorner_frames_mode,
+                        scope=args.scope if args.pc_xpass else "actions",
+                        frames=args.frames if args.pc_xpass else 1,
                     )
+                    if args.pc_xpass and not possession.actions.empty:
+                        state_partitions[possession.pc_cache_match_id] = {
+                            "match_id": str(match_id), "possession_id": int(event_index),
+                            "possessor_id": str(possession.actions.object_id.iloc[0]),
+                        }
+                        frame_selections.setdefault(str(match_id), {})[str(event_index)] = possession.frame_selection
                     unit = make_runtime_buffer_unit(
                         display_key=f"skillcorner {match_id}:{event_index}",
                         skip_keys=[f"{match_id}:{event_index}"],
                         items=runtime_cache_items_from_graphs(
-                            str(possession.match_id),
+                            possession.pc_cache_match_id if args.pc_xpass else str(possession.match_id),
                             possession.graph_features_0,
                             possession.labels,
+                            frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION if args.pc_xpass else None,
+                            state_frame_ids=possession.actions.index.tolist() if args.pc_xpass else None,
                         ),
                     )
                     if unit is not None:
@@ -2113,7 +2187,10 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
         cache_dir,
         args,
         stats=stats,
-        source_inputs={"input_dir": str(args.skillcorner_input_dir), "match_ids": selected, "frames_mode": args.skillcorner_frames_mode},
+        source_inputs={"input_dir": str(args.skillcorner_input_dir), "match_ids": selected,
+                       "scope": args.scope if args.pc_xpass else "actions", "frames": args.frames if args.pc_xpass else 1,
+                       "state_contract": STATE_CONTRACT if args.pc_xpass else None,
+                       "state_partitions": state_partitions, "frame_selections": frame_selections},
         skipped={"discovery": skipped_discovery, "processing": skipped},
     )
     return {"dataset": "skillcorner", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}

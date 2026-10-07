@@ -262,7 +262,7 @@ def render_possession(
         )
         possession_component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
             physical_cache_dir,
-            str(possession.match_id),
+            possession.pc_cache_match_id if bool(getattr(args, "pc_xpass", False)) else str(possession.match_id),
             physical_frame_ids,
             metric=physical_xpass_metric_name,
             x_pass_version=getattr(args, "x_pass_version", "top10"),

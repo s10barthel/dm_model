@@ -54,6 +54,7 @@ tests/AS_viz/
 !tests/split_fixture.py
 !tests/test_preprocess_sportec.py
 !tests/test_endpoint_policy.py
+!tests/test_possession_frames.py
 test_kpi_final/
 test_nan_xg/
 test_smoke_2425

@@ -39,8 +39,9 @@ COMPONENT_COLUMNS = [
     "outcome_conceding_success",
     "outcome_conceding_failure",
 ]
-METADATA_COLUMNS = ["match_id", "frame", "index", "period", "player_id", "attacking_side"]
-SKILLCORNER_FRAME_MODES = {"all", "first_and_last"}
+METADATA_COLUMNS = ["match_id", "frame", "index", "period", "player_id", "attacking_side",
+                    "frame_role", "original_start_frame", "original_end_frame", "pc_cache_match_id"]
+from datatools.possession_frames import possession_cache_identity, select_possession_frames
 
 
 @dataclass
@@ -62,6 +63,8 @@ class SkillcornerPossession:
     lineup: pd.DataFrame = field(default_factory=pd.DataFrame)
     tabular_features_0: None = None
     tabular_features_1: None = None
+    original_start_frame: int | None = None
+    original_end_frame: int | None = None
 
 
 def _match_paths(input_dir: str | Path, match_id: str) -> dict[str, Path]:
@@ -551,7 +554,8 @@ def _build_actions_and_labels(
     possession: SkillcornerPossession,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
-    frames_mode: str = "first_and_last",
+    scope: str = "actions",
+    frames: int = 1,
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
     actions: list[dict[str, Any]] = []
     labels: list[list[float]] = []
@@ -561,60 +565,22 @@ def _build_actions_and_labels(
     period_tracking = possession.tracking[possession.tracking["period_id"] == period_id]
     stats = _initial_skillcorner_frame_stats(len(possession.frame_meta))
 
-    if frames_mode not in SKILLCORNER_FRAME_MODES:
-        raise ValueError(f"Unsupported SkillCorner frames_mode: {frames_mode}")
-
-    frame_items = [(int(frame_id), frame_row) for frame_id, frame_row in possession.frame_meta.iterrows()]
-    if frames_mode == "all":
-        for frame_id, frame_row in frame_items:
-            result = _evaluate_skillcorner_frame(
-                possession,
-                frame_id,
-                frame_row,
-                period_tracking,
-                feature_dim,
-                add_v_edge_features,
-                add_relative_speed_edge_features,
-                stats,
-            )
-            if result is not None:
-                _append_skillcorner_frame_result(result, actions, labels, graphs, stats)
-    else:
-        first_frame_id: int | None = None
-        first_result: tuple[dict[str, Any], list[float], Data] | None = None
-        for frame_id, frame_row in frame_items:
-            first_result = _evaluate_skillcorner_frame(
-                possession,
-                frame_id,
-                frame_row,
-                period_tracking,
-                feature_dim,
-                add_v_edge_features,
-                add_relative_speed_edge_features,
-                stats,
-            )
-            if first_result is not None:
-                first_frame_id = frame_id
-                _append_skillcorner_frame_result(first_result, actions, labels, graphs, stats)
-                break
-
-        if first_frame_id is not None and first_result is not None:
-            for frame_id, frame_row in reversed(frame_items):
-                if frame_id == first_frame_id:
-                    break
-                result = _evaluate_skillcorner_frame(
-                    possession,
-                    frame_id,
-                    frame_row,
-                    period_tracking,
-                    feature_dim,
-                    add_v_edge_features,
-                    add_relative_speed_edge_features,
-                    stats,
-                )
-                if result is not None:
-                    _append_skillcorner_frame_result(result, actions, labels, graphs, stats)
-                    break
+    frame_rows = {int(frame_id): row for frame_id, row in possession.frame_meta.iterrows()}
+    if frame_rows:
+        start = possession.original_start_frame if possession.original_start_frame is not None else min(frame_rows)
+        end = possession.original_end_frame if possession.original_end_frame is not None else max(frame_rows)
+        selected, selection = select_possession_frames(
+            frame_rows, start, end,
+            lambda frame: _evaluate_skillcorner_frame(
+                possession, frame, frame_rows[frame], period_tracking, feature_dim,
+                add_v_edge_features, add_relative_speed_edge_features, stats,
+            ), scope=scope, frames=frames,
+        )
+        possession.frame_selection = selection
+        for frame, result, role in selected:
+            result[0].update(frame_role=role, original_start_frame=start, original_end_frame=end)
+            _append_skillcorner_frame_result(result, actions, labels, graphs, stats)
+        stats["endpoint_substitutions"] = selection["endpoint_substitutions"]
 
     actions_df = (
         pd.DataFrame(actions).set_index("frame_id", drop=False)
@@ -630,7 +596,8 @@ def build_skillcorner_possession(
     event_index: int,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
-    frames_mode: str = "first_and_last",
+    scope: str = "actions",
+    frames: int = 1,
 ) -> tuple[SkillcornerPossession, dict[str, int]]:
     events = context["events"]
     event_rows = events.loc[events["index"] == int(event_index)]
@@ -661,6 +628,8 @@ def build_skillcorner_possession(
         actions=pd.DataFrame(),
         labels=torch.empty((0, len(config.LABEL_COLUMNS))),
         graph_features_0=[],
+        original_start_frame=int(event_row["frame_start"]),
+        original_end_frame=int(event_row["frame_end"]),
     )
     if frame_meta.empty:
         empty_stats = _initial_skillcorner_frame_stats(0)
@@ -670,7 +639,18 @@ def build_skillcorner_possession(
         possession,
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
-        frames_mode=frames_mode,
+        scope=scope,
+        frames=frames,
+    )
+    possession.pc_cache_match_id = possession_cache_identity(
+        "skillcorner", possession.match_id, possession.event_index, str(event_row["player_id"]),
+        {"start": possession.original_start_frame, "end": possession.original_end_frame, "period": int(event_row["period"])},
+    )
+    possession.pc_generation_hint = (
+        "Generate matching states with scripts/generate_physical_xpass.py --pc-xpass "
+        f"--skillcorner-match-id {possession.match_id} --scope {scope}"
+        + (f" --frames {frames}" if scope == "frames" else "")
+        + "; select the same pc-xPass version and input data for generation and inference."
     )
     possession.actions = actions
     possession.labels = labels
@@ -688,20 +668,22 @@ def infer_skillcorner_components(
     if possession.labels.numel() == 0 or not possession.graph_features_0:
         return components
 
-    action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False)
-    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False)
+    state_inputs = {"graph_override": possession.graph_features_0, "label_override": possession.labels}
+    action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False, **state_inputs)
+    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False, **state_inputs)
     try:
         pass_success, _ = inference_gnn(
             possession,
             model_specs["pass_success"],
             device=device,
             post_action=False,
+            **state_inputs,
             pass_intent_probs=pass_intent,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
     if "pass_height" in model_specs:
-        pass_height, _ = inference_gnn(possession, model_specs["pass_height"], device=device, post_action=False)
+        pass_height, _ = inference_gnn(possession, model_specs["pass_height"], device=device, post_action=False, **state_inputs)
     else:
         pass_height = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
@@ -709,12 +691,14 @@ def infer_skillcorner_components(
         model_specs["outcome_scoring"],
         device=device,
         post_action=False,
+        **state_inputs,
     )
     conceding_failure, conceding_success = inference_gnn(
         possession,
         model_specs["outcome_conceding"],
         device=device,
         post_action=False,
+        **state_inputs,
     )
 
     components["action_intent"] = action_intent
@@ -774,6 +758,9 @@ def build_skillcorner_component_table(
     mapped = _map_component_columns(component_frame, include_shot).rename_axis("frame").reset_index()
     metadata = metadata.loc[metadata["frame"].isin(mapped["frame"])].copy()
     table = metadata.merge(mapped, on="frame", how="inner")
+    for column in ["frame_role", "original_start_frame", "original_end_frame"]:
+        table[column] = table["frame"].map(possession.actions.get(column, pd.Series(dtype=object)))
+    table["pc_cache_match_id"] = getattr(possession, "pc_cache_match_id", None)
 
     for column in option_columns:
         if column not in table.columns:
