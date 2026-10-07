@@ -543,13 +543,23 @@ def _assign_phase_ids(tracking: pd.DataFrame, keepers: list[str]) -> tuple[pd.Da
 
 
 def _add_goal_nodes(tracking: pd.DataFrame) -> pd.DataFrame:
+    if "ball_owning_home_away" not in tracking.columns:
+        raise ValueError("Hawkeye goal placement requires ball_owning_home_away possession prefixes.")
+    possession = tracking["ball_owning_home_away"]
+    invalid = ~possession.isin(["home", "away"])
+    if invalid.any():
+        raise ValueError(
+            "Hawkeye goal placement requires 'home' or 'away' possession prefixes; "
+            f"invalid values at frames {tracking.index[invalid].tolist()}."
+        )
     tracking = tracking.copy()
     features = ["x", "y", "vx", "vy", "speed", "accel"]
     goal_cols = [f"{team}_goal_{feature}" for team in ["home", "away"] for feature in features]
     tracking[goal_cols] = 0.0
-    tracking["home_goal_x"] = config.FIELD_SIZE[0]
+    # GameID transforms already make possession attack from left to right.
+    tracking["home_goal_x"] = np.where(possession == "home", config.FIELD_SIZE[0], 0.0)
     tracking["home_goal_y"] = config.FIELD_SIZE[1] / 2
-    tracking["away_goal_x"] = 0.0
+    tracking["away_goal_x"] = np.where(possession == "away", config.FIELD_SIZE[0], 0.0)
     tracking["away_goal_y"] = config.FIELD_SIZE[1] / 2
     return tracking
 

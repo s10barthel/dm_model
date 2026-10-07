@@ -622,10 +622,9 @@ class SnapshotVisualizer:
                 annot_kwargs = dict(annot_args)
                 if not p.endswith("_goal"):
                     annot_kwargs.update({"xytext": (0, 8), "textcoords": "offset points"})
-                elif p == "home_goal":
-                    text_xy[0] += 3
-                elif p == "away_goal":
-                    text_xy[0] -= 3
+                else:
+                    # Place labels inside the pitch using the displayed goal position.
+                    text_xy[0] += 3 if text_xy[0] < config.FIELD_SIZE[0] / 2 else -3
                 ax.annotate(text, xy=text_xy, **annot_kwargs)
 
         if self.colors is not None:
