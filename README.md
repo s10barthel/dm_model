@@ -1636,9 +1636,9 @@ formulas or get averaged into action scores.
 - `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - Carry-augmented inference is selected automatically from checkpoint metadata and requires a feature run with carry artifacts; there is no runtime `--use-carries` flag.
-- `--split {train,test,all}`: choose which Sportec split to export. Default: `test`.
+- `--split {train,test,all}`: choose which Sportec split to export. Default: `all`.
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
-- `--season {22_23,23_24,24_25}`: restrict Sportec export to selected seasons; repeat to select multiple seasons. Intersects with `--match-id` and `--split`; use `--split all --season 24_25` for the full eligible season (the default split remains `test`). Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Default: no season filter.
+- `--season {22_23,23_24,24_25}`: restrict Sportec export to selected seasons; repeat to select multiple seasons. Intersects with `--match-id` and `--split`; use `--season 24_25` for the full eligible season (the default split is `all`). Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Default: no season filter.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.

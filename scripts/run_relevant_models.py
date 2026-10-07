@@ -71,7 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_frame_selection_arguments(parser)
     add_season_argument(parser)
-    parser.add_argument("--split", default="test", choices=["train", "test", "all"])
+    parser.add_argument("--split", default="all", choices=["train", "test", "all"])
     add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
     parser.add_argument("--device", default="cuda:0")
