@@ -64,11 +64,13 @@ from project_config import (
     write_latest_run,
     write_run_metadata,
 )
+from datatools.sportec_seasons import add_season_argument, select_season_match_ids
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_frame_selection_arguments(parser)
+    add_season_argument(parser)
     parser.add_argument("--split", default="test", choices=["train", "test", "all"])
     add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
@@ -547,6 +549,7 @@ def resolve_match_ids(
     feature_dir: Path,
     train_split: int | None = None,
     *, train_count: int | None = None,
+    requested_seasons: list[str] | None = None,
 ) -> list[str]:
     train_ids, test_ids = load_base_splits(feature_dir, train_split=train_split, train_count=train_count)
 
@@ -561,6 +564,7 @@ def resolve_match_ids(
         requested = set(requested_match_ids)
         match_ids = [match_id for match_id in match_ids if match_id in requested]
 
+    match_ids = select_season_match_ids(match_ids, requested_seasons)
     if not match_ids:
         raise ValueError("No matches selected for component inference.")
 
@@ -701,7 +705,9 @@ def main() -> None:
         args.match_id,
         get_action_graph_dir(feature_root, use_carries=use_carries),
         **recorded_selector,
+        requested_seasons=args.season,
     )
+    print(f"Selected {len(match_ids)} Sportec matches for component inference.")
 
     physical_lookup_config = (
         physical_xpass_inference_lookup_config(pass_success_args, cache_dir=physical_cache_dir)
@@ -717,6 +723,7 @@ def main() -> None:
         "output_parent": str(output_parent),
         "split": args.split,
         **split_metadata(shared_context),
+        "requested_seasons": list(dict.fromkeys(args.season or [])),
         "requested_match_ids": match_ids,
         "feature_run_id": feature_run_id,
         "runtime_feature_run_id": feature_run_id,

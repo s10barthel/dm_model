@@ -1444,7 +1444,8 @@ Sportec generation processes the canonical match universe in order, or the expli
 - default mode: generate runtime physical xPass caches for Sportec, SkillCorner, Benchmark, and Hawkeye under `data/runtime_physical_xpass/<dataset>`.
 - `--feature-run-id <feature_run_id>`: enable legacy Sportec feature-run sidecar mode under `data/features/runs/<feature_run_id>/physical_xpass`.
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
-- `--match-id <id>`: restrict Sportec matches. Default: all matches in the selected split.
+- `--match-id <id>`: restrict Sportec matches. Default: all matches in the canonical preprocessed match universe.
+- `--season {22_23,23_24,24_25}`: restrict Sportec to selected seasons; repeat to select multiple seasons. Intersects with `--match-id`. Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Other datasets remain enabled. Cannot be combined with `--no-sportec`. Default: no season filter.
 - `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`: SkillCorner runtime selectors.
 - `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Default: possession endpoints (`actions`); `frames` samples every Nth frame ID, starting at possession start, plus both endpoints. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
 - `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass (default: latest). Select the **same feature run as inference**. Existing whole-spell audit artifacts are required; neither generator nor inference derives new control spells.
@@ -1637,6 +1638,7 @@ formulas or get averaged into action scores.
 - Carry-augmented inference is selected automatically from checkpoint metadata and requires a feature run with carry artifacts; there is no runtime `--use-carries` flag.
 - `--split {train,test,all}`: choose which Sportec split to export. Default: `test`.
 - `--match-id <id>`: restrict export to one or more specific matches. Default: all matches in the selected split.
+- `--season {22_23,23_24,24_25}`: restrict Sportec export to selected seasons; repeat to select multiple seasons. Intersects with `--match-id` and `--split`; use `--split all --season 24_25` for the full eligible season (the default split remains `test`). Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Default: no season filter.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
@@ -2174,3 +2176,27 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - `data/visualizations/skillcorner/<visualization_run_id>/<match_id>/<index>/*.{png,mp4,gif}`
   - `data/visualizations/skillcorner/<visualization_run_id>/metadata.json`
+
+## Sportec season selection
+
+`generate_physical_xpass.py` and `run_relevant_models.py` accept repeatable
+`--season` values (`22_23`, `23_24`, `24_25`). For example:
+
+```bash
+python scripts/generate_physical_xpass.py --season 24_25
+python scripts/run_relevant_models.py --split all --season 24_25
+```
+
+Season filters intersect with `--match-id` and the existing eligible match set.
+Inference still defaults to `--split test`; use `--split all` for the full eligible
+season. Repeat `--season` to select multiple seasons. Cache generation filters
+Sportec only: other datasets remain enabled unless explicitly disabled.
+`--season` cannot be combined with `--no-sportec`. Existing limits and cache
+reuse/overwrite behavior are unchanged.
+
+Membership is discovered from `DFL-MAT-*` match-information filenames under
+`RAW_SEASON_ROOTS`; raw events and tracking are not required. Requested season
+metadata directories must be accessible, and every candidate match must have
+unambiguous membership. Missing membership, conflicting seasons, and empty
+selections fail explicitly. No preprocessing or metadata migration is required,
+and commands without `--season` do not inspect raw season directories.

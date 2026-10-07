@@ -72,3 +72,5 @@ __pycache__/
 
 *.log
 _vendor/defcon/saved
+
+!tests/test_sportec_seasons.py

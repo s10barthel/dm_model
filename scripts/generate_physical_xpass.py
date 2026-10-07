@@ -132,6 +132,7 @@ from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_f
 
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
 from datatools.sportec_possessions import build_sportec_possessions
+from datatools.sportec_seasons import add_season_argument, select_season_match_ids
 
 RUNTIME_DATASETS = ("sportec", "skillcorner", "benchmark", "hawkeye")
 
@@ -150,6 +151,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Generate physical xPass caches for inference, or legacy feature-run sidecars when --feature-run-id is set."
     )
     add_frame_selection_arguments(parser)
+    add_season_argument(parser)
     parser.add_argument("--sportec-feature-run-id", help="Input feature run for Sportec pc-xPass possession states; defaults to latest. Use the same run as inference.")
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
@@ -389,6 +391,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser)
     reach.add_arguments(parser)
     args = parser.parse_args(argv)
+    if args.season and args.no_sportec:
+        parser.error("--season cannot be combined with --no-sportec.")
     resolve_frame_selection_arguments(parser, args, pc_only=True)
     if args.sportec_feature_run_id and (not args.pc_xpass or args.feature_run_id):
         parser.error("--sportec-feature-run-id requires runtime --pc-xpass mode.")
@@ -677,10 +681,14 @@ def resolve_reference_label_dir(feature_run_id: str, feature_root: Path, args: a
 
 
 def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
-    if args.match_id:
-        return [str(match_id) for match_id in args.match_id]
-
-    return [str(match_id) for match_id in load_match_universe()["match_ids"]]
+    if getattr(args, "_preflight_season_match_ids", None) is not None:
+        return list(args._preflight_season_match_ids)
+    candidates = args.match_id or load_match_universe()["match_ids"]
+    selected = select_season_match_ids(candidates, getattr(args, "season", None))
+    args.selected_sportec_match_ids = selected
+    if getattr(args, "season", None):
+        print(f"Selected {len(selected)} Sportec matches for seasons: {', '.join(dict.fromkeys(args.season))}")
+    return selected
 
 
 def teammate_policy_from_args(args: argparse.Namespace) -> str:
@@ -1419,6 +1427,12 @@ def write_runtime_dataset_metadata(
     if bool(getattr(args, "dry_run", False)):
         print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
         return
+    if dataset == "sportec":
+        source_inputs = {
+            **source_inputs,
+            "requested_seasons": list(dict.fromkeys(getattr(args, "season", None) or [])),
+            "selected_match_ids": getattr(args, "selected_sportec_match_ids", []),
+        }
     base_metadata = (
         pc_xpass_metadata(
             teammate_policy_from_args(args),
@@ -1672,6 +1686,8 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
         "label_dir": str(label_dir),
         "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
         "output_root": str(output_root),
+        "requested_seasons": list(dict.fromkeys(getattr(args, "season", None) or [])),
+        "selected_match_ids": match_ids,
         "match_ids": written_match_ids,
         "skipped_match_ids": skipped_match_ids,
         "n_actions": int(total_computed + total_reused),
@@ -2210,6 +2226,8 @@ def selected_runtime_datasets(args: argparse.Namespace) -> list[str]:
 
 
 def run_runtime_mode(args: argparse.Namespace) -> None:
+    if getattr(args, "season", None):
+        args._preflight_season_match_ids = resolve_match_ids(args, PROJECT_ROOT)
     pc_versions.start_generation(args)
     if args.overwrite:
         warnings.warn("--overwrite is ignored in runtime mode; runtime physical xPass caches are updated in place.")
