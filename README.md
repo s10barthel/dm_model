@@ -1056,11 +1056,16 @@ python scripts/generate_physical_xpass.py --no-sportec --benchmark-modification 
 python scripts/generate_physical_xpass.py --pass-height-model-id pass_height/<model_run_id>
 python scripts/generate_physical_xpass.py --pc-xpass --top-n 10 --pass-height-model-id pass_height/<model_run_id>
 python scripts/generate_physical_xpass.py --pc-xpass --top-n 10 --top-pass 5 10
+python scripts/generate_physical_xpass.py --pc-xpass --export-lane-control --pc-xpass-id <new_run_id>
 ```
 
 For **pc-xPass**, top metrics are opt-in: omitting both flags generates maximum output only. `--top-n N` retains the mean over the best N speed–angle–endpoint combinations; `--top-n-values 5 10` explicitly requests multiple counts. `--top-pass 5 10` (also `--top_pass`) instead selects the best endpoint for each speed–angle pair, ranks those distinct pairs, and exports a mean for each requested count. Endpoint and pair ranking both use xPass × xT with `--top-xt`, or xPass otherwise; the exported means remain xPass. Each family has separate lane-survival and receiver-control diagnostics. This describes good execution options, not an explicit execution-noise distribution.
 
 Downstream inference and visualization select exactly one count directly with `--pc-xpass --top-pass 5`; no `--xpass-version` flag is needed. This is equivalent to `--pc-xpass --xpass-version top-pass5`. The evaluation commands already use pc-xPass and accept `--top-pass 5` directly. Generating the metric does not change downstream defaults: existing commands defaulting to `top10` still need `--top-n 10` during generation or an explicit alternative selection. Conflicting selectors and unavailable cache metrics raise errors. Original physical xPass defaults are unchanged.
+
+Optional **per-opponent lane-control export**: add `--export-lane-control` when creating a fresh pc-xPass version. The main cache remains wide (one row per state with receiver-specific columns); a separate long-format Parquet sidecar stores one row per state, receiver, and opponent at `data/pc_xpass/<run_id>/<dataset>/lane_control/<match_id>.parquet`. It contains `match_id`, `action_index`, `physical_state_hash`, nullable `frame_scope` and `state_frame_id`, `receiver_id`, `opponent_id`, `lane_control`, and the selected pass's `speed`, `angle`, `distance`, `target_x`, and `target_y`.
+
+Each contribution is the opponent's maximum interception control over lane samples **strictly before the endpoint**; `product(1 - lane_control)` reconstructs the selected pass's lane survival. Selection follows the main cache, including xPass × xT ranking with `--top-xt`. The export is off by default and does not change scoring or existing cache columns. **No backfill:** it cannot be enabled on an existing version created without it. Export-enabled versions can resume unfinished computation, but missing sidecars for existing cache hits cause an incomplete-coverage error rather than recomputation. Coverage manifests include valid empty exports. See [lane-control export documentation](docs/lane_control_export.md).
 
 Default runtime output locations:
 
@@ -1421,7 +1426,10 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--top-n <N>`: number of highest finite xPass grid values averaged for the default top-N metric. Original physical xPass stores this as `__topmean_xpass` with metadata `top_n=N`; pc-xPass stores it as `__top<N>_xpass` and uses it for unsuffixed default player columns. Default: `10` for original physical xPass; opt-in for pc-xPass.
 - `--top-n-values <N...>`: pc-xPass only; export additional top-N columns in one run, for example `--top-n-values 5 10 25` writes `__top5_xpass`, `__top10_xpass`, and `__top25_xpass`. An explicitly supplied `--top-n` value is also included.
 - `--top-pass <N...>` / `--top_pass <N...>`: pc-xPass only; export `__top_pass<N>_xpass` and matching diagnostics for the best N distinct speed-angle pairs after endpoint optimization. Opt-in; accepts multiple positive integers.
-- `--pc-xpass`: generate pc-xPass caches under `data/pc_xpass/<dataset>` instead of runtime physical xPass caches.
+- `--pc-xpass` / `--pc_xpass`: generate versioned pc-xPass caches under `data/pc_xpass/<run_id>/<dataset>` instead of runtime physical xPass caches.
+- `--pc-xpass-id <run_id>`: pin a fresh pc-xPass version ID or resume a version with matching recorded generation settings. Default: auto-generate a new ID.
+- `--export-lane-control`: pc-xPass only; export per-opponent interception controls for each receiver's selected best pass to `lane_control/<match_id>.parquet` within the dataset cache. Default: off. Uses long-format state/receiver/opponent rows and includes state identifiers and selected-pass geometry; does not change the main cache or scoring. Enable only when creating a fresh version; no backfill of existing cache rows is performed. Resume inherits the recorded option, and missing sidecars for cache hits raise an incomplete-coverage error. Valid with `--no-max` when another xPass metric remains enabled; incompatible with `--reuse-cache-dir` and legacy `--feature-run-id` mode. See [export schema and semantics](docs/lane_control_export.md).
+- `--top-xt`: pc-xPass only; rank max, top-N, and top-pass options by xPass × interpolated xT while exporting xPass probabilities. Best-pass details and optional opponent lane controls follow the same selected option. Default: off.
 - `--margin {tta,reachability}`: pc-xPass only; choose the player-movement margin model. `tta` retains the reaction-time/max-speed model and is the default. `reachability` uses a fitted empirical reachability artifact and requires `--reachability-model-id`; see [Empirical reachability circles for pc-xPass](docs/reachability.md).
 - `--reaction-time <seconds|dist_pass>`: pc-xPass only; fixed player reaction time or distance-to-passer mode. With `dist_pass`, each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)`. Default: `0.25`.
 - `--dist-pass-div <float>`: pc-xPass only; divisor for `--reaction-time dist_pass`. Default: `50`.
@@ -1937,8 +1945,11 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 - Outputs:
   - default runtime cache: `data/runtime_physical_xpass/<dataset>/metadata.json`
   - default runtime rows: `data/runtime_physical_xpass/<dataset>/matches/*.parquet`
-  - pc-xPass cache with `--pc-xpass`: `data/pc_xpass/<dataset>/metadata.json`
-  - pc-xPass rows with `--pc-xpass`: `data/pc_xpass/<dataset>/matches/*.parquet`
+  - pc-xPass version metadata with `--pc-xpass`: `data/pc_xpass/<run_id>/metadata.json`
+  - pc-xPass dataset metadata: `data/pc_xpass/<run_id>/<dataset>/metadata.json`
+  - pc-xPass rows: `data/pc_xpass/<run_id>/<dataset>/matches/*.parquet`
+  - optional opponent lane controls with `--export-lane-control`: `data/pc_xpass/<run_id>/<dataset>/lane_control/<match_id>.parquet` (one row per state/receiver/opponent)
+  - optional lane-control coverage manifests: `data/pc_xpass/<run_id>/<dataset>/lane_control/coverage/<match_id>.json` (including completed states with no export rows)
   - legacy feature-run sidecars with `--feature-run-id`: `data/features/runs/<feature_run_id>/physical_xpass/...`
   - optional per-player `<player_id>__pass_height` columns in runtime/pc cache rows when pass-height enrichment is enabled
 

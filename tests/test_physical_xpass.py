@@ -10,6 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+import pc_xpass_versions
+
 import numpy as np
 import pandas as pd
 import torch
@@ -8293,3 +8296,149 @@ class PhysicalXPassTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Optional best-pass opponent-control sidecars (no historical backfill).
+@pytest.mark.parametrize("top_xt", [False, True])
+@pytest.mark.parametrize("export_max", [False, True])
+def test_selected_controls_reconstruct_survival(top_xt, export_max, monkeypatch):
+    monkeypatch.setattr(physical_pass_model, "_pc_xpass_xt_values", lambda x, y: 0.1 + x / 105.0)
+    graph = make_graph(["home_1", "home_2", "away_3", "away_4"])
+    records = []
+    kwargs = dict(max_speed=7, angle_step=90, top_xt=top_xt,
+                  enabled_metrics=["top10_xpass"] + (["max_xpass"] if export_max else []))
+    expected = physical_pass_model.compute_graph_pc_xpass_metrics(graph, **kwargs)
+    actual = physical_pass_model.compute_graph_pc_xpass_metrics(graph, lane_control_records=records, **kwargs)
+    pd.testing.assert_series_equal(expected, actual)
+    assert records
+    frame = pd.DataFrame(records)
+    assert set(frame.opponent_id) == {"away_3", "away_4"}
+    for receiver, group in frame.groupby("receiver_id"):
+        assert np.prod(1 - group.lane_control) == pytest.approx(actual[f"{receiver}__lane_survival"])
+        for field in ["speed", "angle", "distance", "target_x", "target_y"]:
+            assert (group[field] == actual[f"{receiver}__{field}"]).all()
+    batch_records = [[]]
+    batch = physical_pass_model.compute_graphs_pc_xpass_metrics([graph], lane_control_records=batch_records, **kwargs)
+    assert batch_records == [records]
+    pd.testing.assert_series_equal(batch[0], actual)
+
+
+def test_prefix_controls_endpoint_and_nonfinite():
+    raw = np.array([[[[.2, np.nan, .9, 1.]]], [[[np.inf, -.2, .3, .8]]]])
+    for distance in range(4):
+        controls = physical_pass_model._pc_xpass_selected_lane_controls(raw, 0, 0, distance)
+        assert np.prod(1 - controls) == pytest.approx(physical_pass_model.pc_xpass_lane_survival_from_raw(raw)[0, 0, distance])
+    np.testing.assert_array_equal(physical_pass_model._pc_xpass_selected_lane_controls(raw, 0, 0, 0), [0, 0])
+    np.testing.assert_allclose(physical_pass_model._pc_xpass_selected_lane_controls(raw, 0, 0, 2), [.2, 0])
+
+
+def lane_export_identity(scope=None):
+    return dict(match_id="match", action_index=7, physical_state_hash="hash", frame_scope=scope, state_frame_id=42)
+
+
+def lane_export_record(state):
+    return dict(**state, receiver_id="home_2", opponent_id="away_3", lane_control=.2,
+                speed=7., angle=0., distance=12., target_x=12., target_y=34.)
+
+
+def test_writer_scope_dedupe_and_empty_coverage(tmp_path):
+    first, second = lane_export_identity(), lane_export_identity("receive_frame_id")
+    physical_pass_model._write_lane_control_sidecar(tmp_path, "match", [lane_export_record(first)] * 2, [first])
+    physical_pass_model._write_lane_control_sidecar(tmp_path, "match", [lane_export_record(second)], [second])
+    physical_pass_model._write_lane_control_sidecar(tmp_path, "match", [lane_export_record(first)], [first])
+    path = tmp_path / "lane_control/match.parquet"
+    frame = pd.read_parquet(path)
+    assert len(frame) == 2
+    assert list(frame.columns) == physical_pass_model.LANE_CONTROL_COLUMNS
+    assert len(physical_pass_model._lane_control_completed_states(tmp_path, "match")) == 2
+    physical_pass_model._write_lane_control_sidecar(tmp_path, "match", [], [first])
+    assert len(pd.read_parquet(path)) == 1
+    assert len(physical_pass_model._lane_control_completed_states(tmp_path, "match")) == 2
+    path.unlink()
+    assert not physical_pass_model._lane_control_completed_states(tmp_path, "match")
+
+
+def test_atomic_failure_does_not_mark_completed(tmp_path):
+    with patch.object(Path, "replace", side_effect=PermissionError("locked")):
+        with pytest.raises(PermissionError):
+            physical_pass_model._write_lane_control_sidecar(tmp_path, "match", [lane_export_record(lane_export_identity())], [lane_export_identity()])
+    assert not physical_pass_model._lane_control_completed_states(tmp_path, "match")
+    assert not list(tmp_path.rglob("*.tmp.*"))
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_runtime_export_resume_and_no_backfill(tmp_path, workers):
+    graph = make_graph()
+    kwargs = dict(cache_dir=tmp_path, source=physical_pass_model.PC_XPASS_SOURCE, export_lane_control=True,
+                  max_speed=7, angle_step=90, num_workers=workers, physical_batch_size=1)
+    items = [dict(match_id="match", graphs=[graph, graph],
+                  labels=torch.stack([make_label(action_index=7), make_label(action_index=8)]))]
+    physical_pass_model.prewarm_physical_xpass_runtime_cache(items, **kwargs)
+    path = tmp_path / "lane_control/match.parquet"
+    frame = pd.read_parquet(path)
+    assert set(frame.action_index) == {7, 8}
+    assert len(physical_pass_model._lane_control_completed_states(tmp_path, "match")) == 2
+    with patch.object(physical_pass_model, "_compute_runtime_physical_xpass_chunk", side_effect=AssertionError("must not recompute")):
+        physical_pass_model.prewarm_physical_xpass_runtime_cache(items, **kwargs)
+        path.unlink()
+        with pytest.raises(ValueError, match="no backfill"):
+            physical_pass_model.prewarm_physical_xpass_runtime_cache(items, **kwargs)
+
+
+def test_disabled_has_no_sidecar(tmp_path):
+    physical_pass_model.prewarm_physical_xpass_runtime_cache(
+        [dict(match_id="match", graphs=[make_graph()], labels=torch.stack([make_label()]))],
+        cache_dir=tmp_path, source=physical_pass_model.PC_XPASS_SOURCE, max_speed=7, angle_step=90, num_workers=1)
+    assert not (tmp_path / "lane_control").exists()
+
+
+def test_cli_fresh_run_only_and_old_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr(pc_xpass_versions.config, "PC_XPASS_DIR", tmp_path)
+    with pytest.raises(SystemExit):
+        generate_physical_xpass.parse_args(["--export-lane-control"])
+    args = generate_physical_xpass.parse_args(["--pc-xpass", "--pc-xpass-id", "old"])
+    pc_xpass_versions.start_generation(args)
+    metadata = pc_xpass_versions.read_metadata(tmp_path / "old")
+    metadata["generation_settings"].pop("export_lane_control")
+    pc_xpass_versions.atomic_json(tmp_path / "old/metadata.json", metadata)
+    with pytest.raises(ValueError, match="new pc-xPass version"):
+        generate_physical_xpass.parse_args(["--pc-xpass", "--pc-xpass-id", "old", "--export-lane-control"])
+    pc_xpass_versions.start_generation(generate_physical_xpass.parse_args(["--pc-xpass", "--pc-xpass-id", "old"]))
+    fresh = generate_physical_xpass.parse_args(["--pc-xpass", "--pc-xpass-id", "fresh", "--export-lane-control", "--no-max", "--top-n", "10"])
+    pc_xpass_versions.start_generation(fresh)
+    resumed = generate_physical_xpass.parse_args(["--pc-xpass", "--pc-xpass-id", "fresh"])
+    assert resumed.export_lane_control
+
+
+@pytest.mark.parametrize("empty_reason", ["no_opponents", "invalid_options"])
+def test_lane_export_empty_simulation(empty_reason, monkeypatch):
+    graph = make_graph(["home_1", "home_2"] if empty_reason == "no_opponents" else None)
+    if empty_reason == "invalid_options":
+        monkeypatch.setattr(physical_pass_model, "_pc_xpass_r_grid", lambda *a, **k: np.array([1000.]))
+    records = []
+    physical_pass_model.compute_graph_pc_xpass_metrics(graph, max_speed=7, angle_step=90, lane_control_records=records)
+    assert records == []
+
+
+def test_lane_export_dry_run_and_failed_write(tmp_path):
+    items = [dict(match_id="match", graphs=[make_graph()], labels=torch.stack([make_label()]))]
+    kwargs = dict(cache_dir=tmp_path, source=PC_XPASS_SOURCE, export_lane_control=True,
+                  max_speed=7, angle_step=90, num_workers=1)
+    physical_pass_model.prewarm_physical_xpass_runtime_cache(items, dry_run=True, **kwargs)
+    assert not (tmp_path / "lane_control").exists()
+    with patch.object(physical_pass_model, "_write_lane_control_sidecar", side_effect=PermissionError("locked")):
+        with pytest.raises(PermissionError):
+            physical_pass_model.prewarm_physical_xpass_runtime_cache(items, **kwargs)
+    assert not (tmp_path / "matches/match.parquet").exists()
+
+
+def test_lane_export_multiple_receivers():
+    graph = make_graph(["home_1", "home_2", "home_3", "away_4"])
+    graph.x[2, 0] = 1.0
+    records = []
+    row = physical_pass_model.compute_graph_pc_xpass_metrics(graph, max_speed=7, angle_step=90,
+                                                            lane_control_records=records)
+    assert {record["receiver_id"] for record in records} == {"home_2", "home_3"}
+    for record in records:
+        assert record["opponent_id"] == "away_4"
+        assert 1 - record["lane_control"] == pytest.approx(row[record["receiver_id"] + "__lane_survival"])

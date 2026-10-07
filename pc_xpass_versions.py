@@ -21,7 +21,7 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     control_inflection_point endpoint_normalization boost_def_endpoint_control use_position_discount
     position_discount_power position_discount_distance consider_teammates ignore_teammates_lane_survival
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
-    pass_height_model_id""".split())
+    pass_height_model_id export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
 RESERVED = {"reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
@@ -79,6 +79,7 @@ def settings(args: Namespace) -> dict[str, Any]:
     # Store the CLI representation so existing validation can be reused on load.
     if result.get("reaction_time_mode") == "dist_pass":
         result["reaction_time"] = "dist_pass"
+    result.setdefault("export_lane_control", False)
     return result
 
 
@@ -97,6 +98,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
             metadata = read_metadata(root)
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
+            metadata["generation_settings"].setdefault("export_lane_control", False)
             for key, value in metadata["generation_settings"].items():
                 if key not in SETTING_KEYS or (location and key == "pass_height_model_id"):
                     continue
@@ -156,6 +158,8 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     if getattr(args, "dry_run", False):
         return
     old = read_metadata(root) if (root / "metadata.json").exists() else {}
+    if "generation_settings" in old:
+        old["generation_settings"].setdefault("export_lane_control", False)
     effective = settings(args)
     if old.get("generation_settings", effective) != effective:
         raise ValueError("Effective pc-xPass settings differ from selected version.")

@@ -2871,6 +2871,14 @@ def pc_xpass_endpoint_control_probabilities(
     return output
 
 
+def _pc_xpass_selected_lane_controls(raw: np.ndarray, speed: int, angle: int, distance: int) -> np.ndarray:
+    """Opponent prefix maxima, using precisely the lane-survival sanitization."""
+    if distance == 0:
+        return np.zeros(raw.shape[0], dtype=float)
+    lane = raw[:, speed, angle, :distance]
+    return np.max(np.where(np.isfinite(lane), np.clip(lane, 0.0, 1.0), 0.0), axis=1)
+
+
 def pc_xpass_lane_survival_from_raw(lane_raw: np.ndarray) -> np.ndarray:
     raw = np.asarray(lane_raw, dtype=float)
     if raw.ndim != 4:
@@ -3069,6 +3077,7 @@ def compute_graph_pc_xpass_metrics(
     *,
     eps: float = 1e-4,
     diagnostic_details: dict | None = None,
+    lane_control_records: list[dict[str, Any]] | None = None,
     consider_teammates: bool = True,
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
@@ -3306,6 +3315,19 @@ def compute_graph_pc_xpass_metrics(
         flat = int(np.nanargmax(np.where(finite_ranking, ranking, np.nan)))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
+        if lane_control_records is not None:
+            controls = _pc_xpass_selected_lane_controls(lane_raw, speed_i, angle_i, distance_i)
+            for opponent_index in np.flatnonzero(defense_mask):
+                lane_control_records.append({
+                    "receiver_id": node_id,
+                    "opponent_id": str(player_ids[opponent_index]),
+                    "lane_control": float(controls[opponent_index]),
+                    "speed": float(speeds[speed_i]),
+                    "angle": math.degrees(float(angles[angle_i])) % 360.0,
+                    "distance": float(distances[distance_i]),
+                    "target_x": float(target_x[angle_i, distance_i]),
+                    "target_y": float(target_y[angle_i, distance_i]),
+                })
         top_option_indices = {
             int(value): _pc_xpass_top_option_indices(score, ranking if bool(top_xt) else score, int(value))
             for value in resolved_top_n_values
@@ -3356,6 +3378,7 @@ def compute_graphs_pc_xpass_metrics(
     graphs: list[Data] | tuple[Data, ...],
     *,
     eps: float = 1e-4,
+    lane_control_records: list[list[dict[str, Any]]] | None = None,
     consider_teammates: bool = True,
     ignore_teammates_lane_survival: bool | None = None,
     ignore_teammates_control: bool | None = None,
@@ -3395,6 +3418,7 @@ def compute_graphs_pc_xpass_metrics(
         compute_graph_pc_xpass_metrics(
             graph,
             eps=eps,
+            lane_control_records=None if lane_control_records is None else lane_control_records[index],
             consider_teammates=consider_teammates,
             ignore_teammates_lane_survival=ignore_teammates_lane_survival,
             ignore_teammates_control=ignore_teammates_control,
@@ -3429,7 +3453,7 @@ def compute_graphs_pc_xpass_metrics(
             position_discount_distance=position_discount_distance,
             top_xt=top_xt,
         )
-        for graph in graphs
+        for index, graph in enumerate(graphs)
     ]
 
 
@@ -4660,6 +4684,93 @@ def _ensure_runtime_physical_xpass_cache(
     return metadata
 
 
+LANE_CONTROL_ID_COLUMNS = ["match_id", "action_index", "physical_state_hash", "frame_scope", "state_frame_id"]
+LANE_CONTROL_COLUMNS = LANE_CONTROL_ID_COLUMNS + [
+    "receiver_id", "opponent_id", "lane_control", "speed", "angle", "distance", "target_x", "target_y",
+]
+LANE_CONTROL_DEFINITION = "per_opponent_max_before_endpoint_v1"
+
+
+def _lane_control_identity(row: Mapping[str, Any]) -> dict[str, Any]:
+    def nullable(value):
+        return None if value is None or pd.isna(value) else value
+    return {
+        "match_id": str(row["match_id"]),
+        "action_index": int(row["action_index"]),
+        "physical_state_hash": str(row["physical_state_hash"]),
+        "frame_scope": nullable(row.get("frame_scope")),
+        "state_frame_id": None if nullable(row.get("state_frame_id")) is None else int(row["state_frame_id"]),
+    }
+
+
+def _lane_control_state_key(row: Mapping[str, Any]) -> tuple:
+    identity = _lane_control_identity(row)
+    # The main cache normalizes absent scope to the action-frame scope.
+    identity["frame_scope"] = identity["frame_scope"] or PHYSICAL_XPASS_FRAME_SCOPE_ACTION
+    return tuple(identity[column] for column in LANE_CONTROL_ID_COLUMNS)
+
+
+def _lane_control_completed_states(cache_dir: str | Path, match_id: str) -> set[tuple]:
+    root = Path(cache_dir) / "lane_control"
+    manifest = root / "coverage" / f"{match_id}.json"
+    data = root / f"{match_id}.parquet"
+    if not manifest.exists() or not data.exists():
+        return set()
+    metadata = json.loads(manifest.read_text(encoding="utf-8"))
+    if metadata.get("definition") != LANE_CONTROL_DEFINITION or metadata.get("schema_version") != 1:
+        raise ValueError("Incompatible lane-control sidecar schema; create a fresh run.")
+    counts: dict[tuple, int] = {}
+    for row in pd.read_parquet(data, columns=LANE_CONTROL_ID_COLUMNS).to_dict("records"):
+        key = _lane_control_state_key(row)
+        counts[key] = counts.get(key, 0) + 1
+    return {_lane_control_state_key(row) for row in metadata["states"]
+            if counts.get(_lane_control_state_key(row), 0) == row["row_count"]}
+
+
+def _write_lane_control_sidecar(cache_dir: str | Path, match_id: str,
+                                records: list[dict[str, Any]], states: list[dict[str, Any]]) -> None:
+    root = Path(cache_dir) / "lane_control"
+    root.mkdir(parents=True, exist_ok=True)
+    output = root / f"{match_id}.parquet"
+    manifest = root / "coverage" / f"{match_id}.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    state_keys = {_lane_control_state_key(row) for row in states}
+    frame = pd.DataFrame(records, columns=LANE_CONTROL_COLUMNS)
+    if output.exists():
+        old = pd.read_parquet(output)
+        keep = [_lane_control_state_key(row) not in state_keys for row in old.to_dict("records")]
+        frame = pd.concat([old.loc[keep], frame], ignore_index=True)
+    frame = frame.drop_duplicates(LANE_CONTROL_ID_COLUMNS + ["receiver_id", "opponent_id"], keep="last")
+    for column in ["match_id", "physical_state_hash", "frame_scope", "receiver_id", "opponent_id"]:
+        frame[column] = frame[column].astype("string")
+    for column in ["action_index", "state_frame_id"]:
+        frame[column] = frame[column].astype("Int64")
+    for column in ["lane_control", "speed", "angle", "distance", "target_x", "target_y"]:
+        frame[column] = frame[column].astype("float64")
+    frame = frame.sort_values(LANE_CONTROL_ID_COLUMNS + ["receiver_id", "opponent_id"]).reset_index(drop=True)
+    previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+    completed = {_lane_control_state_key(row): row for row in previous.get("states", [])}
+    counts: dict[tuple, set[tuple[str, str]]] = {}
+    for row in records:
+        key = _lane_control_state_key(row)
+        counts.setdefault(key, set()).add((row["receiver_id"], row["opponent_id"]))
+    for row in states:
+        key = _lane_control_state_key(row)
+        completed[key] = {**_lane_control_identity(row), "row_count": len(counts.get(key, set()))}
+    metadata = {"schema_version": 1, "definition": LANE_CONTROL_DEFINITION,
+                "selection": "same_as_main_cache_best_option", "states": list(completed.values())}
+    temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.tmp.parquet")
+    temporary_manifest = manifest.with_name(f".{manifest.stem}.{uuid.uuid4().hex}.tmp.json")
+    try:
+        frame.to_parquet(temporary, index=False)
+        temporary_manifest.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        temporary.replace(output)
+        temporary_manifest.replace(manifest)
+    finally:
+        temporary.unlink(missing_ok=True)
+        temporary_manifest.unlink(missing_ok=True)
+
+
 def _write_runtime_physical_xpass_rows(
     cache_dir: str | Path,
     match_id: str,
@@ -5146,6 +5257,7 @@ def _pass_height_predictions_for_graphs(
 
 def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, object]:
     misses = list(task["misses"])
+    lane_records = [[] for _ in misses] if task.get("export_lane_control", False) else None
     source = str(task["source"])
     eps = float(task["eps"])
     teammate_policy = str(task["teammate_policy"])
@@ -5215,6 +5327,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     elif source == PC_XPASS_SOURCE:
         computed_probs = compute_graphs_pc_xpass_metrics(
             [item["graph"] for item in misses],
+            lane_control_records=lane_records,
             eps=eps,
             consider_teammates=consider_teammates,
             ignore_teammates_lane_survival=None
@@ -5289,7 +5402,13 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
         row.update(graph_nearest_opponent_distance_row_values(item["graph"]))
         rows.append(row)
     skipped_all_nan = sum(1 for row in rows if not _physical_xpass_row_has_finite_metric(row, enabled_metrics))
-    return {"rows": rows, "computed": len(rows), "skipped_all_nan": int(skipped_all_nan)}
+    result = {"rows": rows, "computed": len(rows), "skipped_all_nan": int(skipped_all_nan)}
+    if lane_records is not None:
+        result["lane_control_records"] = [
+            {**_lane_control_identity(item), **record}
+            for item, records in zip(misses, lane_records) for record in records
+        ]
+    return result
 
 
 def _has_finite_pass_distance(row: pd.Series) -> bool:
@@ -5357,6 +5476,7 @@ def prewarm_physical_xpass_runtime_cache(
     *,
     cache_dir: str | Path,
     source: str,
+    export_lane_control: bool = False,
     eps: float = 1e-4,
     teammate_policy: str | None = None,
     ignore_teammates_lane_survival: bool | None = None,
@@ -5412,6 +5532,9 @@ def prewarm_physical_xpass_runtime_cache(
     progress_desc: str | None = None,
     verbose_status: bool = False,
 ) -> dict[str, object]:
+    if export_lane_control and (source != PC_XPASS_SOURCE or reuse_cache_dir is not None):
+        raise ValueError("Lane-control export requires fresh pc-xPass computation without cache reuse.")
+    lane_completed_by_match: dict[str, set[tuple]] = {}
     pass_height_lane_survival_mode = None
     if pass_height_model is not None and bool(getattr(pass_height_model, "args", {}).get("lane_survival", False)):
         pass_height_lane_survival_mode = normalize_pc_xpass_lane_survival_mode(
@@ -5612,6 +5735,14 @@ def prewarm_physical_xpass_runtime_cache(
             if not refresh and cached_rows is not None and action_index in cached_rows.index:
                 cached_row = cached_rows.loc[action_index]
                 hash_matches, missing_hash = _physical_row_hash_matches_or_missing(cached_row, state_hash)
+                if export_lane_control and hash_matches:
+                    if match_id not in lane_completed_by_match:
+                        lane_completed_by_match[match_id] = _lane_control_completed_states(cache_dir, match_id)
+                    identity = {"match_id": match_id, "action_index": action_index,
+                                "physical_state_hash": state_hash, "frame_scope": frame_scope,
+                                "state_frame_id": state_frame_id}
+                    if _lane_control_state_key(identity) not in lane_completed_by_match[match_id]:
+                        raise ValueError("Incomplete lane-control coverage for an existing cache row; no backfill is performed. Create a fresh run.")
                 if (
                     hash_matches
                     and not missing_hash
@@ -5759,6 +5890,7 @@ def prewarm_physical_xpass_runtime_cache(
         stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
         return stats
 
+    pending_lane_records: dict[str, list[dict[str, Any]]] = {}
     pending_write_rows: dict[str, list[tuple[dict[str, Any], bool]]] = {}
     for row in copied_rows:
         pending_write_rows.setdefault(str(row["match_id"]), []).append((row, False))
@@ -5774,6 +5906,7 @@ def prewarm_physical_xpass_runtime_cache(
 
         misses_by_key = {miss_key(miss): miss for miss in misses}
         task_template = {
+            "export_lane_control": export_lane_control,
             "source": source,
             "eps": float(eps),
             "teammate_policy": teammate_policy,
@@ -5828,6 +5961,8 @@ def prewarm_physical_xpass_runtime_cache(
         compute_start = time.perf_counter()
 
         def handle_chunk_result(result: dict[str, object]) -> None:
+            for record in result.get("lane_control_records", []):
+                pending_lane_records.setdefault(str(record["match_id"]), []).append(record)
             rows = list(result.get("rows") or [])
             progress.update(int(result.get("computed", len(rows)) or 0))
             if not rows:
@@ -5897,6 +6032,10 @@ def prewarm_physical_xpass_runtime_cache(
         frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
         online_written = sum(1 for _row, computed_online in tagged_rows if computed_online)
         write_start = time.perf_counter()
+        if export_lane_control:
+            computed_states = [row for row, computed in tagged_rows if computed]
+            if computed_states:
+                _write_lane_control_sidecar(cache_dir, match_id, pending_lane_records.get(match_id, []), computed_states)
         _write_runtime_physical_xpass_rows(cache_dir, match_id, frame, retry_stats=stats)
         write_elapsed = time.perf_counter() - write_start
         written = int(len(frame))

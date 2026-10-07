@@ -52,6 +52,8 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_SPEED_AGGREGATION,
     PHYSICAL_DEFAULT_MAX_AUTO_WORKERS,
     PC_XPASS_AVAILABLE_METRICS,
+    LANE_CONTROL_DEFINITION,
+    LANE_CONTROL_COLUMNS,
     PC_XPASS_DEFAULT_CONTROL_INFLECTION_POINT,
     PC_XPASS_DEFAULT_CONTROL_POWER,
     PC_XPASS_DEFAULT_BOOST_DEF_ENDPOINT_CONTROL,
@@ -161,6 +163,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Number of benchmark runtime pass rows to buffer before prewarming physical xPass. Defaults to physical_batch_size * num_workers * 2.",
     )
     parser.add_argument("--overwrite", action="store_true", help="Deprecated outside legacy --feature-run-id mode.")
+    parser.add_argument("--export-lane-control", action="store_true", help="pc-xPass only: export best-pass opponent lane controls to a separate Parquet sidecar; fresh versions only.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Generate pitch-control-style pc-xPass caches under data/pc_xpass.")
     parser.add_argument(
         "--runtime-sportec-cache",
@@ -600,6 +603,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         value = getattr(args, attr_name)
         if value is not None and (not math.isfinite(float(value)) or float(value) <= 0):
             parser.error(f"{flag_name} must be a positive finite float.")
+    if args.export_lane_control and not args.pc_xpass:
+        parser.error("--export-lane-control requires --pc-xpass")
+    if args.export_lane_control and args.reuse_cache_dir:
+        parser.error("--export-lane-control cannot reuse an existing cache; use a fresh run")
     if bool(args.pc_xpass) and args.feature_run_id:
         parser.error("--pc-xpass writes runtime caches under data/pc_xpass and cannot be combined with legacy --feature-run-id mode.")
     if not bool(args.pc_xpass) and (
@@ -1231,6 +1238,7 @@ def prewarm_runtime_items(
     return prewarm_physical_xpass_runtime_cache(
         items,
         cache_dir=cache_dir,
+        export_lane_control=bool(getattr(args, "export_lane_control", False)),
         source=PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
         eps=float(args.physical_eps),
         teammate_policy=teammate_policy_from_args(args),
@@ -1504,6 +1512,16 @@ def write_runtime_dataset_metadata(
         ],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
+    if bool(getattr(args, "export_lane_control", False)):
+        metadata["lane_control_export"] = {
+            "enabled": True,
+            "schema_version": 1,
+            "definition": LANE_CONTROL_DEFINITION,
+            "columns": LANE_CONTROL_COLUMNS,
+            "path": "lane_control/<match_id>.parquet",
+            "coverage": "lane_control/coverage/<match_id>.json",
+            "selection": "same_as_main_cache_best_option",
+        }
     if getattr(args, "pass_height_model_id", None):
         metadata.update(
             {
