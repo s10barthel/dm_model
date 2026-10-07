@@ -2,6 +2,8 @@ import argparse
 import faulthandler
 import json
 import os
+import random
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -19,7 +21,14 @@ from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
-from prepared_dataset import PreparedActionDataset
+from ipw_options import add_ipw_arguments, restore_ipw_defaults
+from ipw_preparation import IPWPreparer
+from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
+from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
+    atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
+    optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts,
+    environment_versions)
+from training_monitor import TrainingMonitor
 from datatools import config
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
@@ -31,7 +40,6 @@ from models.utils import (
     get_args_str,
     get_losses_str,
     infer_training_edge_schema,
-    estimate_propensity,
     is_validation_loss_improved,
     load_splits,
     mask_possessor_relative_speed_edge_features_for_mode,
@@ -82,7 +90,12 @@ from project_config import (
 )
 
 parser = argparse.ArgumentParser()
+from models.pass_height import add_pass_height_argument, resolve_training_height
+add_pass_height_argument(parser)
 add_dataset_loading_arguments(parser)
+add_ipw_arguments(parser)
+add_training_runtime_arguments(parser)
+parser.add_argument("--resume-checkpoint", default=None, help=argparse.SUPPRESS)
 
 
 def parse_lane_survival_mode(value: str) -> str:
@@ -460,7 +473,36 @@ parser.add_argument("--training-step-index", type=int, default=None, help=argpar
 parser.add_argument("--training-step-total", type=int, default=None, help=argparse.SUPPRESS)
 
 pc_versions.add_selection_argument(parser)
-args, _ = parser.parse_known_args()
+resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+resume_probe.add_argument("--resume-checkpoint")
+add_pass_height_argument(resume_probe)
+resume_probe.add_argument("--monitoring", choices=("on", "off"), default="off")
+resume_options, resume_extra = resume_probe.parse_known_args()
+resume_checkpoint = None
+if resume_options.resume_checkpoint:
+    if resume_extra:
+        parser.error("Resume restores saved settings; only --monitoring and a matching --pass-height-threshold may accompany --resume-checkpoint.")
+    resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
+    if resume_options.pass_height_threshold is not None:
+        saved_height = resume_checkpoint["args"].get("pass_height_definition")
+        if not saved_height or saved_height["threshold_meters"] != resume_options.pass_height_threshold:
+            parser.error("Resume pass-height cutoff conflicts with the checkpoint target definition.")
+    if resume_checkpoint["finished"]:
+        publish_checkpoint_artifacts(resume_checkpoint, Path(resume_options.resume_checkpoint).parent)
+        print("Model is already completed; no retraining needed.")
+        sys.exit(0)
+    args = argparse.Namespace(**resume_checkpoint["args"])
+    args.resume_run_id = args.run_id
+    args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
+    args.monitoring = resume_options.monitoring
+else:
+    args, _ = parser.parse_known_args()
+    if args.resume_run_id:
+        parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+restore_ipw_defaults(args)
+validate_learning_rates(args.start_lr, args.min_lr)
+if args.batch_size < 1 or args.n_epochs < 1:
+    parser.error("--batch_size and --n_epochs must be positive.")
 pc_versions.check_selectors(args)
 vars(args).update(split_selector(args, default=None))
 normalize_v_edge_feature_args(vars(args))
@@ -584,14 +626,6 @@ def infer_last_lr_from_log(trial_path: str, default_lr: float) -> float:
     return lr
 
 
-def checkpoint_path_for_resume(trial_path: str) -> Path:
-    for name in ("last_weights.pt", "best_weights.pt"):
-        path = Path(trial_path) / name
-        if path.exists():
-            return path
-    raise FileNotFoundError(f"No resumable checkpoint found in {trial_path}. Expected last_weights.pt or best_weights.pt.")
-
-
 def resolve_goal_next10_diagnostic_context(args: argparse.Namespace, feature_root: Path) -> tuple[str | None, str | None]:
     if not requires_goal_next10_diagnostics(args.task):
         return None, None
@@ -634,6 +668,7 @@ def update_training_metadata(trial_path: str, metadata: dict, **updates) -> None
 
 if __name__ == "__main__":
     # Set device and manual seed
+    random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = resolve_training_device(args.device)
@@ -679,9 +714,12 @@ if __name__ == "__main__":
         resume_root = get_model_run_root(args.task, args.run_id)
         if args.artifact_stage:
             resume_root = resume_root / args.artifact_stage
-        resume_args = json.loads((resume_root / "args.json").read_text(encoding="utf-8"))
-        resume_meta = load_existing_metadata(str(resume_root))
-        resume_record = {**resume_args, **resume_meta}
+        if resume_checkpoint is not None:
+            resume_record = {**resume_checkpoint["args"], **resume_checkpoint["metadata"]}
+        else:
+            resume_args = json.loads((resume_root / "args.json").read_text(encoding="utf-8"))
+            resume_meta = load_existing_metadata(str(resume_root))
+            resume_record = {**resume_args, **resume_meta}
         if args.feature_run_id is None:
             args.feature_run_id = resume_record.get("feature_run_id")
         elif resume_record.get("feature_run_id") != args.feature_run_id:
@@ -689,6 +727,7 @@ if __name__ == "__main__":
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    resolve_training_height(args, feature_metadata, resume=resume_record is not None)
     args.split_manifest, args.split_resolution_source = resolve_artifact_split(
         args, feature_metadata, feature_run_id=args.feature_run_id, checkpoint=resume_record,
     )
@@ -804,22 +843,34 @@ if __name__ == "__main__":
             physical_xpass_metadata.get("speed_aggregation")
         )
 
+    source_identity = {
+        "sources": dataset_signature(args),
+        "preprocessing": LOADED_PREPROCESSING_FINGERPRINT,
+        "training_code": hashlib.sha256(b"".join(path.read_bytes() for path in
+            [Path(__file__), Path("training_state.py"), *sorted(Path("models").glob("*.py"))])).hexdigest(),
+    }
+    if resume_checkpoint is not None and source_identity != resume_checkpoint["dataset_identity"]:
+        raise ValueError("Resume rejected: source data, split, preprocessing, or model/training code changed.")
+
     # Load model
-    args_dict = vars(args)
+    args_dict = dict(vars(args))
     model = GNN(args_dict).to(device)
     if str(device).startswith("cuda") and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
-    args_dict["total_params"] = num_trainable_params(model)
+    args.total_params = num_trainable_params(model)
+    args_dict["total_params"] = args.total_params
     args_dict["run_id"] = args.run_id
     args_dict["model_id"] = args.model_id
 
     # Create a path to save model arguments and parameters
     model_run_root = get_model_run_root(args.task, args.run_id)
     trial_path = str(model_run_root / args.artifact_stage) if args.artifact_stage else str(model_run_root)
+    if resume_checkpoint is not None and Path(args.resume_checkpoint).resolve() != (Path(trial_path) / CHECKPOINT_NAME).resolve():
+        raise ValueError("Checkpoint location does not match its saved model run/stage.")
     os.makedirs(trial_path, exist_ok=True)
     crash_log_file = open(f"{trial_path}/crash.log", "a", encoding="utf-8", buffering=1)
     faulthandler.enable(file=crash_log_file, all_threads=True)
-    existing_metadata = load_existing_metadata(trial_path) if args.resume_run_id else {}
+    existing_metadata = cpu_copy(resume_checkpoint["metadata"]) if resume_checkpoint is not None else {}
     with open(f"{trial_path}/args.json", "w", encoding="utf-8") as f:
         json.dump(args_dict, f, indent=4)
 
@@ -832,6 +883,21 @@ if __name__ == "__main__":
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "resume_run_id": args.resume_run_id,
+        "accumulation_steps": args.accumulation_steps,
+        "effective_batch_size": args.batch_size * args.accumulation_steps,
+        "monitoring": args.monitoring,
+        "ipw_settings": {"batch_size": args.ipw_batch_size, "probability_cache": args.ipw_probability_cache,
+                         "probability_cache_dir": args.ipw_probability_cache_dir},
+        "optimizer_policy": "persistent_adam_restore_best_optimizer_on_lr_reduction",
+        "checkpoint_format": 1,
+        "environment": environment_versions(),
+        "resume_events": existing_metadata.get("resume_events", []) + ([{
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "completed_epoch": existing_metadata.get("last_epoch", 0),
+            "previous_environment": existing_metadata.get("environment"),
+            "environment": environment_versions(),
+            "monitoring": args.monitoring,
+        }] if resume_checkpoint is not None else []),
         "feature_run_id": args.feature_run_id,
         "use_carries": bool(args.use_carries),
         "min_pass_dur": args.min_pass_dur,
@@ -896,6 +962,7 @@ if __name__ == "__main__":
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
+        "pass_height_definition": getattr(args, "pass_height_definition", None),
         "early_stopping": bool(args.early_stopping),
         "early_stopping_patience": int(args.early_stopping_patience),
         "early_stopping_min_epochs": int(args.early_stopping_min_epochs),
@@ -911,17 +978,16 @@ if __name__ == "__main__":
         "epochs_since_best",
         "epochs_since_loss_improvement",
         "epochs_since_lr_loss_improvement",
+        "best_epoch", "best_valid_metrics", "best_train_metrics",
     ):
         if key in existing_metadata:
             metadata[key] = existing_metadata[key]
     write_run_metadata(Path(trial_path), metadata)
 
     # Continue a previous experiment, or start a new one
-    if args.resume_run_id:
-        resume_path = checkpoint_path_for_resume(trial_path)
-        state_dict = torch.load(resume_path, weights_only=False, map_location=device)
-        unwrap_model(model).load_state_dict(state_dict)
-        printlog(f"Resumed weights from {resume_path}", trial_path)
+    if resume_checkpoint is not None:
+        unwrap_model(model).load_state_dict(resume_checkpoint["model"])
+        printlog(f"Resumed complete epoch checkpoint from {args.resume_checkpoint}", trial_path)
     elif args.cont:
         state_dict = torch.load(f"{trial_path}/best_weights.pt", weights_only=False, map_location=device)
         unwrap_model(model).load_state_dict(state_dict)
@@ -943,6 +1009,11 @@ if __name__ == "__main__":
     )
     write_run_metadata(Path(trial_path), metadata)
 
+    monitor = TrainingMonitor(trial_path, enabled=args.monitoring == "on")
+    args._batch_failure_dir = trial_path
+    if monitor.enabled:
+        args._monitor = monitor
+    monitor.event("dataset_loading", device)
     print("Generating datasets...")
     common_dataset_args = build_action_dataset_kwargs(
         args,
@@ -995,9 +1066,13 @@ if __name__ == "__main__":
 
     if args.task in {"pass_success", "pass_height"} and args.weight_bce:
         target_column = "pass_high" if args.task == "pass_height" else "success"
-        n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
-        n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 0].shape[0]
-        pos_weight = n_negatives / n_positives
+        if disk_args:
+            n_positives = sum(int(label[LABEL_INDEX[target_column]] == 1) for _, label, _ in train_dataset)
+            n_negatives = len(train_dataset) - n_positives
+        else:
+            n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
+            n_negatives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 0].shape[0]
+        pos_weight = n_negatives / n_positives if n_positives and n_negatives else 1
     else:
         pos_weight = 1
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
@@ -1014,45 +1089,24 @@ if __name__ == "__main__":
             diagnostic_label_dir=args.diagnostic_label_dir,
             require_goal_next10_diagnostics=args.require_goal_next10_diagnostics,
         )
-        ipw_train_dataset = ActionDataset(
-            train_match_ids,
-            feature_dir=args.ipw_feature_dir,
-            label_dir=args.label_dir,
-            **ipw_dataset_args,
+        preparer = IPWPreparer(
+            model_id=args.ipw_model_id, model_args=ipw_model_record["args"],
+            feature_dir=args.ipw_feature_dir, label_dir=args.label_dir, options=ipw_dataset_args,
+            device=device, batch_size=args.ipw_batch_size, pin_memory=args.pin_memory,
+            cache=args.ipw_probability_cache, cache_dir=args.ipw_probability_cache_dir,
+            monitor=monitor,
         )
-        ipw_valid_dataset = None if args.final_refit else ActionDataset(
-            valid_match_ids,
-            feature_dir=args.ipw_feature_dir,
-            label_dir=args.label_dir,
-            **ipw_dataset_args,
-        )
-        if len(ipw_train_dataset) == 0 or (ipw_valid_dataset is not None and len(ipw_valid_dataset) == 0):
-            raise ValueError("No usable samples remained for inverse-propensity weighting.")
-
-        inverse_propensity = 1 / estimate_propensity(
-            ipw_train_dataset,
-            model_id=args.ipw_model_id,
-            device=device,
-            pin_memory=args.pin_memory,
-        )
-        carry_mask = train_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
-        pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
-        train_ipw = inverse_propensity / pass_normalizer
-        train_ipw[carry_mask] = 1.0
-        train_dataset.set_inverse_propensity_weights(train_ipw)
-
-        if ipw_valid_dataset is not None and valid_dataset is not None:
-            inverse_propensity = 1 / estimate_propensity(
-                ipw_valid_dataset,
-                model_id=args.ipw_model_id,
-                device=device,
-                pin_memory=args.pin_memory,
-            )
-            carry_mask = valid_dataset.labels[:, LABEL_INDEX["is_dribble"]] == 1
-            pass_normalizer = inverse_propensity[~carry_mask].mean() if bool((~carry_mask).any()) else 1.0
-            valid_ipw = inverse_propensity / pass_normalizer
-            valid_ipw[carry_mask] = 1.0
-            valid_dataset.set_inverse_propensity_weights(valid_ipw)
+        try:
+            train_ipw, train_ipw_stats = preparer.prepare(train_dataset, train_match_ids, split="training")
+            train_dataset.set_inverse_propensity_weights(train_ipw)
+            metadata["ipw_preparation"] = {"training": train_ipw_stats}
+            if valid_dataset is not None:
+                valid_ipw, valid_ipw_stats = preparer.prepare(valid_dataset, valid_match_ids, split="validation")
+                valid_dataset.set_inverse_propensity_weights(valid_ipw)
+                metadata["ipw_preparation"]["validation"] = valid_ipw_stats
+            write_run_metadata(Path(trial_path), metadata)
+        finally:
+            preparer.close()
 
     train_loader = DataLoader(train_dataset, **loader_args)
     valid_loader = None if valid_dataset is None else DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
@@ -1073,13 +1127,11 @@ if __name__ == "__main__":
         epochs_since_loss_improvement = 0
         epochs_since_lr_loss_improvement = 0
     lr = (
-        float(existing_metadata.get("lr", infer_last_lr_from_log(trial_path, default_lr)) or default_lr)
+        float(existing_metadata["lr"])
         if args.resume_run_id
         else default_lr
     )
     last_epoch = int(existing_metadata.get("last_epoch", 0) or 0) if args.resume_run_id else 0
-    if args.resume_run_id and last_epoch == 0:
-        last_epoch = infer_last_completed_epoch_from_log(trial_path)
     start_epoch = min(last_epoch + 1, args.n_epochs + 1) if args.resume_run_id else 1
     update_training_metadata(
         trial_path,
@@ -1096,30 +1148,41 @@ if __name__ == "__main__":
         updated_at=datetime.now().isoformat(timespec="seconds"),
     )
 
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, unwrap_model(model).parameters()), lr=lr)
+    best_snapshot = None
+    best_acc_weights = None
+    if resume_checkpoint is not None:
+        restore_optimizer_snapshot(resume_checkpoint, unwrap_model(model), optimizer)
+        best_snapshot = resume_checkpoint["best"]
+        best_acc_weights = resume_checkpoint["best_acc_weights"]
+        restore_rng(resume_checkpoint["rng"])
+        del resume_checkpoint
+    else:
+        atomic_torch_save(make_checkpoint(unwrap_model(model), optimizer, args, metadata,
+                          source_identity, best_snapshot, best_acc_weights), Path(trial_path) / CHECKPOINT_NAME)
+    printlog(f"Physical batch: {args.batch_size}; accumulation: {args.accumulation_steps}; "
+             f"effective batch: {args.batch_size * args.accumulation_steps}", trial_path)
+
     stopped_early = False
     early_stop_epoch = None
     early_stop_reason = None
     for epoch in range(start_epoch, args.n_epochs + 1):
         # Set a custom learning rate schedule
         if epochs_since_lr_loss_improvement >= 3 and lr > args.min_lr and best_loss > 0:
-            # Load previous best model
-            path = f"{trial_path}/best_weights.pt"
-            state_dict = torch.load(path, weights_only=False, map_location=device)
-            unwrap_model(model).load_state_dict(state_dict)
-
-            # Decrease learning rate
             lr = max(lr * 0.5, args.min_lr)
+            if best_snapshot is None:
+                raise RuntimeError("Missing best model/optimizer state for scheduler rollback.")
+            restore_optimizer_snapshot(best_snapshot, unwrap_model(model), optimizer, lr=lr)
             printlog(f"########## lr {lr} ##########", trial_path)
             epochs_since_lr_loss_improvement = 0
-
-        # Remove parameters with requires_grad=False (https://github.com/pytorch/pytorch/issues/679)
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, unwrap_model(model).parameters()), lr=lr)
 
         if args.training_step_index is not None and args.training_step_total is not None:
             printlog(f"\nTraining model {args.training_step_index}/{args.training_step_total}: {args.task}", trial_path)
             printlog(f"Run id: {args.run_id}", trial_path)
         printlog(f"\nEpoch: {epoch:d}", trial_path)
         start_time = time.time()
+        args._epoch = epoch
+        monitor.epoch_start(device, epoch)
 
         if disk_args:
             train_dataset.set_epoch(epoch)
@@ -1147,7 +1210,7 @@ if __name__ == "__main__":
 
         # Best model on test set
         if args.final_refit:
-            torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_weights.pt")
+            best_snapshot = optimizer_snapshot(unwrap_model(model), optimizer)
             best_loss = float(train_metrics.get("ce_loss", train_metrics.get("mse_loss", 0.0)))
             metadata["best_epoch"] = epoch
             metadata["best_train_metrics"] = train_metrics
@@ -1158,7 +1221,7 @@ if __name__ == "__main__":
             metadata["best_epoch"] = epoch
             metadata["best_valid_metrics"] = valid_metrics
 
-            torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_weights.pt")
+            best_snapshot = optimizer_snapshot(unwrap_model(model), optimizer)
             printlog("######## Best Loss ########", trial_path)
         else:
             epochs_since_loss_improvement += 1
@@ -1168,10 +1231,9 @@ if __name__ == "__main__":
             epoch_acc = valid_metrics["accuracy"] if "accuracy" in valid_metrics else valid_metrics["f1"]
             if epoch_acc > best_acc:
                 best_acc = epoch_acc
-                torch.save(unwrap_model(model).state_dict(), f"{trial_path}/best_acc_weights.pt")
+                best_acc_weights = cpu_copy(unwrap_model(model).state_dict())
                 printlog("###### Best Accuracy ######", trial_path)
 
-        torch.save(unwrap_model(model).state_dict(), f"{trial_path}/last_weights.pt")
         update_training_metadata(
             trial_path,
             metadata,
@@ -1188,13 +1250,27 @@ if __name__ == "__main__":
             status="running",
         )
 
-        if should_stop_early(
-            args.early_stopping and not args.final_refit,
-            epoch,
-            args.early_stopping_min_epochs,
-            epochs_since_loss_improvement,
-            args.early_stopping_patience,
-        ):
+        stop_now = should_stop_early(
+            args.early_stopping and not args.final_refit, epoch, args.early_stopping_min_epochs,
+            epochs_since_loss_improvement, args.early_stopping_patience,
+        )
+        finished = stop_now or epoch == args.n_epochs
+        metadata["status"] = "completed" if finished else "running"
+        metadata["stopped_early"] = stop_now
+        metadata["early_stop_epoch"] = epoch if stop_now else None
+        metadata["early_stop_reason"] = (
+            f"validation loss did not improve by at least {args.early_stopping_min_delta:g} "
+            f"for {epochs_since_loss_improvement} consecutive epochs" if stop_now else None
+        )
+        if finished:
+            metadata["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        checkpoint = make_checkpoint(unwrap_model(model), optimizer, args, metadata, source_identity,
+                                     best_snapshot, best_acc_weights, finished=finished)
+        atomic_torch_save(checkpoint, Path(trial_path) / CHECKPOINT_NAME)
+        publish_checkpoint_artifacts(checkpoint, trial_path)
+        del checkpoint
+        monitor.event("epoch_complete", device, epoch=epoch)
+        if stop_now:
             stopped_early = True
             early_stop_epoch = epoch
             early_stop_reason = (
@@ -1226,5 +1302,6 @@ if __name__ == "__main__":
             source = Path(trial_path) / name
             if source.exists():
                 shutil.copy2(source, model_run_root / name)
+    monitor.close()
     faulthandler.disable()
     crash_log_file.close()

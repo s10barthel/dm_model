@@ -37,6 +37,7 @@ from physical_pass_model import (
     load_physical_xpass_match,
 )
 from project_config import get_pc_xpass_dir
+from models.pass_height import positive_height, relabel_height
 
 
 OUTCOME_DIAGNOSTIC_TASKS = {
@@ -190,6 +191,7 @@ def _copy_pass_height_diagnostics(
     match_id: str,
     selected_labels: torch.Tensor,
     diagnostic_labels: torch.Tensor,
+    continuous_height: bool = False,
 ) -> torch.Tensor:
     _validate_diagnostic_labels(match_id, selected_labels, diagnostic_labels)
     if not _has_label_columns(diagnostic_labels, PASS_HEIGHT_LABEL_COLUMNS):
@@ -198,6 +200,8 @@ def _copy_pass_height_diagnostics(
     pass_high = diagnostic_labels[:, LABEL_INDEX["pass_high"]]
     pass_rows = diagnostic_labels[:, LABEL_INDEX["is_pass"]] == 1
     unavailable = torch.isnan(pass_max_ball_z) & torch.isnan(pass_high)
+    if continuous_height:
+        unavailable = ~torch.isfinite(pass_max_ball_z)
     valid_height = torch.isfinite(pass_max_ball_z) & torch.isfinite(pass_high)
     if not bool((valid_height[pass_rows] | unavailable[pass_rows]).all().item()):
         raise ValueError(f"Pass-height diagnostic labels for match {match_id} contain non-finite pass-row values.")
@@ -264,7 +268,11 @@ class ActionDataset(Dataset):
         lane_survival_mode=None,
         lane_survival_cache_dir=None,
         vel_node_features_aware=True,
+        pass_height_threshold=None,
+        defer_pass_height_relabel=False,
     ):
+        if pass_height_threshold is not None:
+            pass_height_threshold = positive_height(pass_height_threshold)
         feature_root = Path(feature_dir)
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
@@ -359,10 +367,15 @@ class ActionDataset(Dataset):
                         f"{pass_height_diagnostic_path}."
                     )
                 pass_height_diagnostic_labels = torch.load(pass_height_diagnostic_path, weights_only=False)
+                if pass_height_threshold is not None or defer_pass_height_relabel:
+                    # Diagnostic validation must not depend on the obsolete stored binary target.
+                    pass_height_diagnostic_labels = relabel_height(
+                        pass_height_diagnostic_labels, pass_height_threshold or 1.0)
                 match_labels = _copy_pass_height_diagnostics(
                     match_id,
                     match_labels,
                     pass_height_diagnostic_labels,
+                    continuous_height=pass_height_threshold is not None or defer_pass_height_relabel,
                 )
             elif (task == "pass_height" or self.require_pass_height_labels) and not _has_label_columns(
                 match_labels, PASS_HEIGHT_LABEL_COLUMNS
@@ -390,6 +403,8 @@ class ActionDataset(Dataset):
                     match_labels = _copy_goal_next10_diagnostics(match_labels, diagnostic_labels)
 
             match_labels = _normalize_label_width(match_labels)
+            if pass_height_threshold is not None:
+                match_labels = relabel_height(match_labels, pass_height_threshold)
 
             features.extend(match_features)
             feature_match_ids.extend([match_id] * len(match_features))
@@ -571,7 +586,11 @@ class ActionDataset(Dataset):
             if task == "pass_height":
                 pass_high = graph_labels[LABEL_INDEX["pass_high"]]
                 pass_max_ball_z = graph_labels[LABEL_INDEX["pass_max_ball_z"]]
-                if not bool(torch.isfinite(pass_high).item()) or not bool(torch.isfinite(pass_max_ball_z).item()):
+                if (not defer_pass_height_relabel and not bool(torch.isfinite(pass_high).item())) or not bool(torch.isfinite(pass_max_ball_z).item()):
+                    _increment_count(self.skipped_rows, "invalid_pass_height_target:nonfinite_height")
+                    continue
+            elif self.require_pass_height_labels and (pass_height_threshold is not None or defer_pass_height_relabel):
+                if not bool(torch.isfinite(graph_labels[LABEL_INDEX["pass_max_ball_z"]]).item()):
                     _increment_count(self.skipped_rows, "invalid_pass_height_target:nonfinite_height")
                     continue
 

@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from dataset import requires_goal_next10_diagnostics
-from models.utils import (
+from models.edge_feature_config import (
     mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
     normalize_relative_speed_edge_feature_mode,
@@ -75,6 +75,8 @@ def build_action_dataset_kwargs(
 
     return {
         "task": task,
+        "pass_height_threshold": _get_arg(args, "pass_height_threshold", None),
+        "defer_pass_height_relabel": False,
         "inplay_only": task.split("_")[1] == "receiver" and not bool(_get_arg(args, "include_out", False)),
         "min_pass_dur": float(_get_arg(args, "min_pass_dur", 0.0)),
         "shot_success_type": str(_get_arg(args, "shot_success", "unblocked")),

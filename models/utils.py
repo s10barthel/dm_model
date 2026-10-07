@@ -28,6 +28,24 @@ from xgboost import XGBClassifier
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
+from models.edge_feature_config import (
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
+    RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS,
+    RELATIVE_SPEED_EDGE_FEATURE_MODES,
+    V_EDGE_FEATURE_MODE_ALL,
+    V_EDGE_FEATURE_MODE_NONE,
+    V_EDGE_FEATURE_MODE_NO_POSS,
+    V_EDGE_FEATURE_MODES,
+    mask_possessor_relative_speed_edge_features_for_mode,
+    mask_possessor_v_edge_features_for_mode,
+    normalize_relative_speed_edge_feature_mode,
+    normalize_v_edge_feature_args,
+    normalize_v_edge_feature_mode,
+    use_relative_speed_edge_features_for_mode,
+    use_v_edge_features_for_mode,
+    validate_relative_speed_edge_feature_mode,
+)
 from physical_pass_model import (
     EVALUATION_XPASS_DISTANCE_ATTR,
     EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
@@ -94,127 +112,8 @@ FEATURE_SIGNATURE_KEYS = (
     "edge_in_dim",
 )
 
-V_EDGE_FEATURE_MODE_ALL = "all"
-V_EDGE_FEATURE_MODE_NONE = "none"
-V_EDGE_FEATURE_MODE_NO_POSS = "no_poss"
-V_EDGE_FEATURE_MODES = (
-    V_EDGE_FEATURE_MODE_ALL,
-    V_EDGE_FEATURE_MODE_NONE,
-    V_EDGE_FEATURE_MODE_NO_POSS,
-)
-RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL = "all"
-RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE = "none"
-RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS = "no_poss"
-RELATIVE_SPEED_EDGE_FEATURE_MODES = (
-    RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
-    RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
-    RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS,
-)
 RUNTIME_INTENDED_RECEIVER_MODE_PREFERENCE = ("model", "original", "angle_only")
 DEFAULT_RUNTIME_RETURN_TYPE = "disc_0.9"
-
-
-def normalize_v_edge_feature_mode(
-    v_edge_feature_mode: str | None = None,
-    *,
-    use_v_edge_features: bool | None = None,
-    mask_possessor_v_edge_features: bool | None = None,
-    add_v_edge_features: bool | None = None,
-    edge_in_dim: int | None = None,
-) -> str:
-    if v_edge_feature_mode is not None:
-        mode = str(v_edge_feature_mode).strip().replace("-", "_")
-        if mode in V_EDGE_FEATURE_MODES:
-            return mode
-        raise ValueError(
-            f"Invalid v_edge_feature_mode={v_edge_feature_mode!r}. "
-            f"Expected one of: {', '.join(V_EDGE_FEATURE_MODES)}."
-        )
-    if bool(mask_possessor_v_edge_features):
-        return V_EDGE_FEATURE_MODE_NO_POSS
-    if use_v_edge_features is not None:
-        return V_EDGE_FEATURE_MODE_ALL if bool(use_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
-    if add_v_edge_features is not None:
-        return V_EDGE_FEATURE_MODE_ALL if bool(add_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
-    if edge_in_dim is not None:
-        return V_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 2 else V_EDGE_FEATURE_MODE_NONE
-    return V_EDGE_FEATURE_MODE_NONE
-
-
-def normalize_relative_speed_edge_feature_mode(
-    relative_speed_edge_feature_mode: str | None = None,
-    *,
-    use_relative_speed_edge_features: bool | None = None,
-    mask_possessor_relative_speed_edge_features: bool | None = None,
-    add_relative_speed_edge_features: bool | None = None,
-    edge_in_dim: int | None = None,
-) -> str:
-    if relative_speed_edge_feature_mode is not None:
-        mode = str(relative_speed_edge_feature_mode).strip().replace("-", "_")
-        if mode in RELATIVE_SPEED_EDGE_FEATURE_MODES:
-            return mode
-        raise ValueError(
-            f"Invalid relative_speed_edge_feature_mode={relative_speed_edge_feature_mode!r}. "
-            f"Expected one of: {', '.join(RELATIVE_SPEED_EDGE_FEATURE_MODES)}."
-        )
-    if bool(mask_possessor_relative_speed_edge_features):
-        return RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS
-    if use_relative_speed_edge_features is not None:
-        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if bool(use_relative_speed_edge_features) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
-    if add_relative_speed_edge_features is not None:
-        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if bool(add_relative_speed_edge_features) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
-    if edge_in_dim is not None:
-        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 4 else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
-    return RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
-
-
-def use_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> bool:
-    return normalize_v_edge_feature_mode(v_edge_feature_mode) != V_EDGE_FEATURE_MODE_NONE
-
-
-def mask_possessor_v_edge_features_for_mode(v_edge_feature_mode: str | None) -> bool:
-    return normalize_v_edge_feature_mode(v_edge_feature_mode) == V_EDGE_FEATURE_MODE_NO_POSS
-
-
-def use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode: str | None) -> bool:
-    return normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode) != RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
-
-
-def mask_possessor_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode: str | None) -> bool:
-    return normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode) == RELATIVE_SPEED_EDGE_FEATURE_MODE_NO_POSS
-
-
-def validate_relative_speed_edge_feature_mode(
-    v_edge_feature_mode: str | None,
-    relative_speed_edge_feature_mode: str | None,
-) -> None:
-    if use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode) and not use_v_edge_features_for_mode(v_edge_feature_mode):
-        raise ValueError("Relative-speed edge features require velocity-angle edge features.")
-
-
-def normalize_v_edge_feature_args(args: dict[str, Any]) -> dict[str, Any]:
-    mode = normalize_v_edge_feature_mode(
-        args.get("v_edge_feature_mode"),
-        use_v_edge_features=args.get("use_v_edge_features"),
-        mask_possessor_v_edge_features=args.get("mask_possessor_v_edge_features"),
-        add_v_edge_features=args.get("add_v_edge_features"),
-        edge_in_dim=args.get("edge_in_dim"),
-    )
-    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
-        args.get("relative_speed_edge_feature_mode"),
-        use_relative_speed_edge_features=args.get("use_relative_speed_edge_features"),
-        mask_possessor_relative_speed_edge_features=args.get("mask_possessor_relative_speed_edge_features"),
-        add_relative_speed_edge_features=args.get("add_relative_speed_edge_features"),
-        edge_in_dim=args.get("edge_in_dim"),
-    )
-    validate_relative_speed_edge_feature_mode(mode, relative_speed_mode)
-    args["v_edge_feature_mode"] = mode
-    args["use_v_edge_features"] = use_v_edge_features_for_mode(mode)
-    args["mask_possessor_v_edge_features"] = mask_possessor_v_edge_features_for_mode(mode)
-    args["relative_speed_edge_feature_mode"] = relative_speed_mode
-    args["use_relative_speed_edge_features"] = use_relative_speed_edge_features_for_mode(relative_speed_mode)
-    args["mask_possessor_relative_speed_edge_features"] = mask_possessor_relative_speed_edge_features_for_mode(relative_speed_mode)
-    return args
 
 
 def is_validation_loss_improved(current_loss: float, best_loss: float, min_delta: float) -> bool:
@@ -308,6 +207,9 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 
 def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if (metadata or {}).get("pass_height_definition"):
+        args.setdefault("pass_height_definition", metadata["pass_height_definition"])
+        args.setdefault("pass_height_threshold", metadata["pass_height_definition"]["threshold_meters"])
     physical_metadata = (metadata or {}).get("physical_xpass")
     if isinstance(physical_metadata, dict):
         source = physical_metadata.get("source")
@@ -391,6 +293,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "created_at": created_at,
         "timestamp": created_at,
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
+        "pass_height_definition": args.get("pass_height_definition"),
         **split_metadata(metadata if any(metadata.get(key) is not None for key in ("train_split_percent", "train_count")) else args),
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
@@ -416,6 +319,9 @@ def get_model_record(model_id: str) -> dict[str, Any]:
 
 def get_model_provenance(model_id: str) -> dict[str, Any]:
     record = get_model_record(model_id)
+    if record["task"] == "pass_height":
+        from models.pass_height import model_definition
+        record["pass_height_definition"] = model_definition(record["args"], record["metadata"])
     return {
         key: record[key]
         for key in [
@@ -425,6 +331,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "model_path",
             "created_at",
             "feature_run_id",
+            "pass_height_definition",
             "intended_receiver_mode",
             "target_family",
             "return_type",
@@ -1422,7 +1329,7 @@ def calc_binary_metrics(y, y_hat, threshold: float | None = 0.5, *, include_cali
         "roc_auc": roc_auc_score(y_true, y_score) if has_positive and has_negative else np.nan,
         "pr_auc": average_precision_score(y_true, y_score) if has_positive else np.nan,
         "brier": brier_score_loss(y_true, y_score),
-        "log_loss": log_loss(y_true, y_score, labels=[0, 1]) if has_positive else np.nan,
+        "log_loss": log_loss(y_true, y_score, labels=[0, 1]),
     }
     if include_calibration:
         metrics.update(calc_binary_calibration_metrics(y_true, y_score))
@@ -1846,7 +1753,13 @@ def run_epoch(
     return_learning_curve_rows: bool = False,
     pass_intent_model: nn.Module | None = None,
 ):
-    # torch.autograd.set_detect_anomaly(True)
+    from training_state import GradientAccumulator
+    from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
+    from models.observed_selection import observed_layout, select_observed
+    from models.graph_diagnostics import validate_with_snapshot
+    monitor = getattr(args, "_monitor", None)
+    accumulator = GradientAccumulator(optimizer, unwrap_model(model).parameters(),
+                                      getattr(args, "accumulation_steps", 1), args.clip) if train else None
     model.train() if train else model.eval()
     n_batches = len(loader)
     pos_weight = torch.tensor(pos_weight)
@@ -1890,9 +1803,25 @@ def run_epoch(
     learning_curve_rows: list[dict] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
+        context = {"epoch": getattr(args, "_epoch", None), "batch": batch_index,
+                   "phase": "train" if train else "validation"}
+        if monitor is not None:
+            monitor.event("batch_loaded", device, **context, graphs=batch_graphs.num_graphs,
+                          nodes=batch_graphs.num_nodes, edges=batch_graphs.num_edges,
+                          **batch_identifiers(batch_graphs))
+        validate_with_snapshot(batch_graphs, batch_labels, batch_ipw,
+                               directory=getattr(args, "_batch_failure_dir", None), context=context)
+        layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out) if args.gnn_task == "node_selection" else None
+        observed = None
+        if args.gnn_task in {"node_binary", "node_regression"}:
+            observed = observed_layout(batch_graphs, batch_labels, args.include_out,
+                                       args.task in {"outcome_scoring", "outcome_conceding", "outcome_return"})
+        if monitor is not None:
+            monitor.event("forward", device, **context)
         batch_graphs: Batch = batch_graphs.to(device)
         batch_ipw: torch.Tensor = batch_ipw.to(device)
-        index_range = torch.unique(batch_graphs.batch)
+        if observed is not None:
+            observed_positions, observed_branches = (v.to(device) if v is not None else None for v in observed)
 
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
@@ -1925,12 +1854,6 @@ def run_epoch(
                 candidate_logits = intent_logits[graph_mask][candidate_mask].reshape(-1)
                 candidate_probs = torch.softmax(candidate_logits, dim=0)
                 observed_v5_pass_intent.append(candidate_probs[target_candidate.item()])
-
-        if args.include_out:
-            # One node per player and one ball-out node per graph instance
-            batch = torch.cat([batch_graphs.batch, index_range])
-        else:
-            batch = batch_graphs.batch
 
         batch_labels[batch_labels[:, 6] == -1, 6] = batch_labels[batch_labels[:, 6] == -1, 4]  # -1 to n_players
 
@@ -1974,86 +1897,23 @@ def run_epoch(
                 with torch.no_grad():
                     out: torch.Tensor = model(batch_graphs, batch_dests)
 
-        if args.gnn_task == "node_selection":  # {pass/action}_intent, {success/failure}_receiver
-            if args.task.split("_")[1] == "intent":
-                target = batch_labels[:, 5].clone().long()
-            elif args.task.split("_")[1] == "receiver":
-                target = batch_labels[:, 6].clone().long()
-
-            loss_fn = nn.CrossEntropyLoss()
-            pred_loss = 0
-            accuracy = 0
-
-            for graph_index in index_range:
-                if args.task in [
-                    "pass_intent",
-                    "success_intent",
-                    "pass_intent_oppo_agn",
-                    "action_intent",
-                    "success_receiver",
-                ]:
-                    # Only take teammate nodes
-                    assert not args.include_out
-                    pred_i = out[
-                        (batch == graph_index)
-                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
-                    ]  # [N_i]
-                    target_i = target[graph_index]
-
-                elif args.task == "failure_receiver":
-                    # Only take opponent nodes
-                    if args.include_out:
-                        ball_out_mask = torch.ones(batch_graphs.num_graphs).bool().to(device)
-                        failure_mask = torch.cat(
-                            [batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0, ball_out_mask]
-                        )
-                    else:
-                        failure_mask = batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0
-                    pred_i = out[(batch == graph_index) & failure_mask]
-                    n_teammates = (
-                        (batch_graphs.batch == graph_index)
-                        & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
-                    ).sum()
-                    target_i = target[graph_index] - n_teammates
-
-                else:  # pass_receiver, dest_receiver
-                    pred_i = out[batch == graph_index]
-                    target_i = target[graph_index]
-
-                pred_i = pred_i.reshape(-1)
-                if target_i.numel() != 1:
-                    raise ValueError(
-                        f"Expected one node-selection target for graph {int(graph_index.item())}, "
-                        f"got shape {tuple(target_i.shape)}."
-                    )
-                target_i = target_i.reshape(())
-                pred_loss += loss_fn(pred_i.unsqueeze(0), target_i.unsqueeze(0))
-                accuracy += (pred_i.argmax() == target_i).float()
-
-                rank = (pred_i.argsort(descending=True) == target_i).nonzero(as_tuple=True)[0].item() + 1
-                metrics["mrr"] += 1.0 / rank
-                if return_learning_curve_rows:
-                    gi = int(graph_index.item())
+        if args.gnn_task == "node_selection":
+            pred_loss, predictions, targets, reciprocal_ranks, probabilities = selection_loss_metrics(out, layout)
+            metrics["accuracy"] += (predictions == targets).sum().item()
+            metrics["mrr"] += reciprocal_ranks.double().sum().item()
+            if return_learning_curve_rows:
+                rows = torch.stack((targets, predictions, reciprocal_ranks, probabilities), dim=1).detach().cpu().tolist()
+                for gi, (target_value, prediction, reciprocal_rank, probability) in enumerate(rows):
                     learning_curve_rows.append({
                         "match_id": str(batch_graphs.evaluation_match_id[gi]),
                         "source_index": int(batch_graphs.evaluation_source_row[gi]),
-                        "target": int(target_i.item()),
-                        "prediction": int(pred_i.argmax().item()),
-                        "reciprocal_rank": float(1.0 / rank),
-                        "target_probability": float(torch.softmax(pred_i, dim=0)[target_i].item()),
+                        "target": int(target_value), "prediction": int(prediction),
+                        "reciprocal_rank": reciprocal_rank, "target_probability": probability,
                     })
 
-            pred_loss /= index_range.shape[0]
-            metrics["accuracy"] += accuracy.item()
-
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
-            intent = batch_labels[:, 5].clone().long()
-
             if args.task in ["pass_success", "pass_height", "action_success"]:
-                pred = []
-                for graph_index in index_range:
-                    pred.append(out[batch == graph_index][intent[graph_index]])
-                pred = torch.stack(pred)
+                pred = select_observed(out, observed_positions)
 
                 target_name = "pass_high" if args.task == "pass_height" else "success"
                 target = get_label_slice(batch_labels, target_name)
@@ -2069,15 +1929,8 @@ def run_epoch(
                     delta_gat = unwrap_model(model).decoder.latest_delta_gat
                     if delta_gat is None:
                         raise ValueError("Residual regularization requested, but decoder did not expose latest_delta_gat.")
-                    delta_observed = []
-                    distance_observed = []
-                    for graph_index in index_range:
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        delta_observed.append(delta_gat[graph_mask][target_index])
-                        distance_observed.append(batch_graphs.x[graph_mask][target_index, config.NODE_FEATURE_POSS_DIST])
-                    delta_observed = torch.stack(delta_observed)
-                    distance_observed = torch.stack(distance_observed).to(device=delta_observed.device, dtype=delta_observed.dtype)
+                    delta_observed = delta_gat[observed_positions]
+                    distance_observed = batch_graphs.x[observed_positions, config.NODE_FEATURE_POSS_DIST].to(delta_observed)
                     residual_l2 = delta_observed.pow(2).mean()
                     threshold = float(residual_distance_threshold(args))
                     residual_lambdas = torch.where(
@@ -2103,23 +1956,13 @@ def run_epoch(
                     height_values = getattr(batch_graphs, EVALUATION_XPASS_PASS_HEIGHT_ATTR, None)
                     if xpass_values is None or distance_values is None:
                         raise ValueError("Physical xPass evaluation requires cached xPass and pass-distance tensors.")
-                    observed_xpass = []
-                    observed_distance = []
-                    observed_nearest = []
-                    observed_height = []
-                    for graph_index in index_range:
-                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
-                            continue
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        observed_xpass.append(xpass_values[graph_mask][target_index])
-                        observed_distance.append(distance_values[graph_mask][target_index])
-                        if nearest_values is not None:
-                            observed_nearest.append(nearest_values[graph_mask][target_index])
-                        if height_values is not None:
-                            observed_height.append(height_values[graph_mask][target_index])
-                    xpass_array = torch.stack(observed_xpass).cpu().numpy().astype(float)
-                    distance_array = torch.stack(observed_distance).cpu().numpy().astype(float)
+                    pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
+                    observed_xpass = xpass_values[pass_positions]
+                    observed_distance = distance_values[pass_positions]
+                    observed_nearest = nearest_values[pass_positions] if nearest_values is not None else []
+                    observed_height = height_values[pass_positions] if height_values is not None else []
+                    xpass_array = observed_xpass.detach().cpu().numpy().astype(float)
+                    distance_array = observed_distance.detach().cpu().numpy().astype(float)
                     if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
                         raise ValueError("Physical xPass evaluation requires finite observed-target xPass and distance values.")
                     # The combined diagnostic needs the raw physical component as well.
@@ -2132,11 +1975,11 @@ def run_epoch(
                         if weight_version == "v2":
                             if len(observed_nearest) != len(observed_xpass):
                                 raise ValueError("Combined xPass weight v2 requires cached nearest-opponent distances.")
-                            blend_kwargs["distance_to_nearest_opponent"] = torch.stack(observed_nearest).cpu().numpy()
+                            blend_kwargs["distance_to_nearest_opponent"] = observed_nearest.detach().cpu().numpy()
                         if weight_version in {"v4", "v5"}:
                             if len(observed_height) != len(observed_xpass):
                                 raise ValueError(f"Combined xPass weight {weight_version} requires cached pass-height probabilities.")
-                            blend_kwargs["pass_height"] = torch.stack(observed_height).cpu().numpy()
+                            blend_kwargs["pass_height"] = observed_height.detach().cpu().numpy()
                         if weight_version == "v4":
                             blend_kwargs.update(
                                 v4_power=float(args.v4_power),
@@ -2190,18 +2033,12 @@ def run_epoch(
                         raise ValueError(
                             "Weighted pass-success evaluation requires cached pass-height probabilities and pass distances."
                         )
-                    observed_heights = []
-                    observed_distances = []
-                    for graph_index in index_range:
-                        if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
-                            continue
-                        graph_mask = batch == graph_index
-                        target_index = intent[graph_index]
-                        observed_heights.append(pass_heights[graph_mask][target_index])
-                        observed_distances.append(pass_distances[graph_mask][target_index])
+                    pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
+                    observed_heights = pass_heights[pass_positions]
+                    observed_distances = pass_distances[pass_positions]
                     effective_weights = physical_xpass_blend_weight_v4(
-                        torch.stack(observed_distances),
-                        torch.stack(observed_heights),
+                        observed_distances,
+                        observed_heights,
                         power=float(getattr(args, "v4_power", 4.0)),
                         zero_point=float(getattr(args, "v4_zero", 0.7)),
                         use_discount=bool(getattr(args, "discount", True)),
@@ -2243,10 +2080,7 @@ def run_epoch(
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
                 outcome = get_label_slice(batch_labels, "success").clone().long()
-                pred = []
-                for graph_index in index_range:
-                    pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
-                pred = torch.stack(pred)
+                pred = select_observed(out, observed_positions, observed_branches)
 
                 target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
                 pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
@@ -2279,13 +2113,8 @@ def run_epoch(
                         outcome_match_ids.append(np.asarray(match_ids, dtype=object))
 
             elif args.task in ["intent_return", "intent_return_oppo_agn"]:
-                pred_s = []
-                pred_c = []
-                for graph_index in index_range:
-                    pred_s.append(out[batch == graph_index][intent[graph_index], 0])
-                    pred_c.append(out[batch == graph_index][intent[graph_index], 1])
-                pred_s = torch.stack(pred_s)
-                pred_c = torch.stack(pred_c)
+                selected = select_observed(out, observed_positions)
+                pred_s, pred_c = selected[:, 0], selected[:, 1]
 
                 pred_loss_s = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_s, outcome_scoring)
                 pred_loss_c = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred_c, outcome_conceding)
@@ -2299,13 +2128,7 @@ def run_epoch(
                 binary_threshold = 0.1
 
         elif args.gnn_task == "node_regression":  # outcome_return
-            intent = batch_labels[:, 5].clone().long()
-            outcome = get_label_slice(batch_labels, "success").clone().long()
-
-            pred = []
-            for graph_index in index_range:
-                pred.append(out[batch == graph_index][intent[graph_index], outcome[graph_index]])
-            pred = torch.stack(pred) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
+            pred = select_observed(out, observed_positions, observed_branches) * 2 - 1  # Transform output to range from [0, 1] to [-1, 1]
 
             target = outcome_scoring - outcome_conceding
             pred_loss = nn.MSELoss()(pred, target)
@@ -2377,11 +2200,11 @@ def run_epoch(
         metrics["l1_loss"] += l1_loss.item() * batch_graphs.num_graphs
 
         if train:
-            optimizer.zero_grad()
-            loss = pred_loss + l1_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(unwrap_model(model).parameters(), args.clip)
-            optimizer.step()
+            if monitor is not None:
+                monitor.event("backward_update", device, **context)
+            accumulator.backward(pred_loss + l1_loss, batch_graphs.num_graphs)
+        if monitor is not None:
+            monitor.event("batch_complete", device, **context)
 
         if train and batch_index % args.print_freq == 0:
             interim_metrics = dict()
@@ -2399,6 +2222,9 @@ def run_epoch(
                 )
                 )
             print(f"[{batch_index:>{len(str(n_batches))}d}/{n_batches}]  {get_losses_str(interim_metrics)}")
+
+    if accumulator is not None:
+        accumulator.flush()
 
     for key, value in metrics.items():
         if key == "count":

@@ -798,7 +798,7 @@ class BinaryMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["f1"], 0)
         self.assertTrue(math.isnan(metrics["roc_auc"]))
         self.assertFalse(math.isnan(metrics["brier"]))
-        self.assertTrue(math.isnan(metrics["log_loss"]))
+        self.assertAlmostEqual(metrics["log_loss"], float(-np.log([0.9, 0.8, 0.7]).mean()))
 
 
 class OutcomeTargetSelectionTests(unittest.TestCase):

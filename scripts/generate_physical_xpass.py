@@ -700,6 +700,8 @@ def pc_ignore_teammates_control_from_args(args: argparse.Namespace) -> bool:
 def prepare_pass_height_context(args: argparse.Namespace) -> None:
     model_id = getattr(args, "pass_height_model_id", None)
     if not model_id:
+        if getattr(args, "pass_height_threshold", None) is not None:
+            raise ValueError("--pass-height-threshold requires --pass-height-model-id for cache generation.")
         args._pass_height_model = None
         args._pass_height_model_record = None
         return
@@ -710,6 +712,9 @@ def prepare_pass_height_context(args: argparse.Namespace) -> None:
         raise ValueError(f"--pass-height-model-id must point to a pass_height checkpoint, got {model_id_text!r}.")
     args._pass_height_model = model
     args._pass_height_model_record = get_model_provenance(model_id_text)
+    from models.pass_height import check_height_probability
+    check_height_probability(args._pass_height_model_record.get("pass_height_definition"),
+                             getattr(args, "pass_height_threshold", None))
 
 
 def prepare_runtime_graph_schema(args: argparse.Namespace) -> None:
@@ -1504,6 +1509,7 @@ def write_runtime_dataset_metadata(
             {
                 "pass_height_model_id": str(args.pass_height_model_id),
                 "pass_height_model_record": getattr(args, "_pass_height_model_record", None),
+                "pass_height_definition": (getattr(args, "_pass_height_model_record", None) or {}).get("pass_height_definition"),
                 "pass_height_column_suffix": PHYSICAL_XPASS_PASS_HEIGHT_SUFFIX,
                 "pass_height_storage": "per_player_probability_columns",
                 "pass_height_device": str(getattr(args, "pass_height_device", "cpu")),

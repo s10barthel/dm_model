@@ -28,11 +28,20 @@ including resumed epoch numbers, but differs from the old global shuffle.
 
 ## Cache lifetime and disk use
 
-Cache identity includes task, dataset options, source directories, preprocessing
-code, schema version, and source file signatures. Batch size, seed, learning rate,
-and epoch count do not affect the prepared graph contents. Compatible overlapping
-splits reuse the same per-match entries. Different tasks or feature settings can
-need separate caches, so their sizes add up.
+Cache identity includes task, all resolved `ActionDataset` options, source
+directories, preparation-specific code, and the cache schema version. Per-match
+source signatures validate individual entries. Batch size, accumulation, seed,
+learning rate, epoch count, optimizer, early stopping, monitoring, device, and
+training or metric code do not affect prepared graph contents. Compatible
+overlapping splits reuse the same per-match entries. Different tasks or feature
+settings can need separate caches, so their sizes add up.
+
+The code fingerprint covers the prepared loader, `ActionDataset`, dataset-option
+construction, edge-feature configuration, and the graph/label helpers used to
+construct serialized samples. Physical-xPass and reachability code is included
+only for datasets that enable physical-xPass, observed-height, evaluation-xPass,
+or lane-survival inputs. It deliberately excludes the training loop and model,
+loss, metric, checkpoint, and monitoring code.
 
 Preparation checks manifests and file checksums before reuse. Missing, stale, or
 corrupt entries are rebuilt. Unreadable source matches are reported and retried
@@ -49,6 +58,11 @@ reserve. If space is insufficient, free space or choose another cache directory
 and rerun. No other cache is deleted automatically. Source signatures use paths,
 sizes, and modification times; do not replace source contents while preserving
 their timestamps deliberately.
+
+The narrower preparation fingerprint introduced after the initial disk-loader
+release intentionally does not accept the older broad-fingerprint caches. Delete
+those caches manually and allow one rebuild. No automatic cache migration or
+legacy-ID aliasing is performed.
 
 Run metadata records each cache directory and identity, accepted sample counts,
 built/reused entry counts, cache bytes, preparation duration, and graph loading

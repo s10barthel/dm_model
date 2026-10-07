@@ -172,6 +172,8 @@ def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str
         pass_success_model.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
         pass_success_model.args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
         pass_success_model.args["v5_discount"] = bool(getattr(args, "v5_discount", True))
+        if getattr(args, "pass_height_threshold", None) is not None:
+            pass_success_model.args["pass_height_threshold"] = args.pass_height_threshold
         pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
@@ -214,6 +216,8 @@ def epv_physical_xpass_metadata(
         "physical_xpass_metric": lookup_config.get("metric"),
         "x_pass_version": lookup_config.get("x_pass_version"),
         "physical_xpass_weight_version": lookup_config.get("weight_version"),
+        "pass_height_probability_definition": lookup_config.get("pass_height_definition"),
+        "observed_pass_height_threshold_meters": lookup_config.get("observed_pass_height_threshold_meters"),
         "physical_xpass_v4_power": lookup_config.get("v4_power") if lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v4_zero": lookup_config.get("v4_zero") if lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v4_discount": lookup_config.get("v4_discount") if lookup_config.get("weight_version") == "v4" else None,

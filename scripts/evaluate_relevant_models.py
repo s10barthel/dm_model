@@ -51,6 +51,8 @@ def probability_threshold(value: str) -> float:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    from models.pass_height import add_pass_height_argument
+    add_pass_height_argument(parser)
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--learning-curve", action="store_true")
@@ -202,6 +204,8 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    if getattr(args, "pass_height_threshold", None) is not None:
+        command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
     if task in {"outcome_scoring", "outcome_conceding"}:
         command.extend(["--outcome-bootstrap-resamples", str(getattr(args, "outcome_bootstrap_resamples", 2000)),
                         "--outcome-bootstrap-seed", str(getattr(args, "outcome_bootstrap_seed", 42))])
@@ -322,6 +326,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
         raise ValueError(f"No comparable checkpoint series found; skipped: {skipped}")
     output_root.mkdir(parents=True)
     report = {"evaluation_timestamp": timestamp, "bundle_id": args.bundle_id,
+              "evaluation_pass_height_threshold_meters": args.pass_height_threshold,
               "bootstrap_resamples": args.learning_curve_bootstrap_resamples,
               "bootstrap_seed": args.learning_curve_bootstrap_seed,
               "classification_threshold": args.classification_threshold,
@@ -338,6 +343,8 @@ def run_learning_curve(args: argparse.Namespace) -> None:
                        "--learning-curve-rows"]
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
                 command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+            if args.pass_height_threshold is not None:
+                command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
             if task in {"pass_success", "pass_height"}:
                 command.extend(["--classification-threshold", str(args.classification_threshold)])
             if task in {"outcome_scoring", "outcome_conceding"}:
@@ -421,6 +428,7 @@ def main() -> None:
         "evaluated_models": {task: model_id for task, model_id in models_to_evaluate},
         "bundle_id": args.bundle_id,
         "diagnostic_feature_run_id": args.diagnostic_feature_run_id,
+        "pass_height_threshold_meters": args.pass_height_threshold,
         "evaluation_options": {
             "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
             "evaluate_xpass": bool(args.evaluate_xpass),

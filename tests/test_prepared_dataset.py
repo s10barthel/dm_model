@@ -1,5 +1,6 @@
 import argparse
 import gc
+import inspect
 import json
 import sys
 from types import SimpleNamespace
@@ -121,7 +122,7 @@ def test_invalidation_and_corrupt_repair(tmp_path, artifacts):
     changed_options = {**artifacts, "min_pass_dur": 0.0}
     assert make_disk(tmp_path, changed_options, ["m0"]).cache_id != disk.cache_id
     with patch.object(prepared, "preprocessing_fingerprint", return_value="new-code"), \
-            patch.object(prepared, "LOADED_PREPROCESSING_FINGERPRINT", "new-code"):
+            patch.object(prepared, "loaded_preprocessing_fingerprint", return_value="new-code"):
         assert make_disk(tmp_path, artifacts, ["m0"]).cache_id != disk.cache_id
     label_path = artifacts["label_dir"] / "m0.pt"
     x = torch.load(label_path, weights_only=False)
@@ -203,6 +204,69 @@ def test_source_edits_after_import_cannot_relabel_cached_graphs(tmp_path, artifa
     with patch.object(prepared, "preprocessing_fingerprint", return_value="edited-on-disk"):
         with pytest.raises(RuntimeError, match="changed since import"):
             make_disk(tmp_path, artifacts, ["m0"])
+
+
+def test_preparation_fingerprint_has_narrow_code_boundary():
+    standard = {path.relative_to(prepared._ROOT).as_posix()
+                for path in prepared.preparation_code_paths({"task": "pass_intent"})}
+    assert "models/edge_feature_config.py" in standard
+    assert "models/dataset_config.py" in standard
+    assert "dataset.py" in standard
+    assert "datatools/config.py" in standard
+    assert "datatools/utils.py" in standard
+    for training_only in (
+        "models/utils.py", "models/gnn.py", "models/node_selection.py",
+        "train.py", "training_state.py", "training_monitor.py",
+    ):
+        assert training_only not in standard
+    assert "physical_pass_model.py" not in standard
+    assert "reachability.py" not in standard
+    assert prepared.preprocessing_fingerprint({"task": "pass_intent"}) != prepared.preprocessing_fingerprint(
+        {"task": "pass_intent", "use_physical_xpass": True}
+    )
+
+
+def test_edge_feature_helpers_remain_compatible_reexports():
+    from models import edge_feature_config
+    from models import utils
+
+    for name in (
+        "normalize_v_edge_feature_mode", "normalize_relative_speed_edge_feature_mode",
+        "validate_relative_speed_edge_feature_mode", "normalize_v_edge_feature_args",
+        "use_v_edge_features_for_mode", "mask_possessor_v_edge_features_for_mode",
+    ):
+        assert getattr(utils, name) is getattr(edge_feature_config, name)
+
+
+@pytest.mark.parametrize("option", [
+    "use_physical_xpass", "require_observed_pass_height", "pass_height_cache_dir",
+    "evaluation_xpass_cache_dir", "lane_survival", "lane_survival_cache_dir",
+])
+def test_physical_preparation_code_is_conditional(option):
+    paths = {path.name for path in prepared.preparation_code_paths({option: True})}
+    assert {"physical_pass_model.py", "reachability.py"}.issubset(paths)
+
+
+def test_cache_identity_uses_all_action_dataset_options_but_not_runtime_controls(tmp_path, artifacts):
+    first = make_disk(tmp_path, artifacts, ["m0"], seed=1, shuffle=True, buffer_matches=1)
+    second = make_disk(tmp_path, artifacts, ["m0"], seed=999, shuffle=False, buffer_matches=9)
+    assert first.cache_id == second.cache_id
+    assert second.preparation["reused"] == 1
+
+    bound = inspect.signature(ActionDataset.__init__).bind(
+        None, [], feature_dir=str(Path(artifacts["feature_dir"]).resolve()),
+        label_dir=str(Path(artifacts["label_dir"]).resolve()),
+        **{key: value for key, value in artifacts.items() if key not in {"feature_dir", "label_dir"}},
+    )
+    bound.apply_defaults()
+    expected = set(bound.arguments) - {"self", "match_ids", "feature_dir", "label_dir"}
+    assert set(first.options) == expected
+    for training_only in (
+        "batch_size", "accumulation_steps", "start_lr", "min_lr", "n_epochs",
+        "optimizer", "early_stopping", "monitoring", "device", "pin_memory",
+        "seed", "shuffle", "buffer_matches",
+    ):
+        assert training_only not in first.identity["options"]
 
 
 def test_interrupted_manifest_publish_and_iterator_error(tmp_path, artifacts):

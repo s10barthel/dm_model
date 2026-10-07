@@ -893,6 +893,8 @@ def main() -> None:
         pass_success_model.args["v4_discount"] = bool(getattr(args, "v4_discount", True))
         pass_success_model.args["v5_intent_threshold"] = float(getattr(args, "v5_intent_threshold", 0.01))
         pass_success_model.args["v5_discount"] = bool(getattr(args, "v5_discount", True))
+        if getattr(args, "pass_height_threshold", None) is not None:
+            pass_success_model.args["pass_height_threshold"] = args.pass_height_threshold
         pass_success_model.args["ball_z_limit"] = getattr(args, "ball_z_limit", "none")
     if pass_success_model is not None and (model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)):
         pass_success_model.args["physical_runtime_cache_disabled"] = no_physical_cache
@@ -1017,6 +1019,8 @@ def main() -> None:
         "physical_xpass_runtime_source": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["source"] if pass_success_model is not None else None,
         "x_pass_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["x_pass_version"] if pass_success_model is not None else None,
         "physical_xpass_weight_version": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] if pass_success_model is not None else None,
+        "pass_height_probability_definition": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["pass_height_definition"] if pass_success_model is not None else None,
+        "observed_pass_height_threshold_meters": getattr(args, "pass_height_threshold", None),
         "physical_xpass_v4_power": (
             physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["v4_power"]
             if pass_success_model is not None

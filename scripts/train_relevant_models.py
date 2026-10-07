@@ -16,6 +16,10 @@ if str(ROOT) not in sys.path:
 
 from datatools import config
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from ipw_options import add_ipw_arguments, ipw_flags
+from crash_capture import add_crash_capture_arguments, run_training
+from training_state import (add_training_runtime_arguments, validate_learning_rates,
+                            resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts)
 from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
@@ -816,8 +820,15 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    from models.pass_height import add_pass_height_argument
     parser = argparse.ArgumentParser()
     add_dataset_loading_arguments(parser)
+    add_ipw_arguments(parser)
+    add_crash_capture_arguments(parser)
+    add_training_runtime_arguments(parser)
+    parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
+    parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
+    parser.add_argument("--resume-id", default=None, help="Resume one model with its saved training settings.")
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
@@ -1241,7 +1252,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional long-pass override for pass_success residual clipping.",
     )
     pc_versions.add_selection_argument(parser)
+    add_pass_height_argument(parser)
     args = parser.parse_args(argv)
+    if args.resume_id:
+        supplied = sys.argv[1:] if argv is None else argv
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold")]
+        if invalid:
+            parser.error("--resume-id restores saved settings; only --monitoring, --crash-dump, --procdump-path and a matching --pass-height-threshold may accompany it. Conflicts: " + ", ".join(invalid))
+        return args
+    try:
+        validate_learning_rates(args.start_lr, args.min_lr)
+    except ValueError as exc:
+        parser.error(str(exc))
     pc_versions.check_selectors(args)
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
@@ -1893,7 +1915,18 @@ def build_training_commands(
 
     duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
-    commands = [command + dataset_loading_flags(args) for command in commands]
+    commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
+    for index, command in enumerate(commands):
+        for flag in ("--start_lr", "--min_lr"):
+            value = getattr(args, flag[2:], None)
+            if value is not None:
+                command = _replace_cli_value(command, flag, value)
+        validate_learning_rates(float(get_cli_value(command, "--start_lr")), float(get_cli_value(command, "--min_lr")))
+        command = _replace_cli_value(command, "--accumulation-steps", getattr(args, "accumulation_steps", 1))
+        command = _replace_cli_value(command, "--monitoring", getattr(args, "monitoring", "off"))
+        if getattr(args, "pass_height_threshold", None) is not None:
+            command = _replace_cli_value(command, "--pass-height-threshold", args.pass_height_threshold)
+        commands[index] = command
     return (
         commands,
         trained_model_ids,
@@ -1988,6 +2021,28 @@ def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> di
 
 def main() -> None:
     cli_args = parse_args()
+    if cli_args.resume_id:
+        checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
+        checkpoint = load_checkpoint(checkpoint_path)
+        if cli_args.pass_height_threshold is not None:
+            saved_height = checkpoint["args"].get("pass_height_definition")
+            if not saved_height or saved_height["threshold_meters"] != cli_args.pass_height_threshold:
+                raise ValueError("Resume pass-height cutoff conflicts with the checkpoint target definition.")
+        publish_checkpoint_artifacts(checkpoint, checkpoint_path.parent)
+        if checkpoint["finished"]:
+            print(f"Model {cli_args.resume_id} is already completed; no retraining needed.")
+            return
+        command = [sys.executable, "train.py", "--resume-checkpoint", str(checkpoint_path.resolve()),
+                   "--monitoring", cli_args.monitoring]
+        print("Resuming:", subprocess.list2cmdline(command))
+        try:
+            run_training(command, cwd=ROOT, options=cli_args)
+        except subprocess.CalledProcessError as exc:
+            print(f"Training failed for {cli_args.resume_id}. Return code: {describe_returncode(exc.returncode)}")
+            print(f"Model log: {checkpoint_path.parent / 'log.txt'}")
+            print(f"Crash log: {checkpoint_path.parent / 'crash.log'}")
+            raise
+        return
     if getattr(cli_args, "lane_survival_mode", None) or getattr(cli_args, "pc_xpass_id", None):
         pc_versions.cache_dir("sportec", cli_args)
     validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
@@ -2051,7 +2106,7 @@ def main() -> None:
                 command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
                 print("Running:", " ".join(command))
                 try:
-                    subprocess.run(command, cwd=ROOT, check=True)
+                    run_training(command, cwd=ROOT, options=cli_args)
                 except subprocess.CalledProcessError as exc:
                     write_run_metadata(
                         bundle_root,
@@ -2098,7 +2153,7 @@ def main() -> None:
             command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
             print("Running:", " ".join(command))
             try:
-                subprocess.run(command, cwd=ROOT, check=True)
+                run_training(command, cwd=ROOT, options=cli_args)
             except subprocess.CalledProcessError as exc:
                 write_run_metadata(
                     bundle_root,
@@ -2138,7 +2193,7 @@ def main() -> None:
         command.extend(["--training-step-index", str(index), "--training-step-total", str(total_commands)])
         print("Running:", " ".join(command))
         try:
-            subprocess.run(command, cwd=ROOT, check=True)
+            run_training(command, cwd=ROOT, options=cli_args)
         except subprocess.CalledProcessError as exc:
             failed_task = get_cli_value(command, "--task")
             failed_run_id = get_cli_value(command, "--run-id")

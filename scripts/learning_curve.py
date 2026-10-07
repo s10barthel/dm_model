@@ -43,6 +43,9 @@ def checkpoint(model_id: str) -> dict:
     if not manifest_id:
         raise ValueError(f"Checkpoint {model_id} lacks a split manifest ID.")
     manifest = load_recorded_split_manifest(manifest_id)
+    height_definition = metadata.get("pass_height_definition")
+    if height_definition:
+        height_definition = {key: value for key, value in height_definition.items() if key != "resolution_source"}
     test_ids = [str(value) for value in manifest["test"]]
     if set(train_ids) & set(test_ids):
         raise ValueError(f"Checkpoint {model_id} has training matches in its test set.")
@@ -52,9 +55,10 @@ def checkpoint(model_id: str) -> dict:
         "train_matches": len(train_ids), "test_match_ids": test_ids,
         "split_manifest_id": manifest_id, "seed": metadata.get("training_args", {}).get("seed"),
         "comparison_config": {
-            key: metadata.get(key) for key in (
+            key: height_definition if key == "pass_height_definition" else metadata.get(key) for key in (
                 "feature_run_id", "use_carries", "min_pass_dur", "target_family",
                 "intended_receiver_mode", "training_filter", "label_source", "feature_signature",
+                "pass_height_definition",
             )
         },
         "weights_sha256": hashlib.sha256(weights_path.read_bytes()).hexdigest(),
@@ -129,7 +133,8 @@ def load_aligned_predictions(records: list[dict], output_dir: Path) -> list[pd.D
         if not set(frame["match_id"]).issubset(record["test_match_ids"]):
             raise ValueError(f"Predictions outside the test manifest in {path}.")
         identity = frame[["match_id", "source_index", "target"]].copy()
-        for column in ("soft_target", "execution_branch"):
+        for column in ("soft_target", "execution_branch", "model_pass_height_threshold_meters",
+                       "evaluation_pass_height_threshold_meters", "pass_height_label_mode"):
             if column in frame:
                 identity[column] = frame[column]
         if reference is None:

@@ -1119,6 +1119,12 @@ def physical_xpass_ball_z_limit(args: Any) -> float | None:
 
 
 def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
+    from models.pass_height import cached_height_definition, check_height_probability
+    height_definition = None
+    if cache_dir is not None and (Path(cache_dir) / "metadata.json").is_file():
+        height_definition = cached_height_definition(json.loads((Path(cache_dir) / "metadata.json").read_text(encoding="utf-8-sig")))
+    if physical_xpass_weight_version(args) in {"v4", "v5"}:
+        check_height_probability(height_definition, _get_arg(args, "pass_height_threshold", None))
     source = PC_XPASS_SOURCE if pc_xpass_enabled(args) else PHYSICAL_XPASS_SOURCE
     x_pass_version = normalize_x_pass_version(_get_arg(args, "x_pass_version", _get_arg(args, "xpass_version", None)))
     metric = physical_xpass_metric(args)
@@ -1130,6 +1136,8 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "metric": metric,
         "x_pass_version": x_pass_version,
         "weight_version": physical_xpass_weight_version(args),
+        "pass_height_definition": height_definition,
+        "observed_pass_height_threshold_meters": _get_arg(args, "pass_height_threshold", None),
         "v4_power": physical_xpass_v4_power(args),
         "v4_zero": physical_xpass_v4_zero(args),
         "v4_discount": physical_xpass_v4_discount(args),
@@ -5507,6 +5515,11 @@ def prewarm_physical_xpass_runtime_cache(
             "Run scripts/generate_physical_xpass.py with --pc-xpass."
         )
     pass_height_model_id_text = None if pass_height_model_id is None else str(pass_height_model_id)
+    from models.pass_height import model_definition, cached_height_definition, check_height_probability
+    height_definition = model_definition(pass_height_model.args) if pass_height_enabled else None
+    if pass_height_enabled and cache_metadata.get("pass_height_model_id") and height_definition["threshold_meters"] is not None:
+        # A cache-wide definition must never describe a mixture of old and new target events.
+        check_height_probability(cached_height_definition(cache_metadata), height_definition["threshold_meters"])
     pass_height_refresh_required = bool(
         pass_height_enabled and str(cache_metadata.get("pass_height_model_id")) != str(pass_height_model_id_text)
     )
@@ -5520,6 +5533,7 @@ def prewarm_physical_xpass_runtime_cache(
     stats["disabled_metrics"] = disabled_physical_xpass_metrics(available_metrics)
     stats["dry_run"] = bool(dry_run)
     stats["pass_height_model_id"] = pass_height_model_id_text
+    stats["pass_height_definition"] = height_definition
     stats["pass_height_refresh_required"] = pass_height_refresh_required
     match_stats_by_id: dict[str, dict[str, int]] = {}
     misses: list[dict[str, Any]] = []
@@ -5896,6 +5910,12 @@ def prewarm_physical_xpass_runtime_cache(
 
     stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
     compute_seconds = float(stats.get("compute_seconds", 0.0) or 0.0)
+    if pass_height_enabled and not dry_run:
+        metadata_path = Path(cache_dir) / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        metadata.update(pass_height_model_id=pass_height_model_id_text, pass_height_definition=height_definition)
+        from pc_xpass_versions import atomic_json
+        atomic_json(metadata_path, metadata)
     if compute_seconds > 0.0:
         stats["rows_per_second"] = float(stats.get("online_graphs", 0) or 0) / compute_seconds
         stats["chunks_per_second"] = float(stats.get("compute_chunks", 0) or 0) / compute_seconds

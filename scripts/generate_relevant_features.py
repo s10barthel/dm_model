@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
 from datatools.graph_feature import infer_node_feature_dim
@@ -155,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--pass-height-threshold",
-        type=float,
+        type=positive_height,
         default=None,
         help=(
             "Maximum-ball-height cutoff in metres used to classify a pass as high. Requires --pass-height; "
