@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from dataset import requires_goal_next10_diagnostics
+from models.goal_context import goal_policy
 from models.edge_feature_config import (
     mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
@@ -89,6 +90,10 @@ def build_action_dataset_kwargs(
         "poss_geometry_aware": _bool_arg(args, "poss_geometry_aware", True),
         "goal_features_aware": _bool_arg(args, "goal_features_aware", True),
         "goal_nodes_aware": _bool_arg(args, "goal_nodes_aware", True),
+        "goal_context_version": goal_policy(args).version,
+        "include_goals": goal_policy(args).include_goals,
+        "goal_input_nodes": None,
+        "auxiliary_model_args": None,
         "vel_node_features_aware": _bool_arg(args, "vel_node_features_aware", True),
         "accel_aware": _bool_arg(args, "accel_aware", True),
         "offside_aware": _bool_arg(args, "offside_aware", True),
@@ -168,8 +173,11 @@ def build_ipw_dataset_kwargs(
     transforms are reconstructed from the IPW checkpoint because it may require
     lane-survival even when the target model does not.
     """
+    input_goals = goal_policy(ipw_model_args).input_goals
     checkpoint_args = dict(ipw_model_args)
     checkpoint_args["task"] = target_dataset_kwargs["task"]
+    # Row eligibility belongs to the target; input-node policy was resolved above.
+    checkpoint_args["goal_context_version"] = 1
     lane_metadata = dict((ipw_model_metadata or {}).get("lane_survival") or {})
     checkpoint_args["lane_survival"] = bool(
         lane_metadata.get("enabled", checkpoint_args.get("lane_survival", False))
@@ -205,6 +213,7 @@ def build_ipw_dataset_kwargs(
     result = dict(target_dataset_kwargs)
     for key in _IPW_CHECKPOINT_FEATURE_KEYS:
         result[key] = checkpoint_kwargs[key]
+    result["goal_input_nodes"] = input_goals
     result["use_physical_xpass"] = False
     result["physical_cache_dir"] = None
     return result

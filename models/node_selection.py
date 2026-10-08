@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from datatools import config
+from models.goal_context import goal_policy, candidate_mask as goal_candidate_mask, target_candidate_position
 
 TEAMMATE_TASKS = {"pass_intent", "success_intent", "pass_intent_oppo_agn", "action_intent", "success_receiver"}
 
@@ -34,7 +35,7 @@ def validate_graph_batch(graphs):
             raise ValueError(f"Nonfinite graph {name} at {location}: {sample}")
 
 
-def selection_layout(graphs, labels, task, include_out):
+def selection_layout(graphs, labels, task, include_out, model_args=None):
     """Group equal candidate counts to preserve the existing argsort tie behavior."""
     graph_count = graphs.num_graphs
     batch = graphs.batch
@@ -54,6 +55,9 @@ def selection_layout(graphs, labels, task, include_out):
         target -= torch.bincount(batch[teammate], minlength=graph_count)
     else:
         candidate_mask = torch.ones_like(batch, dtype=torch.bool)
+    policy = goal_policy(model_args or {"task": task})
+    if policy.version == 2:
+        candidate_mask = goal_candidate_mask(graphs, model_args)
     if include_out:
         batch = torch.cat((batch, torch.arange(graph_count)))
         candidate_mask = torch.cat((candidate_mask, torch.ones(graph_count, dtype=torch.bool)))
@@ -61,6 +65,9 @@ def selection_layout(graphs, labels, task, include_out):
     for gi in range(graph_count):
         indices = torch.where((batch == gi) & candidate_mask)[0]
         count = indices.numel()
+        if policy.version == 2:
+            graph_target = int(graphs.ptr[gi]) + int(target[gi])
+            target[gi] = target_candidate_position(indices, graph_target)
         if not 0 <= int(target[gi]) < count:
             raise ValueError(f"Node-selection target {int(target[gi])} outside {count} candidates "
                              f"in graph {gi}: {batch_identifiers(graphs)}")

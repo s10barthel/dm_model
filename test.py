@@ -989,6 +989,8 @@ if __name__ == "__main__":
         # These attributes are evaluation sidecars; they do not modify node or edge features.
         dataset_args["pass_height_cache_dir"] = weighted_pc_xpass_cache_dir
         dataset_args["require_observed_pass_height"] = True
+    if pass_intent_model is not None:
+        dataset_args["auxiliary_model_args"] = dict(pass_intent_model.args)
     if evaluation_xpass_cache_dir is not None:
         dataset_args["evaluation_xpass_cache_dir"] = evaluation_xpass_cache_dir
         dataset_args["evaluation_xpass_metric"] = evaluation_xpass_metric

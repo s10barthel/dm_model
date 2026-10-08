@@ -146,13 +146,19 @@ parser.add_argument(
     help="Ignore goal-relative geometry node features.",
 )
 parser.set_defaults(goal_features_aware=True)
-parser.add_argument(
+goal_nodes_group = parser.add_mutually_exclusive_group()
+goal_nodes_group.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true")
+goal_nodes_group.add_argument(
     "--no-goal-nodes",
     dest="goal_nodes_aware",
     action="store_false",
     help="Remove goal nodes and their incident edges regardless of task defaults.",
 )
-parser.set_defaults(goal_nodes_aware=True)
+parser.set_defaults(goal_nodes_aware=None)
+goal_candidates_group = parser.add_mutually_exclusive_group()
+goal_candidates_group.add_argument("--include-goals", dest="include_goals", action="store_true", help="Include shot candidates (action_intent only).")
+goal_candidates_group.add_argument("--no-include-goals", dest="include_goals", action="store_false", help="Exclude goal predictions and shot examples.")
+parser.set_defaults(include_goals=None)
 accel_group = parser.add_mutually_exclusive_group()
 accel_group.add_argument(
     "--accel",
@@ -477,12 +483,21 @@ resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
 add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "off"), default="off")
+resume_nodes = resume_probe.add_mutually_exclusive_group()
+resume_nodes.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true")
+resume_nodes.add_argument("--no-goal-nodes", dest="goal_nodes_aware", action="store_false")
+resume_candidates = resume_probe.add_mutually_exclusive_group()
+resume_candidates.add_argument("--include-goals", dest="include_goals", action="store_true")
+resume_candidates.add_argument("--no-include-goals", dest="include_goals", action="store_false")
+resume_probe.set_defaults(goal_nodes_aware=None, include_goals=None)
 resume_options, resume_extra = resume_probe.parse_known_args()
 resume_checkpoint = None
 if resume_options.resume_checkpoint:
     if resume_extra:
-        parser.error("Resume restores saved settings; only --monitoring and a matching --pass-height-threshold may accompany --resume-checkpoint.")
+        parser.error("Resume restores saved settings; only --monitoring and matching pass-height or goal settings may accompany --resume-checkpoint.")
     resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
+    from models.goal_context import resolve_training_goal_settings
+    resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
     if resume_options.pass_height_threshold is not None:
         saved_height = resume_checkpoint["args"].get("pass_height_definition")
         if not saved_height or saved_height["threshold_meters"] != resume_options.pass_height_threshold:
@@ -724,6 +739,8 @@ if __name__ == "__main__":
             args.feature_run_id = resume_record.get("feature_run_id")
         elif resume_record.get("feature_run_id") != args.feature_run_id:
             raise ValueError("Resumed checkpoint feature run does not match requested feature run.")
+    from models.goal_context import resolve_training_goal_settings
+    resolve_training_goal_settings(args, resume_record)
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
@@ -875,6 +892,9 @@ if __name__ == "__main__":
         json.dump(args_dict, f, indent=4)
 
     metadata = {
+        "goal_context_version": args.goal_context_version,
+        "goal_nodes_aware": args.goal_nodes_aware,
+        "include_goals": args.include_goals,
         "model_id": args.model_id,
         "task": args.task,
         "run_id": args.run_id,

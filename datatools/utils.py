@@ -12,6 +12,7 @@ from shapely.geometry import Point, Polygon
 from torch_geometric.data import Batch, Data
 
 from datatools import config
+from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
@@ -1355,6 +1356,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     edge_index = index_map[graph.edge_index[:, edge_mask]]
     edge_attr = graph.edge_attr[edge_mask]
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
+    if hasattr(graph, "source_node_positions"):
+        masked_graph.source_node_positions = graph.source_node_positions[node_mask]
     if hasattr(graph, "node_ids"):
         masked_graph.node_ids = [graph.node_ids[idx] for idx in node_mask_indices.tolist()]
 
@@ -1506,6 +1509,8 @@ def zero_offside_node_feature(graph: Data) -> None:
         graph.x[:, -1] = 0
 
 
+
+
 def filter_features_and_labels(
     features: List[Data],
     labels: torch.Tensor,
@@ -1513,6 +1518,7 @@ def filter_features_and_labels(
     event_indices: np.ndarray = None,
     feature_action_indices: np.ndarray | torch.Tensor | list[int] | None = None,
 ) -> Tuple[List[Data], torch.Tensor]:
+    policy = goal_policy(args)
     filtered_features = []
     filtered_labels = []
     event_index_set = None if event_indices is None else {int(event_index) for event_index in event_indices}
@@ -1552,6 +1558,8 @@ def filter_features_and_labels(
 
         graph: Data = features[feature_pos]
         graph_labels: torch.Tensor = labels[i]
+        if policy.version == 2 and args["task"] == "action_intent" and not policy.include_goals and bool(graph_labels[config.LABEL_INDEX["is_shot"]]):
+            continue
 
         if graph is None:
             # filtered_features.append(graph)
@@ -1615,7 +1623,8 @@ def filter_features_and_labels(
         if not args.get("offside_aware", True):
             zero_offside_node_feature(graph)
 
-        if not args.get("goal_nodes_aware", True) or not config.TASK_CONFIG.at[args["task"], "include_goals"]:
+        validate_source_goals(graph, policy)
+        if not policy.input_goals:
             graph, graph_labels = drop_goal_nodes(graph, graph_labels)
 
         if args["task"].endswith("oppo_agn"):
@@ -1633,6 +1642,7 @@ def filter_features_and_labels(
         elif args["sparsify"] == "delaunay" and graph.x.shape[0] > 3:
             graph = sparsify_edges(graph, "delaunay")
 
+        validate_observed_goal_target(graph, graph_labels, args)
         filtered_features.append(graph)
         filtered_labels.append(graph_labels)
 

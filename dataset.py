@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from tqdm import tqdm
 
 from datatools import config
+from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     adapt_graph_edge_features,
@@ -270,7 +271,14 @@ class ActionDataset(Dataset):
         vel_node_features_aware=True,
         pass_height_threshold=None,
         defer_pass_height_relabel=False,
+        goal_context_version=1,
+        include_goals=None,
+        goal_input_nodes=None,
+        auxiliary_model_args=None,
     ):
+        goal_args = dict(task=task, goal_context_version=goal_context_version, goal_nodes_aware=goal_nodes_aware, include_goals=include_goals)
+        policy = goal_policy(goal_args)
+        input_goals = policy.input_goals if goal_input_nodes is None else bool(goal_input_nodes)
         if pass_height_threshold is not None:
             pass_height_threshold = positive_height(pass_height_threshold)
         feature_root = Path(feature_dir)
@@ -427,6 +435,9 @@ class ActionDataset(Dataset):
             condition &= labels[:, 1] == 0
         if not TASK_CONFIG.at[task, "dribble"]:
             condition &= labels[:, 2] == 0
+        if policy.version == 2 and task == "action_intent" and not policy.include_goals:
+            self.skipped_rows["shot_candidate_disabled"] = int((labels[:, 3] == 1).sum())
+            condition &= labels[:, 3] == 0
         if not TASK_CONFIG.at[task, "shot"]:
             condition &= labels[:, 3] == 0
 
@@ -494,7 +505,10 @@ class ActionDataset(Dataset):
             if graph is None:
                 _increment_count(self.skipped_rows, "graph_none")
                 continue
+            auxiliary_source = graph.clone() if auxiliary_model_args is not None else None
+            auxiliary_label = graph_labels.clone() if auxiliary_model_args is not None else None
             graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
+            graph.source_node_positions = torch.arange(graph.num_nodes)
 
             try:
                 possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
@@ -562,7 +576,8 @@ class ActionDataset(Dataset):
             if not offside_aware:
                 _zero_offside_node_feature(graph)
 
-            if not goal_nodes_aware or not TASK_CONFIG.at[task, "include_goals"]:
+            validate_source_goals(graph, policy, goal_input_nodes)
+            if not input_goals:
                 graph, graph_labels = drop_goal_nodes(graph, graph_labels)
 
             if task.endswith("oppo_agn"):
@@ -577,6 +592,7 @@ class ActionDataset(Dataset):
                     config.NODE_FEATURE_IS_POSSESSOR,
                 )
 
+            validate_observed_goal_target(graph, graph_labels, goal_args)
             if task in {"pass_success", "pass_height"}:
                 invalid_reason = pass_success_observed_target_invalid_reason(graph, graph_labels)
                 if invalid_reason is not None:
@@ -688,6 +704,18 @@ class ActionDataset(Dataset):
                         require_pass_height=self.evaluation_xpass_require_height,
                     )
 
+            if auxiliary_model_args is not None:
+                from datatools.utils import filter_features_and_labels
+                aux_graphs, aux_labels = filter_features_and_labels([auxiliary_source], auxiliary_label.unsqueeze(0), auxiliary_model_args)
+                aux_graph = aux_graphs[0]
+                if auxiliary_model_args.get("lane_survival", False):
+                    aux_cache = Path(auxiliary_model_args["lane_survival_cache_dir"])
+                    aux_key = (str(aux_cache), feature_match_ids[int(i)])
+                    if aux_key not in lane_survival_rows_by_match:
+                        lane_survival_rows_by_match[aux_key] = load_physical_xpass_match(aux_cache, aux_key[1], frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+                    aux_graph = append_pc_xpass_lane_survival_to_graph(aux_graph, aux_labels[0], lane_survival_rows_by_match[aux_key], match_id=aux_key[1], require_observed_target=True, mode=auxiliary_model_args.get("lane_survival_mode"))
+                graph.auxiliary_graph = aux_graph
+                graph.auxiliary_label = aux_labels[0].unsqueeze(0)
             graph.evaluation_match_id = str(feature_match_ids[int(i)])
             # Preserve the source row through task-specific filtering for paired evaluations.
             # Avoid "index" in the graph attribute name: PyG offsets index-like

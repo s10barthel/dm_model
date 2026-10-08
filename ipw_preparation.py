@@ -43,7 +43,7 @@ def inference_fingerprint():
         selected[name] = ast.dump(node, include_attributes=False)
         pending.extend(n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in definitions)
     return _digest({"helpers": selected, "files": {
-        name: _file_digest(_ROOT / name) for name in ("ipw_preparation.py", "models/gnn.py")}})
+        name: _file_digest(_ROOT / name) for name in ("ipw_preparation.py", "models/gnn.py", "models/goal_context.py")}})
 
 
 LOADED_INFERENCE_FINGERPRINT = inference_fingerprint()
@@ -60,13 +60,17 @@ def sample_records(dataset, indices=None):
         identity = (str(graph.evaluation_match_id), int(graph.evaluation_source_row))
         occurrence = occurrences[identity]
         occurrences[identity] += 1
-        records.append([*identity, occurrence, float(label[config.LABEL_INDEX["intent_index"]]),
+        target = float(label[config.LABEL_INDEX["intent_index"]])
+        if target.is_integer() and 0 <= target < graph.num_nodes and hasattr(graph, "source_node_positions"):
+            target = float(graph.source_node_positions[int(target)])
+        records.append([*identity, occurrence, target,
                         float(label[config.LABEL_INDEX["is_dribble"]])])
     return records
 
 
 def predict_probabilities(dataset, model, *, device, batch_size, pin_memory):
     """Raw probabilities with the historical IPW teammate/target semantics."""
+    from models.goal_context import goal_policy, candidate_mask, target_candidate_position
     probabilities = torch.empty(len(dataset), dtype=torch.float32)
     offset = 0
     model.eval()
@@ -80,9 +84,11 @@ def predict_probabilities(dataset, model, *, device, batch_size, pin_memory):
                 if bool(labels[i, config.LABEL_INDEX["is_dribble"]]):
                     probability = 1.0
                 else:
-                    logits = out[(graphs.batch == i) &
-                                 (graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)]
+                    indices = torch.where((graphs.batch == i) & candidate_mask(graphs, model.args))[0]
+                    logits = out[indices]
                     target = int(labels[i, config.LABEL_INDEX["intent_index"]])
+                    if goal_policy(model.args).version == 2:
+                        target = target_candidate_position(indices, int(graphs.ptr[i]) + target)
                     if target < 0 or target >= len(logits):
                         raise ValueError("IPW target is outside the teammate candidates.")
                     probability = torch.softmax(logits, dim=0)[target].item()

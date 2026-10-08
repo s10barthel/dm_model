@@ -6184,6 +6184,9 @@ def attach_physical_xpass_to_graph(
     missing_columns = []
     default_metric = physical_rows.attrs.get("physical_xpass_default_metric") if hasattr(physical_rows, "attrs") else None
     for node_index, node_id in enumerate(node_ids):
+        if bool(graph.x[node_index, config.NODE_FEATURE_IS_GOAL] == 1):
+            probs[node_index] = 0.5  # Neutral physical logit for context-only nodes.
+            continue
         value_columns = physical_xpass_metric_columns(str(node_id), selected_metric, default_metric=default_metric)
         value_column = next((column for column in value_columns if column in row.index), None)
         if value_column is None:

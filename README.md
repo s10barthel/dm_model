@@ -1518,7 +1518,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 When split flags are omitted, training infers the selector from feature-run metadata, recovering it from the recorded immutable manifest if needed. Explicit selectors are assertions and must match, including count versus percentage mode. Inconsistent modern provenance or a changed match-universe identity fails. Only runs with no split provenance assume the historical 50% split. The resolved selector, match counts, and source are printed and forwarded to training commands.
 
 - `--min_pass_dur <seconds>`: minimum pass duration applied to every selected component. Default: `0.5` seconds.
-- `--resume-id <task/run_id>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Only `--monitoring` may accompany this flag; bundle ids are not accepted.
+- `--resume-id <task/run_id>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
 - `--train-count <int>`: optional assertion of the feature run's exact development match count, including validation. Mutually exclusive with `--train-split`.
@@ -1547,7 +1547,8 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
 - `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.
-- `--no-goal-nodes`: remove goal nodes and their incident edges even for tasks that normally keep goal nodes. Default: off, so task defaults decide goal-node handling.
+- `--goal-nodes-aware` / `--no-goal-nodes`: retain or remove goal nodes and their incident edges as GNN input context. Default: enabled for new runs of `action_intent`, `pass_intent`, `success_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding`. Legacy checkpoints retain their historical task-dependent handling. Independent of `--no-goal-features` and prediction candidate selection.
+- `--action-intent-include-goals` / `--no-action-intent-include-goals`: include or exclude the shooting candidate for `action_intent` only. Default: enabled for new runs. Disabling it excludes shot-labelled training and evaluation examples and exports no goal prediction. Enabling it requires input goal nodes. The other five goal-context tasks always exclude goals from prediction candidates. Resume inherits the checkpoint's settings and rejects conflicting overrides. See "Goal input context and prediction candidates" below.
 - `--use_physical_xpass` / `--use-physical-xpass`: enable physical xPass for `pass_success` only.
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the pass-success physical xPass architecture. Default: `gat_phys_logit_offset`.
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.
@@ -2200,3 +2201,36 @@ metadata directories must be accessible, and every candidate match must have
 unambiguous membership. Missing membership, conflicting seasons, and empty
 selections fail explicitly. No preprocessing or metadata migration is required,
 and commands without `--season` do not inspect raw season directories.
+
+
+### Goal input context and prediction candidates
+
+New training runs for `action_intent`, `pass_intent`, `success_intent`, `pass_success`,
+`outcome_scoring`, and `outcome_conceding` save `goal_context_version: 2`.
+`goal_nodes_aware` controls goal nodes and their incident edges in the GNN input.
+Use `--goal-nodes-aware` (the new-run default) or `--no-goal-nodes` in direct
+training or the training wrapper. `--no-goal-features` independently zeros explicit
+goal-relative geometry; it does not remove nodes.
+
+`include_goals` controls prediction candidates only. Direct action-intent training
+accepts `--include-goals` (default) and `--no-include-goals`. The multi-model wrapper
+accepts `--action-intent-include-goals` and `--no-action-intent-include-goals`, applied
+only to action intent. The other five tasks require `include_goals=False`: goals
+can supply context but never receive predictions or enter their softmax.
+
+Action intent with goal predictions disabled excludes shot-labelled training and
+evaluation examples and records `shot_candidate_disabled` counts. Enabling goal
+predictions while disabling input goal nodes is an error. For example, train
+pass/carry-only action intent without goals using both `--no-goal-nodes` and
+`--no-include-goals` (the action-specific candidate flag in the wrapper).
+
+Checkpoints without a version marker retain version-1 task-dependent node removal
+and prediction behavior. Resume restores the saved settings and rejects conflicts.
+To use contextual goals with a model previously trained without them, start a new
+training run. Model arguments, metadata, feature signatures, and prepared cache
+identities distinguish the policies; existing saved checkpoints are not rewritten.
+Goal candidate indices are mapped explicitly to graph nodes in loss, inference,
+IPW, and combined xPass evaluation. Auxiliary models use their own input policy.
+
+The Hawkeye goal-position/annotation correction is separate from this change;
+correct Hawkeye goal geometry before using newly goal-aware models on those scenes.

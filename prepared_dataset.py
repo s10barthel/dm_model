@@ -28,6 +28,7 @@ BASE_PREPARATION_FILES = (
     "prepared_dataset.py",
     "dataset.py",
     "models/dataset_config.py",
+    "models/goal_context.py",
     "models/edge_feature_config.py",
     "models/pass_height.py",
     "datatools/config.py",

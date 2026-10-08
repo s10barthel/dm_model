@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from models.goal_context import goal_policy, resolve_training_goal_settings
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from ipw_options import add_ipw_arguments, ipw_flags
 from crash_capture import add_crash_capture_arguments, run_training
@@ -1102,13 +1103,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Disable goal-relative geometry node features.",
     )
-    parser.add_argument(
+    goal_nodes_group = parser.add_mutually_exclusive_group()
+    goal_nodes_group.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true", default=None)
+    goal_nodes_group.add_argument(
         "--no-goal-nodes",
         dest="goal_nodes_aware",
         action="store_false",
         default=None,
         help="Remove goal nodes and their incident edges regardless of task defaults.",
     )
+    action_goal_group = parser.add_mutually_exclusive_group()
+    action_goal_group.add_argument("--action-intent-include-goals", dest="action_intent_include_goals", action="store_true")
+    action_goal_group.add_argument("--no-action-intent-include-goals", dest="action_intent_include_goals", action="store_false")
+    parser.set_defaults(action_intent_include_goals=None)
     add_bool_override(
         parser,
         "accel",
@@ -1256,9 +1263,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
-            parser.error("--resume-id restores saved settings; only --monitoring, --crash-dump, --procdump-path and a matching --pass-height-threshold may accompany it. Conflicts: " + ", ".join(invalid))
+            parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         return args
     try:
         validate_learning_rates(args.start_lr, args.min_lr)
@@ -1694,6 +1701,12 @@ def build_training_commands(
     effective_return_type = args.return_type
     use_carries = bool(getattr(args, "use_carries", False))
     feature_flags = resolve_wrapper_feature_flags(args)
+    action_include_goals = getattr(args, "action_intent_include_goals", None)
+    action_include_goals = True if action_include_goals is None else action_include_goals
+    if args.enabled_tasks.get("action_intent", False):
+        goal_policy(dict(task="action_intent", goal_context_version=2,
+                         goal_nodes_aware=feature_flags["goal_nodes_aware"],
+                         include_goals=action_include_goals))
     batch_sizes = resolve_batch_sizes(args, args.enabled_tasks)
     resolved_feature_run_id = resolve_feature_run_id(args.feature_run_id, required=True, allow_latest=False)
     feature_root = resolve_feature_root(resolved_feature_run_id)
@@ -1803,6 +1816,7 @@ def build_training_commands(
                     relative_speed_edge_feature_mode,
                     feature_flags,
             )
+            action_intent_command.append("--include-goals" if action_include_goals else "--no-include-goals")
             if use_carries:
                 action_intent_command.append("--use-carries")
             commands.append(action_intent_command)
@@ -2024,6 +2038,11 @@ def main() -> None:
     if cli_args.resume_id:
         checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
         checkpoint = load_checkpoint(checkpoint_path)
+        requested_candidates = cli_args.action_intent_include_goals
+        if requested_candidates is not None and checkpoint["args"]["task"] != "action_intent":
+            raise ValueError("Action-intent goal flags require an action_intent checkpoint.")
+        resolve_training_goal_settings(argparse.Namespace(
+            goal_nodes_aware=cli_args.goal_nodes_aware, include_goals=requested_candidates), checkpoint["args"])
         if cli_args.pass_height_threshold is not None:
             saved_height = checkpoint["args"].get("pass_height_definition")
             if not saved_height or saved_height["threshold_meters"] != cli_args.pass_height_threshold:

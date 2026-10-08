@@ -84,7 +84,11 @@ from project_config import (
 )
 
 
+from models.goal_context import goal_policy, candidate_mask, target_candidate_position
+
 FEATURE_SIGNATURE_KEYS = (
+    "goal_context_version",
+    "include_goals",
     "xy_only",
     "possessor_aware",
     "keeper_aware",
@@ -149,6 +153,8 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
     )
     validate_relative_speed_edge_feature_mode(v_edge_feature_mode, relative_speed_edge_feature_mode)
     signature = {
+        "goal_context_version": goal_policy(args).version,
+        "include_goals": goal_policy(args).include_goals,
         "xy_only": bool(args.get("xy_only", False)),
         "possessor_aware": bool(args.get("possessor_aware", False)),
         "keeper_aware": bool(args.get("keeper_aware", False)),
@@ -519,6 +525,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args.setdefault("model_id", str(model_id))
         enrich_model_args_from_metadata(args, metadata)
         normalize_v_edge_feature_args(args)
+        args.update(goal_policy(args).settings())
 
         if args["model"] in ["gcn", "gin", "gat"]:  # GNN models
             model = GNN(args).to(device)
@@ -1213,10 +1220,15 @@ def should_mask_possessor_relative_speed_edge_features_for_model(model_args: dic
 
 def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_clip=0.01, pin_memory: bool = True) -> torch.Tensor:
     model = load_model(model_id, device)
+    policy = goal_policy(model.args)
     loader = DataLoader(dataset, batch_size=2048, shuffle=False, pin_memory=pin_memory)
     likelihoods = []
 
     for batch_graphs, batch_labels, _ in tqdm(loader):
+        goals = batch_graphs.x[:, config.NODE_FEATURE_IS_GOAL] == 1
+        goal_counts = torch.bincount(batch_graphs.batch[goals], minlength=batch_graphs.num_graphs)
+        if bool((goal_counts != (2 if policy.input_goals else 0)).any()):
+            raise ValueError("IPW inputs must be prepared with the propensity checkpoint's own goal policy.")
         batch_graphs = batch_graphs.to(device)
         batch_labels = batch_labels.to(device)
 
@@ -1227,12 +1239,13 @@ def estimate_propensity(dataset, model_id="pass_intent/00", device="cuda", min_c
                 if bool(batch_labels[graph_index, config.LABEL_INDEX["is_dribble"]].item()):
                     likelihoods.append(1.0)
                     continue
-                logits = out[
-                    (batch_graphs.batch == graph_index)
-                    & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
-                ]
+                indices = torch.where((batch_graphs.batch == graph_index) & candidate_mask(batch_graphs, model.args))[0]
+                logits = out[indices]
+                target = int(batch_labels[graph_index, 5])
+                if goal_policy(model.args).version == 2:
+                    target = target_candidate_position(indices, int(batch_graphs.ptr[graph_index]) + target)
                 probs = nn.Softmax(dim=0)(logits).cpu().detach().numpy()
-                likelihoods.append(probs[int(batch_labels[graph_index, 5].item())])
+                likelihoods.append(probs[target])
 
     return torch.Tensor(likelihoods).clip(min_clip)
 
@@ -1811,7 +1824,7 @@ def run_epoch(
                           **batch_identifiers(batch_graphs))
         validate_with_snapshot(batch_graphs, batch_labels, batch_ipw,
                                directory=getattr(args, "_batch_failure_dir", None), context=context)
-        layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out) if args.gnn_task == "node_selection" else None
+        layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out, args) if args.gnn_task == "node_selection" else None
         observed = None
         if args.gnn_task in {"node_binary", "node_regression"}:
             observed = observed_layout(batch_graphs, batch_labels, args.include_out,
@@ -1828,10 +1841,15 @@ def run_epoch(
         diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(batch_labels)
         observed_v5_pass_intent: list[torch.Tensor] = []
         if evaluate_combined_v5:
+            if hasattr(batch_graphs, "auxiliary_graph"):
+                intent_graphs = Batch.from_data_list(batch_graphs.auxiliary_graph).to(device)
+                intent_labels = batch_graphs.auxiliary_label.to(device)
+            else:
+                if goal_policy(args).input_goals != goal_policy(pass_intent_model.args).input_goals:
+                    raise ValueError("Combined v5 evaluation requires separately prepared pass-intent input graphs.")
+                intent_graphs, intent_labels = batch_graphs.clone(), batch_labels
             intent_graphs = adapt_batch_graphs_for_model(
-                batch_graphs.clone(),
-                pass_intent_model.args,
-                context="v5 evaluation pass_intent model",
+                intent_graphs, pass_intent_model.args, context="v5 evaluation pass_intent model",
             )
             with torch.no_grad():
                 intent_logits = pass_intent_model(intent_graphs)
@@ -1839,19 +1857,16 @@ def run_epoch(
                 if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
                     continue
                 graph_mask = intent_graphs.batch == graph_index
-                teammate_mask = intent_graphs.x[graph_mask, config.NODE_FEATURE_IS_TEAMMATE] == 1
-                possessor_mask = intent_graphs.x[graph_mask, config.NODE_FEATURE_IS_POSSESSOR] == 1
-                candidate_mask = teammate_mask & ~possessor_mask
-                teammate_positions = torch.nonzero(teammate_mask, as_tuple=False).flatten()
-                target_index = int(batch_labels[graph_index, config.LABEL_INDEX["intent_index"]].item())
-                if target_index < 0 or target_index >= teammate_positions.numel():
+                eligible_mask = candidate_mask(intent_graphs, pass_intent_model.args, exclude_possessor=True)[graph_mask]
+                target_index = int(intent_labels[graph_index, config.LABEL_INDEX["intent_index"]].item())
+                if target_index < 0 or target_index >= int(graph_mask.sum()):
                     raise ValueError(f"Combined v5 evaluation has invalid intent target index {target_index}.")
-                target_node_position = teammate_positions[target_index]
-                candidate_positions = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+                target_node_position = target_index
+                candidate_positions = torch.nonzero(eligible_mask, as_tuple=False).flatten()
                 target_candidate = torch.nonzero(candidate_positions == target_node_position, as_tuple=False).flatten()
                 if target_candidate.numel() != 1:
                     raise ValueError("Combined v5 evaluation target is not a unique non-possessor teammate.")
-                candidate_logits = intent_logits[graph_mask][candidate_mask].reshape(-1)
+                candidate_logits = intent_logits[graph_mask][eligible_mask].reshape(-1)
                 candidate_probs = torch.softmax(candidate_logits, dim=0)
                 observed_v5_pass_intent.append(candidate_probs[target_candidate.item()])
 

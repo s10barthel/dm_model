@@ -249,6 +249,7 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
             "--dataset-cache-dir", str(tmp_path / "cache"), "--node_emb_dim", "8", "--graph_emb_dim", "8",
             "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping"]
     entry = Path(__file__).resolve().parents[1] / "train.py"
+    base.append("--no-goal-nodes")
     original_epoch = utils.run_epoch
 
     def plateau(*a, **kw):

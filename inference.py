@@ -14,6 +14,7 @@ from xgboost import XGBClassifier
 
 from datatools import config
 from datatools.config import FIELD_SIZE, TASK_CONFIG
+from models.goal_context import goal_policy, candidate_mask as goal_candidate_mask
 from datatools.match import Match
 from datatools.utils import (
     filter_features_and_labels,
@@ -832,8 +833,9 @@ def inference_gnn(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if (graph_override is None) != (label_override is None):
         raise ValueError("graph_override and label_override must be supplied together.")
+    policy = goal_policy(model.args)
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
-    include_goals = TASK_CONFIG.at[model.args["task"], "include_goals"]
+    include_goals = policy.include_goals
     out_filter = TASK_CONFIG.at[model.args["task"], "out_filter"]
     if (
         model.args["task"] == "pass_success"
@@ -869,6 +871,18 @@ def inference_gnn(
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
     graphs = attach_lane_survival_for_inference(match, graphs, labels, model)
 
+    selected_node_ids = []
+    if policy.version == 2:
+        for graph, label in zip(graphs, labels):
+            ids = getattr(graph, "node_ids", None)
+            if ids is None:
+                action = match.actions.loc[int(label[0])]
+                frame_key, player_key = ("end_frame_id", "end_player_id") if post_action else ("frame_id", "object_id")
+                sides = find_active_players(match.tracking, int(action[frame_key]), str(action[player_key])[:4], include_goals=policy.input_goals)
+                ids = sides[0] + sides[1]
+            if len(ids) != graph.num_nodes:
+                raise ValueError("Cannot align prediction candidates with graph node identities.")
+            selected_node_ids.append([ids[j] for j in torch.where(goal_candidate_mask(graph, model.args))[0].tolist()])
     graphs = Batch.from_data_list(graphs).to(device)
     graphs = adapt_batch_graphs_for_model(graphs, model.args, context=f"{model.args['task']} model")
     use_offside_rule_mask = model.args["task"] == "pass_success" and _uses_offside_rule_mask(model, int(graphs.x.shape[1]))
@@ -901,9 +915,9 @@ def inference_gnn(
             physical_ball_z_out = getattr(graphs, PHYSICAL_XPASS_BALL_Z_ATTR, None)
             physical_pass_height_out = getattr(graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
 
-            if TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
+            if policy.version == 2 or TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select components corresponding to teammates
-                teammate_mask = graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
+                teammate_mask = goal_candidate_mask(graphs, model.args) if policy.version == 2 else graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
                 batch = batch[teammate_mask]
                 out = out[teammate_mask]  # [N',]
                 offside_out_mask = offside_out_mask[teammate_mask]
@@ -1002,7 +1016,7 @@ def inference_gnn(
         offside_i = offside_out_mask[batch == i].cpu().detach().numpy().astype(bool)
 
         if out_filter == "teammates":
-            player_indices_i = list(active_players[0])
+            player_indices_i = selected_node_ids[i] if policy.version == 2 else list(active_players[0])
             if gnn_task == "node_selection":
                 if model.args["task"] in PASS_ONLY_INTENT_TASKS and str(possessor_object_id) in player_indices_i:
                     keep_mask = np.array([player_id != str(possessor_object_id) for player_id in player_indices_i], dtype=bool)

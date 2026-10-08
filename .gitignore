@@ -21,6 +21,7 @@ test*/*.csv
 test*/*.png
 !tests/
 tests/*.py
+!tests/test_goal_context.py
 !tests/test_pass_height_threshold.py
 !tests/test_prepared_dataset.py
 !tests/test_ipw_preparation.py
