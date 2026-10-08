@@ -998,6 +998,7 @@ The existing low-level feature toggles on `train.py` are:
 - `--ball_z_aware`
 - `--poss_vel_aware`
 - `--poss_rel_vel_aware`
+- `--no-pos-node-features`
 - `--no-vel-node-features`
 - `--no-poss-geometry`
 - `--no-goal-features`
@@ -1007,6 +1008,8 @@ The existing low-level feature toggles on `train.py` are:
 - `--pass-lane-features` / `--no-pass-lane-features`: retain only `nearest_opponent_to_pass` and `potential_interceptors` from the fixed-width extended block. This requires possessor-aware features. `--extend_features` takes precedence and retains all six extended features.
 
 Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
+
+`--no-pos-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `x` and `y` for every node, including the possessor and goal nodes, at the encoder and decoder inputs. Positions are enabled by default. Graph width stays unchanged, and original coordinates remain available for graph processing, physical calculations, and destination features. Other spatial features remain independently controlled. The setting is saved with the checkpoint for evaluation and inference. Combining it with `--xy-only` (`--xy_only` in `train.py`) is rejected.
 
 `--no-vel-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `vx`, `vy`, `speed`, and `accel` for every node, including the possessor. It preserves graph width and cached features, overrides `--accel` and possessor velocity enablement, and is saved with the checkpoint for evaluation and inference. Relative velocity-angle node features and velocity-related edge features remain independently controlled. Without this flag, existing behavior is preserved.
 

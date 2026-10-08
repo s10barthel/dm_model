@@ -30,6 +30,7 @@ from training_state import (add_training_runtime_arguments, validate_learning_ra
     environment_versions)
 from training_monitor import TrainingMonitor
 from datatools import config
+from models.node_feature_config import resolve_pos_node_features
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
@@ -173,6 +174,13 @@ accel_group.add_argument(
     help="Ignore player-acceleration node features and zero that feature slot.",
 )
 parser.set_defaults(accel_aware=True)
+parser.add_argument(
+    "--no-pos-node-features",
+    dest="pos_node_features_aware",
+    action="store_false",
+    default=True,
+    help="Zero x and y inputs for every node in the model; preserve graph width and coordinates for graph processing. Incompatible with --xy_only.",
+)
 parser.add_argument(
     "--no-vel-node-features",
     dest="vel_node_features_aware",
@@ -515,6 +523,10 @@ else:
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
 restore_ipw_defaults(args)
+try:
+    args.pos_node_features_aware = resolve_pos_node_features(args)
+except ValueError as exc:
+    parser.error(str(exc))
 validate_learning_rates(args.start_lr, args.min_lr)
 if args.batch_size < 1 or args.n_epochs < 1:
     parser.error("--batch_size and --n_epochs must be positive.")

@@ -6,6 +6,7 @@ from torch_geometric.data import Batch
 from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
 
 from datatools import config
+from models.node_feature_config import resolve_pos_node_features
 from physical_pass_model import (
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_VARIANTS,
@@ -15,11 +16,21 @@ from physical_pass_model import (
 )
 
 
+def mask_pos_node_features(node_features: torch.Tensor | None, args: dict) -> torch.Tensor | None:
+    """Mask learned inputs without changing coordinates used by graph processing."""
+    if resolve_pos_node_features(args) or node_features is None:
+        return node_features
+    masked = node_features.clone()
+    masked[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1] = 0
+    return masked
+
+
 class Encoder(nn.Module):
     def __init__(self, args: dict):
         super().__init__()
 
         self.args = args
+        resolve_pos_node_features(args)
         self.model_type = args.get("model", "gat")
         node_in_dim = args["node_in_dim"]
         edge_in_dim = args["edge_in_dim"]
@@ -68,10 +79,11 @@ class Encoder(nn.Module):
             node_embeddings: [N, z] tensor.
             graph_embeddings: [B, z] tensor.
         """
-        node_embeddings = self.node_in_fc(batch_graphs.x)  # [N, z]
+        node_features = mask_pos_node_features(batch_graphs.x, self.args)
+        node_embeddings = self.node_in_fc(node_features)  # [N, z]
         for i, gnn_layer in enumerate(self.gnn_layers):
             if self.args["skip_conn"]:
-                gnn_inputs = torch.cat([batch_graphs.x, node_embeddings], -1)  # [N, x+z]
+                gnn_inputs = torch.cat([node_features, node_embeddings], -1)  # [N, x+z]
             else:
                 gnn_inputs = node_embeddings  # [N, z]
 
@@ -96,6 +108,7 @@ class Decoder(nn.Module):
         super().__init__()
 
         self.args = args
+        resolve_pos_node_features(args)
         self.physical_variant = physical_xpass_model_variant(args)
         self.use_physical_xpass = (
             args.get("task") == "pass_success"
@@ -252,6 +265,7 @@ class Decoder(nn.Module):
             elif gnn_task == ["graph_binary", "graph_regression"]:
                 out: [B] tensor.
         """
+        node_features = mask_pos_node_features(node_features, self.args)
         if "dest" in self.args["task"]:
             assert batch_dests is not None
         else:
@@ -327,6 +341,7 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
         super().__init__()
 
         self.args = args
+        resolve_pos_node_features(args)
         self.encoder = Encoder(args)
         self.decoder = Decoder(args)
 

@@ -5,6 +5,7 @@ from typing import Any
 
 from dataset import requires_goal_next10_diagnostics
 from models.goal_context import goal_policy
+from models.node_feature_config import resolve_pos_node_features
 from models.edge_feature_config import (
     mask_possessor_relative_speed_edge_features_for_mode,
     mask_possessor_v_edge_features_for_mode,
@@ -95,6 +96,7 @@ def build_action_dataset_kwargs(
         "goal_input_nodes": None,
         "auxiliary_model_args": None,
         "vel_node_features_aware": _bool_arg(args, "vel_node_features_aware", True),
+        "pos_node_features_aware": resolve_pos_node_features(args),
         "accel_aware": _bool_arg(args, "accel_aware", True),
         "offside_aware": _bool_arg(args, "offside_aware", True),
         "extend_features": _bool_arg(args, "extend_features", False),
@@ -141,6 +143,7 @@ _IPW_CHECKPOINT_FEATURE_KEYS = (
     "goal_features_aware",
     "goal_nodes_aware",
     "vel_node_features_aware",
+    "pos_node_features_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",

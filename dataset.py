@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from tqdm import tqdm
 
 from datatools import config
+from models.node_feature_config import resolve_pos_node_features
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
@@ -269,6 +270,7 @@ class ActionDataset(Dataset):
         lane_survival_mode=None,
         lane_survival_cache_dir=None,
         vel_node_features_aware=True,
+        pos_node_features_aware=True,
         pass_height_threshold=None,
         defer_pass_height_relabel=False,
         goal_context_version=1,
@@ -276,6 +278,8 @@ class ActionDataset(Dataset):
         goal_input_nodes=None,
         auxiliary_model_args=None,
     ):
+        # Preserve geometry here; encoder and decoder mask only learned inputs.
+        resolve_pos_node_features(dict(xy_only=xy_only, pos_node_features_aware=pos_node_features_aware))
         goal_args = dict(task=task, goal_context_version=goal_context_version, goal_nodes_aware=goal_nodes_aware, include_goals=include_goals)
         policy = goal_policy(goal_args)
         input_goals = policy.input_goals if goal_input_nodes is None else bool(goal_input_nodes)

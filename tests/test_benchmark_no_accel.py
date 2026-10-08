@@ -868,6 +868,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 poss_rel_vel_aware=None,
                 accel_aware=False,
                 vel_node_features_aware=False,
+                pos_node_features_aware=False,
                 extend_features=None,
             )
 
@@ -885,6 +886,9 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertIn("--no-vel-node-features", commands[0])
         refit = train_wrapper._replace_cli_value(commands[0], "--n_epochs", 3)
         self.assertIn("--no-vel-node-features", refit)
+        self.assertFalse(feature_flags["pos_node_features_aware"])
+        self.assertIn("--no-pos-node-features", commands[0])
+        self.assertIn("--no-pos-node-features", refit)
 
     def test_resolve_enabled_tasks_only_pass_height(self) -> None:
         args = SimpleNamespace(

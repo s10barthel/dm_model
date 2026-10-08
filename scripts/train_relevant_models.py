@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from models.node_feature_config import resolve_pos_node_features
 from models.goal_context import goal_policy, resolve_training_goal_settings
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from ipw_options import add_ipw_arguments, ipw_flags
@@ -85,6 +86,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "goal_features_aware": True,
     "goal_nodes_aware": True,
     "vel_node_features_aware": True,
+    "pos_node_features_aware": True,
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
@@ -104,6 +106,7 @@ LOW_LEVEL_FEATURE_FLAGS = {
 
 LOW_LEVEL_FALSE_FLAGS = {
     "vel_node_features_aware": "--no-vel-node-features",
+    "pos_node_features_aware": "--no-pos-node-features",
     "poss_geometry_aware": "--no-poss-geometry",
     "goal_features_aware": "--no-goal-features",
     "goal_nodes_aware": "--no-goal-nodes",
@@ -230,6 +233,7 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
         name: WRAPPER_FEATURE_DEFAULTS[name] if getattr(args, name, None) is None else bool(getattr(args, name))
         for name in WRAPPER_FEATURE_DEFAULTS
     }
+    resolve_pos_node_features(resolved_flags)
     if not resolved_flags["possessor_aware"] and (
         resolved_flags["extend_features"] or resolved_flags["pass_lane_features"]
     ):
@@ -1081,6 +1085,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "poss_rel_vel_aware",
         "Include player velocity relative to the ball possessor's velocity during training.",
         "Disable player velocity relative to the ball possessor's velocity during training.",
+    )
+    parser.add_argument(
+        "--no-pos-node-features",
+        dest="pos_node_features_aware",
+        action="store_false",
+        default=True,
+        help="Zero x and y inputs for every node in the model; preserve graph width and coordinates for graph processing. Incompatible with --xy-only.",
     )
     parser.add_argument(
         "--no-vel-node-features",

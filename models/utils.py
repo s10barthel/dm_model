@@ -28,6 +28,7 @@ from xgboost import XGBClassifier
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
+from models.node_feature_config import resolve_pos_node_features
 from models.edge_feature_config import (
     RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
     RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
@@ -99,6 +100,7 @@ FEATURE_SIGNATURE_KEYS = (
     "goal_features_aware",
     "goal_nodes_aware",
     "vel_node_features_aware",
+    "pos_node_features_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",
@@ -137,6 +139,7 @@ def should_stop_early(
 
 
 def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
+    pos_node_features_aware = resolve_pos_node_features(args)
     v_edge_feature_mode = normalize_v_edge_feature_mode(
         args.get("v_edge_feature_mode"),
         use_v_edge_features=args.get("use_v_edge_features"),
@@ -165,6 +168,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "goal_features_aware": bool(args.get("goal_features_aware", True)),
         "goal_nodes_aware": bool(args.get("goal_nodes_aware", True)),
         "vel_node_features_aware": True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"]),
+        "pos_node_features_aware": pos_node_features_aware,
         "accel_aware": True if args.get("accel_aware") is None else bool(args.get("accel_aware")),
         "offside_aware": True if args.get("offside_aware") is None else bool(args.get("offside_aware")),
         "extend_features": bool(args.get("extend_features", False)),
@@ -260,6 +264,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
     args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
     args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
+    args["pos_node_features_aware"] = resolve_pos_node_features(args)
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
     enrich_model_args_from_metadata(args, metadata)
@@ -520,6 +525,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
         args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
         args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
+        args["pos_node_features_aware"] = resolve_pos_node_features(args)
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
