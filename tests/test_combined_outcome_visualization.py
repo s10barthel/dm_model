@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 from PIL import Image
 
-from datatools.viz_helpers import compute_outcome
+from datatools.viz_helpers import compute_outcome, compute_pass_score
 from datatools.viz_snapshot import SnapshotVisualizer
 from scripts import visualize_hawkeye, visualize_benchmark, visualize_skillcorner
 from scripts import visualize_action_components as sportec
@@ -69,6 +69,38 @@ def tables():
         "outcome_scoring_success": 0.7, "outcome_conceding_success": 0.2,
         "pass_success": 0.25,
     }.items()}
+
+
+@pytest.mark.parametrize("success,expected", [(0.75, 0.3), (0.375, 0.0), (0.25, -0.1), (np.nan, np.nan)])
+@pytest.mark.parametrize("missing_outcome", [False, True])
+def test_hawkeye_carrier_pass_score_annotation(monkeypatch, success, expected, missing_outcome):
+    source = {name: table.loc[10].copy() for name, table in tables().items()}
+    source["pass_success"]["home_1"] = success
+    if missing_outcome:
+        source["outcome_scoring_success"]["home_1"] = np.nan
+    score = compute_pass_score(**source)
+    if missing_outcome or np.isnan(expected):
+        assert np.isnan(score["home_1"])
+    else:
+        assert score["home_1"] == pytest.approx(expected)
+    situation = SimpleNamespace(
+        situation_id="s", tracking=pd.DataFrame({
+            "home_1_x": [10.0], "home_1_y": [10.0],
+            "home_1_vx": [0.0], "home_1_vy": [0.0],
+            "ball_x": [10.0], "ball_y": [10.0],
+        }, index=[10]),
+        frame_meta=pd.DataFrame({"possession_prefix": ["home"], "possessor_object_id": ["home_1"], "abs_time": [1.0]}, index=[10]),
+    )
+    annotations = []
+    def capture(fig, **kwargs):
+        annotations.extend(text.get_text() for text in fig.axes[0].texts)
+        return Image.new("RGB", (2, 2))
+    monkeypatch.setattr(direct, "figure_to_rgb_image", capture)
+    direct.render_frame_image(situation, 10, "pass_score", score)
+    if missing_outcome or np.isnan(expected):
+        assert not any(text in {"0.300", "0.000", "-0.100", "nan"} for text in annotations)
+    else:
+        assert f"{score['home_1']:.3f}" in annotations
 
 
 @pytest.mark.parametrize("module", [visualize_hawkeye, visualize_benchmark, visualize_skillcorner])

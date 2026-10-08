@@ -147,6 +147,7 @@ def _physical_xpass_blend_finite_mask(
     pass_distance: np.ndarray,
     offside: np.ndarray,
     weight_version: str,
+    candidate_eligibility: np.ndarray | None = None,
     distance_to_nearest_opponent: np.ndarray | None = None,
     pass_height: np.ndarray | None = None,
     pass_intent: np.ndarray | None = None,
@@ -159,6 +160,11 @@ def _physical_xpass_blend_finite_mask(
     if offside_values.shape != xpass_values.shape:
         offside_values = np.zeros(xpass_values.shape, dtype=bool)
     blend_eligible = ~offside_values
+    if candidate_eligibility is not None:
+        eligible_values = np.asarray(candidate_eligibility, dtype=bool)
+        if eligible_values.shape != xpass_values.shape:
+            raise ValueError("Physical xPass candidate eligibility must match prediction shape.")
+        blend_eligible = blend_eligible & eligible_values
 
     if weight_version == "v2":
         nearest_values = np.asarray(distance_to_nearest_opponent, dtype=float)
@@ -1032,6 +1038,11 @@ def inference_gnn(
 
         if model.args["task"] == "pass_success":
             probs_i = np.asarray(probs_i, dtype=float).copy()
+            # The possessor's output represents a carry, even in synthetic pass frames.
+            pass_candidate_mask = np.array(
+                [player_id != str(possessor_object_id) for player_id in player_indices_i], dtype=bool
+            )
+            offside_i = offside_i & pass_candidate_mask
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
             is_carry = bool(labels[i, config.LABEL_INDEX["is_dribble"]].item())
@@ -1104,6 +1115,7 @@ def inference_gnn(
                     pass_distance=distance_i,
                     offside=offside_i,
                     weight_version=weight_version,
+                    candidate_eligibility=pass_candidate_mask,
                     distance_to_nearest_opponent=nearest_i,
                     pass_height=pass_height_i,
                     pass_intent=pass_intent_i,

@@ -182,6 +182,128 @@ from scripts import train_relevant_models as train_wrapper
 from scripts import visualize_action_components
 
 
+@pytest.mark.parametrize("version", ["v1", "v2", "v3", "v4", "v5"])
+@pytest.mark.parametrize("carrier_inputs", ["missing", "finite", "missing_auxiliary"])
+def test_blend_eligibility_preserves_carrier_and_validates_teammate(version, carrier_inputs):
+    carrier_value = np.nan if carrier_inputs == "missing" else 0.2
+    carrier_auxiliary = 0.25 if carrier_inputs == "finite" else np.nan
+    inputs = dict(
+        xpass=np.array([carrier_value, 0.2]),
+        pass_distance=np.array([0.0, 20.0]),
+        offside=np.array([False, False]),
+        candidate_eligibility=np.array([False, True]),
+        weight_version=version,
+        distance_to_nearest_opponent=np.array([carrier_auxiliary, 10.0]),
+        pass_height=np.array([carrier_auxiliary, 0.25]),
+        pass_intent=np.array([carrier_auxiliary, 0.5]),
+        ball_z=np.array([carrier_auxiliary, 0.0]),
+        ball_z_limit=2.0,
+    )
+    finite, missing = inference._physical_xpass_blend_finite_mask(**inputs)
+    assert finite.tolist() == [False, True]
+    assert missing.tolist() == [False, False]
+    auxiliary = {"v2": "distance_to_nearest_opponent", "v4": "pass_height", "v5": "pass_intent"}.get(version, "ball_z")
+    inputs[auxiliary][1] = np.nan
+    with pytest.raises(ValueError, match=auxiliary):
+        inference._physical_xpass_blend_finite_mask(**inputs)
+
+
+@pytest.mark.parametrize("version", [None, "v1", "v2", "v3", "v4", "v5"])
+@pytest.mark.parametrize("use_carries", [False, True])
+@pytest.mark.parametrize("carrier_inputs", ["missing", "finite", "missing_auxiliary"])
+@pytest.mark.parametrize("post_action", [False, True])
+@pytest.mark.parametrize("teammate_offside", [False, True])
+def test_inference_preserves_carrier_probability(monkeypatch, version, use_carries, carrier_inputs, post_action, teammate_offside):
+    match = make_physical_inference_match([7], [1])
+    # Reorder the candidates and make pre-/post-action possessors different.
+    carrier = "home_2" if post_action else "home_1"
+    match.actions.at[7, "end_player_id"] = "home_2"
+    graph = make_graph(["home_2", "home_1", "away_3"])
+    graph.x = torch.cat([graph.x, torch.zeros((3, 1))], dim=1)
+    carrier_index = graph.node_ids.index(carrier)
+    graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] = 0
+    graph.x[carrier_index, config.NODE_FEATURE_IS_POSSESSOR] = 1
+    graph.x[carrier_index, -1] = 1
+    graph.x[1 - carrier_index, -1] = int(teammate_offside)
+    model = ConstantPassHeightModel(probability=0.8, node_in_dim=26)
+    model.args.update(make_pass_success_args(
+        use_physical_xpass=False, inference_use_physical_xpass=version is not None,
+        xpass_weight=version or "v3", use_carries=use_carries, node_in_dim=26,
+        goal_context_version=2, goal_nodes_aware=False, include_goals=False,
+    ))
+
+    def attach(match, graphs, labels, model, **kwargs):
+        for item in graphs:
+            for attribute, value in [
+                (PHYSICAL_XPASS_PROB_ATTR, 0.2), (PHYSICAL_XPASS_DISTANCE_ATTR, 20.0),
+                (PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, 10.0),
+                (PHYSICAL_XPASS_PASS_HEIGHT_ATTR, 0.25), (PHYSICAL_XPASS_BALL_Z_ATTR, 0.0),
+            ]:
+                values = torch.full((3,), value)
+                if carrier_inputs == "missing" or (carrier_inputs == "missing_auxiliary" and attribute not in {PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_DISTANCE_ATTR}):
+                    values[carrier_index] = float("nan")
+                setattr(item, attribute, values)
+        return graphs
+
+    monkeypatch.setattr(inference, "filter_missing_physical_xpass_rows_for_inference", lambda match, graphs, labels, model, **kwargs: (graphs, labels))
+    monkeypatch.setattr(inference, "attach_physical_xpass_for_inference", attach)
+    probs, _ = inference.inference_gnn(
+        match, model, device="cpu", post_action=post_action,
+        graph_override=[graph], label_override=match.labels,
+        pass_intent_probs=pd.DataFrame({"home_1": [0.5], "home_2": [0.5]}, index=[7]),
+    )
+    assert probs.at[7, carrier] == pytest.approx(torch.sigmoid(torch.tensor(model.logit)).item())
+    teammate = "home_1" if post_action else "home_2"
+    if teammate_offside:
+        expected = 0.0
+    elif version is None:
+        expected = 0.8
+    else:
+        expected = float(blend_physical_xpass_predictions(
+            pass_success_model=0.8, xpass=0.2, pass_distance=20.0,
+            weight_version=version, distance_to_nearest_opponent=10.0,
+            pass_height=0.25, pass_intent=0.5,
+        ))
+    assert probs.at[7, teammate] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("is_carry", [False, True])
+def test_carrier_absent_from_prediction_candidates(monkeypatch, is_carry):
+    match = make_physical_inference_match([7], [int(not is_carry)])
+    match.labels[0, LABEL_INDEX["is_dribble"]] = int(is_carry)
+    graph = make_graph()
+    graph.x[0, config.NODE_FEATURE_IS_TEAMMATE] = 0
+    model = ConstantPassHeightModel(probability=0.8)
+    model.args.update(make_pass_success_args(
+        use_physical_xpass=False, goal_context_version=2, goal_nodes_aware=False, include_goals=False,
+    ))
+    probs, _ = inference.inference_gnn(
+        match, model, device="cpu", graph_override=[graph], label_override=match.labels,
+    )
+    assert list(probs.columns) == ["home_2"]
+    assert probs.at[7, "home_2"] == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("version", ["v1", "v2", "v3", "v4", "v5"])
+def test_explicit_carry_bypasses_blending_and_offside(monkeypatch, version):
+    match = make_physical_inference_match([7], [0])
+    match.labels[0, LABEL_INDEX["is_dribble"]] = 1
+    graph = make_graph()
+    graph.x = torch.cat([graph.x, torch.zeros((3, 1))], dim=1)
+    graph.x[0, -1] = 1
+    model = ConstantPassHeightModel(probability=0.8, node_in_dim=26)
+    model.args.update(make_pass_success_args(
+        node_in_dim=26, use_physical_xpass=False, inference_use_physical_xpass=True,
+        xpass_weight=version,
+    ))
+    monkeypatch.setattr(inference, "blend_physical_xpass_predictions", lambda **kwargs: pytest.fail("Carry event must bypass blending"))
+    probs, _ = inference.inference_gnn(
+        match, model, device="cpu", graph_override=[graph], label_override=match.labels,
+        pass_intent_probs=pd.DataFrame({"home_2": [1.0]}, index=[7]),
+    )
+    assert probs.at[7, "home_1"] == pytest.approx(0.8)
+
+
 class DummyEpvModel:
     def __init__(self, *, task: str) -> None:
         self.args = {"task": task, "model_variant": "gat_baseline"}
@@ -5683,7 +5805,8 @@ class PhysicalXPassTests(unittest.TestCase):
             probs, _ = inference.inference_gnn(match, model, device="cpu", post_action=False)
 
         self.assertTrue(np.isnan(float(probs.loc[0, "home_2"])))
-        self.assertAlmostEqual(float(probs.loc[0, "home_1"]), 0.2, places=5)
+        # The carrier retains its model probability; missing teammate data stays missing.
+        self.assertAlmostEqual(float(probs.loc[0, "home_1"]), 0.9, places=5)
 
     def test_inference_missing_synthetic_sidecar_stays_read_only_when_cache_disabled(self) -> None:
         RuntimeState = type("BenchmarkState", (), {"__module__": "datatools.benchmark"})
