@@ -39,6 +39,7 @@ from datatools.skillcorner import (
 )
 from models.utils import get_model_provenance, load_model, parse_model_id, validate_model_graph_schemas
 import pc_xpass_versions as pc_versions
+import pc_xpass_resume as pc_resume
 
 from physical_pass_model import (
     PC_XPASS_DEFAULT_BALL_DEC,
@@ -1233,6 +1234,8 @@ def prewarm_runtime_items(
 ) -> dict[str, Any] | None:
     if not items:
         return None
+    if getattr(args, "_pc_refresh", None) is not None:
+        return args._pc_refresh.consume(items)
     if progress_desc is None:
         match_ids = sorted({str(item.get("match_id")) for item in items})
         progress_desc = f"physical xPass {match_ids[0]}" if len(match_ids) == 1 else "physical xPass runtime"
@@ -1294,6 +1297,7 @@ def prewarm_runtime_items(
         top_xt=bool(getattr(args, "top_xt", False)),
         pass_height_model=getattr(args, "_pass_height_model", None),
         pass_height_model_id=getattr(args, "pass_height_model_id", None),
+        pass_height_identity=getattr(args, "_pass_height_identity", None),
         pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
         dry_run=bool(args.dry_run),
         show_progress=not bool(args.dry_run),
@@ -1424,6 +1428,8 @@ def write_runtime_dataset_metadata(
     source_inputs: dict[str, Any],
     skipped: dict[str, Any],
 ) -> None:
+    if getattr(args, "_pc_refresh", None) is not None:
+        return
     if bool(getattr(args, "dry_run", False)):
         print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
         return
@@ -1548,6 +1554,16 @@ def write_runtime_dataset_metadata(
         )
     if (cache_dir / "metadata.json").exists():
         existing = pc_versions.read_metadata(cache_dir)
+        previous_sources = existing.get("source_inputs") or {}
+        history = list(existing.get("selection_history", []))
+        history.append({k: v for k, v in source_inputs.items() if k != "state_partitions"})
+        metadata["selection_history"] = history
+        for key in ("possession_reports", "frame_selections"):
+            if previous_sources.get(key) or source_inputs.get(key):
+                metadata["source_inputs"][key] = {**previous_sources.get(key, {}), **source_inputs.get(key, {})}
+        for key in ("selected_match_ids", "match_ids", "modifications", "situation_ids"):
+            if previous_sources.get(key) or source_inputs.get(key):
+                metadata["source_inputs"][key] = list(dict.fromkeys(previous_sources.get(key, []) + source_inputs.get(key, [])))
         # Preserve discoverability of partitions computed with other strides or
         # match selections; a new invocation adds coverage, not a new identity.
         previous_partitions = (existing.get("source_inputs") or {}).get("state_partitions", {})
@@ -1729,6 +1745,12 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
                 add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                 add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
             ):
+                pc_resume.record_source(args, "sportec", state.pc_cache_match_id, {
+                    "match_id": str(match_id), "possession_id": state.event_index,
+                    "possessor_id": str(state.actions.object_id.iloc[0]),
+                    "feature_run_id": str(feature_run_id), "carry_definition": report["carry_definition"],
+                    "spell_artifact_sha256": report["spell_artifact_sha256"],
+                })
                 reports[str(match_id)] = report
                 partitions[state.pc_cache_match_id] = {"match_id": str(match_id), "possession_id": state.event_index,
                     "possessor_id": str(state.actions.object_id.iloc[0]), "feature_run_id": str(feature_run_id),
@@ -1959,6 +1981,9 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             ]
             items: list[dict[str, Any]] = []
             for state in states:
+                pc_resume.record_source(args, "benchmark", str(state.match_id), {
+                    "modification_id": int(modification_id), "benchmark_input_dir": str(args.benchmark_input_dir),
+                })
                 items.extend(runtime_cache_items_from_graphs(str(state.match_id), state.graph_features_0, state.labels))
             unit = make_runtime_buffer_unit(
                 display_key=f"benchmark modification {modification_id}",
@@ -2048,6 +2073,10 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 situation_tracking,
                 getattr(args, "time_norm", None),
             )
+            pc_resume.record_source(args, "hawkeye", str(situation.match_id), {
+                "situation_id": str(situation_id), "hawkeye_tracking_csv": str(args.hawkeye_tracking_csv),
+                "hawkeye_ball_csv": str(args.hawkeye_ball_csv),
+            })
             if frame_selections:
                 resolved_time_norms[str(situation_id)] = frame_selections
             unit = make_runtime_buffer_unit(
@@ -2147,6 +2176,13 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         frames=args.frames if args.pc_xpass else 1,
                     )
                     if args.pc_xpass and not possession.actions.empty:
+                        pc_resume.record_source(args, "skillcorner", possession.pc_cache_match_id, {
+                            "match_id": str(match_id), "possession_id": int(event_index),
+                            "possessor_id": str(possession.actions.object_id.iloc[0]),
+                            "original_start_frame": possession.original_start_frame,
+                            "original_end_frame": possession.original_end_frame,
+                            "skillcorner_input_dir": str(args.skillcorner_input_dir),
+                        })
                         state_partitions[possession.pc_cache_match_id] = {
                             "match_id": str(match_id), "possession_id": int(event_index),
                             "possessor_id": str(possession.actions.object_id.iloc[0]),
@@ -2226,6 +2262,7 @@ def selected_runtime_datasets(args: argparse.Namespace) -> list[str]:
 
 
 def run_runtime_mode(args: argparse.Namespace) -> None:
+    pc_resume.prepare_contracts(args, selected_runtime_datasets(args))
     if getattr(args, "season", None):
         args._preflight_season_match_ids = resolve_match_ids(args, PROJECT_ROOT)
     pc_versions.start_generation(args)
@@ -2242,12 +2279,15 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
         "benchmark": run_runtime_benchmark,
         "hawkeye": run_runtime_hawkeye,
     }
+    pc_resume.recover_sources(args, runners)
+    pc_resume.persist_contracts(args)
+    pc_resume.refresh_all(args, runners)
     summaries = []
     cache_label = "pc-xPass" if bool(getattr(args, "pc_xpass", False)) else "physical xPass"
     for dataset in selected_runtime_datasets(args):
         print(f"Generating runtime {cache_label} cache for {dataset}...")
         summaries.append(runners[dataset](args))
-    success = bool(summaries) and all(not _flatten_skip_reasons(item.get("skipped") or {}) and not int(item["stats"].get("skipped_all_nan", 0)) for item in summaries)
+    success = bool(summaries or getattr(args, "_pc_height_refresh_completed", False)) and all(not _flatten_skip_reasons(item.get("skipped") or {}) and not int(item["stats"].get("skipped_all_nan", 0)) for item in summaries)
     pc_versions.finish_generation(args, success=success, coverage={item["dataset"]: item for item in summaries})
     print(f"Runtime {cache_label} cache generation complete.")
     for summary in summaries:
@@ -2274,7 +2314,7 @@ def main() -> None:
     else:
         try:
             run_runtime_mode(args)
-        except Exception:
+        except (Exception, KeyboardInterrupt):
             pc_versions.finish_generation(args, success=False)
             raise
 

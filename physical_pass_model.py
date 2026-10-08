@@ -1124,6 +1124,14 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
     if cache_dir is not None and (Path(cache_dir) / "metadata.json").is_file():
         height_definition = cached_height_definition(json.loads((Path(cache_dir) / "metadata.json").read_text(encoding="utf-8-sig")))
     if physical_xpass_weight_version(args) in {"v4", "v5"}:
+        if cache_dir is not None:
+            from pc_xpass_resume import assert_height_readable
+            for metadata_path in (Path(cache_dir) / "metadata.json", Path(cache_dir).parent / "metadata.json"):
+                if metadata_path.exists():
+                    saved = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                    if saved.get("pass_height_enrichment", {}).get("pending"):
+                        saved["pass_height_refresh_pending"] = True
+                    assert_height_readable(saved)
         check_height_probability(height_definition, _get_arg(args, "pass_height_threshold", None))
     source = PC_XPASS_SOURCE if pc_xpass_enabled(args) else PHYSICAL_XPASS_SOURCE
     x_pass_version = normalize_x_pass_version(_get_arg(args, "x_pass_version", _get_arg(args, "xpass_version", None)))
@@ -4094,6 +4102,11 @@ def load_physical_xpass_match(
         raise ValueError(f"Physical xPass sidecar {path} contains duplicate action_index rows, e.g. {duplicates}.{scope_hint}")
     frame = frame.set_index("action_index", drop=False)
     metadata = validate_runtime_physical_xpass_visualization_cache(cache_root)
+    version_metadata = cache_root.parent / "metadata.json"
+    if version_metadata.exists():
+        parent_metadata = json.loads(version_metadata.read_text(encoding="utf-8-sig"))
+        if parent_metadata.get("pass_height_enrichment", {}).get("pending"):
+            metadata = {**metadata, "pass_height_refresh_pending": True}
     frame.attrs["physical_xpass_cache_metadata"] = metadata
     frame.attrs["physical_xpass_default_metric"] = _default_physical_xpass_metric_from_metadata(metadata)
     return frame
@@ -5490,6 +5503,7 @@ def prewarm_physical_xpass_runtime_cache(
     reuse_cache_dir: str | Path | None = None,
     pass_height_model: Any | None = None,
     pass_height_model_id: str | None = None,
+    pass_height_identity: dict[str, Any] | None = None,
     pass_height_device: str = "cpu",
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
@@ -5646,6 +5660,20 @@ def prewarm_physical_xpass_runtime_cache(
     pass_height_refresh_required = bool(
         pass_height_enabled and str(cache_metadata.get("pass_height_model_id")) != str(pass_height_model_id_text)
     )
+    def height_row_current(row, graph, label):
+        if pass_height_identity is None:
+            return not pass_height_refresh_required
+        from pc_xpass_resume import MODEL_COLUMN, INPUT_COLUMN, fingerprint, input_digest
+        return (row.get(MODEL_COLUMN) == fingerprint(pass_height_identity)
+                and row.get(INPUT_COLUMN) == input_digest(graph, label, row))
+
+    def stamp_height_row(row, graph, label):
+        if pass_height_enabled and pass_height_identity is not None:
+            if not _has_finite_pass_height_predictions(pd.Series(row), graph):
+                raise ValueError("Incomplete pass-height predictions cannot be saved as verified enrichment.")
+            from pc_xpass_resume import MODEL_COLUMN, INPUT_COLUMN, fingerprint, input_digest
+            row[MODEL_COLUMN] = fingerprint(pass_height_identity)
+            row[INPUT_COLUMN] = input_digest(graph, label, row)
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
@@ -5735,6 +5763,11 @@ def prewarm_physical_xpass_runtime_cache(
             if not refresh and cached_rows is not None and action_index in cached_rows.index:
                 cached_row = cached_rows.loc[action_index]
                 hash_matches, missing_hash = _physical_row_hash_matches_or_missing(cached_row, state_hash)
+                if (not hash_matches and source == PC_XPASS_SOURCE
+                        and (Path(cache_dir).parent / "metadata.json").exists()):
+                    from pc_xpass_versions import read_metadata
+                    if "generation_settings" in read_metadata(Path(cache_dir).parent):
+                        raise ValueError(f"Changed input state in versioned pc-xPass cache: {match_id}/{action_index}")
                 if export_lane_control and hash_matches:
                     if match_id not in lane_completed_by_match:
                         lane_completed_by_match[match_id] = _lane_control_completed_states(cache_dir, match_id)
@@ -5754,7 +5787,7 @@ def prewarm_physical_xpass_runtime_cache(
                     has_current_pass_height = (
                         not pass_height_enabled
                         or (
-                            not pass_height_refresh_required
+                            height_row_current(cached_row, graph, label)
                             and _has_finite_pass_height_predictions(cached_row, graph)
                         )
                     )
@@ -5780,6 +5813,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row.update(nearest_opponent_values)
                     pass_height_values = pass_height_values_for(graph, label, copied_row, match_id)
                     _apply_pass_height_predictions(copied_row, pass_height_values)
+                    stamp_height_row(copied_row, graph, label)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
@@ -5823,6 +5857,7 @@ def prewarm_physical_xpass_runtime_cache(
                     copied_row.update(nearest_opponent_values)
                     pass_height_values = pass_height_values_for(graph, label, copied_row, match_id)
                     _apply_pass_height_predictions(copied_row, pass_height_values)
+                    stamp_height_row(copied_row, graph, label)
                     copied_rows.append(copied_row)
                     stats["copied_from_reuse"] = int(stats["copied_from_reuse"]) + 1
                     stats["pass_distance_filled"] = int(stats["pass_distance_filled"]) + int(
@@ -5982,6 +6017,7 @@ def prewarm_physical_xpass_runtime_cache(
                         str(row["match_id"]),
                     )
                     _apply_pass_height_predictions(row, pass_height_values)
+                    stamp_height_row(row, context["graph"], context["label"])
                     stats["pass_height_filled"] = int(stats["pass_height_filled"]) + 1
                     match_stats_by_id[str(row["match_id"])]["pass_height_filled"] += 1
             rows_by_match: dict[str, list[dict[str, Any]]] = {}
@@ -6200,7 +6236,8 @@ def attach_physical_xpass_to_graph(
         if nearest_column in row.index and not pd.isna(row[nearest_column]):
             nearest_opponent_distances[node_index] = float(row[nearest_column])
         pass_height_column = physical_xpass_pass_height_column(str(node_id))
-        if pass_height_column in row.index and not pd.isna(row[pass_height_column]):
+        if (not physical_rows.attrs.get("physical_xpass_cache_metadata", {}).get("pass_height_refresh_pending")
+                and pass_height_column in row.index and not pd.isna(row[pass_height_column])):
             pass_heights[node_index] = float(row[pass_height_column])
 
     if missing_columns and require_observed_target:
@@ -6254,6 +6291,9 @@ def attach_evaluation_xpass_to_graph(
     require_pass_height: bool = False,
 ) -> Data:
     """Attach strict read-only evaluation sidecars without replacing model input attributes."""
+    if require_pass_height:
+        from pc_xpass_resume import assert_height_readable
+        assert_height_readable(physical_rows.attrs.get("physical_xpass_cache_metadata", {}))
     sidecar_graph = attach_physical_xpass_to_graph(
         graph.clone(),
         labels,
@@ -6304,6 +6344,8 @@ def attach_pass_height_to_graph(
     """Attach pass-height sidecar values without replacing a model's physical xPass inputs."""
     if physical_rows is None:
         raise ValueError("physical_rows must be provided when attaching pass-height probabilities.")
+    from pc_xpass_resume import assert_height_readable
+    assert_height_readable(physical_rows.attrs.get("physical_xpass_cache_metadata", {}))
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
     if action_index not in physical_rows.index:
         raise FileNotFoundError(

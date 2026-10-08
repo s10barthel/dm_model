@@ -21,7 +21,7 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     control_inflection_point endpoint_normalization boost_def_endpoint_control use_position_discount
     position_discount_power position_discount_distance consider_teammates ignore_teammates_lane_survival
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
-    pass_height_model_id export_lane_control""".split())
+    export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
 RESERVED = {"reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
@@ -96,6 +96,17 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
         root = version_root(run_id, location)
         if location or root.exists():
             metadata = read_metadata(root)
+            if not location:
+                for key, expected in (("schema_version", 1), ("physics_version", 2)):
+                    if metadata.get(key, expected) != expected:
+                        raise ValueError(f"Incompatible pc-xPass {key}; create a new version.")
+                enrichment = metadata.get("pass_height_enrichment", {})
+                pending = enrichment.get("pending") or {}
+                inherited = pending.get("model_id") or enrichment.get("model_id") or metadata.get("generation_settings", {}).get("pass_height_model_id")
+                if pending and "pass_height_model_id" in explicit and args.pass_height_model_id != inherited:
+                    raise ValueError("Finish the pending pass-height refresh before switching models again.")
+                if "pass_height_model_id" not in explicit:
+                    args.pass_height_model_id = inherited
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
             metadata["generation_settings"].setdefault("export_lane_control", False)
@@ -160,11 +171,15 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     old = read_metadata(root) if (root / "metadata.json").exists() else {}
     if "generation_settings" in old:
         old["generation_settings"].setdefault("export_lane_control", False)
+        old["generation_settings"].pop("pass_height_model_id", None)
     effective = settings(args)
     if old.get("generation_settings", effective) != effective:
         raise ValueError("Effective pc-xPass settings differ from selected version.")
     now = datetime.now(timezone.utc).isoformat()
     metadata = dict(old)
+    legacy_height = getattr(args, "_pc_existing_metadata", {}).get("generation_settings", {}).get("pass_height_model_id")
+    if legacy_height and not location:
+        metadata.setdefault("pass_height_enrichment", {"model_id": legacy_height})
     metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=args.pc_xpass_namespace,
                     schema_version=1, physics_version=2, ball_dec=float(args.ball_dec),
                     generation_settings=effective, created_at=old.get("created_at", now),
@@ -184,6 +199,8 @@ def finish_generation(args: Namespace, *, success: bool = True, coverage: dict[s
     if not (root / "metadata.json").exists():
         return
     metadata = read_metadata(root)
+    if metadata.get("pass_height_enrichment", {}).get("pending"):
+        success = False
     now = datetime.now(timezone.utc).isoformat()
     metadata.update(updated_at=now, status="completed" if success else "incomplete")
     if coverage is not None:

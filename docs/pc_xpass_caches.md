@@ -68,3 +68,44 @@ python scripts/run_hawkeye_loc.py --pc-xpass-cache-dir data/pc_xpass/legacy_loca
 Do not combine an ID with a cache-directory override. Legacy metadata without
 deceleration is interpreted as constant speed; location generation through that
 explicit directory retains zero deceleration. No automatic migration occurs.
+
+## Consistent resumes and pass-height replacement
+
+Resume with `--pc-xpass --pc-xpass-id <id>`. Omitted calculation settings and
+`--export-lane-control` inherit recorded values; explicit conflicts require a new
+version. Physics and ranking dependencies are validated. Sportec pins the resolved
+feature run and whole-spell provenance; Hawkeye pins `--freeze-ballreceipt`
+(initial default: true). Contracts and reconstruction sources are saved before
+computation. Paths may move if source identities and reconstructed hashes match.
+
+Data selection remains flexible: season, match/situation IDs, dataset switches,
+limits, `--scope`, `--frames`, and Hawkeye times are not frozen or automatically
+restored. Workers, device, and batch/window sizes may change. Repeat the original
+selection to finish the same requested coverage, or change it to extend the cache.
+Partition/source coverage accumulates, and sampling reports are saved per invocation.
+
+An older interrupted Sportec cache lacking resolved input provenance requires
+explicit `--sportec-feature-run-id <id>`. Saved states are reconstructed and checked
+before new partitions are added; unknown or incompatible sources cause an error.
+Ctrl+C marks the invocation incomplete where possible. Saved rows remain reusable
+if abrupt shutdown leaves status marked running.
+
+Pass-height predictions are mutable enrichment. Omitting `--pass-height-model-id`
+inherits the recorded model, including a pending refresh target. Selecting another
+compatible height model refreshes all saved states across every populated dataset,
+including datasets excluded by current generation switches. Physical metrics and
+lane-control artifacts are preserved. Additional selected physical states are
+generated after the full refresh completes.
+
+Refresh requires the original state sources. Target artifact and pending status
+are saved before predictions change. Model/input fingerprints are stored with
+predictions in the same atomic Parquet write. Resuming skips verified rows; another
+model switch is rejected until the pending refresh completes. Legacy predictions
+without trustworthy provenance are refreshed, rather than certified from a single
+dataset-level model ID.
+
+While refresh is pending, height-consuming reads fail, physical-only reads remain
+available, and the version cannot advance `latest`. Missing sources, changed state
+hashes, incompatible height definitions, or incomplete predictions retain pending
+status and identify unresolved work. Completed model metadata is committed only
+after full verification. Dry runs leave cache files and metadata unchanged.

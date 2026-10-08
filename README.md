@@ -1088,9 +1088,9 @@ The cached row contains `pass_distance`, per-player nearest-opponent distances f
 
 Current runtime defaults are `--consider-teammates`, `--speed-aggregation package_max`, speeds `3..22 m/s` in `1 m/s` steps, coarse angle search plus adaptive `2.5` degree local refinement, `--top-n 10`, `--num-workers auto`, `--physical-batch-size 16`, and `--worker-thread-limit 1`. Runtime caches are updated in place and compatible existing rows are reused; old max-only runtime caches are incompatible and should be deleted or moved before regeneration.
 
-Add `--pass-height-model-id pass_height/<model_run_id>` to enrich either cache family with per-passing-option high-pass probabilities from a trained `pass_height` checkpoint. This does not change xPass cache compatibility: if the existing xPass row is valid but `__pass_height` columns are missing or were produced by a different pass-height model id, the script refreshes only the pass-height columns and preserves existing xPass metrics. Use `--pass-height-device <device>` to choose the inference device for this model; by default it uses `cuda:0` when CUDA is available, otherwise `cpu`. This enrichment is runtime-cache only and cannot be combined with legacy `--feature-run-id` mode.
+Add `--pass-height-model-id pass_height/<model_run_id>` to enrich either cache family with per-passing-option high-pass probabilities from a trained `pass_height` checkpoint, preserving compatible physical xPass metrics. For versioned pc-xPass, changing the height model or adding enrichment to saved states triggers a full, resumable refresh across all populated datasets; omission inherits the recorded or pending model. Ordinary unversioned physical caches retain selected-row backfilling. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height) for commands and interruption behavior. Use `--pass-height-device <device>` to choose the inference device for this model; by default it uses `cuda:0` when CUDA is available, otherwise `cpu`. This enrichment is runtime-cache only and cannot be combined with legacy `--feature-run-id` mode.
 
-Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; top-N generation requires an explicit `--top-n` or `--top-n-values`. To export several pc top-N columns in one cache, use `--top-n-values 5 10 25`; `--top-n` still controls the unsuffixed default player columns.
+Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<run_id>/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; top-N generation requires an explicit `--top-n` or `--top-n-values`. To export several pc top-N columns in one cache, use `--top-n-values 5 10 25`; `--top-n` still controls the unsuffixed default player columns. Supply `--pc-xpass-id <run_id>` to resume an existing version; omitting the ID creates a new version. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height).
 
 pc-xPass motion and control assumptions are generation-time settings. `--reaction-time` accepts a fixed seconds value or `dist_pass`, where each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)` with defaults `50`, `0.2`, and `0.7`. Player movement speed defaults to `--max-player-speed 5.0`; `--max-player-speed-off` and `--max-player-speed-def` can override attacking and defending players separately. Lane survival and endpoint control use separate sigmoid settings: `--lane-power`, `--lane-inflection-point`, `--control-power`, and `--control-inflection-point`, all defaulting to `15` and `0.3` for their respective power/inflection values.
 
@@ -1407,6 +1407,69 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
+#### Resuming a version and refreshing pass-height
+
+For versioned pc-xPass, `--pc-xpass-id <run_id>` is the resume option; there is no
+separate `--resume` flag. Stop with Ctrl+C, let the generator and its workers exit,
+then restart with the same ID. Saved rows are reused; unfinished buffered work is
+recomputed. Ctrl+C marks the invocation incomplete where possible; a status left
+as `running` after abrupt shutdown does not prevent resumption.
+
+```powershell
+# Create a named Sportec version with explicit inputs and sampling.
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --sportec-feature-run-id FEATURE_RUN --season 24_25 --scope frames --frames 5 --no-skillcorner --no-benchmark --no-hawkeye
+
+# Resume that coverage; calculation settings and the resolved feature run inherit.
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --season 24_25 --scope frames --frames 5 --no-skillcorner --no-benchmark --no-hawkeye
+
+# Replace/add height predictions across ALL saved states, without adding physical rows.
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --pass-height-model-id pass_height/NEW_MODEL_RUN --no-sportec --no-skillcorner --no-benchmark --no-hawkeye
+
+# Resume an interrupted height refresh; the pending target model inherits.
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --no-sportec --no-skillcorner --no-benchmark --no-hawkeye
+```
+
+Replace the example IDs with real feature-run, cache, and model IDs. A resume
+restores omitted physical calculation settings and `--export-lane-control`;
+explicit conflicts require a new version. Sportec also pins its resolved feature
+run and whole-spell provenance; Hawkeye pins `--freeze-ballreceipt` (initial
+default: true). An older interrupted Sportec version lacking resolved provenance
+requires explicit `--sportec-feature-run-id <feature_run_id>`; saved identities
+and hashes are checked before adding new partitions.
+
+Season, match/situation IDs, limits, dataset switches, Hawkeye time selections,
+`--scope`, and `--frames` are **not automatically restored or frozen**. Repeat
+them to finish the original coverage, or change them to extend the same version.
+Worker counts, device, and batch/window sizes may change. Saved coverage accumulates.
+
+For an existing pc-xPass version, explicitly changing `--pass-height-model-id`
+starts a **full, resumable refresh of every saved state in every populated
+dataset**, regardless of the current data selections or `--no-*` switches.
+Adding height enrichment to existing rows, or encountering legacy predictions
+without trustworthy provenance, also triggers full refresh. Physical xPass
+values and lane-control artifacts are preserved. The selected model must predict
+a compatible height-event definition; `--pass-height-threshold` asserts that
+definition and does not convert probabilities.
+
+The original sources are needed to reconstruct saved states. Model/artifact and
+input fingerprints are written atomically with each row's predictions. If
+interrupted, rerun the refresh command or omit the model flag to inherit its
+pending target: verified rows are skipped and unfinished rows are refreshed.
+Another model switch is rejected until the pending refresh finishes. Missing or
+changed sources and incomplete predictions leave the refresh pending with an
+error identifying unresolved work.
+
+While refresh is pending, height-consuming reads (including v4/v5 blending) fail;
+physical-only reads remain available and `latest` is not advanced. Completed model
+metadata is committed only after full verification. When generation switches
+remain enabled, additional selected physical states are generated afterward using
+the current height model. The all-disabled examples above perform only the refresh.
+`--dry-run` checks contracts and reports refresh requirements without updating
+cache rows or metadata. These full-refresh guarantees apply to versioned pc-xPass;
+ordinary unversioned runtime physical caches retain their existing behavior.
+
+See [pc-xPass version and cache documentation](docs/pc_xpass_caches.md) for details.
+
 #### Matching inference and pc-xPass frame coverage
 
 For receipt 102, release 119, and `--scope frames --frames 5`, both paths select
@@ -1451,9 +1514,10 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--season {22_23,23_24,24_25}`: restrict Sportec to selected seasons; repeat to select multiple seasons. Intersects with `--match-id`. Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Other datasets remain enabled. Cannot be combined with `--no-sportec`. Default: no season filter.
 - `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`: SkillCorner runtime selectors.
 - `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Default: possession endpoints (`actions`); `frames` samples every Nth frame ID, starting at possession start, plus both endpoints. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
-- `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass (default: latest). Select the **same feature run as inference**. Existing whole-spell audit artifacts are required; neither generator nor inference derives new control spells.
+- `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass. Default for a new version: latest; on resume: the recorded resolved run. Explicitly selecting a different run is rejected. Required explicitly when an older interrupted cache lacks resolved input provenance. Select the **same feature run as inference**. Existing whole-spell audit artifacts are required; neither generator nor inference derives new control spells.
 - `--benchmark-input-dir`, `--benchmark-modification`, `--benchmark-limit`: benchmark runtime selectors.
 - `--hawkeye-tracking-csv`, `--hawkeye-ball-csv`, `--hawkeye-situation-id`, `--hawkeye-limit`: Hawkeye runtime selectors.
+- `--freeze-ballreceipt` / `--no-freeze-ballreceipt`: Hawkeye state construction. Initial default: enabled. A versioned pc-xPass resume inherits the recorded value and rejects an explicit conflict.
 - `--limit <N>`: in Sportec/legacy mode, process only the first `N` pass actions across selected matches. Default: no limit.
 - `--overwrite`: legacy feature-run mode only. Runtime caches are updated in place.
 - `--reuse-cache-dir <path>`: reuse compatible Sportec rows from another `physical_xpass` directory and compute only misses. Reuse requires matching source, teammate policy, AS-default parameters, and `physical_eps`.
@@ -1470,7 +1534,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--top-pass <N...>` / `--top_pass <N...>`: pc-xPass only; export `__top_pass<N>_xpass` and matching diagnostics for the best N distinct speed-angle pairs after endpoint optimization. Opt-in; accepts multiple positive integers.
 - `--pc-xpass` / `--pc_xpass`: generate versioned pc-xPass caches under `data/pc_xpass/<run_id>/<dataset>` instead of runtime physical xPass caches.
 - `--ball-dec <m/s^2>`: pc-xPass ball deceleration. Default: `0.45`; `0` disables slowing.
-- `--pc-xpass-id <run_id>`: pin a fresh pc-xPass version ID or resume a version with matching recorded generation settings. Default: auto-generate a new ID.
+- `--pc-xpass-id <run_id>`: create a named pc-xPass version or resume an existing one, reusing saved rows and restoring omitted calculation/input contracts. Data selections and execution settings remain flexible; repeat the original selections to finish the same coverage. Default without an ID: create a new version. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height).
 - `--export-lane-control`: pc-xPass only; export per-opponent interception controls for each receiver's selected best pass to `lane_control/<match_id>.parquet` within the dataset cache. Default: off. Uses long-format state/receiver/opponent rows and includes state identifiers and selected-pass geometry; does not change the main cache or scoring. Enable only when creating a fresh version; no backfill of existing cache rows is performed. Resume inherits the recorded option, and missing sidecars for cache hits raise an incomplete-coverage error. Valid with `--no-max` when another xPass metric remains enabled; incompatible with `--reuse-cache-dir` and legacy `--feature-run-id` mode. See [export schema and semantics](docs/lane_control_export.md).
 - `--top-xt`: pc-xPass only; rank max, top-N, and top-pass options by xPass × interpolated xT while exporting xPass probabilities. Best-pass details and optional opponent lane controls follow the same selected option. Default: off.
 - `--margin {tta,reachability}`: pc-xPass only; choose the player-movement margin model. `tta` retains the reaction-time/max-speed model and is the default. `reachability` uses a fitted empirical reachability artifact and requires `--reachability-model-id`; see [Empirical reachability circles for pc-xPass](docs/reachability.md).
@@ -1491,11 +1555,12 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--use-position-discount <true|false>`: pc-xPass only; apply the goal-distance target-position discount before max/top-N aggregation. Default: `true`.
 - `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
 - `--position-discount-distance <m>`: pc-xPass only; backward goal-distance delta where the target-position discount reaches zero. Default: `20.0`.
-- `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich existing or newly generated xPass rows with per-player `<player_id>__pass_height` probabilities from the selected `pass_height` checkpoint. If xPass metrics are already valid, only missing/stale pass-height columns are backfilled.
+- `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich xPass rows with per-player `<player_id>__pass_height` probabilities. For versioned pc-xPass, omission inherits the completed or pending model; selecting a different compatible model refreshes **all saved states across all populated datasets**, even those excluded from this command. Refresh is resumable and preserves physical metrics/lane controls. Existing legacy height rows without verified provenance are refreshed too. Use all four `--no-*` dataset switches for refresh only; otherwise additional selected states are generated after refresh. Ordinary unversioned physical caches retain selected-row backfilling.
 - `--pass-height-threshold <meters>`: assert that an explicitly selected pass-height checkpoint predicts this cutoff before its probabilities are cached. It does not relabel or convert those probabilities.
 - `--pass-height-device <device>`: device used for `--pass-height-model-id`. Default: `cuda:0` when CUDA is available, otherwise `cpu`.
 - `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--xpass-version top<N>` during inference/visualization.
 - `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
+- `--dry-run`: inspect cache compatibility/hits and report whether a full height refresh is required, without computing predictions or changing cache rows/metadata.
 - `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 
 ### `scripts/generate_relevant_features.py`
