@@ -1,7 +1,9 @@
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 if not os.getcwd() in sys.path:
     sys.path.append(os.getcwd())
@@ -14,6 +16,7 @@ from datatools.defcon import DEFCON
 from datatools.event_xg import EventXGModel
 from datatools.match import Match
 from datatools.tabular_feature import construct_tabular_features
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from project_config import (
     ACTION_GRAPH_DIR,
     POST_ACTION_GRAPH_DIR,
@@ -25,13 +28,18 @@ from project_config import (
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument("--shot_success", type=str, default="unblocked", choices=["goal", "on_target", "unblocked"])
     parser.add_argument("--load_saved", action="store_true", default=False, help="load saved components")
     parser.add_argument("--use-original-intended-receiver", action="store_true")
     parser.add_argument("--use-intended-receiver-model", action="store_true")
     parser.add_argument("--component_path", type=str, required=False, default=None)
     parser.add_argument("--result_path", type=str, required=False, default="data/player_scores.parquet")
-    args, _ = parser.parse_known_args()
+    args, unknown_args = parser.parse_known_args()
+    if any(option.startswith("--inference-mask-") for option in unknown_args):
+        parser.error("Numbered inference masks are only supported by scripts/evaluate_relevant_models.py.")
+    if args.load_saved and args.inference_mask:
+        parser.error("--inference-mask requires fresh inference; omit --load_saved.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     intended_receiver_mode = resolve_intended_receiver_mode(
@@ -104,6 +112,19 @@ if __name__ == "__main__":
 
         print("\nValuing defensive contributions...")
         defcon = DEFCON(match, **defcon_args)
+        inference_models = {
+            name: model
+            for name, model in {
+                "action_intent": defcon.select_model,
+                "pass_success": defcon.pass_success_model,
+                "outcome_scoring": defcon.score_model,
+                "outcome_conceding": defcon.concede_model,
+                "failure_receiver": defcon.posterior_model,
+                "shot_blocking": defcon.shot_block_model,
+            }.items()
+            if model is not None and hasattr(model, "encoder")
+        }
+        inference_mask_config = configure_inference_masks(inference_models, args.inference_mask)
 
         if args.load_saved:
             defcon.load_components(component_path)
@@ -111,6 +132,9 @@ if __name__ == "__main__":
         else:
             defcon.estimate_components()
             defcon.save_components(component_path)
+            if args.inference_mask:
+                metadata_path = Path(component_path) / "inference_masks.json"
+                metadata_path.write_text(json.dumps(inference_mask_config, indent=2), encoding="utf-8")
 
         player_scores = defcon.evaluate_players()
 

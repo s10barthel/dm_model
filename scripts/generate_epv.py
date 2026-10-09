@@ -16,6 +16,7 @@ import torch
 
 from datatools.epv import annotate_match_epv, build_epv_action_values, compute_epv_values
 from inference import configure_lane_survival_runtime_cache, inference_gnn
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.utils import (
     get_model_provenance,
     load_model,
@@ -58,6 +59,7 @@ REQUIRED_EPV_MODEL_TASKS = [
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument("--bundle-id")
     parser.add_argument("--pass-intent-model-id")
     parser.add_argument("--pass-success-model-id")
@@ -348,12 +350,15 @@ def main() -> None:
     output_csv = EPV_DIR / "epv.csv"
     output_metadata = EPV_DIR / "metadata.json"
     if not args.overwrite and output_csv.exists() and output_metadata.exists():
+        if getattr(args, "inference_mask", None):
+            raise ValueError("EPV outputs already exist; use --overwrite to generate the requested masked predictions.")
         print(f"EPV outputs already exist in {EPV_DIR}. Use --overwrite to rebuild them.")
         return
 
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
     model_specs = load_epv_models(resolved_model_ids, device)
+    inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     physical_cache_dir = configure_epv_physical_xpass(args, model_specs)
     graph_schema = validate_model_graph_schemas(model_specs)
     runtime_feature_context = resolve_runtime_feature_run_context(
@@ -415,6 +420,7 @@ def main() -> None:
         "bundle_id": args.bundle_id,
         "bundle": bundle,
         "models": resolved_model_ids,
+        "inference_masks": inference_mask_config,
         "model_records": model_records,
         "feature_run_id": shared_context["feature_run_id"],
         "runtime_feature_run_id": shared_context["runtime_feature_run_id"],

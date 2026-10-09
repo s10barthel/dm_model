@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from models.inference_masks import add_inference_mask_arguments, resolve_inference_mask_configurations
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -117,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run the scoped DEFCON pipeline described in README.md without visualization steps."
     )
+    add_inference_mask_arguments(parser)
     add_dataset_loading_arguments(parser)
     parser.add_argument(
         "--target-family",
@@ -793,6 +795,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         for command in commands:
             if len(command) > 1 and command[1] in consumers:
                 command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
+    mask_configurations = resolve_inference_mask_configurations(args)
+    if mask_configurations:
+        mask_consumers = {
+            "scripts/generate_epv.py", "scripts/evaluate_relevant_models.py",
+            "scripts/run_relevant_models.py", "scripts/run_hawkeye.py",
+            "scripts/run_benchmark.py", "scripts/run_skillcorner.py",
+        }
+        for command in commands:
+            if len(command) > 1 and command[1] in mask_consumers:
+                command.extend(["--inference-mask", *mask_configurations[0]["masks"]])
     return commands
 
 

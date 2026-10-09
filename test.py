@@ -18,6 +18,12 @@ from datatools import config
 from models import utils
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, outcome_bootstrap
 from models.dataset_config import build_action_dataset_kwargs
+from models.inference_masks import (
+    add_inference_mask_arguments,
+    configure_inference_masks,
+    resolve_inference_mask_configurations,
+)
+from models.prediction_identity import ensure_dataset_node_identities
 from models.utils import (
     calc_binary_metrics,
     calc_binary_diagnostic_rows,
@@ -762,6 +768,8 @@ def write_model_evaluation_artifacts(
         "observed_pass_height_threshold_meters": observed_pass_height_threshold_meters,
         "pass_height_diagnostic_ancestry_validated": bool(pass_height_diagnostic_ancestry_validated),
         "evaluation_options": _json_compatible(evaluation_options),
+        "configuration_id": evaluation_options.get("configuration_id", "unmasked"),
+        "inference_masks": _json_compatible(evaluation_options.get("inference_masks", {})),
     }
     if outcome_metrics is not None and "outcome_bootstrap" in outcome_metrics.attrs:
         metadata["outcome_bootstrap"] = outcome_metrics.attrs["outcome_bootstrap"]
@@ -775,6 +783,7 @@ def write_model_evaluation_artifacts(
         "height_target_context": _json_compatible({key: value for key, value in evaluation_options.items()
                                                    if "pass_height" in key}),
         "metrics": _json_compatible(test_metrics),
+        "configuration_id": evaluation_options.get("configuration_id", "unmasked"),
     }
     (artifact_dir / "metrics.json").write_text(json.dumps(metric_record, indent=2, allow_nan=False), encoding="utf-8")
 
@@ -804,6 +813,8 @@ def write_model_evaluation_artifacts(
             ~(
                 existing["evaluation_timestamp"].astype(str).eq(str(timestamp))
                 & existing["model_id"].astype(str).eq(str(model_id))
+                & existing.get("configuration_id", pd.Series("unmasked", index=existing.index))
+                    .fillna("unmasked").astype(str).eq(str(evaluation_options.get("configuration_id", "unmasked")))
             )
         ]
     columns = list(dict.fromkeys([*existing.columns, *row.columns]))
@@ -825,6 +836,9 @@ if __name__ == "__main__":
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
     parser.add_argument("--learning-curve-rows", action="store_true")
+    parser.add_argument("--comparison-rows", action="store_true", help="Export semantic prediction rows and retain diagnostic artifacts.")
+    parser.add_argument("--inference-configuration-id", default=None, help="Artifact identity supplied by the evaluation wrapper.")
+    add_inference_mask_arguments(parser)
     parser.add_argument("--evaluation-timestamp", type=str, required=False, default=None)
     parser.add_argument("--weighted-pass-success-metrics", action="store_true")
     parser.add_argument("--evaluate-xpass", action="store_true")
@@ -844,7 +858,11 @@ if __name__ == "__main__":
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
-    args, _ = parser.parse_known_args()
+    args, unknown_args = parser.parse_known_args()
+    if any(token.startswith("--inference-mask-") for token in unknown_args):
+        parser.error("Numbered inference masks are supported by scripts/evaluate_relevant_models.py only.")
+    if args.comparison_rows:
+        args.learning_curve_rows = True
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args, pc_only=True)
     # This entrypoint tolerates unrelated model flags, but not extra selector counts.
@@ -897,6 +915,14 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"Missing pass_intent model checkpoint: {args.pass_intent_model_id}")
         if str(pass_intent_model.args.get("task")) != "pass_intent":
             raise ValueError("--pass-intent-model-id must reference a pass_intent checkpoint.")
+
+    mask_configurations = resolve_inference_mask_configurations(args)
+    inference_masks = mask_configurations[0]["masks"] if mask_configurations else []
+    participating_models = {model_args.task: model}
+    if pass_intent_model is not None:
+        participating_models["pass_intent"] = pass_intent_model
+    mask_metadata = configure_inference_masks(participating_models, inference_masks)
+    configuration_id = args.inference_configuration_id or mask_metadata["configuration_id"]
 
     print("\nGenerating test datasets...")
     resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
@@ -1021,6 +1047,8 @@ if __name__ == "__main__":
     if len(test_dataset) == 0:
         raise ValueError("No usable test samples remained after loading graph and label artifacts.")
     validate_test_dataset_dimensions(test_dataset, model_args)
+    if args.comparison_rows and model_args.gnn_task == "node_selection":
+        ensure_dataset_node_identities(test_dataset, feature_root, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
     #Adjust as needed for your environment.
@@ -1037,7 +1065,7 @@ if __name__ == "__main__":
           f"{test_split_provenance['loaded_match_count']} loaded, "
           f"{test_split_provenance['contributing_match_count']} contributing matches with {len(test_dataset)} samples")
     collect_outcome_evaluation = bool(
-        args.evaluation_output_dir and not args.learning_curve_rows
+        args.evaluation_output_dir and (not args.learning_curve_rows or args.comparison_rows)
         and getattr(model_args, "task", None) in {"outcome_scoring", "outcome_conceding"}
     )
     result = run_epoch(
@@ -1049,13 +1077,17 @@ if __name__ == "__main__":
         return_outcome_evaluation=collect_outcome_evaluation,
         return_learning_curve_rows=args.learning_curve_rows,
         pass_intent_model=pass_intent_model,
+        return_semantic_prediction_rows=args.comparison_rows,
     )
     outcome_metrics = None
     pass_success_height_rows = None
     if args.learning_curve_rows:
         if not args.evaluation_output_dir:
             parser.error("--learning-curve-rows requires --evaluation-output-dir")
-        test_metrics, learning_rows = result
+        if args.comparison_rows:
+            test_metrics, learning_rows, comparison_diagnostics = result
+        else:
+            test_metrics, learning_rows = result
         if not learning_rows:
             raise ValueError("No learning-curve prediction rows were collected.")
         output_path = Path(args.evaluation_output_dir)
@@ -1063,6 +1095,30 @@ if __name__ == "__main__":
         for row in learning_rows:
             row.update(height_export)
         pd.DataFrame(learning_rows).to_csv(output_path / "learning_curve_predictions.csv", index=False)
+        if args.comparison_rows and collect_outcome_evaluation:
+            outcome_evaluation = comparison_diagnostics["outcome"]
+            if outcome_evaluation is None:
+                raise RuntimeError("Comparison rows requested without outcome diagnostics.")
+            artifact_dir, outcome_metrics = write_outcome_evaluation_artifacts(
+                args.evaluation_output_dir, model_id=args.model_id, task=model_args.task,
+                outcome_evaluation=outcome_evaluation, f1_outcome_threshold=args.f1_outcome_threshold,
+                outcome_bootstrap_resamples=args.outcome_bootstrap_resamples,
+                outcome_bootstrap_seed=args.outcome_bootstrap_seed)
+        elif args.comparison_rows and comparison_diagnostics["binary"] is not None:
+            binary_evaluation = comparison_diagnostics["binary"]
+            if model_args.return_pass_success_height_evaluation:
+                pass_success_height_rows = binary_evaluation["height_rows"]
+                if args.observed_pass_height_stratification:
+                    write_pass_success_height_metrics(args.evaluation_output_dir, args.model_id, pass_success_height_rows, height_export)
+                if binary_evaluation.get("predictor_diagnostics"):
+                    write_pass_success_predictor_diagnostics(
+                        args.evaluation_output_dir, args.model_id, binary_evaluation["predictor_diagnostics"],
+                        threshold=args.classification_threshold, height_context=height_export)
+            else:
+                write_pass_height_diagnostics(
+                    args.evaluation_output_dir, args.model_id, binary_evaluation,
+                    threshold=args.classification_threshold,
+                    height_threshold=height_export["evaluation_pass_height_threshold_meters"], height_context=height_export)
     elif collect_outcome_evaluation:
         test_metrics, outcome_evaluation = result
         if outcome_evaluation is None:
@@ -1111,6 +1167,8 @@ if __name__ == "__main__":
             diagnostic_feature_run_id=diagnostic_feature_run_id,
             evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
             evaluation_options={
+                "configuration_id": configuration_id,
+                "inference_masks": mask_metadata,
                 **height_context,
                 **height_export,
                 **split_metadata(checkpoint_selector),

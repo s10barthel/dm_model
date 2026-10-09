@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import subprocess
@@ -14,9 +15,13 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
-from scripts import learning_curve
-from models.utils import get_model_record, load_bundle_record, resolve_model_selection
+from scripts import learning_curve, model_comparison
+from models.utils import load_bundle_record
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
+from models.inference_masks import (
+    add_inference_mask_arguments, inference_mask_catalog,
+    resolve_inference_mask_configurations, resolve_scoped_masks, resolve_model_masks,
+)
 import pc_xpass_versions as pc_versions
 
 from project_config import EVALUATION_RUNS_DIR
@@ -49,23 +54,37 @@ def probability_threshold(value: str) -> float:
     return threshold
 
 
+class RepeatableModelId(argparse.Action):
+    """Keep single-selector attributes compatible while accepting repeated IDs."""
+    def __call__(self, parser, namespace, values, option_string=None):
+        current = getattr(namespace, self.dest, None)
+        setattr(namespace, self.dest, values if current is None else model_id_list(current) + [values])
+
+
+def model_id_list(value) -> list[str]:
+    return [] if value is None else [value] if isinstance(value, str) else list(value)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Evaluate selected checkpoints independently or compare models and inference masks.",
+        epilog="For separate mask configurations, use --inference-mask-1 MASK ... --inference-mask-2 MASK ...; each positive number identifies a configuration.",
+    )
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--bundle-id", default=None)
+    parser.add_argument("--compare", action="store_true", help="Compare at least two checkpoints of one task; masks compare within each checkpoint instead.")
+    parser.add_argument("--comparison-bootstrap-resamples", type=nonnegative_integer, default=2000)
+    parser.add_argument("--comparison-bootstrap-seed", type=nonnegative_integer, default=42)
+    add_inference_mask_arguments(parser, numbered=True, argv=argv)
     parser.add_argument("--learning-curve", action="store_true")
     parser.add_argument("--learning-curve-model-id", action="append", default=[])
     parser.add_argument("--learning-curve-bootstrap-resamples", type=nonnegative_integer, default=2000)
     parser.add_argument("--learning-curve-bootstrap-seed", type=nonnegative_integer, default=42)
-    parser.add_argument("--action-intent-model-id")
-    parser.add_argument("--pass-intent-model-id")
-    parser.add_argument("--success-intent-model-id")
-    parser.add_argument("--pass-success-model-id")
-    parser.add_argument("--pass-height-model-id")
-    parser.add_argument("--outcome-scoring-model-id")
-    parser.add_argument("--outcome-conceding-model-id")
+    for task in SUPPORTED_EVALUATION_TASKS:
+        parser.add_argument(f"--{task.replace('_', '-')}-model-id", action=RepeatableModelId,
+                            help="Task-qualified checkpoint ID; repeat to evaluate more checkpoints.")
     parser.add_argument("--diagnostic-feature-run-id")
     parser.add_argument("--evaluation-output-dir", default=None)
     parser.add_argument("--device", default="cuda:0")
@@ -99,8 +118,9 @@ def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
     if args.evaluate_combined_success and not args.xpass_weight:
         raise ValueError("--evaluate-combined-success requires --xpass-weight.")
     if args.evaluate_combined_success and args.xpass_weight == "v5":
-        if not args.pass_intent_model_id:
-            raise ValueError("Combined v5 evaluation requires explicit --pass-intent-model-id.")
+        intent_ids = model_id_list(args.pass_intent_model_id)
+        if len(intent_ids) != 1:
+            raise ValueError("Combined v5 evaluation requires exactly one explicit --pass-intent-model-id as the shared auxiliary.")
         args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
         args.v5_discount = True if args.v5_discount is None else args.v5_discount
         if not math.isfinite(float(args.v5_intent_threshold)) or float(args.v5_intent_threshold) <= 0.0:
@@ -236,7 +256,7 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
             if args.xpass_weight == "v5":
                 command.extend(
                     [
-                        "--pass-intent-model-id", str(args.pass_intent_model_id),
+                        "--pass-intent-model-id", model_id_list(args.pass_intent_model_id)[0],
                         "--v5-intent-threshold", str(args.v5_intent_threshold),
                         "--v5-discount", str(bool(args.v5_discount)).lower(),
                     ]
@@ -276,12 +296,17 @@ def update_model_metadata(output_dir: Path, wrapper_context: dict) -> None:
 
 
 def learning_curve_selection(args: argparse.Namespace) -> tuple[dict[str, list[str]], dict[str, str]]:
+    if args.compare or resolve_inference_mask_configurations(args):
+        raise ValueError("Learning-curve mode cannot be combined with --compare or inference masks.")
     if args.evaluate_xpass or args.evaluate_combined_success or args.weighted_pass_success_metrics:
         raise ValueError("Learning-curve mode compares learned checkpoints only; xPass and weighted options are unavailable.")
     bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
     anchors = {task: str(model_id) for task, model_id in dict((bundle or {}).get("model_ids") or {}).items()
                if task in SUPPORTED_EVALUATION_TASKS}
-    anchors.update(explicit_model_ids(args))
+    explicit = explicit_model_ids(args)
+    if any(len(model_id_list(value)) != 1 for value in explicit.values()):
+        raise ValueError("Learning-curve task selectors accept one anchor per task; use --learning-curve-model-id for direct series.")
+    anchors.update(explicit)
     direct: dict[str, list[str]] = defaultdict(list)
     for model_id in args.learning_curve_model_id:
         task, _ = learning_curve.parse_model_id(model_id)
@@ -381,95 +406,207 @@ def run_learning_curve(args: argparse.Namespace) -> None:
         print(f"Skipped {task}: {reason}")
 
 
+def resolve_evaluation_entries(args: argparse.Namespace) -> tuple[list[dict], dict, dict | None]:
+    tasks, explicit, bundle = requested_evaluation_tasks(args)
+    validate_selected_task_options(args, tasks)
+    bundle_ids = dict((bundle or {}).get("model_ids") or {})
+    entries = []
+    seen = set()
+    for task in tasks:
+        ids = model_id_list(explicit.get(task) or bundle_ids.get(task))
+        for model_id in ids:
+            if model_id in seen:
+                raise ValueError(f"Duplicate checkpoint selection: {model_id}.")
+            seen.add(model_id)
+            entry = model_comparison.checkpoint(model_id, expected_task=task)
+            if args.pass_height_threshold is not None and "pass_height_definition" in entry["target_definitions"]:
+                entry["target_definitions"]["pass_height_definition"] = {
+                    "threshold_meters": args.pass_height_threshold, "operator": ">=", "target_source": "pass_max_ball_z",
+                }
+            entries.append(entry)
+    return entries, explicit, bundle
+
+
+def _entry_name(model_id: str) -> str:
+    readable = "_".join(model_id.split("/")[1:])
+    readable = "".join(value if value.isalnum() or value in "_-" else "_" for value in readable)[:80]
+    return f"{readable}_{hashlib.sha256(model_id.encode()).hexdigest()[:8]}"
+
+
+def evaluation_options(args: argparse.Namespace) -> dict:
+    return {
+        "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
+        "evaluate_xpass": bool(args.evaluate_xpass),
+        "evaluate_combined_success": bool(args.evaluate_combined_success),
+        "xpass_version": args.xpass_version, "xpass_weight": args.xpass_weight,
+        "v5_intent_threshold": args.v5_intent_threshold if args.xpass_weight == "v5" else None,
+        "v5_discount": args.v5_discount if args.xpass_weight == "v5" else None,
+        "pass_intent_model_id": model_id_list(args.pass_intent_model_id)[0] if args.xpass_weight == "v5" else None,
+        "observed_pass_height_stratification": not bool(args.no_observed_pass_height_stratification),
+        "classification_threshold": args.classification_threshold,
+        "f1_outcome_threshold": args.f1_outcome_threshold,
+        "discount": args.discount, "v4_power": args.v4_power, "v4_zero": args.v4_zero,
+        "pc_xpass_id": getattr(args, "pc_xpass_id", None), "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
+    }
+
+
+def _comparison_threshold(args: argparse.Namespace, task: str) -> float | None:
+    if task in {"pass_success", "pass_height"}:
+        return args.classification_threshold
+    if task in {"outcome_scoring", "outcome_conceding"}:
+        return args.f1_outcome_threshold
+    return None
+
+
+def _participating_entry_tasks(args: argparse.Namespace, task: str) -> set[str]:
+    tasks = {task}
+    if task == "pass_success" and args.evaluate_combined_success and args.xpass_weight == "v5":
+        tasks.add("pass_intent")
+    return tasks
+
+
+def _write_manifest(path: Path, report: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+
+
 def main() -> None:
     args = parse_args()
+    if args.list_inference_masks:
+        print(json.dumps(inference_mask_catalog(), indent=2))
+        return
+    configurations = resolve_inference_mask_configurations(args)
     if args.learning_curve:
         run_learning_curve(args)
         return
     if args.learning_curve_model_id:
         raise ValueError("--learning-curve-model-id requires --learning-curve.")
+    validate_pass_success_predictor_args(args)
+    entries, explicit, selected_bundle = resolve_evaluation_entries(args)
+    all_entries = list(entries)
+    mask_mode = bool(configurations)
+    checkpoint_mode = bool(args.compare and not mask_mode)
+    if checkpoint_mode:
+        if args.bundle_id:
+            raise ValueError("--compare without masks requires direct task-specific selections without --bundle-id.")
+        subjects = entries
+        if args.evaluate_combined_success and args.xpass_weight == "v5":
+            subjects = [entry for entry in entries if entry["task"] != "pass_intent"]
+        if len(subjects) < 2 or len({entry["task"] for entry in subjects}) != 1:
+            raise ValueError("--compare requires at least two distinct checkpoints of the same task.")
+        model_comparison.validate_target_definitions(subjects)
+        entries = subjects
+    participating_tasks = {entry["task"] for entry in entries}
+    if args.evaluate_combined_success and args.xpass_weight == "v5":
+        participating_tasks.add("pass_intent")
+    for configuration in configurations:
+        configuration["scoped_masks"] = resolve_scoped_masks(configuration["masks"], participating_tasks)
+        for entry in all_entries:
+            names = configuration["scoped_masks"].get(entry["task"], [])
+            if names:
+                resolve_model_masks(entry["checkpoint_record"]["args"], names)
     if not args.pc_xpass_cache_dir and (args.pc_xpass_id or args.weighted_pass_success_metrics or args.evaluate_xpass or args.evaluate_combined_success):
         pc_versions.cache_dir("sportec", args)
-    validate_pass_success_predictor_args(args)
-    required_tasks, explicit_ids, selected_bundle = requested_evaluation_tasks(args)
-    validate_selected_task_options(args, required_tasks)
-    resolved_model_ids, _, bundle = resolve_model_selection(
-        required_tasks=required_tasks,
-        bundle_id=args.bundle_id,
-        explicit_model_ids=explicit_ids,
-        require_feature_run_id=False,
-        require_intended_receiver_mode=False,
-        require_return_type=False,
-        require_target_family=False,
-    )
     if not args.pc_xpass_cache_dir and not getattr(args, "_pc_version_root", None):
-        if any(get_model_record(model_id)["args"].get("lane_survival", False) for model_id in resolved_model_ids.values()):
+        if any(entry["checkpoint_record"]["args"].get("lane_survival", False) for entry in entries):
             pc_versions.cache_dir("sportec", args)
-    python = sys.executable
-    models_to_evaluate = [(task, resolved_model_ids[task]) for task in required_tasks]
-
-    evaluation_timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    evaluation_base_dir = Path(args.evaluation_output_dir) if args.evaluation_output_dir else EVALUATION_RUNS_DIR
-    model_output_dirs = model_evaluation_output_dirs(
-        evaluation_base_dir,
-        [task for task, _ in models_to_evaluate],
-        evaluation_timestamp,
-    )
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    base_dir = Path(args.evaluation_output_dir) if args.evaluation_output_dir else EVALUATION_RUNS_DIR
+    mode = "mask_comparison" if mask_mode else "model_comparison" if checkpoint_mode else "evaluation"
+    repeated_tasks = len({entry["task"] for entry in entries}) < len(entries)
+    grouped_output = mask_mode or checkpoint_mode or repeated_tasks
+    output_root = base_dir / f"{mode}_{timestamp}"
+    if grouped_output and output_root.exists():
+        raise FileExistsError(f"Evaluation output already exists: {output_root}")
+    legacy_dirs = {} if grouped_output else model_evaluation_output_dirs(base_dir, [entry["task"] for entry in entries], timestamp)
+    manifest_path = output_root / "experiment_manifest.json" if grouped_output else base_dir / f"evaluation_{timestamp}_manifest.json"
+    if manifest_path.exists():
+        raise FileExistsError(f"Evaluation manifest already exists: {manifest_path}")
+    selected_ids = defaultdict(list)
+    for entry in entries:
+        selected_ids[entry["task"]].append(entry["model_id"])
+    resolved_ids = {task: values[0] if len(values) == 1 else values for task, values in selected_ids.items()}
     wrapper_context = {
-        "evaluation_timestamp": evaluation_timestamp,
-        "resolved_model_ids": resolved_model_ids,
-        "requested_tasks": required_tasks,
-        "explicit_model_ids": {task: model_id for task, model_id in explicit_ids.items() if model_id},
-        "bundle_model_ids": {
-            task: model_id
-            for task, model_id in dict((selected_bundle or {}).get("model_ids") or {}).items()
-            if task in SUPPORTED_EVALUATION_TASKS
-        },
-        "evaluated_models": {task: model_id for task, model_id in models_to_evaluate},
-        "bundle_id": args.bundle_id,
+        "mode": mode, "evaluation_timestamp": timestamp, "resolved_model_ids": resolved_ids,
+        "requested_tasks": list(selected_ids), "explicit_model_ids": explicit,
+        "bundle_model_ids": {task: model_id for task, model_id in dict((selected_bundle or {}).get("model_ids") or {}).items()
+                             if task in SUPPORTED_EVALUATION_TASKS},
+        "evaluated_models": resolved_ids, "bundle_id": args.bundle_id,
         "diagnostic_feature_run_id": args.diagnostic_feature_run_id,
-        "pass_height_threshold_meters": args.pass_height_threshold,
-        "evaluation_options": {
-            "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
-            "evaluate_xpass": bool(args.evaluate_xpass),
-            "evaluate_combined_success": bool(args.evaluate_combined_success),
-            "xpass_version": args.xpass_version,
-            "xpass_weight": args.xpass_weight,
-            "v5_intent_threshold": args.v5_intent_threshold if args.xpass_weight == "v5" else None,
-            "v5_discount": args.v5_discount if args.xpass_weight == "v5" else None,
-            "pass_intent_model_id": args.pass_intent_model_id if args.xpass_weight == "v5" else None,
-            "observed_pass_height_stratification": not bool(args.no_observed_pass_height_stratification),
-            "classification_threshold": args.classification_threshold,
-            "f1_outcome_threshold": args.f1_outcome_threshold,
-            "discount": args.discount,
-            "v4_power": args.v4_power,
-            "v4_zero": args.v4_zero,
-            "pc_xpass_id": getattr(args, "pc_xpass_id", None),
-            "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
-        },
-        "evaluation_base_dir": str(evaluation_base_dir.resolve()),
+        "pass_height_threshold_meters": args.pass_height_threshold, "evaluation_options": evaluation_options(args),
+        "evaluation_base_dir": str(base_dir.resolve()),
+        "mask_configurations": configurations,
+        "comparison_bootstrap_resamples": args.comparison_bootstrap_resamples,
+        "comparison_bootstrap_seed": args.comparison_bootstrap_seed,
+        "comparison_interval_method": "paired_match_percentile",
+        "comparison_confidence_level": 0.95,
+        "comparison_interval_scope": "pointwise",
     }
-    print(f"Evaluation artifacts will be saved below {evaluation_base_dir}")
-
-    for task, model_id in models_to_evaluate:
-        evaluation_output_dir = model_output_dirs[task]
-        command = [python, "test.py", "--model_id", model_id, "--device", args.device]
-        if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
-            command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
-        command.extend(
-            [
-                "--evaluation-output-dir",
-                str(evaluation_output_dir),
-                "--evaluation-timestamp",
-                evaluation_timestamp,
-            ]
+    report = {**wrapper_context, "entries": [], "comparisons": [], "skipped_configurations": []}
+    _write_manifest(manifest_path, report)
+    print(f"Evaluation artifacts will be saved below {base_dir}", flush=True)
+    compare_records = []
+    for entry in entries:
+        task, model_id = entry["task"], entry["model_id"]
+        model_dir = output_root / task / _entry_name(model_id)
+        variants = [{"id": "unmasked", "masks": []}]
+        if mask_mode:
+            entry_tasks = _participating_entry_tasks(args, task)
+            for configuration in configurations:
+                scoped = configuration["scoped_masks"]
+                values = [f"{scope}:{name}" for scope, names in scoped.items() if scope in entry_tasks for name in names]
+                if not values:
+                    report["skipped_configurations"].append({"model_id": model_id, "configuration_id": configuration["id"],
+                                                             "reason": "Configuration affects neither this checkpoint nor its auxiliary dependencies."})
+                    continue
+                variants.append({"id": configuration["id"], "masks": values})
+        records = []
+        for variant in variants:
+            output_dir = model_dir / variant["id"] if grouped_output else legacy_dirs[task]
+            record = {**entry, "configuration_id": variant["id"], "masks": variant["masks"],
+                      "output_dir": str(output_dir), "label": variant["id"] if mask_mode else model_id}
+            command = [sys.executable, "test.py", "--model_id", model_id, "--device", args.device,
+                       "--evaluation-output-dir", str(output_dir), "--evaluation-timestamp", timestamp]
+            if grouped_output:
+                command.extend(["--inference-configuration-id", variant["id"]])
+            if mask_mode or checkpoint_mode:
+                command.extend(["--learning-curve-rows", "--comparison-rows"])
+            if variant["masks"]:
+                command.extend(["--inference-mask", *variant["masks"]])
+            if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
+                command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+            if args.weighted_pass_success_metrics and task == "pass_success":
+                add_weighted_pass_success_options(command, args)
+            add_task_evaluation_options(command, args, task)
+            print("Running:", " ".join(command), flush=True)
+            subprocess.run(command, cwd=ROOT, check=True)
+            update_model_metadata(output_dir, {**wrapper_context, "configuration_id": variant["id"],
+                                              "requested_inference_masks": variant["masks"]})
+            artifact_metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+            record["inference_masks"] = artifact_metadata.get("inference_masks", {})
+            records.append(record)
+            report["entries"].append(record)
+            _write_manifest(manifest_path, report)
+        if mask_mode and len(records) >= 2:
+            comparison = model_comparison.write_report(
+                records, model_dir, resamples=args.comparison_bootstrap_resamples,
+                seed=args.comparison_bootstrap_seed, threshold=_comparison_threshold(args, task),
+            )
+            report["comparisons"].append({"model_id": model_id, "output_dir": str(model_dir),
+                                          "warnings": comparison["warnings"], "example_count": comparison["example_count"]})
+        compare_records.extend(records)
+        _write_manifest(manifest_path, report)
+    if checkpoint_mode:
+        comparison = model_comparison.write_report(
+            compare_records, output_root, resamples=args.comparison_bootstrap_resamples,
+            seed=args.comparison_bootstrap_seed, threshold=_comparison_threshold(args, entries[0]["task"]),
         )
-        if args.weighted_pass_success_metrics and task == "pass_success":
-            add_weighted_pass_success_options(command, args)
-        add_task_evaluation_options(command, args, task)
-        print("Running:", " ".join(command))
-        subprocess.run(command, cwd=ROOT, check=True)
-        update_model_metadata(evaluation_output_dir, wrapper_context)
+        report["comparisons"].append({"task": entries[0]["task"], "output_dir": str(output_root),
+                                      "warnings": comparison["warnings"], "example_count": comparison["example_count"]})
+        _write_manifest(manifest_path, report)
+    for skipped in report["skipped_configurations"]:
+        print(f"Skipped {skipped['model_id']} {skipped['configuration_id']}: {skipped['reason']}", flush=True)
+    print(f"Evaluation manifest saved to {manifest_path}", flush=True)
 
 
 if __name__ == "__main__":

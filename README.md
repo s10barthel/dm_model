@@ -1673,6 +1673,12 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 
 ### `scripts/evaluate_relevant_models.py`
 
+- Task-specific model selectors are repeatable. Without `--compare` or masks, every specified checkpoint is evaluated independently, including several checkpoints of one task and different tasks sharing a run identifier. Explicit selections replace the corresponding task's bundle entry.
+- `--compare`: compare at least two completed checkpoints of one task. Use repeatable task-specific selectors; there is no generic `--model-id`. Feature configurations, architectures, seeds, and training sizes may differ. Comparison requires identical evaluated rows and targets. Different intent candidate membership produces a warning; candidate ordering is aligned by identity.
+- `--inference-mask <name> [<name> ...]`: automatically compare the selected checkpoint without masks against one combined masked configuration. Repeating this argument adds names to that same configuration.
+- `--inference-mask-1 <name> ...`, `--inference-mask-2 <name> ...`: define independent configurations, compared with unmasked inference separately for each selected checkpoint. Numbered identifiers must be positive and unique; do not mix numbered and unnumbered forms. Multiple tasks/checkpoints are allowed, but masked evaluation never compares different checkpoint runs. Masks take precedence over an additional `--compare` flag.
+- `--comparison-bootstrap-resamples <N>` and `--comparison-bootstrap-seed <N>`: comparison whole-match bootstrap settings. Defaults: 2000 and 42. Zero resamples disables intervals; otherwise at least two contributing matches are required. Reports include all within-group pairwise differences and pointwise 95% intervals.
+- `--compare` and inference masks cannot be combined with learning-curve mode. Combined-v5 evaluation requires exactly one explicit pass-intent checkpoint as its shared auxiliary dependency.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to evaluate.
 - `--learning-curve`: compare completed subset checkpoints on the same recorded test set. With a bundle or any existing `--<task>-model-id`, discover that run's completed expanding folds and promoted final refit. Tasks with fewer than two sizes are reported as skipped. The default single-model evaluation is unchanged.
 - `--learning-curve-model-id <task/run_id[/fold_N]>`: repeat to select checkpoint series directly for a task; these entries replace automatic discovery for that task. At least two distinct nested training sizes are required. Results include aligned predictions, match-bootstrap intervals and paired differences under `data/evaluation_runs/learning_curve_<timestamp>/` by default.
@@ -1715,6 +1721,42 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 `test.py` is the low-level single-checkpoint evaluator normally launched by `scripts/evaluate_relevant_models.py`.
 
 - `--pass-height-threshold <meters>`: evaluate with relabelled observed height targets and cutoff-relative diagnostics. Omit it to use the checkpoint definition; this never changes the event predicted by the checkpoint.
+
+### Shared inference masks
+
+Evaluation, component inference, Hawkeye, action-component visualization, and EPV generation accept the same runtime feature masks. `scripts/main.py` forwards its combined mask configuration to learned evaluation/inference stages, including EPV generation, without changing feature generation or training. Outside evaluation, only the requested combined masked inference runs; numbered configurations are evaluation-only.
+
+```powershell
+python scripts/evaluate_relevant_models.py --compare --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b
+python scripts/evaluate_relevant_models.py --pass-success-model-id pass_success/run_a --inference-mask-1 accel --inference-mask-2 goal-features
+python scripts/run_and_visualize_hawkeye.py --bundle-id BUNDLE --situation-id SITUATION --inference-mask pass_success:pos-node-features
+```
+
+Use a task prefix to select a component (`pass_success:accel`) or `all:` to select all participating components. Unscoped names are allowed only when one model task participates, including auxiliary models. A configuration scoped away from a checkpoint and its dependencies is skipped in evaluation and recorded in the manifest.
+
+`--list-inference-masks` lists every group, individual feature, and its exact expansion without loading checkpoints. Common groups use training vocabulary:
+
+| Mask | Learned input removed |
+|---|---|
+| `pos-node-features` | Node x and y |
+| `vel-node-features` | Node vx, vy, speed, and acceleration |
+| `accel` | Node acceleration |
+| `goal-features` | Goal distance and normalized goal-direction components |
+| `poss-geometry` | Possessor distance and normalized possessor-direction components |
+| `ball-z-aware`, `keeper-aware`, `offside` | The corresponding height or indicator feature |
+| `possessor-aware` | Possessor indicator, possessor-relative distance/direction, and relative velocity-angle components |
+| `poss-vel-aware` | Velocity features for the possessor node |
+| `poss-rel-vel-aware` | Cosine and sine of velocity angle relative to the possessor |
+| `extend-features`, `pass-lane-features`, `lane-survival` | Corresponding stored handcrafted or sidecar features |
+| `v-edge-features`, `relative-speed-edge-features` | Stored velocity-angle or relative-speed edge inputs |
+| `v-edge-features-no-poss`, `relative-speed-edge-features-no-poss` | Corresponding edge inputs on possessor-incident edges |
+| `motion` | Node velocity, possessor-relative velocity angles, velocity-angle edges, and relative-speed edges |
+
+Individual semantic names such as `node.vx` and `node.goal_dist` permit column-level investigation. Unknown masks, absent features, and ambiguous schemas fail validation. Features already disabled by training or unused by the architecture are recorded as having no additional effect. Structural options, such as removing goal nodes, are excluded.
+
+Masking occurs after feature derivation at encoder and decoder learned-input boundaries, including skip connections. Original positions still determine distances, angles, candidates, geometric control calculations, rendering, and physical/cache inputs. Graph topology and tensor widths remain unchanged. Masking x/y therefore measures reliance on those learned columns, not removal of every positional signal. Likewise, node-velocity masking leaves velocity edge inputs unless those are explicitly masked too.
+
+Physical xPass values remain unchanged. Masked learned predictions can change the blended result, and masked pass-intent predictions may change v5 blending weights. Output metadata records mask names, expansions, and effectiveness; evaluation artifacts and summaries distinguish configurations. Hawkeye keeps its existing visualization layouts.
 
 ### `scripts/run_relevant_models.py`
 

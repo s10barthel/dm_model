@@ -24,6 +24,7 @@ from datatools.hawkeye import (
     resolve_situation_ids as resolve_hawkeye_situation_ids,
 )
 from inference import configure_lane_survival_runtime_cache, inference_gnn
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -77,6 +78,7 @@ from scripts.visualize_hawkeye import (
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument(
         "--situation-id",
         action="append",
@@ -583,6 +585,7 @@ def main() -> None:
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
+    inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
@@ -676,6 +679,7 @@ def main() -> None:
         "bundle_id": args.bundle_id,
         "model_ids": model_ids,
         "selected_model_ids": selected_model_ids,
+        "inference_masks": inference_mask_config,
         "intended_receiver_mode": shared_context.get("intended_receiver_mode"),
         "return_type": shared_context.get("return_type"),
         "target_family": shared_context.get("target_family"),

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
-import time
 from pathlib import Path
 
 import matplotlib
@@ -13,9 +11,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import average_precision_score, brier_score_loss, log_loss, roc_auc_score
 
 from models.utils import get_model_path, parse_model_id
+from scripts.comparison_utils import metrics, paired_bootstrap
 from project_config import load_recorded_split_manifest
 
 
@@ -145,109 +143,27 @@ def load_aligned_predictions(records: list[dict], output_dir: Path) -> list[pd.D
     return aligned
 
 
-def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
-            *, threshold: float | None = None) -> dict[str, float]:
-    data = frame if indices is None else frame.iloc[indices]
-    prediction = data["prediction"].to_numpy(dtype=float)
-    target = data["target"].to_numpy(dtype=float)
-    if task in INTENT_TASKS:
-        probability = np.clip(data["target_probability"].to_numpy(dtype=float), 1e-12, 1)
-        return {
-            "accuracy": float(np.mean(prediction == target)),
-            "mrr": float(data["reciprocal_rank"].mean()),
-            "target_log_loss": float(-np.log(probability).mean()),
-        }
-    if not np.isfinite(prediction).all() or not np.isfinite(target).all():
-        raise ValueError("Learning-curve predictions and targets must be finite.")
-    result = {
-        "roc_auc": float(roc_auc_score(target, prediction)) if np.unique(target).size == 2 else math.nan,
-        "pr_auc": float(average_precision_score(target, prediction)) if np.any(target > 0) else math.nan,
-        "brier": float(brier_score_loss(target, prediction)),
-        "log_loss": float(log_loss(target, prediction, labels=[0, 1])),
-        "calibration_bias": float(np.mean(prediction - target)),
-    }
-    ordered = np.argsort(prediction, kind="stable")
-    result["ece"] = float(sum(
-        len(group) * abs(float(np.mean(prediction[group] - target[group])))
-        for group in np.array_split(ordered, min(10, len(ordered)))
-    ) / len(ordered))
-    if threshold is not None:
-        classified = prediction >= threshold
-        positive = target > 0
-        tp = int(np.sum(classified & positive))
-        fp = int(np.sum(classified & ~positive))
-        fn = int(np.sum(~classified & positive))
-        result["accuracy"] = float(np.mean(classified == positive))
-        result["precision"] = float(tp / (tp + fp)) if tp + fp else 0.0
-        result["recall"] = float(tp / (tp + fn)) if tp + fn else 0.0
-        result["f1"] = float(2 * tp / (2 * tp + fp + fn)) if 2 * tp + fp + fn else 0.0
-    if task in OUTCOME_TASKS:
-        soft = data["soft_target"].to_numpy(dtype=float)
-        clipped = np.clip(prediction, 1e-12, 1 - 1e-12)
-        result.update({
-            "xt_soft_bce": float(np.mean(-soft * np.log(clipped) - (1 - soft) * np.log1p(-clipped))),
-            "xt_rmse": float(np.sqrt(np.mean((soft - prediction) ** 2))),
-            "xt_spearman": float(pd.Series(soft).corr(pd.Series(prediction), method="spearman")),
-            "xt_mean_bias": float(np.mean(prediction - soft)),
-        })
-    return result
-
-
 def compare(task: str, records: list[dict], frames: list[pd.DataFrame], *, resamples: int, seed: int,
             threshold: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if resamples < 0 or seed < 0:
-        raise ValueError("Bootstrap resamples and seed must be nonnegative.")
-    groups = frames[0].groupby("match_id", sort=True).indices
-    match_ids = sorted(groups)
-    if len(match_ids) < 2:
-        raise ValueError("Paired bootstrap requires at least two contributing test matches.")
-    names = list(metrics(task, frames[0], threshold=threshold))
-    points = [metrics(task, frame, threshold=threshold) for frame in frames]
-    draws = {name: [[] for _ in records] for name in names}
-    differences = {(a, b, name): [] for a in range(len(records)) for b in range(a + 1, len(records)) for name in names}
-    rng = np.random.default_rng(seed)
-    last_report = time.perf_counter()
-    for repeat in range(resamples):
-        sampled = rng.integers(0, len(match_ids), size=len(match_ids))
-        indices = np.concatenate([groups[match_ids[index]] for index in sampled])
-        batch = [metrics(task, frame, indices, threshold=threshold) for frame in frames]
-        for name in names:
-            for index, item in enumerate(batch):
-                draws[name][index].append(item[name])
-            for a in range(len(records)):
-                for b in range(a + 1, len(records)):
-                    differences[(a, b, name)].append(batch[b][name] - batch[a][name])
-        now = time.perf_counter()
-        if now - last_report >= 30 or repeat + 1 == resamples:
-            print(f"{task} paired bootstrap: {repeat + 1}/{resamples}", flush=True)
-            last_report = now
-    def interval(values):
-        if resamples == 0:
-            return math.nan, math.nan, 0, "disabled"
-        finite = np.asarray(values, dtype=float)
-        finite = finite[np.isfinite(finite)]
-        if len(finite) < math.ceil(0.95 * resamples) or not len(finite):
-            return math.nan, math.nan, len(finite), "insufficient_valid_resamples"
-        lower, upper = np.quantile(finite, [0.025, 0.975])
-        return float(lower), float(upper), len(finite), "ok"
+    points, intervals, pair_intervals = paired_bootstrap(
+        task, frames, resamples=resamples, seed=seed, threshold=threshold,
+    )
     rows = []
     diff_rows = []
     for index, record in enumerate(records):
-        for name in names:
-            low, high, valid, status = interval(draws[name][index])
+        for name, estimate in points[index].items():
+            low, high, valid, status = intervals[index, name]
             rows.append({"task": task, "model_id": record["model_id"], "train_matches": record["train_matches"],
-                         "metric": name, "estimate": points[index][name], "lower": low, "upper": high,
+                         "metric": name, "estimate": estimate, "lower": low, "upper": high,
                          "valid_resamples": valid, "status": status})
-    for (a, b, name), values in differences.items():
+    for (a, b, name), (low, high, valid, status) in pair_intervals.items():
         if a != 0 and b != a + 1:
             continue
-        low, high, valid, status = interval(values)
         diff_rows.append({"task": task, "from_matches": records[a]["train_matches"],
                           "to_matches": records[b]["train_matches"], "metric": name,
                           "difference": points[b][name] - points[a][name], "lower": low, "upper": high,
                           "valid_resamples": valid, "status": status})
     return pd.DataFrame(rows), pd.DataFrame(diff_rows)
-
 
 def save_plot(summary: pd.DataFrame, output_path: Path, task: str) -> None:
     metric_names = summary["metric"].unique()

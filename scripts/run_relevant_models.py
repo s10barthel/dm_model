@@ -20,6 +20,7 @@ import torch
 from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
 from inference import PhysicalXPassNoUsableRowsError, inference_gnn, load_success_intent_labels
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.utils import (
     get_model_provenance,
     infer_feature_graph_schema,
@@ -69,6 +70,7 @@ from datatools.sportec_seasons import add_season_argument, select_season_match_i
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     add_frame_selection_arguments(parser)
     add_season_argument(parser)
     parser.add_argument("--split", default="all", choices=["train", "test", "all"])
@@ -689,6 +691,11 @@ def main() -> None:
         success_intent_feature_schema,
     ) = load_optional_success_intent_model(success_intent_model_id, device, feature_root)
 
+    inference_models = dict(model_specs)
+    if success_intent_model is not None:
+        inference_models["success_intent"] = success_intent_model
+    inference_mask_config = configure_inference_masks(inference_models, getattr(args, "inference_mask", None))
+
     recorded_selector = checked_split_selector(args, shared_context)
     feature_metadata = load_feature_run_metadata(feature_run_id, required=False) or {}
     use_carries = bool(shared_context.get("use_carries", False))
@@ -715,6 +722,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "run_id": component_run_id,

@@ -17,6 +17,7 @@ import torch
 from tqdm import tqdm
 
 from inference import configure_lane_survival_runtime_cache
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from datatools.skillcorner import (
     COMPONENT_COLUMNS,
     build_skillcorner_component_table,
@@ -61,6 +62,7 @@ from validation.skillcorner.code.skillcorner_postprocessing import run_skillcorn
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more SkillCorner match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N selected SkillCorner matches.")
@@ -318,6 +320,7 @@ def main() -> None:
         pass_success_model.args["physical_runtime_cache_read_only"] = True
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
@@ -506,6 +509,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "run_id": component_run_id,

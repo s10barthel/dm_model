@@ -1,0 +1,213 @@
+"""Compare independent checkpoints or runtime masks on identical prediction rows."""
+
+from __future__ import annotations
+
+import json
+import warnings
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from models.utils import get_model_record, parse_model_id
+from project_config import load_recorded_split_manifest
+from scripts.comparison_utils import INTENT_TASKS, paired_bootstrap
+
+
+TARGET_DEFINITION_KEYS = ("target_family", "return_type", "intended_receiver_mode", "label_source",
+                          "pass_height_definition")
+IDENTITY_COLUMNS = ("soft_target", "execution_branch",
+                    "evaluation_pass_height_threshold_meters", "pass_height_label_mode")
+
+
+def checkpoint(model_id: str, *, expected_task: str | None = None) -> dict:
+    """Validate completion/provenance without learning-curve training-size restrictions."""
+    task, _ = parse_model_id(model_id)
+    if expected_task is not None and task != expected_task:
+        raise ValueError(f"Checkpoint {model_id!r} does not match selector task {expected_task!r}.")
+    record = get_model_record(model_id)
+    if record.get("task") != task or not record.get("is_complete"):
+        raise ValueError(f"Checkpoint {model_id!r} is incomplete or has a different task.")
+    metadata = record.get("metadata") or {}
+    train_data = ((metadata.get("split_datasets") or {}).get("train") or {})
+    train_ids = train_data.get("contributing_match_ids")
+    if train_ids is None:
+        train_ids = metadata.get("train_match_ids") or []
+    train_ids = [str(value) for value in train_ids]
+    if len(train_ids) != len(set(train_ids)):
+        raise ValueError(f"Checkpoint {model_id!r} has duplicate recorded training match IDs.")
+    manifest_id = record.get("split_manifest_id")
+    test_ids = None
+    if manifest_id:
+        manifest = load_recorded_split_manifest(manifest_id)
+        test_ids = [str(value) for value in manifest["test"]]
+        if set(train_ids).intersection(test_ids):
+            raise ValueError(f"Checkpoint {model_id!r} has training matches in its test set.")
+    configuration = {}
+    for name in TARGET_DEFINITION_KEYS:
+        value = record.get(name, metadata.get(name, (record.get("args") or {}).get(name)))
+        if name == "pass_height_definition" and value:
+            value = {key: item for key, item in value.items() if key != "resolution_source"}
+        configuration[name] = value
+    if task not in {"pass_height", "pass_success", "outcome_scoring", "outcome_conceding"}:
+        configuration.pop("pass_height_definition", None)
+    return {
+        "model_id": model_id, "task": task, "train_matches": len(train_ids),
+        "train_match_ids": train_ids, "test_match_ids": test_ids,
+        "split_manifest_id": manifest_id, "target_definitions": configuration,
+        "checkpoint_record": record,
+    }
+
+
+def validate_target_definitions(records: list[dict]) -> None:
+    if not records or len({record["task"] for record in records}) != 1:
+        raise ValueError("Checkpoint comparisons require models of the same task.")
+    reference = records[0].get("target_definitions")
+    for record in records[1:]:
+        if record.get("target_definitions") != reference:
+            raise ValueError(f"Target definitions differ for {record['model_id']}.")
+
+
+def _candidate_set(value: str) -> frozenset[str]:
+    try:
+        candidates = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("Intent candidate_ids must contain JSON arrays.") from exc
+    if not isinstance(candidates, list):
+        raise ValueError("Intent candidate_ids must contain JSON arrays.")
+    return frozenset(str(item) for item in candidates)
+
+
+def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], list[dict]]:
+    """Align all rows strictly; candidate membership differences are warnings only."""
+    frames = []
+    messages = []
+    reference = None
+    reference_candidates = None
+    for record in records:
+        path = Path(record["output_dir"]) / "learning_curve_predictions.csv"
+        frame = pd.read_csv(path, dtype={"match_id": str, "target_id": str, "prediction_id": str},
+                            keep_default_na=False)
+        required = {"match_id", "source_index", "target", "prediction"}
+        intent = record["task"] in INTENT_TASKS
+        if intent:
+            required |= {"target_id", "prediction_id", "candidate_ids", "target_probability", "reciprocal_rank"}
+        if frame.empty or not required.issubset(frame):
+            raise ValueError(f"Missing prediction columns or rows in {path}.")
+        if frame.duplicated(["match_id", "source_index"]).any():
+            raise ValueError(f"Duplicate example identities in {path}.")
+        if frame["match_id"].eq("").any() or frame["source_index"].eq("").any():
+            raise ValueError(f"Missing example identities in {path}.")
+        frame = frame.sort_values(["match_id", "source_index"]).reset_index(drop=True)
+        if record.get("test_match_ids") is not None and not set(frame["match_id"]).issubset(record["test_match_ids"]):
+            raise ValueError(f"Predictions outside the test manifest in {path}.")
+        if set(frame["match_id"]).intersection(record.get("train_match_ids") or []):
+            raise ValueError(f"Predictions include recorded training matches in {path}.")
+        target_name = "target_id" if intent else "target"
+        if intent and (frame["target_id"].eq("").any() or frame["prediction_id"].eq("").any()):
+            raise ValueError(f"Missing semantic intent identities in {path}.")
+        identity = frame[["match_id", "source_index", target_name] +
+                         [name for name in IDENTITY_COLUMNS if name in frame]].copy()
+        if reference is None:
+            reference = identity
+        elif not identity.equals(reference):
+            raise ValueError(f"Evaluated examples or targets differ for {record['model_id']} ({record.get('configuration_id')}).")
+        if intent:
+            candidates = frame["candidate_ids"].map(_candidate_set)
+            if reference_candidates is None:
+                reference_candidates = candidates
+            else:
+                different = candidates != reference_candidates
+                if different.any():
+                    sample = frame.loc[different, ["match_id", "source_index"]].head(5).to_dict("records")
+                    message = {
+                        "kind": "candidate_membership_mismatch", "model_id": record["model_id"],
+                        "configuration_id": record.get("configuration_id", "unmasked"),
+                        "reference_model_id": records[0]["model_id"],
+                        "reference_configuration_id": records[0].get("configuration_id", "unmasked"),
+                        "affected_row_count": int(different.sum()), "examples": sample,
+                    }
+                    messages.append(message)
+                    warnings.warn(f"Candidate membership differs for {record['model_id']} on {int(different.sum())} rows; "
+                                  "paired comparison continues.", RuntimeWarning, stacklevel=2)
+        frames.append(frame)
+    return frames, messages
+
+
+def compare(task: str, records: list[dict], frames: list[pd.DataFrame], *, resamples: int, seed: int,
+            threshold: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    points, intervals, pair_intervals = paired_bootstrap(
+        task, frames, resamples=resamples, seed=seed, threshold=threshold, strict_threshold=True,
+    )
+    rows = []
+    differences = []
+    for index, record in enumerate(records):
+        for metric, estimate in points[index].items():
+            low, high, valid, status = intervals[index, metric]
+            rows.append({"task": task, "model_id": record["model_id"],
+                         "configuration_id": record.get("configuration_id", "unmasked"),
+                         "label": record.get("label", record["model_id"]), "metric": metric,
+                         "estimate": estimate, "lower": low, "upper": high,
+                         "valid_resamples": valid, "status": status})
+    for (a, b, metric), (low, high, valid, status) in pair_intervals.items():
+        differences.append({
+            "task": task, "model_a": records[a]["model_id"], "model_b": records[b]["model_id"],
+            "configuration_a": records[a].get("configuration_id", "unmasked"),
+            "configuration_b": records[b].get("configuration_id", "unmasked"),
+            "direction": f"{records[b].get('label', records[b]['model_id'])} - {records[a].get('label', records[a]['model_id'])}",
+            "metric": metric, "difference": points[b][metric] - points[a][metric],
+            "lower": low, "upper": high, "valid_resamples": valid, "status": status,
+        })
+    return pd.DataFrame(rows), pd.DataFrame(differences)
+
+
+def save_plot(summary: pd.DataFrame, output_path: Path, task: str) -> None:
+    metric_names = summary["metric"].unique()
+    fig, axes = plt.subplots(len(metric_names), 1, figsize=(9, max(3, 2.5 * len(metric_names))), squeeze=False)
+    for axis, name in zip(axes[:, 0], metric_names):
+        data = summary.loc[summary.metric == name]
+        x = np.arange(len(data))
+        y = data.estimate.to_numpy(dtype=float)
+        axis.plot(x, y, "o")
+        low, high = data.lower.to_numpy(dtype=float), data.upper.to_numpy(dtype=float)
+        finite = np.isfinite(low) & np.isfinite(high)
+        axis.vlines(x[finite], low[finite], high[finite])
+        axis.set_xticks(x, data.label.tolist(), rotation=20, ha="right")
+        axis.set_ylabel(name)
+        axis.grid(alpha=0.25)
+    fig.suptitle(f"{task}: identical evaluated rows")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
+def write_report(records: list[dict], output_dir: Path, *, resamples: int, seed: int,
+                 threshold: float | None = None) -> dict:
+    if len(records) < 2:
+        raise ValueError("A comparison report requires at least two configurations or checkpoints.")
+    validate_target_definitions(records)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frames, messages = load_aligned_predictions(records)
+    task = records[0]["task"]
+    summary, differences = compare(task, records, frames, resamples=resamples, seed=seed, threshold=threshold)
+    summary.to_csv(output_dir / "comparison_metrics.csv", index=False)
+    differences.to_csv(output_dir / "comparison_differences.csv", index=False)
+    identity_names = [name for name in ("match_id", "source_index", "target", "target_id", *IDENTITY_COLUMNS)
+                      if name in frames[0]]
+    aligned = frames[0][identity_names].copy()
+    for index, frame in enumerate(frames):
+        for name in ("prediction", "prediction_id", "target_probability", "reciprocal_rank", "candidate_ids"):
+            if name in frame:
+                aligned[f"{name}_{index}"] = frame[name].to_numpy()
+    aligned.to_csv(output_dir / "aligned_predictions.csv", index=False)
+    save_plot(summary, output_dir / "comparison.png", task)
+    report = {"task": task, "variants": records, "warnings": messages,
+              "example_count": len(frames[0]), "contributing_match_ids": sorted(frames[0].match_id.unique().tolist()),
+              "bootstrap_resamples": resamples, "bootstrap_seed": seed, "confidence_level": 0.95,
+              "interval_method": "paired_match_percentile", "interval_scope": "pointwise",
+              "classification_threshold": threshold}
+    (output_dir / "experiment_manifest.json").write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    return report

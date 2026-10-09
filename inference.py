@@ -846,6 +846,8 @@ def inference_gnn(
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if (graph_override is None) != (label_override is None):
         raise ValueError("graph_override and label_override must be supplied together.")
+    if hasattr(model, "eval"):
+        model.eval()
     policy = goal_policy(model.args)
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
     include_goals = policy.include_goals
@@ -1187,6 +1189,8 @@ def inference_gnn_posterior(
     event_indices: pd.Index = None,
     melt: bool = True,
 ) -> pd.DataFrame:
+    if hasattr(model, "eval"):
+        model.eval()
     match_graphs, feature_action_indices = resolve_match_graphs(match, model, post_action=False)
     graphs, labels = filter_features_and_labels(
         match_graphs,
@@ -1213,6 +1217,8 @@ def inference_gnn_posterior(
             intent_onehot[intent_index] = 1
             intended_nodes = torch.cat([graph_i.x, intent_onehot.unsqueeze(1)], -1)
             intended_graph = Data(x=intended_nodes, edge_index=graph_i.edge_index, edge_attr=graph_i.edge_attr)
+            if hasattr(graph_i, "inference_possessor_mask"):
+                intended_graph.inference_possessor_mask = graph_i.inference_possessor_mask
             intended_graphs.append(intended_graph)
         intended_graphs = Batch.from_data_list(intended_graphs).to(device)
 
@@ -1252,6 +1258,8 @@ def inference_gnn_posterior(
 
 
 def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, torch.Tensor]:
+    if hasattr(model, "eval"):
+        model.eval()
     assert "dest" in model.args["task"]
 
     grid_size = (int(FIELD_SIZE[0]), int(FIELD_SIZE[1]))
@@ -1282,7 +1290,11 @@ def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, tor
             graph_emb_rep = graph_emb.repeat(n_cells, 1)  # [G, z]
             batch_indices = torch.arange(n_cells, device=device).repeat_interleave(graph_i.num_nodes)
 
-            logits_i = model.decoder(node_feat_rep, node_emb_rep, graph_emb_rep, batch_indices, dest_tensor)
+            possessor_mask = getattr(graph_i, "inference_possessor_mask", None)
+            logits_i = model.decoder(
+                node_feat_rep, node_emb_rep, graph_emb_rep, batch_indices, dest_tensor,
+                inference_possessor_mask=possessor_mask.repeat(n_cells) if possessor_mask is not None else None,
+            )
 
         if model.args["include_out"]:
             node_logits = logits_i[:-n_cells].view(n_cells, -1)  # [G, P]

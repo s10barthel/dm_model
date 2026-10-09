@@ -25,6 +25,7 @@ from datatools.viz_helpers import (
 )
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import configure_lane_survival_runtime_cache, inference_gnn, load_success_intent_labels, resolve_match_id
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.utils import (
     aggregate_graph_schemas,
     get_model_record,
@@ -71,6 +72,7 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
         "--action-id",
@@ -898,6 +900,7 @@ def main() -> None:
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
+    inference_mask_config = configure_inference_masks(loaded_models, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(loaded_models)
     runtime_feature_context = resolve_runtime_feature_run_context(
         args.feature_run_id,
@@ -1039,6 +1042,7 @@ def main() -> None:
         "skipped_actions": skipped_actions,
         "model_ids": model_ids,
         "selected_model_ids": selected_model_ids,
+        "inference_masks": inference_mask_config,
         "success_intent_model_id": str(success_intent_model_id) if success_intent_model_id else None,
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,

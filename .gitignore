@@ -31,6 +31,11 @@ tests/*.py
 !tests/test_training_runtime.py
 !tests/test_training_controls.py
 !tests/test_learning_curve.py
+!tests/test_inference_masks.py
+!tests/test_inference_mask_integration.py
+!tests/test_model_comparison.py
+!tests/test_prediction_identity.py
+!tests/test_masked_evaluation_smoke.py
 tests/AS_viz/
 !tests/test_success_intent_mode_independent.py
 !tests/test_success_intent_visualization.py

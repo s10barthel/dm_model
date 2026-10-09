@@ -1771,6 +1771,7 @@ def run_epoch(
     return_outcome_evaluation: bool = False,
     return_learning_curve_rows: bool = False,
     pass_intent_model: nn.Module | None = None,
+    return_semantic_prediction_rows: bool = False,
 ):
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
@@ -1927,6 +1928,10 @@ def run_epoch(
             metrics["accuracy"] += (predictions == targets).sum().item()
             metrics["mrr"] += reciprocal_ranks.double().sum().item()
             if return_learning_curve_rows:
+                semantic_rows = None
+                if return_semantic_prediction_rows:
+                    from models.prediction_identity import selection_prediction_identities
+                    semantic_rows = selection_prediction_identities(batch_graphs, layout, targets, predictions)
                 rows = torch.stack((targets, predictions, reciprocal_ranks, probabilities), dim=1).detach().cpu().tolist()
                 for gi, (target_value, prediction, reciprocal_rank, probability) in enumerate(rows):
                     learning_curve_rows.append({
@@ -1934,6 +1939,7 @@ def run_epoch(
                         "source_index": int(batch_graphs.evaluation_source_row[gi]),
                         "target": int(target_value), "prediction": int(prediction),
                         "reciprocal_rank": reciprocal_rank, "target_probability": probability,
+                        **(semantic_rows[gi] if semantic_rows is not None else {}),
                     })
 
         elif args.gnn_task == "node_binary":  # {pass/action}_success, outcome_{scoring/conceding}, intent_return
@@ -2330,6 +2336,28 @@ def run_epoch(
                 }
             )
 
+    if return_semantic_prediction_rows:
+        binary_evaluation = None
+        if bool(getattr(args, "return_pass_success_height_evaluation", False)):
+            binary_evaluation = {
+                "height_rows": pass_success_height_rows if observed_pass_height_labels else [],
+                "predictor_rows": pass_success_predictor_rows or [],
+            }
+            if pass_success_predictor_rows:
+                binary_evaluation["predictor_diagnostics"] = {
+                    "targets": np.concatenate(pass_success_diagnostic_targets),
+                    "predictors": predictors,
+                    "observed_pass_high": np.concatenate(observed_pass_height_labels),
+                    "pass_distance": np.concatenate(evaluation_pass_distances),
+                    "combined_learning_weight": np.concatenate(combined_learning_weights) if combined_learning_weights else None,
+                }
+        elif bool(getattr(args, "return_binary_diagnostics", False)):
+            binary_evaluation = {
+                "targets": np.concatenate(binary_targets),
+                "predictions": np.concatenate(binary_predictions),
+                "observed_pass_max_height": np.concatenate(observed_pass_max_heights) if observed_pass_max_heights else None,
+            }
+        return metrics, learning_curve_rows, {"outcome": outcome_evaluation, "binary": binary_evaluation}
     if return_learning_curve_rows:
         return metrics, learning_curve_rows
     if return_outcome_evaluation:

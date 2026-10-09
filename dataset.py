@@ -513,6 +513,8 @@ class ActionDataset(Dataset):
             auxiliary_label = graph_labels.clone() if auxiliary_model_args is not None else None
             graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
             graph.source_node_positions = torch.arange(graph.num_nodes)
+            # Preserve roles used by runtime subset masks before training feature masks.
+            graph.inference_possessor_mask = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
 
             try:
                 possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()

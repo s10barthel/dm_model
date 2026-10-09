@@ -1358,6 +1358,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
     if hasattr(graph, "source_node_positions"):
         masked_graph.source_node_positions = graph.source_node_positions[node_mask]
+    if hasattr(graph, "inference_possessor_mask"):
+        masked_graph.inference_possessor_mask = graph.inference_possessor_mask[node_mask]
     if hasattr(graph, "node_ids"):
         masked_graph.node_ids = [graph.node_ids[idx] for idx in node_mask_indices.tolist()]
 
@@ -1567,6 +1569,8 @@ def filter_features_and_labels(
         else:
             graph = graph.clone()
             graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
+            if not hasattr(graph, "inference_possessor_mask"):
+                graph.inference_possessor_mask = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
 
         try:
             possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()

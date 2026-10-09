@@ -7,6 +7,7 @@ from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
 
 from datatools import config
 from models.node_feature_config import resolve_pos_node_features
+from models.inference_masks import RuntimeInferenceMasks
 from physical_pass_model import (
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_VARIANTS,
@@ -80,6 +81,15 @@ class Encoder(nn.Module):
             graph_embeddings: [B, z] tensor.
         """
         node_features = mask_pos_node_features(batch_graphs.x, self.args)
+        edge_features = batch_graphs.edge_attr
+        runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
+        if runtime is not None:
+            possessor_mask = getattr(batch_graphs, "inference_possessor_mask", None)
+            node_features = runtime.mask_nodes(node_features, training=self.training, possessor_mask=possessor_mask)
+            edge_features = runtime.mask_edges(
+                edge_features, batch_graphs.edge_index, batch_graphs.x,
+                training=self.training, possessor_mask=possessor_mask,
+            )
         node_embeddings = self.node_in_fc(node_features)  # [N, z]
         for i, gnn_layer in enumerate(self.gnn_layers):
             if self.args["skip_conn"]:
@@ -88,7 +98,7 @@ class Encoder(nn.Module):
                 gnn_inputs = node_embeddings  # [N, z]
 
             if self.model_type == "gat":
-                node_embeddings = gnn_layer(gnn_inputs, batch_graphs.edge_index, batch_graphs.edge_attr)  # [N, z]
+                node_embeddings = gnn_layer(gnn_inputs, batch_graphs.edge_index, edge_features)  # [N, z]
             else:  # gcn or gin
                 node_embeddings = gnn_layer(gnn_inputs, batch_graphs.edge_index)  # [N, z]
             node_embeddings = self.activation(self.node_layernorms[i](node_embeddings))
@@ -251,6 +261,7 @@ class Decoder(nn.Module):
         batch_indices: torch.Tensor = None,
         batch_dests: torch.Tensor = None,
         physical_xpass_logit: torch.Tensor = None,
+        inference_possessor_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Arguments:
@@ -265,7 +276,13 @@ class Decoder(nn.Module):
             elif gnn_task == ["graph_binary", "graph_regression"]:
                 out: [B] tensor.
         """
+        original_node_features = node_features
         node_features = mask_pos_node_features(node_features, self.args)
+        runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
+        if runtime is not None:
+            node_features = runtime.mask_nodes(
+                node_features, training=self.training, possessor_mask=inference_possessor_mask,
+            )
         if "dest" in self.args["task"]:
             assert batch_dests is not None
         else:
@@ -305,7 +322,7 @@ class Decoder(nn.Module):
                 "gat_phys_logit_offset_regularized",
             }:
                 delta_gat = node_outputs
-                delta_gat = self._clip_delta_gat(delta_gat, node_features)
+                delta_gat = self._clip_delta_gat(delta_gat, original_node_features)
                 self.latest_delta_gat = delta_gat
                 node_outputs = self.physical_beta0 + self.physical_beta1 * physical_xpass_logit + delta_gat
             else:
@@ -364,6 +381,7 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
             batch_graphs.batch,
             batch_dests,
             getattr(batch_graphs, PHYSICAL_XPASS_LOGIT_ATTR, None),
+            getattr(batch_graphs, "inference_possessor_mask", None),
         )
 
     def forward_grid(self, batch_graphs: Batch, grid_features: torch.Tensor) -> torch.Tensor:
@@ -396,6 +414,9 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
             node_emb_rep = node_embeddings.repeat_interleave(G, dim=0)  # [N*G, z]
             graph_emb_rep = graph_embeddings.repeat_interleave(G, dim=0)  # [B*G, z]
             batch_idx_rep = batch_graphs.batch.repeat_interleave(G, dim=0)  # [N*G]
+            possessor_mask = getattr(batch_graphs, "inference_possessor_mask", None)
+            if possessor_mask is not None:
+                possessor_mask = possessor_mask.repeat_interleave(G, dim=0)
 
             logits = self.decoder(
                 node_features=node_feat_rep,
@@ -403,6 +424,7 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
                 graph_embeddings=graph_emb_rep,
                 batch_indices=batch_idx_rep,
                 batch_dests=grid_features,
+                inference_possessor_mask=possessor_mask,
             )  # [N*G] or [(N+B)*G]
             return logits.view(-1, G)  # [N, G] or [N+B, G]
 

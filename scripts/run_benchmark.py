@@ -15,6 +15,7 @@ import torch
 from tqdm import tqdm
 
 from inference import configure_lane_survival_runtime_cache
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from datatools.benchmark import (
     build_benchmark_export,
     build_benchmark_state,
@@ -69,6 +70,7 @@ BENCHMARK_RUNS_LEDGER_COLUMNS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_inference_mask_arguments(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "benchmark"))
     parser.add_argument("--modification", action="append", type=int, help="Restrict inference to one or more benchmark modifications.")
     parser.add_argument("--limit", type=int, help="Only process the first N selected benchmark modifications.")
@@ -341,6 +343,7 @@ def main() -> None:
         pass_success_model.args["physical_runtime_cache_read_only"] = True
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
@@ -464,6 +467,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "run_id": component_run_id,
