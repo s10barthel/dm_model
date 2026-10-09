@@ -21,7 +21,8 @@ from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from ipw_options import add_ipw_arguments, ipw_flags
 from crash_capture import add_crash_capture_arguments, run_training
 from training_state import (add_training_runtime_arguments, validate_learning_rates,
-                            resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts)
+                            resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts,
+                            add_training_control_arguments)
 from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
@@ -393,6 +394,12 @@ def get_training_control_settings(args: argparse.Namespace) -> dict[str, object]
         "early_stopping_patience": int(getattr(args, "early_stopping_patience", 10)),
         "early_stopping_min_epochs": int(getattr(args, "early_stopping_min_epochs", 30)),
         "early_stopping_min_delta": float(getattr(args, "early_stopping_min_delta", 1e-5)),
+        "lr_reduction_patience": int(getattr(args, "lr_reduction_patience", 3)),
+        "lr_reduction_factor": float(getattr(args, "lr_reduction_factor", 0.5)),
+        "lr_rollback": bool(getattr(args, "lr_rollback", True)),
+        "early_stopping_min_epochs_after_lr_reduction": int(getattr(args, "early_stopping_min_epochs_after_lr_reduction", 5)),
+        "max_epochs": int(getattr(args, "max_epochs", 100)),
+        "seed": int(getattr(args, "seed", 100)),
     }
 
 
@@ -436,6 +443,10 @@ def append_training_control_flags(command: list[str], settings: dict[str, object
     )
     if not bool(settings["early_stopping"]):
         command.append("--no-early-stopping")
+    for name, default in (("lr_reduction_patience", 3), ("lr_reduction_factor", 0.5),
+                          ("early_stopping_min_epochs_after_lr_reduction", 5)):
+        command.extend(["--" + name.replace("_", "-"), str(settings.get(name, default))])
+    command.append("--lr-rollback" if settings.get("lr_rollback", True) else "--no-lr-rollback")
     return command
 
 
@@ -831,6 +842,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_ipw_arguments(parser)
     add_crash_capture_arguments(parser)
     add_training_runtime_arguments(parser)
+    add_training_control_arguments(parser, wrapper=True)
     parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
     parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
     parser.add_argument("--resume-id", default=None, help="Resume one model with its saved training settings.")
@@ -1942,6 +1954,8 @@ def build_training_commands(
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
     for index, command in enumerate(commands):
+        command = _replace_cli_value(command, "--n_epochs", getattr(args, "max_epochs", 100))
+        command = _replace_cli_value(command, "--seed", getattr(args, "seed", 100))
         for flag in ("--start_lr", "--min_lr"):
             value = getattr(args, flag[2:], None)
             if value is not None:

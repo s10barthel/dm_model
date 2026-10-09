@@ -41,6 +41,78 @@ def positive_int(value):
     return result
 
 
+def nonnegative_int(value):
+    result = int(value)
+    if result < 0:
+        raise argparse.ArgumentTypeError("must be a nonnegative integer")
+    return result
+
+
+def reduction_factor(value):
+    result = float(value)
+    if not math.isfinite(result) or not 0 < result < 1:
+        raise argparse.ArgumentTypeError("must be finite and strictly between 0 and 1")
+    return result
+
+
+def random_seed(value):
+    result = int(value)
+    if not 0 <= result <= 2**32 - 1:
+        raise argparse.ArgumentTypeError("must be an integer from 0 through 2**32 - 1")
+    return result
+
+
+def add_training_control_arguments(parser, *, wrapper=False):
+    parser.add_argument("--lr-reduction-patience", type=positive_int, default=3,
+                        help="Validation-loss misses before reducing the learning rate (default: 3).")
+    parser.add_argument("--lr-reduction-factor", type=reduction_factor, default=0.5,
+                        help="Multiplier on learning-rate reduction (default: 0.5).")
+    parser.add_argument("--early-stopping-min-epochs-after-lr-reduction", type=nonnegative_int, default=5,
+                        help="Completed epochs after the latest LR reduction before early stopping (default: 5; 0 disables).")
+    rollback = parser.add_mutually_exclusive_group()
+    rollback.add_argument("--lr-rollback", dest="lr_rollback", action="store_true",
+                          help="Restore best model and Adam state on LR reduction (default).")
+    rollback.add_argument("--no-lr-rollback", dest="lr_rollback", action="store_false",
+                          help="Reduce LR without restoring model or Adam state.")
+    parser.set_defaults(lr_rollback=True)
+    if wrapper:
+        parser.add_argument("--max-epochs", type=positive_int, default=100,
+                            help="Hard epoch cap per validation stage (default: 100).")
+    else:
+        epochs = parser.add_mutually_exclusive_group()
+        epochs.add_argument("--n_epochs", dest="n_epochs", type=positive_int, help="Hard epoch cap (default: 200).")
+        epochs.add_argument("--max-epochs", dest="n_epochs", type=positive_int, help="Alias for --n_epochs.")
+        parser.set_defaults(n_epochs=200)
+    parser.add_argument("--seed", type=random_seed, default=100 if wrapper else 128,
+                        help="Random seed for Python, NumPy and PyTorch.")
+
+
+def restore_training_control_defaults(args):
+    """Old checkpoint arguments retain the behavior used when they were saved."""
+    for name, value in {"lr_reduction_patience": 3, "lr_reduction_factor": 0.5,
+                        "lr_rollback": True, "early_stopping_min_epochs_after_lr_reduction": 0}.items():
+        if not hasattr(args, name):
+            setattr(args, name, value)
+
+
+def reduce_learning_rate(model, optimizer, best, lr, minimum, factor, rollback):
+    new_lr = max(lr * factor, minimum)
+    if new_lr >= lr:
+        return lr
+    if rollback:
+        if best is None:
+            raise RuntimeError("Missing best model/optimizer state for scheduler rollback.")
+        restore_optimizer_snapshot(best, model, optimizer, lr=new_lr)
+    else:
+        for group in optimizer.param_groups:
+            group["lr"] = new_lr
+    return new_lr
+
+
+def lr_reduction_grace_complete(epoch, reduction_start_epoch, grace):
+    return reduction_start_epoch is None or epoch - reduction_start_epoch + 1 >= grace
+
+
 def add_training_runtime_arguments(parser):
     parser.add_argument("--accumulation-steps", type=positive_int, default=1,
                         help="Physical batches per optimizer update (default: 1).")

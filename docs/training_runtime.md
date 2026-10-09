@@ -57,6 +57,12 @@ the existing model/feature selection options:
 | --- | --- | --- |
 | `--start_lr FLOAT` | Model-specific default | Starting learning rate for every selected model |
 | `--min_lr FLOAT` | Model-specific default | Minimum learning rate for every selected model |
+| `--lr-reduction-patience INT` | `3` | Consecutive validation-loss misses before reducing LR |
+| `--lr-reduction-factor FLOAT` | `0.5` | Reduction multiplier, finite and strictly between 0 and 1 |
+| `--early-stopping-min-epochs-after-lr-reduction INT` | `5` | Completed epochs after the latest actual reduction before early stopping; 0 disables |
+| `--lr-rollback` / `--no-lr-rollback` | Enabled | Restore the best model and matching Adam state on reduction, or retain current state |
+| `--max-epochs INT` | `100` | Hard cap per validation training stage |
+| `--seed INT` | `100` | Seed for every selected model; integer from 0 through 2**32 - 1 |
 | `--accumulation-steps INT` | `1` | Physical batches per optimizer update, for every selected model |
 | `--monitoring {on,off}` | `off` | GPU and training telemetry |
 | `--ipw-batch-size INT` | `256` | IPW inference batch size, independent of training |
@@ -136,6 +142,40 @@ On the existing validation-plateau learning-rate reduction, both the best model
 weights and their matching optimizer state are restored, then the current
 learning rate is halved subject to the configured minimum. Stopping counters
 continue to track the current run rather than rewinding to the best epoch.
+Use `--no-lr-rollback` to keep the current weights and Adam state instead.
+
+Reductions occur before the next epoch after the configured number of validation
+loss misses, multiplying LR by the factor and clamping it to `--min_lr`. The
+improvement threshold remains `--early-stopping-min-delta`.
+
+Early stopping also requires the configured number of completed epochs after
+the latest actual reduction. The reduction epoch counts as the first: a reduction
+at epoch 8 with protection 5 permits stopping after epoch 12. This protection
+blocks stopping only; another reduction can occur sooner and renews protection.
+The rate reaching its minimum does not repeatedly renew protection. The hard
+epoch cap always wins, even below the early-stopping minimum. Disabling early
+stopping leaves LR reductions active.
+
+For example, append these controls to a new wrapper run:
+
+```text
+--lr-reduction-patience 3 --lr-reduction-factor 0.5
+--early-stopping-min-epochs-after-lr-reduction 5 --no-lr-rollback
+--max-epochs 60 --seed 42
+```
+
+Direct `train.py` launches accept the same controls, but keep their existing
+200-epoch cap and seed 128 defaults. `--max-epochs` aliases `--n_epochs`;
+supplying both is rejected. Wrapper settings apply to every selected model.
+Expanding final refits retain the rounded median best-fold epoch count, use the
+chosen seed, and keep their constant LR and absence of validation stopping.
+These controls do not add refit replay or change validation protocols.
+
+Checkpoints persist the controls and latest reduction-start epoch. Resume
+restores them and rejects training overrides. Missing legacy controls normalize
+to patience 3, factor 0.5, rollback enabled and protection 0. The existing code
+fingerprint check still rejects unfinished checkpoints from different training
+code; completed artifacts remain readable.
 
 Intent losses and ranking metrics are grouped by candidate count. Candidate
 selection, per-graph weighting, and the existing descending-argsort tie policy

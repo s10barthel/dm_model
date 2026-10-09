@@ -27,7 +27,8 @@ from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERP
 from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
     atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
     optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts,
-    environment_versions)
+    environment_versions, add_training_control_arguments, restore_training_control_defaults,
+    reduce_learning_rate, lr_reduction_grace_complete)
 from training_monitor import TrainingMonitor
 from models.graph_diagnostics import install_collation_diagnostics
 from datatools import config
@@ -447,14 +448,13 @@ parser.add_argument("--gnn_heads", type=int, required=False, default=4, help="nu
 parser.add_argument("--dropout", type=float, required=False, default=0, help="dropout prob")
 parser.add_argument("--skip_conn", action="store_true", default=False, help="adopt skip-connection")
 
-parser.add_argument("--n_epochs", type=int, required=False, default=200, help="num epochs")
+add_training_control_arguments(parser)
 parser.add_argument("--batch_size", type=int, required=False, default=32, help="batch size")
 parser.add_argument("--lambda_l1", type=float, required=False, default=0, help="coeff of L1 regularizer")
 parser.add_argument("--start_lr", type=float, required=False, default=0.0001, help="starting learning rate")
 parser.add_argument("--min_lr", type=float, required=False, default=0.0001, help="minimum learning rate")
 parser.add_argument("--clip", type=int, required=False, default=10, help="gradient clipping")
 parser.add_argument("--print_freq", type=int, required=False, default=50, help="periodically print performance")
-parser.add_argument("--seed", type=int, required=False, default=128, help="PyTorch random seed")
 parser.add_argument(
     "--early-stopping-patience",
     type=int,
@@ -516,6 +516,7 @@ if resume_options.resume_checkpoint:
         print("Model is already completed; no retraining needed.")
         sys.exit(0)
     args = argparse.Namespace(**resume_checkpoint["args"])
+    restore_training_control_defaults(args)
     args.resume_run_id = args.run_id
     args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
     args.monitoring = resume_options.monitoring
@@ -1000,6 +1001,10 @@ if __name__ == "__main__":
         "early_stopping_patience": int(args.early_stopping_patience),
         "early_stopping_min_epochs": int(args.early_stopping_min_epochs),
         "early_stopping_min_delta": float(args.early_stopping_min_delta),
+        "lr_reduction_patience": args.lr_reduction_patience,
+        "lr_reduction_factor": args.lr_reduction_factor,
+        "lr_rollback": args.lr_rollback,
+        "early_stopping_min_epochs_after_lr_reduction": args.early_stopping_min_epochs_after_lr_reduction,
         "crash_log": str(Path(trial_path) / "crash.log"),
         "status": "running",
     }
@@ -1011,6 +1016,7 @@ if __name__ == "__main__":
         "epochs_since_best",
         "epochs_since_loss_improvement",
         "epochs_since_lr_loss_improvement",
+        "last_lr_reduction_start_epoch",
         "best_epoch", "best_valid_metrics", "best_train_metrics",
     ):
         if key in existing_metadata:
@@ -1169,6 +1175,7 @@ if __name__ == "__main__":
     )
     last_epoch = int(existing_metadata.get("last_epoch", 0) or 0) if args.resume_run_id else 0
     start_epoch = min(last_epoch + 1, args.n_epochs + 1) if args.resume_run_id else 1
+    last_lr_reduction_start_epoch = existing_metadata.get("last_lr_reduction_start_epoch") if args.resume_run_id else None
     update_training_metadata(
         trial_path,
         metadata,
@@ -1180,6 +1187,7 @@ if __name__ == "__main__":
         epochs_since_best=epochs_since_loss_improvement,
         epochs_since_loss_improvement=epochs_since_loss_improvement,
         epochs_since_lr_loss_improvement=epochs_since_lr_loss_improvement,
+        last_lr_reduction_start_epoch=last_lr_reduction_start_epoch,
         stopped_early=False,
         updated_at=datetime.now().isoformat(timespec="seconds"),
     )
@@ -1204,13 +1212,15 @@ if __name__ == "__main__":
     early_stop_reason = None
     for epoch in range(start_epoch, args.n_epochs + 1):
         # Set a custom learning rate schedule
-        if epochs_since_lr_loss_improvement >= 3 and lr > args.min_lr and best_loss > 0:
-            lr = max(lr * 0.5, args.min_lr)
-            if best_snapshot is None:
-                raise RuntimeError("Missing best model/optimizer state for scheduler rollback.")
-            restore_optimizer_snapshot(best_snapshot, unwrap_model(model), optimizer, lr=lr)
-            printlog(f"########## lr {lr} ##########", trial_path)
-            epochs_since_lr_loss_improvement = 0
+        if (not args.final_refit and epochs_since_lr_loss_improvement >= args.lr_reduction_patience
+                and lr > args.min_lr and best_loss > 0):
+            new_lr = reduce_learning_rate(unwrap_model(model), optimizer, best_snapshot, lr,
+                                         args.min_lr, args.lr_reduction_factor, args.lr_rollback)
+            if new_lr < lr:
+                printlog(f"########## lr {lr} -> {new_lr}; rollback={args.lr_rollback}; epoch={epoch} ##########", trial_path)
+                lr = new_lr
+                last_lr_reduction_start_epoch = epoch
+                epochs_since_lr_loss_improvement = 0
 
         if args.training_step_index is not None and args.training_step_total is not None:
             printlog(f"\nTraining model {args.training_step_index}/{args.training_step_total}: {args.task}", trial_path)
@@ -1280,6 +1290,7 @@ if __name__ == "__main__":
             epochs_since_best=epochs_since_loss_improvement,
             epochs_since_loss_improvement=epochs_since_loss_improvement,
             epochs_since_lr_loss_improvement=epochs_since_lr_loss_improvement,
+            last_lr_reduction_start_epoch=last_lr_reduction_start_epoch,
             last_epoch_train_metrics=train_metrics,
             last_epoch_valid_metrics=valid_metrics,
             updated_at=datetime.now().isoformat(timespec="seconds"),
@@ -1290,7 +1301,12 @@ if __name__ == "__main__":
             args.early_stopping and not args.final_refit, epoch, args.early_stopping_min_epochs,
             epochs_since_loss_improvement, args.early_stopping_patience,
         )
+        stop_now = stop_now and lr_reduction_grace_complete(
+            epoch, last_lr_reduction_start_epoch, args.early_stopping_min_epochs_after_lr_reduction,
+        )
         finished = stop_now or epoch == args.n_epochs
+        if epoch == args.n_epochs:
+            printlog(f"######## Hard epoch cap reached: {args.n_epochs}. ########", trial_path)
         metadata["status"] = "completed" if finished else "running"
         metadata["stopped_early"] = stop_now
         metadata["early_stop_epoch"] = epoch if stop_now else None

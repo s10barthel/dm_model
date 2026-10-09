@@ -1615,6 +1615,17 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--ipw-probability-cache-dir <path>`: location for the IPW probability cache. Default: `data/cache/ipw_probabilities` under the repository.
 - `--batch-size <n>` / `--batch_size <n>`: override the wrapper batch size for every low-level model training command.
 - `--action-intent-batch-size <n>`, `--pass-intent-batch-size <n>`, `--success-intent-batch-size <n>`, `--pass-success-batch-size <n>`, `--pass-height-batch-size <n>`, `--outcome-scoring-batch-size <n>`, `--outcome-conceding-batch-size <n>`, `--failure-receiver-batch-size <n>`: override one model's batch size. Model-specific flags override `--batch-size`.
+- `--start_lr <float>` / `--min_lr <float>`: override starting/minimum learning rates for every selected model. Both must be finite and positive, with minimum no greater than start. Defaults: start `0.002` for intent, pass-success, pass-height, and failure-receiver models; start `0.0002` for outcome models; minimum `0.00001` for all models.
+- `--lr-reduction-patience <int>`: positive number of consecutive validation-loss misses before reducing LR at the start of the next epoch. Default: `3`.
+- `--lr-reduction-factor <float>`: multiply LR by this factor on reduction, clamping to `--min_lr`. Must be finite and strictly between `0` and `1`. Default: `0.5`.
+- `--lr-rollback` / `--no-lr-rollback`: restore the best validation model and matching Adam state on LR reduction, or continue from the current model and optimizer state. Default: rollback enabled. The best validation checkpoint is saved under either policy.
+- `--early-stopping-patience <int>`: stop after this many consecutive validation-loss misses once the minimum duration and post-reduction protection are satisfied. Positive integer; default: `10`.
+- `--early-stopping-min-epochs <int>`: minimum epoch before early stopping can end a validation training stage. Positive integer; default: `30`.
+- `--early-stopping-min-delta <float>`: minimum absolute validation-loss improvement required to reset the stopping and LR-reduction counters. Default: `0.00001`.
+- `--early-stopping-min-epochs-after-lr-reduction <int>`: completed epochs required after the latest actual LR reduction before early stopping. Nonnegative integer; `0` disables protection. Default: `5`. The reduction epoch counts as the first; further reductions remain possible and renew protection. Being at the minimum rate does not renew it.
+- `--no-early-stopping`: disable validation-loss early stopping; adaptive LR reductions remain active.
+- `--max-epochs <int>`: hard epoch cap for each validation training stage, overriding minimum-duration and post-reduction protection requirements. Positive integer; default: `100`. Expanding final refits still use the rounded median best-fold epoch count, without validation, adaptive LR reductions, or early stopping.
+- `--seed <int>`: seed Python, NumPy, and PyTorch for every selected model, including final refits. Range: `0` through `2**32 - 1`; default: `100`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--lane-survival [{max,top_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects the `max` cache, while `--lane-survival top_25` selects the top-25 cache.
@@ -1639,9 +1650,23 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--short-residual-clip-value <value>` / `--long-residual-clip-value <value>`: optional short/long clipping overrides.
 - `--outcome-scoring-trial <n>` and `--outcome-conceding-trial <n>`: override the auto-generated run ids for those tasks with legacy numeric ids.
 
+Training controls apply to every selected model and are saved in arguments and metadata. Resume restores saved controls and the latest reduction-start epoch; training-control overrides are rejected with `--resume-id`. Unfinished checkpoints from different training code remain subject to the existing fingerprint check. See [Training controls, checkpoints and monitoring](docs/training_runtime.md) for details.
+
+Example with explicit training controls:
+
+```bash
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent --lr-reduction-patience 3 --lr-reduction-factor 0.5 --early-stopping-min-epochs-after-lr-reduction 5 --no-lr-rollback --max-epochs 60 --seed 42
+```
+
 ### `train.py`
 
 `train.py` is the low-level training entrypoint normally launched by `scripts/train_relevant_models.py`. Use the wrapper for new and resumed runs because it restores the complete saved configuration.
+
+- `--max-epochs <int>` / `--n_epochs <int>`: mutually exclusive aliases for the hard epoch cap. Default: `200` for direct launches; the wrapper supplies its own cap or selected refit duration.
+- `--seed <int>`: random seed from `0` through `2**32 - 1`. Default: `128` for direct launches.
+- `--lr-reduction-patience`, `--lr-reduction-factor`, `--lr-rollback` / `--no-lr-rollback`, and `--early-stopping-min-epochs-after-lr-reduction`: same meanings and defaults as the wrapper above (`3`, `0.5`, rollback enabled, and `5`).
+- `--early-stopping-patience`, `--early-stopping-min-epochs`, `--early-stopping-min-delta`, and `--no-early-stopping`: same meanings and defaults as the wrapper above (`10`, `30`, `0.00001`, and stopping enabled).
+- `--start_lr <float>` / `--min_lr <float>`: starting/minimum rates. Both default to `0.0001` for direct launches; the wrapper supplies its model-specific defaults or overrides.
 
 - `--resume-run-id <run_id>`: legacy resume selector. It is retained for CLI compatibility but is intentionally rejected; use `scripts/train_relevant_models.py --resume-id <task/run_id>` instead.
 - `--pass-height-threshold <meters>`: target cutoff for low-level new training. It is normally supplied by the training wrapper; see [Shared pass-height target option](#shared-pass-height-target-option).
