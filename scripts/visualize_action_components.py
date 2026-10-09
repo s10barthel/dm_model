@@ -51,6 +51,7 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 import pc_xpass_versions as pc_versions
+import pc_xpass_match_cache as match_cache
 
 from project_config import (
     DATA_ROOT,
@@ -592,6 +593,35 @@ def render_component(
     plt.close(fig)
 
 
+def possession_state_for_action(match, action_index, feature_root):
+    """Resolve an exact terminal possession endpoint for event visualization."""
+    from datatools.sportec_possessions import load_control_spells, build_sportec_possessions
+
+    action = match.actions.loc[action_index]
+    match_id = resolve_match_id(match)
+    spells, _ = load_control_spells(match_id, feature_root)
+    candidates = spells.loc[
+        spells.terminal_frame.eq(action.frame_id)
+        & spells.carrier_id.eq(action.object_id)
+        & spells.period_id.eq(action.period_id)
+    ]
+    if len(candidates) != 1:
+        raise ValueError("Action has no unique terminal possession state for pc-xPass visualization")
+    states = list(build_sportec_possessions(match, match_id, feature_root, scope="actions",
+                                           possession_ids=candidates.carry_id.tolist()))
+    if len(states) != 1:
+        raise ValueError("Action has no valid possession state for pc-xPass visualization")
+    state = states[0][0]
+    frame = int(action.frame_id)
+    if frame not in state.actions.index:
+        raise ValueError("Action frame was excluded by possession validity checks")
+    position = state.actions.index.get_loc(frame)
+    state.actions = state.actions.loc[[frame]].copy()
+    state.labels = state.labels[position:position + 1]
+    state.graph_features_0 = [state.graph_features_0[position]]
+    return state, frame
+
+
 def render_action_components(
     match: Match,
     loaded_models: dict[str, object],
@@ -623,17 +653,33 @@ def render_action_components(
     ]
     component_prob_rows: dict[str, pd.Series] = {}
 
+    cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json") if physical_cache_dir else {}
+    possession_cache = cache_metadata.get("cache_format") == match_cache.FORMAT or cache_metadata.get("source") == "pc_xpass"
+    pc_state, pc_frame = None, None
+    if possession_cache or any(getattr(model, "args", {}).get("pc_xpass") for model in loaded_models.values()):
+        if physical_cache_dir:
+            match_cache.require_format(physical_cache_dir)
+        pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root)
+
     for component_name, model in loaded_models.items():
+        uses_possession = pc_state is not None and (
+            getattr(model, "args", {}).get("pc_xpass") or getattr(model, "args", {}).get("lane_survival")
+        )
+        model_match = pc_state if uses_possession else match
+        model_index = pc_frame if uses_possession else action_index
+        state_inputs = ({"graph_override": pc_state.graph_features_0, "label_override": pc_state.labels}
+                        if uses_possession else {})
         if component_name.startswith("outcome_"):
             failure_probs, success_probs = inference_gnn(
-                match,
+                model_match,
                 model,
                 device=device,
                 post_action=False,
-                event_indices=[action_index],
+                event_indices=[model_index],
+                **state_inputs,
             )
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
-                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[action_index]
+                component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[model_index]
         else:
             if component_name == "intended_recipient":
                 component_prob_rows[component_name] = run_success_intent_component(
@@ -644,29 +690,31 @@ def render_action_components(
                     action_index,
                 )
             else:
+                intent = (component_prob_rows["pass_intent"].to_frame().T
+                          if component_name == "pass_success" and "pass_intent" in component_prob_rows else None)
+                if intent is not None:
+                    intent.index = [model_index]
                 probs, _ = inference_gnn(
-                    match,
+                    model_match,
                     model,
                     device=device,
                     post_action=False,
-                    event_indices=[action_index],
-                    pass_intent_probs=(
-                        component_prob_rows["pass_intent"].to_frame().T
-                        if component_name == "pass_success" and "pass_intent" in component_prob_rows
-                        else None
-                    ),
+                    event_indices=[model_index],
+                    pass_intent_probs=intent,
+                    **state_inputs,
                 )
-                component_prob_rows[component_name] = probs.loc[action_index]
+                component_prob_rows[component_name] = probs.loc[model_index]
 
     if show_physical_xpass:
         cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
         component_prob_rows["physical_xpass"] = load_runtime_physical_xpass_visualization_component(
             cache_dir,
             resolve_match_id(match),
-            action_index,
+            pc_frame if pc_state is not None else action_index,
             metric=physical_xpass_metric_name,
             x_pass_version=physical_xpass_version_name,
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+            **({"cache_selection": match_cache.selection_for(pc_state)} if pc_state is not None else {}),
         )
 
     validate_derived_inputs(rendered_components, component_prob_rows)

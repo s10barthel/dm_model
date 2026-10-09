@@ -68,6 +68,7 @@ from physical_pass_model import (
     validate_physical_xpass_cache_metadata,
 )
 import pc_xpass_versions as pc_versions
+import pc_xpass_match_cache as match_cache
 from project_config import get_pc_xpass_dir, get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
@@ -239,9 +240,8 @@ def resolve_match_id(match: Match) -> str:
 
 
 def resolve_pc_state_match_id(match: Match) -> str:
-    # Possession cache partitions use frame IDs as row IDs. Never fall back to
-    # legacy event endpoint caches when an exact possession state is required.
-    return str(getattr(match, "pc_cache_match_id", None) or resolve_match_id(match))
+    # File identity is the actual match; selection_for carries possession provenance.
+    return resolve_match_id(match)
 
 
 def resolve_physical_state_match_id(match: Match, model: GNN) -> str:
@@ -396,6 +396,7 @@ def attach_lane_survival_for_inference(
             cache_dir,
             match_id,
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
+            cache_selection=match_cache.selection_for(match),
         )
         attached: list[Data] = []
         for graph, label in zip(graphs, labels):
@@ -518,6 +519,7 @@ def attach_physical_xpass_for_inference(
         missing_player_value=None if use_inference_blend else 0.5,
         require_ball_z=use_inference_blend and physical_xpass_ball_z_limit(model.args) is not None,
         frame_scope=_physical_xpass_frame_scope_for_inference(post_action) if use_inference_blend else None,
+        cache_selection=match_cache.selection_for(match),
     )
 
 
@@ -659,7 +661,12 @@ def filter_missing_physical_xpass_rows_for_inference(
                 x_pass_version=str(lookup_config["x_pass_version"]),
                 metric=str(lookup_config["metric"]),
             )
-        physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
+        physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope,
+                                                   cache_selection=match_cache.selection_for(match))
+        if match_cache.selection_for(match) is not None:
+            missing_frames = set(all_action_indexes) - set(physical_rows.index)
+            if missing_frames:
+                raise ValueError(f"pc-xPass cache is missing requested possession frames: {sorted(missing_frames)[:5]}; resume generation")
     except (FileNotFoundError, ValueError) as exc:
         generation_hint = getattr(match, "pc_generation_hint", "") if pc_xpass_enabled(model.args) else ""
         _record_physical_xpass_skipped_actions(
@@ -673,7 +680,7 @@ def filter_missing_physical_xpass_rows_for_inference(
         )
         raise PhysicalXPassNoUsableRowsError(
             "No usable graph/label pairs remain because the physical xPass cache is missing or invalid. "
-            + generation_hint
+            + str(exc) + " " + generation_hint
         ) from exc
     available_action_indexes = set(physical_rows.index.astype(int).tolist())
     default_metric = physical_rows.attrs.get("physical_xpass_default_metric")

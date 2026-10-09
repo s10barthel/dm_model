@@ -171,25 +171,32 @@ def test_inference_uses_possession_partition_not_legacy_match_cache(tmp_path, mo
     from inference import resolve_physical_state_match_id, resolve_pc_state_match_id
     sp, match, feature_root = spell_fixture(tmp_path, monkeypatch)
     state = list(sp.build_sportec_possessions(match, "match", feature_root))[0][0]
-    assert resolve_pc_state_match_id(state) == state.pc_cache_match_id
-    assert resolve_physical_state_match_id(state, SimpleNamespace(args={"pc_xpass": True})) == state.pc_cache_match_id
+    assert resolve_pc_state_match_id(state) == "match"
+    from pc_xpass_match_cache import selection_for
+    assert selection_for(state).provenance_id == state.pc_cache_match_id
+    assert resolve_physical_state_match_id(state, SimpleNamespace(args={"pc_xpass": True})) == "match"
     with pytest.raises(ValueError, match="event indexes"):
         resolve_physical_state_match_id(state, SimpleNamespace(args={"pc_xpass": False}))
 
 
 def test_pc_cache_multiple_frames_round_trip(tmp_path, monkeypatch):
     import physical_pass_model as physical
+    import pc_xpass_match_cache as cache
     monkeypatch.setattr(physical, "validate_runtime_physical_xpass_visualization_cache", lambda *a: {})
-    partition = possession_cache_identity("sportec", "match", 1, "home_1", {"feature_run_id": "run"})
-    def rows(frames):
-        return pd.DataFrame({"action_index": frames, "state_frame_id": frames, "frame_scope": "frame_id"})
-    physical._write_runtime_physical_xpass_rows(tmp_path, partition, rows([102, 119]))
-    physical._write_runtime_physical_xpass_rows(tmp_path, partition, rows([102, 107, 112, 117, 119]))
-    loaded = physical.load_physical_xpass_match(tmp_path, partition, frame_scope="frame_id")
+    cache.initialize(tmp_path)
+    def rows(frames, key):
+        return pd.DataFrame({"match_id": key, "physical_state_hash": "hash", "action_index": frames,
+                             "state_frame_id": frames, "frame_scope": "frame_id"})
+    with cache.MatchAccumulator(tmp_path, "match") as transaction:
+        for pid, frames in [(1, [102, 119]), (2, [119])]:
+            key = str(pid)
+            transaction.register(key, dict(match_id="match", possession_id=pid, possessor_id="home_1"))
+            physical._write_runtime_physical_xpass_rows(tmp_path, key, rows(frames, key))
+        physical._write_runtime_physical_xpass_rows(tmp_path, "1", rows([102, 107, 112, 117, 119], "1"))
+        transaction.commit()
+    loaded = physical.load_physical_xpass_match(tmp_path, "match", cache_selection=cache.Selection(1, "1"))
     assert loaded.index.tolist() == [102, 107, 112, 117, 119]
-    other = possession_cache_identity("sportec", "match", 2, "away_1", {"feature_run_id": "run"})
-    physical._write_runtime_physical_xpass_rows(tmp_path, other, rows([119]))
-    assert len(physical.load_physical_xpass_match(tmp_path, partition, frame_scope="frame_id")) == 5
+    assert len(physical.load_physical_xpass_match(tmp_path, "match", cache_selection=cache.Selection(2, "2"))) == 1
 
 
 @pytest.mark.parametrize("scope,stride,expected", [("actions", 1, [102, 119]), ("frames", 5, [102, 107, 112, 117, 119])])

@@ -37,6 +37,7 @@ from physical_pass_model import (
     physical_xpass_metric,
 )
 import pc_xpass_versions as pc_versions
+import pc_xpass_match_cache as match_cache
 
 from project_config import (
     COMPONENT_DIR,
@@ -262,8 +263,9 @@ def render_possession(
         )
         possession_component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
             physical_cache_dir,
-            possession.pc_cache_match_id if bool(getattr(args, "pc_xpass", False)) else str(possession.match_id),
+            str(possession.match_id),
             physical_frame_ids,
+            cache_selection=match_cache.selection_for(possession) if args.pc_xpass else None,
             metric=physical_xpass_metric_name,
             x_pass_version=getattr(args, "x_pass_version", "top10"),
         )

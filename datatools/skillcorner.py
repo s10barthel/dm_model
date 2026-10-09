@@ -642,6 +642,7 @@ def build_skillcorner_possession(
         scope=scope,
         frames=frames,
     )
+    possession._pc_match_cache = context.setdefault("_pc_match_cache", {})
     possession.pc_cache_match_id = possession_cache_identity(
         "skillcorner", possession.match_id, possession.event_index, str(event_row["player_id"]),
         {"start": possession.original_start_frame, "end": possession.original_end_frame, "period": int(event_row["period"])},

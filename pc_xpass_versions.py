@@ -222,6 +222,9 @@ def cache_dir(source: str, args: Namespace) -> Path:
         result = root if source == "hawkeye_loc" else root / source
         if not hasattr(args, "_pc_explicit") and not (result / "metadata.json").is_file():
             raise FileNotFoundError(f"Selected pc-xPass version has no {source} dataset cache.")
+        if source in {"sportec", "skillcorner"} and not hasattr(args, "_pc_explicit"):
+            from pc_xpass_match_cache import require_format
+            require_format(result)
         return result
     run_id = getattr(args, "pc_xpass_id", None)
     location = source == "hawkeye_loc"
@@ -240,6 +243,9 @@ def cache_dir(source: str, args: Namespace) -> Path:
     args.pc_xpass_id = run_id
     args.pc_xpass_namespace = "hawkeye_loc" if location else "normal"
     args._pc_version_root = str(root)
+    if source in {"sportec", "skillcorner"} and not hasattr(args, "_pc_explicit"):
+        from pc_xpass_match_cache import require_format
+        require_format(result)
     return result
 
 

@@ -6,6 +6,7 @@ No physical calculation or lane-control write is performed by a refresh.
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 import hashlib
 import inspect
 import json
@@ -15,6 +16,7 @@ import pandas as pd
 import torch
 
 import pc_xpass_versions as versions
+import pc_xpass_match_cache as match_cache
 from datatools.possession_frames import STATE_CONTRACT
 
 MODEL_COLUMN = "pass_height_model_fingerprint"
@@ -41,7 +43,7 @@ def model_identity(args):
             "graph_schema": record.get("graph_schema")}
 
 
-def input_digest(graph, label, row):
+def input_digest(graph, label, row, *, omit_missing=False):
     digest = hashlib.sha256()
     for key, value in sorted(graph.to_dict().items()):
         digest.update(key.encode())
@@ -55,7 +57,8 @@ def input_digest(graph, label, row):
     # Height models may consume cached lane-survival metrics as features.
     digest.update(json.dumps({k: v.item() if hasattr(v, "item") else v for k, v in row.items()
                               if k not in (MODEL_COLUMN, INPUT_COLUMN)
-                              and not k.endswith("__pass_height")},
+                              and not k.endswith("__pass_height")
+                              and not (omit_missing and pd.api.types.is_scalar(v) and pd.isna(v))},
                              sort_keys=True, default=str).encode())
     return digest.hexdigest()
 
@@ -69,10 +72,37 @@ def enabled(args):
                 and not getattr(args, "_pc_location", False))
 
 
-def inventory(cache_root):
-    return {dataset: {path.stem: pd.read_parquet(path)
-                      for path in sorted((cache_root / dataset / "matches").glob("*.parquet"))}
-            for dataset in DATASETS}
+class MatchInventory(Mapping):
+    """Read one match at a time, including interrupted publications."""
+    def __init__(self, directory):
+        self.directory = directory
+        self.paths = {path.stem: path for path in sorted((directory / "matches").glob("*.parquet"))
+                      if not path.name.startswith(".")}
+        for record in (directory / "completion").glob("*.json"):
+            self.paths.setdefault(record.stem, directory / "matches" / f"{record.stem}.parquet")
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __iter__(self):
+        return iter(self.paths)
+
+    def __getitem__(self, key):
+        record = match_cache.read_json(self.directory / "completion" / f"{key}.json")
+        if record.get("status") == "pending":
+            frame = pd.DataFrame()
+            frame.attrs["pending_match_commit"] = True
+            return frame
+        return pd.read_parquet(self.paths[key])
+
+
+def inventory(cache_root, *, datasets=DATASETS, lazy_possessions=False):
+    return {dataset: (MatchInventory(cache_root / dataset)
+                      if lazy_possessions and dataset in match_cache.DATASETS else
+                      {path.stem: pd.read_parquet(path)
+                       for path in sorted((cache_root / dataset / "matches").glob("*.parquet"))
+                       if not path.name.startswith(".")})
+            for dataset in datasets}
 
 
 def dataset_metadata(cache_root, dataset):
@@ -118,6 +148,8 @@ def prepare_contracts(args, selected):
         needed.update(d for d in DATASETS if any((cache_root / d / "matches").glob("*.parquet")))
     history = metadata.get("invocations", [])
     for dataset in needed:
+        if dataset in match_cache.DATASETS:
+            match_cache.require_format(cache_root / dataset, allow_new=True)
         old = contracts.get(dataset, {})
         source = dataset_metadata(cache_root, dataset).get("source_inputs", {})
         if dataset in {"sportec", "skillcorner"}:
@@ -167,6 +199,13 @@ def persist_contracts(args):
 
 
 def record_source(args, dataset, match_id, descriptor):
+    transaction = match_cache.active(root(args) / dataset) if enabled(args) else None
+    if transaction is not None:
+        refresh = getattr(args, "_pc_refresh", None)
+        if refresh is not None and str(match_id) not in refresh.frames:
+            return
+        transaction.register(str(match_id), descriptor)
+        return
     if not enabled(args):
         return
     metadata = versions.read_metadata(root(args)) if (root(args) / "metadata.json").exists() else {}
@@ -213,6 +252,11 @@ def assert_height_readable(metadata):
 class HeightRefresh:
     def __init__(self, args, dataset, frames, identity):
         self.args, self.dataset, self.frames, self.identity = args, dataset, frames, identity
+        if dataset in match_cache.DATASETS:
+            match_cache.require_format(root(args) / dataset)
+            self.frames = {str(key): match_cache.MatchAccumulator._internal(part, str(key))
+                           for frame in frames.values()
+                           for key, part in frame.groupby("possession_provenance_id")}
         self.verified = set()
 
     @staticmethod
@@ -245,7 +289,7 @@ class HeightRefresh:
                 if self.identity is None:
                     self.verified.add((match_id, key))
                     continue
-                digest = input_digest(graph, label, row)
+                digest = input_digest(graph, label, row, omit_missing=self.dataset in match_cache.DATASETS)
                 if (row.get(MODEL_COLUMN) != target or row.get(INPUT_COLUMN) != digest
                         or not physics._has_finite_pass_height_predictions(pd.Series(row), graph)):
                     prediction = physics._pass_height_predictions_for_graphs(
@@ -264,7 +308,9 @@ class HeightRefresh:
                 confirmed.add((match_id, key))
             if updates:
                 physics._write_runtime_physical_xpass_rows(root(self.args) / self.dataset, match_id, pd.DataFrame(updates))
-                self.frames[match_id] = pd.read_parquet(root(self.args) / self.dataset / "matches" / f"{match_id}.parquet")
+                transaction = match_cache.active(root(self.args) / self.dataset)
+                self.frames[match_id] = (transaction.read(match_id) if transaction is not None else
+                    pd.read_parquet(root(self.args) / self.dataset / "matches" / f"{match_id}.parquet"))
             self.verified.update(confirmed)
         return stats
 
@@ -321,7 +367,10 @@ def refresh_all(args, runners):
     if not enabled(args) or not getattr(args, "_pass_height_model", None):
         return
     cache_root = root(args)
-    frames = inventory(cache_root)
+    frames = inventory(cache_root, lazy_possessions=True)
+    for dataset in match_cache.DATASETS:
+        if frames.get(dataset):
+            match_cache.require_format(cache_root / dataset)
     identity = model_identity(args)
     args._pass_height_identity = identity
     target = fingerprint(identity)
@@ -329,8 +378,9 @@ def refresh_all(args, runners):
     enrichment = metadata.get("pass_height_enrichment", {})
     if enrichment.get("pending") and fingerprint(enrichment["pending"]) != target:
         raise ValueError("Pending pass-height model artifact changed; restore it before resuming.")
-    stale = any(MODEL_COLUMN not in frame or INPUT_COLUMN not in frame
-                or not frame[MODEL_COLUMN].eq(target).all() or frame[INPUT_COLUMN].isna().any()
+    stale = any(frame.attrs.get("pending_match_commit") or (not frame.empty and (
+                MODEL_COLUMN not in frame or INPUT_COLUMN not in frame
+                or not frame[MODEL_COLUMN].eq(target).all() or frame[INPUT_COLUMN].isna().any()))
                 for dataset in frames.values() for frame in dataset.values())
     if args.dry_run:
         print(f"Pass-height full refresh required: {bool(stale or enrichment.get('pending'))}")
@@ -352,11 +402,28 @@ def refresh_all(args, runners):
         for dataset, matches in frames.items():
             if not matches:
                 continue
+            if dataset in match_cache.DATASETS:
+                for match_id, frame in matches.items():
+                    replay = replay_args(args, dataset, metadata)
+                    setattr(replay, "match_id" if dataset == "sportec" else "skillcorner_match_id", [match_id])
+                    pending = bool(frame.attrs.get("pending_match_commit"))
+                    refresh = None if pending else HeightRefresh(replay, dataset, {match_id: frame}, identity)
+                    if refresh is not None:
+                        replay._pc_refresh = refresh
+                    print(f"Refreshing saved pass-height states for {dataset}/{match_id}...")
+                    result = runners[dataset](replay)
+                    if _has_failures((result or {}).get("skipped")):
+                        raise ValueError(f"Pass-height refresh failed for {dataset}/{match_id}; resume generation")
+                    if refresh is not None:
+                        refresh.verify()
+                continue
             replay = replay_args(args, dataset, metadata)
             refresh = HeightRefresh(replay, dataset, matches, identity)
             replay._pc_refresh = refresh
             print(f"Refreshing all saved pass-height states for {dataset}...")
-            runners[dataset](replay)
+            result = runners[dataset](replay)
+            if _has_failures((result or {}).get("skipped")):
+                raise ValueError(f"Pass-height refresh failed for {dataset}; resume generation")
             refresh.verify()
         # Root pending remains the barrier until every dataset is committed.
         for dataset, matches in frames.items():
@@ -373,12 +440,21 @@ def refresh_all(args, runners):
     versions.atomic_json(cache_root / "metadata.json", metadata)
 
 
+def _has_failures(value):
+    if isinstance(value, dict):
+        return any(_has_failures(item) for item in value.values())
+    return bool(value)
+
+
 def recover_sources(args, runners):
     """Audit legacy states before allowing a guessed input source to add partitions."""
     if not enabled(args):
         return
     metadata = versions.read_metadata(root(args)) if (root(args) / "metadata.json").exists() else {}
-    for dataset, matches in inventory(root(args)).items():
+    for dataset in match_cache.DATASETS:
+        if (args.pass_height_model_id or not getattr(args, "no_" + dataset, False)) and MatchInventory(root(args) / dataset):
+            match_cache.require_format(root(args) / dataset)
+    for dataset, matches in inventory(root(args), datasets=[d for d in DATASETS if d not in match_cache.DATASETS]).items():
         if not args.pass_height_model_id and getattr(args, "no_" + dataset, False):
             continue
         known = metadata.get("reconstruction", {}).get(dataset, {})

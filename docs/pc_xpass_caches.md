@@ -19,8 +19,8 @@ python scripts/run_hawkeye.py --pc-xpass --pc-xpass-id dec045
 ```
 
 Each version lives in `data/pc_xpass/<pc_xpass_id>/`, with root metadata and separate
-`sportec`, `skillcorner`, `benchmark`, and `hawkeye` subdirectories. Dataset files
-retain their existing layout. The command prints its generated ID.
+`sportec`, `skillcorner`, `benchmark`, and `hawkeye` subdirectories. The command
+prints its generated ID.
 
 Generation without an ID always creates a new version. Resuming an ID inherits
 omitted generation settings and rejects explicitly conflicting settings. The
@@ -109,3 +109,48 @@ available, and the version cannot advance `latest`. Missing sources, changed sta
 hashes, incompatible height definitions, or incomplete predictions retain pending
 status and identify unresolved work. Completed model metadata is committed only
 after full verification. Dry runs leave cache files and metadata unchanged.
+
+
+## Sportec and SkillCorner match checkpoints
+
+Both `--scope actions` and `--scope frames` write one parquet per actual match:
+
+```text
+<dataset>/matches/<match_id>.parquet
+<dataset>/lane_control/<match_id>.parquet  # with --export-lane-control
+<dataset>/completion/<match_id>.json
+```
+
+Dataset metadata declares `cache_format: "match_possession_frames_v1"`. Older
+action-based match files and hashed possession files require regeneration into a
+new cache version. There is no conversion or fallback reader. This check applies
+to the selected dataset; Benchmark and Hawkeye retain their existing formats.
+
+Rows contain actual `match_id`, integer `possession_id`, `possessor_id`,
+`state_frame_id`, and `possession_provenance_id` (the existing possession hash).
+The main row key is `(match_id, possession_id, state_frame_id)`: two possessions
+can share a boundary frame. Lane-control rows add `receiver_id` and `opponent_id`
+to that key. `action_index` is a compatibility alias for `state_frame_id`, never
+an event action ID. Full provenance and reconstruction descriptors are embedded
+in each parquet under the Arrow metadata key `pc_xpass`.
+
+Computation still processes possessions in bounded graph batches. Results are
+buffered in memory and saved once per completed match. Runtime row-window flags
+control computation batching, not checkpoint frequency. Interrupted or failed
+matches lose unsaved work; completed compatible matches reuse their cached rows.
+Changing scope or stride adds missing states without removing compatible rows.
+Unchanged matches do not rewrite their parquets. Validity exclusions and matches
+with no valid selected states are recorded separately from computation failures.
+
+The completion record contains requested/completed coverage, row counts, and
+output checksums. Publication first marks the match pending, then replaces its
+outputs, and finally marks it completed. Readers reject pending or inconsistent
+commits. Resume the interrupted generation request to recompute an unfinished
+match. Completion records protect publication; they are not needed to identify
+the rows in a parquet read independently.
+
+Inference reads a match once per context, validates provenance, selects the
+possession, and looks up its frame. Legacy event-action consumers cannot read
+these tables without an explicit possession selection. Sportec action
+visualization resolves an exact terminal possession endpoint and fails if the
+event has no unique valid endpoint; it does not guess by frame proximity.

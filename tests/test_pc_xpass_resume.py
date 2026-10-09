@@ -155,13 +155,13 @@ def test_sportec_unknown_source_requires_explicit_input(setup_cache, monkeypatch
     path = resume.root(args) / "sportec" / "matches" / "unknown.parquet"
     path.parent.mkdir(parents=True)
     pd.DataFrame({"action_index": [1]}).to_parquet(path)
-    with pytest.raises(ValueError, match="provide --sportec-feature-run-id"):
+    with pytest.raises(ValueError, match="Regenerate"):
         resume.prepare_contracts(args, ["sportec"])
     args.sportec_feature_run_id = "features"
     args._pc_explicit.add("sportec_feature_run_id")
     monkeypatch.setattr("project_config.resolve_feature_run_id", lambda *a, **kw: "features")
-    resume.prepare_contracts(args, ["sportec"])
-    assert args._pc_dataset_contracts["sportec"]["feature_run_id"] == "features"
+    with pytest.raises(ValueError, match="Regenerate"):
+        resume.prepare_contracts(args, ["sportec"])
 
 
 def test_legacy_recovery_does_not_commit_unverified_partitions(setup_cache):

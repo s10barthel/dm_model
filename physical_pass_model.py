@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import reachability as reach
 import pandas as pd
+import pc_xpass_match_cache as match_cache
 import torch
 from tqdm import tqdm
 from torch_geometric.data import Batch, Data
@@ -172,6 +173,7 @@ PHYSICAL_XPASS_LEGACY_METRIC_SUFFIXES = {
     PHYSICAL_XPASS_METRIC_TOPMEAN: "__top10mean_xpass",
 }
 PHYSICAL_XPASS_ID_COLUMNS = {
+    "possession_id", "possessor_id", "possession_provenance_id",
     "match_id",
     "action_index",
     "action_id",
@@ -4072,16 +4074,23 @@ def load_physical_xpass_match(
     match_id: str,
     *,
     frame_scope: str | None = None,
+    cache_selection: match_cache.Selection | None = None,
 ) -> pd.DataFrame:
     cache_root = Path(cache_dir)
-    direct_path = cache_root / "matches" / f"{match_id}.parquet"
-    path = direct_path if cache_root.name == "physical_xpass" or direct_path.exists() else get_physical_xpass_match_path(str(match_id), root=cache_root)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Physical xPass sidecar not found at {path}. "
-            "Run scripts/generate_physical_xpass.py --feature-run-id <feature_run_id> before training with --use_physical_xpass."
-        )
-    frame = pd.read_parquet(path)
+    transaction = match_cache.active(cache_root)
+    if transaction is not None:
+        frame = transaction.read(str(match_id))
+    elif cache_selection is not None:
+        frame = match_cache.load_possession(cache_root, str(match_id), cache_selection)
+    else:
+        if match_cache.read_json(cache_root / "metadata.json").get("cache_format") == match_cache.FORMAT:
+            raise ValueError("Possession selection is required; frame rows cannot be used as event-action rows")
+        direct_path = cache_root / "matches" / f"{match_id}.parquet"
+        path = direct_path if cache_root.name == "physical_xpass" or direct_path.exists() else get_physical_xpass_match_path(str(match_id), root=cache_root)
+        if not path.exists():
+            raise FileNotFoundError(f"Physical xPass sidecar not found at {path}. Run scripts/generate_physical_xpass.py to generate a compatible cache first.")
+        frame = pd.read_parquet(path)
+    path = cache_root / "matches" / f"{match_id}.parquet"
     if "action_index" not in frame.columns:
         raise ValueError(f"Physical xPass sidecar {path} is missing required column 'action_index'.")
     frame = frame.copy()
@@ -4101,10 +4110,11 @@ def load_physical_xpass_match(
         )
         raise ValueError(f"Physical xPass sidecar {path} contains duplicate action_index rows, e.g. {duplicates}.{scope_hint}")
     frame = frame.set_index("action_index", drop=False)
-    metadata = validate_runtime_physical_xpass_visualization_cache(cache_root)
+    metadata = (match_cache.read_json(cache_root / "metadata.json", memo=cache_selection.memo)
+                if cache_selection is not None else validate_runtime_physical_xpass_visualization_cache(cache_root))
     version_metadata = cache_root.parent / "metadata.json"
     if version_metadata.exists():
-        parent_metadata = json.loads(version_metadata.read_text(encoding="utf-8-sig"))
+        parent_metadata = match_cache.read_json(version_metadata, memo=cache_selection.memo if cache_selection else None)
         if parent_metadata.get("pass_height_enrichment", {}).get("pending"):
             metadata = {**metadata, "pass_height_refresh_pending": True}
     frame.attrs["physical_xpass_cache_metadata"] = metadata
@@ -4119,8 +4129,9 @@ def load_physical_xpass_component(
     *,
     metric: str | None = None,
     frame_scope: str | None = None,
+    cache_selection: match_cache.Selection | None = None,
 ) -> pd.Series:
-    frame = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
+    frame = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope, cache_selection=cache_selection)
     if int(action_index) not in frame.index:
         scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
         raise KeyError(f"Physical xPass sidecar has no row for match_id={match_id}, action_index={int(action_index)}{scope_text}.")
@@ -4187,6 +4198,7 @@ def load_runtime_physical_xpass_visualization_component(
     metric: str | None = None,
     x_pass_version: str | None = None,
     frame_scope: str | None = None,
+    cache_selection: match_cache.Selection | None = None,
 ) -> pd.Series:
     selected_metric = normalize_physical_xpass_metric(metric)
     if x_pass_version is not None:
@@ -4202,6 +4214,7 @@ def load_runtime_physical_xpass_visualization_component(
             action_index,
             metric=selected_metric,
             frame_scope=frame_scope,
+            cache_selection=cache_selection,
         )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         scope_text = "" if frame_scope is None else f", frame_scope={frame_scope!r}"
@@ -4230,6 +4243,7 @@ def load_runtime_physical_xpass_visualization_table(
     metric: str | None = None,
     x_pass_version: str | None = None,
     frame_scope: str | None = None,
+    cache_selection: match_cache.Selection | None = None,
 ) -> pd.DataFrame:
     rows = [
         load_runtime_physical_xpass_visualization_component(
@@ -4239,6 +4253,7 @@ def load_runtime_physical_xpass_visualization_table(
             metric=metric,
             x_pass_version=x_pass_version,
             frame_scope=frame_scope,
+            cache_selection=cache_selection,
         )
         for action_index in action_indices
     ]
@@ -4495,7 +4510,7 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
-            if "generation_settings" in metadata and "source" not in metadata:
+            if ("generation_settings" in metadata or metadata.get("cache_format") == match_cache.FORMAT) and "source" not in metadata:
                 metadata = {**metadata, **expected_metadata}
                 if create_if_missing:
                     from pc_xpass_versions import atomic_json
@@ -4724,6 +4739,9 @@ def _lane_control_state_key(row: Mapping[str, Any]) -> tuple:
 
 
 def _lane_control_completed_states(cache_dir: str | Path, match_id: str) -> set[tuple]:
+    transaction = match_cache.active(cache_dir)
+    if transaction is not None:
+        return transaction.completed_lane(str(match_id))
     root = Path(cache_dir) / "lane_control"
     manifest = root / "coverage" / f"{match_id}.json"
     data = root / f"{match_id}.parquet"
@@ -4742,6 +4760,10 @@ def _lane_control_completed_states(cache_dir: str | Path, match_id: str) -> set[
 
 def _write_lane_control_sidecar(cache_dir: str | Path, match_id: str,
                                 records: list[dict[str, Any]], states: list[dict[str, Any]]) -> None:
+    transaction = match_cache.active(cache_dir)
+    if transaction is not None:
+        transaction.write_lane(str(match_id), records, states)
+        return
     root = Path(cache_dir) / "lane_control"
     root.mkdir(parents=True, exist_ok=True)
     output = root / f"{match_id}.parquet"
@@ -4791,6 +4813,10 @@ def _write_runtime_physical_xpass_rows(
     *,
     retry_stats: dict[str, object] | None = None,
 ) -> Path:
+    transaction = match_cache.active(cache_dir)
+    if transaction is not None:
+        transaction.write(str(match_id), rows)
+        return Path(cache_dir) / "matches" / f"{transaction.match_id}.parquet"
     cache_root = Path(cache_dir)
     output_path = cache_root / "matches" / f"{match_id}.parquet"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5665,7 +5691,8 @@ def prewarm_physical_xpass_runtime_cache(
             return not pass_height_refresh_required
         from pc_xpass_resume import MODEL_COLUMN, INPUT_COLUMN, fingerprint, input_digest
         return (row.get(MODEL_COLUMN) == fingerprint(pass_height_identity)
-                and row.get(INPUT_COLUMN) == input_digest(graph, label, row))
+                and row.get(INPUT_COLUMN) == input_digest(graph, label, row,
+                    omit_missing=match_cache.active(cache_dir) is not None))
 
     def stamp_height_row(row, graph, label):
         if pass_height_enabled and pass_height_identity is not None:
@@ -5673,7 +5700,8 @@ def prewarm_physical_xpass_runtime_cache(
                 raise ValueError("Incomplete pass-height predictions cannot be saved as verified enrichment.")
             from pc_xpass_resume import MODEL_COLUMN, INPUT_COLUMN, fingerprint, input_digest
             row[MODEL_COLUMN] = fingerprint(pass_height_identity)
-            row[INPUT_COLUMN] = input_digest(graph, label, row)
+            row[INPUT_COLUMN] = input_digest(graph, label, row,
+                                            omit_missing=match_cache.active(cache_dir) is not None)
 
     stats = _runtime_physical_xpass_stats(cache_dir)
     stats["num_workers"] = int(resolved_workers)
@@ -5775,7 +5803,10 @@ def prewarm_physical_xpass_runtime_cache(
                                 "physical_state_hash": state_hash, "frame_scope": frame_scope,
                                 "state_frame_id": state_frame_id}
                     if _lane_control_state_key(identity) not in lane_completed_by_match[match_id]:
-                        raise ValueError("Incomplete lane-control coverage for an existing cache row; no backfill is performed. Create a fresh run.")
+                        if match_cache.active(cache_dir) is not None:
+                            hash_matches = False  # Recompute the state and its lane-control rows together.
+                        else:
+                            raise ValueError("Incomplete lane-control coverage for an existing cache row; no backfill is performed. Create a fresh run.")
                 if (
                     hash_matches
                     and not missing_hash
@@ -6065,6 +6096,8 @@ def prewarm_physical_xpass_runtime_cache(
             if PHYSICAL_XPASS_FRAME_SCOPE_COLUMN in frame.columns
             else ["action_index"]
         )
+        if match_cache.active(cache_dir) is not None and frame.duplicated(dedupe_columns).any():
+            raise ValueError("Duplicate possession/frame computation results")
         frame = frame.drop_duplicates(subset=dedupe_columns, keep="last")
         online_written = sum(1 for _row, computed_online in tagged_rows if computed_online)
         write_start = time.perf_counter()
@@ -6085,7 +6118,7 @@ def prewarm_physical_xpass_runtime_cache(
 
     stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
     compute_seconds = float(stats.get("compute_seconds", 0.0) or 0.0)
-    if pass_height_enabled and not dry_run:
+    if pass_height_enabled and not dry_run and match_cache.active(cache_dir) is None:
         metadata_path = Path(cache_dir) / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
         metadata.update(pass_height_model_id=pass_height_model_id_text, pass_height_definition=height_definition)
@@ -6515,8 +6548,9 @@ def attach_physical_xpass_read_only_to_graphs(
     missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
     require_ball_z: bool = False,
     frame_scope: str | None = None,
+    cache_selection: match_cache.Selection | None = None,
 ) -> list[Data]:
-    rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope)
+    rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope, cache_selection=cache_selection)
     attached: list[Data] = []
     for graph, label in zip(graphs, labels):
         action_index = int(label[LABEL_INDEX["action_index"]].item())

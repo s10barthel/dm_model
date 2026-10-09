@@ -40,6 +40,7 @@ from datatools.skillcorner import (
 from models.utils import get_model_provenance, load_model, parse_model_id, validate_model_graph_schemas
 import pc_xpass_versions as pc_versions
 import pc_xpass_resume as pc_resume
+import pc_xpass_match_cache as match_cache
 
 from physical_pass_model import (
     PC_XPASS_DEFAULT_BALL_DEC,
@@ -1234,6 +1235,9 @@ def prewarm_runtime_items(
 ) -> dict[str, Any] | None:
     if not items:
         return None
+    transaction = match_cache.active(cache_dir)
+    if transaction is not None and getattr(args, "_pc_refresh", None) is None:
+        transaction.expect(items)
     if getattr(args, "_pc_refresh", None) is not None:
         return args._pc_refresh.consume(items)
     if progress_desc is None:
@@ -1415,6 +1419,9 @@ def flush_runtime_buffer(
             for skip_key in unit["skip_keys"]:
                 skipped[str(skip_key)] = reason
             failed_units += 1
+            transaction = match_cache.active(cache_dir)
+            if transaction is not None:
+                transaction.failed = True
             tqdm.write(f"{display_key}: skipped={_skip_reason_label(reason)}")
     return failed_units
 
@@ -1528,8 +1535,8 @@ def write_runtime_dataset_metadata(
     if source_inputs.get("state_contract") == STATE_CONTRACT:
         metadata.update(
             state_contract=STATE_CONTRACT,
-            storage="wide_parquet_one_row_per_possession_frame_player_id_columns",
-            state_identity="state_partitions[cache_match_id] + action_index(actual_frame_id)",
+            storage="wide_parquet_one_row_per_match_possession_frame_player_id_columns",
+            state_identity="match_id + possession_id + state_frame_id",
         )
     if bool(getattr(args, "export_lane_control", False)):
         metadata["lane_control_export"] = {
@@ -1576,6 +1583,8 @@ def write_runtime_dataset_metadata(
             metadata["created_at"] = existing["created_at"]
     if getattr(args, "pc_xpass_id", None):
         metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=getattr(args, "pc_xpass_namespace", "normal"))
+    if bool(getattr(args, "pc_xpass", False)) and dataset in match_cache.DATASETS:
+        metadata["cache_format"] = match_cache.FORMAT
     write_run_metadata(cache_dir, metadata)
 
 
@@ -1735,7 +1744,9 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
     skipped, reports, partitions = {}, {}, {}
     selected = resolve_match_ids(args, get_action_graph_dir(feature_root))
     for match_id in tqdm(selected, desc="sportec possession pc-xPass", unit="matches"):
+        transaction = None
         try:
+            transaction = match_cache.begin(args, cache_dir, match_id)
             match = load_match(str(match_id), intended_receiver_mode=intended_receiver_mode,
                                return_type=return_type, feature_root=feature_root, load_endpoint_graphs=False)
             pending = []
@@ -1771,11 +1782,14 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
             flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
                                  progress_desc=f"sportec {match_id}")
             reports[str(match_id)] = match.possession_report
-            if not any(v["selected_frames"] for v in match.possession_report["possessions"].values()):
-                skipped[str(match_id)] = "no_valid_possession_states"
+            transaction.set_provenance(match.possession_report)
+            transaction.selection_report = match.possession_report
+            match_cache.finish(transaction, args)
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"sportec {match_id}: {skipped[str(match_id)]}")
+        finally:
+            match_cache.end(transaction)
     write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
         source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,
                        "state_contract": STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
@@ -2131,7 +2145,9 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
         limit=args.skillcorner_limit,
     )
     for match_id in tqdm(selected, desc="skillcorner matches", unit="matches"):
+        transaction = None
         try:
+            transaction = match_cache.begin(args, cache_dir, match_id)
             context = build_skillcorner_match_context(str(match_id), args.skillcorner_input_dir)
             events = context["events"]
             match_before = dict(stats)
@@ -2179,6 +2195,8 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         pc_resume.record_source(args, "skillcorner", possession.pc_cache_match_id, {
                             "match_id": str(match_id), "possession_id": int(event_index),
                             "possessor_id": str(possession.actions.object_id.iloc[0]),
+                            "source_possessor_id": str(possession.actions.player_id.iloc[0]),
+                            "period_id": int(possession.actions.period_id.iloc[0]),
                             "original_start_frame": possession.original_start_frame,
                             "original_end_frame": possession.original_end_frame,
                             "skillcorner_input_dir": str(args.skillcorner_input_dir),
@@ -2231,9 +2249,16 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                     match_delta,
                 )
             )
+            if transaction is not None and event_skipped:
+                transaction.failed = True
+            if transaction is not None:
+                transaction.selection_report = frame_selections.get(str(match_id), {})
+            match_cache.finish(transaction, args)
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"skillcorner match {match_id}: skipped={_skip_reason_label(skipped[str(match_id)])}")
+        finally:
+            match_cache.end(transaction)
     write_runtime_dataset_metadata(
         "skillcorner",
         cache_dir,

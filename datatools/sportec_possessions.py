@@ -103,12 +103,15 @@ def load_control_spells(match_id: str, feature_root: Path, *, artifact_path: Pat
 
 
 def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope="actions", frames=1,
-                              add_v_edge_features=False, add_relative_speed_edge_features=False):
+                              add_v_edge_features=False, add_relative_speed_edge_features=False, possession_ids=None):
+    match._pc_match_cache = {}
     spells, report = load_control_spells(match_id, feature_root)
     report["possessions"] = {}
     match.possession_report = report
     if "ball_accel" not in match.tracking.columns:
         match.tracking = preprocess.calc_physical_features(match.tracking, match.fps)
+    if possession_ids is not None:
+        spells = spells.loc[spells.carry_id.isin(possession_ids)]
     for _, spell in spells.iterrows():
         spell_id = int(spell.carry_id)
         start, end, period = int(spell.start_frame), int(spell.terminal_frame), int(spell.period_id)

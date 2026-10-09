@@ -1488,15 +1488,21 @@ Use the same `--scope`/`--frames` for SkillCorner inference and generation too;
 the generator takes `--skillcorner-input-dir` / `--skillcorner-match-id` while
 the inference runner takes `--input-dir` / `--match-id`.
 
-pc-xPass calculations are unchanged. New possession-state caches use the
-`possession_states_v1` identity: each possession/provenance has a separate cache
-partition, and rows inside it are keyed by actual frame ID. This also isolates
-lane-control data. Scope/stride are not part of identity, so expanding coverage
-reuses overlapping states without overwriting other frames. Sportec partitions
-include the feature-run ID and a fingerprint of the whole-spell artifact.
-Dataset cache metadata records the partition-to-match/possession mapping.
-Legacy event-endpoint pc-xPass caches must be regenerated for these inference
-paths; there is no ambiguous fallback. Inference remains cache-read-only.
+pc-xPass calculations retain the `possession_states_v1` identity. Sportec and
+SkillCorner now write one `matches/<match_id>.parquet` per actual match, with
+explicit match, possession, possessor, frame, and provenance columns. Optional
+lane-control output also uses one file per match. The dataset format marker is
+`match_possession_frames_v1`; both older event caches and hashed possession files
+require regeneration into a new version. See [the cache format documentation](docs/pc_xpass_caches.md#sportec-and-skillcorner-match-checkpoints).
+
+Results are buffered across computation batches and saved after each complete
+match. An interrupted match loses unsaved work; compatible completed rows are
+reused without rewriting an unchanged parquet. Scope/stride are outside state
+identity, so expanding coverage preserves overlapping states. Inference selects
+the possession before its frame, keeping shared boundary frames distinct.
+Sportec provenance includes the feature run and whole-spell artifact fingerprint;
+full reconstruction descriptors are embedded in each parquet. Inference remains
+cache-read-only and rejects pending or inconsistent match commits.
 For Sportec possession-state inference, physical blending requires pc-xPass;
 legacy ordinary physical-xPass rows use event indexes and cannot safely supply
 these frame-indexed states. Inference without physical blending is unaffected.
