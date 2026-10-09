@@ -218,8 +218,9 @@ def test_monitor_process_records_sample_and_exits(tmp_path):
     assert process.poll() is not None
 
 
+@pytest.mark.parametrize("monitoring", ["off", "on"])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, device):
+def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, device, monitoring):
     """Exercise the actual entry point, disk loader, optimizer loop and resume path."""
     import project_config as pc
     import models.utils as utils
@@ -249,10 +250,12 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
             "--dataset-cache-dir", str(tmp_path / "cache"), "--node_emb_dim", "8", "--graph_emb_dim", "8",
             "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping"]
     entry = Path(__file__).resolve().parents[1] / "train.py"
-    base.append("--no-goal-nodes")
+    base.extend(["--no-goal-nodes", "--monitoring", monitoring])
     original_epoch = utils.run_epoch
 
     def plateau(*a, **kw):
+        from models.graph_diagnostics import DiagnosticCollater
+        assert isinstance(a[2].collate_fn, DiagnosticCollater) == (monitoring == "on")
         result = original_epoch(*a, **kw)
         if not kw.get("train", False):
             result["ce_loss"] = 1.0
@@ -278,7 +281,8 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
     checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint["metadata"]["last_epoch"] == 1 and not checkpoint["finished"]
     monkeypatch.setattr(utils, "run_epoch", original)
-    monkeypatch.setattr(sys, "argv", ["train.py", "--resume-checkpoint", str(checkpoint_path)])
+    monkeypatch.setattr(sys, "argv", ["train.py", "--resume-checkpoint", str(checkpoint_path),
+                                    "--monitoring", monitoring])
     runpy.run_path(str(entry), run_name="__main__")
     resumed = load_checkpoint(checkpoint_path)
     assert resumed["finished"] and resumed["metadata"]["last_epoch"] == 5

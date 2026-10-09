@@ -45,7 +45,7 @@ def add_training_runtime_arguments(parser):
     parser.add_argument("--accumulation-steps", type=positive_int, default=1,
                         help="Physical batches per optimizer update (default: 1).")
     parser.add_argument("--monitoring", choices=("on", "off"), default="off",
-                        help="Optional GPU and training telemetry (default: off).")
+                        help="Optional GPU/training telemetry and main training/validation graph collation diagnostics (default: off).")
 
 
 def validate_learning_rates(start, minimum):

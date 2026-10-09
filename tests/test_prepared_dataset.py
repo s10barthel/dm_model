@@ -337,3 +337,18 @@ def test_progress_report_error_does_not_kill_verification(monkeypatch, tmp_path)
     assert result["status"] == "completed"
     assert result["report_write_errors"] == 1
     assert json.loads((tmp_path / "epoch_report.json").read_text())["peak_private"] == 200
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_diagnostic_collation_preserves_eager_and_prepared_batches(tmp_path, artifacts, enabled):
+    from models.graph_diagnostics import install_collation_diagnostics
+    eager = ActionDataset(["m0", "m1"], **artifacts)
+    disk = make_disk(tmp_path, artifacts, ["m0", "m1"])
+    loaders = [DataLoader(dataset, batch_size=3, num_workers=0) for dataset in (eager, disk)]
+    for loader in loaders:
+        install_collation_diagnostics(loader, enabled=enabled, directory=tmp_path / "diagnostics")
+    eager_batches, disk_batches = (list(loader) for loader in loaders)
+    assert [graphs.num_graphs for graphs, _, _ in disk_batches] == [3, 1]
+    for a, b in zip(eager_batches, disk_batches):
+        assert_sample_equal(a, b)
+    assert not (tmp_path / "diagnostics").exists()

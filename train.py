@@ -29,6 +29,7 @@ from training_state import (add_training_runtime_arguments, validate_learning_ra
     optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts,
     environment_versions)
 from training_monitor import TrainingMonitor
+from models.graph_diagnostics import install_collation_diagnostics
 from datatools import config
 from models.node_feature_config import resolve_pos_node_features
 from datatools.endpoint_policy import nonnegative_duration
@@ -1142,6 +1143,9 @@ if __name__ == "__main__":
 
     train_loader = DataLoader(train_dataset, **loader_args)
     valid_loader = None if valid_dataset is None else DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
+    for loader in (train_loader, valid_loader):
+        if loader is not None:
+            install_collation_diagnostics(loader, enabled=args.monitoring == "on", directory=trial_path)
 
     # Train loop
     default_lr = max(args.start_lr, args.min_lr)

@@ -1775,7 +1775,9 @@ def run_epoch(
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
     from models.observed_selection import observed_layout, select_observed
-    from models.graph_diagnostics import validate_with_snapshot
+    from models.graph_diagnostics import DiagnosticCollater, validate_with_snapshot
+    if isinstance(loader.collate_fn, DiagnosticCollater):
+        loader.collate_fn.start_epoch(getattr(args, "_epoch", None), "train" if train else "validation")
     monitor = getattr(args, "_monitor", None)
     accumulator = GradientAccumulator(optimizer, unwrap_model(model).parameters(),
                                       getattr(args, "accumulation_steps", 1), args.clip) if train else None
@@ -1829,7 +1831,9 @@ def run_epoch(
                           nodes=batch_graphs.num_nodes, edges=batch_graphs.num_edges,
                           **batch_identifiers(batch_graphs))
         validate_with_snapshot(batch_graphs, batch_labels, batch_ipw,
-                               directory=getattr(args, "_batch_failure_dir", None), context=context)
+                               directory=getattr(args, "_batch_failure_dir", None),
+                               context={**context, "stage": "before_device_transfer"}
+                               if getattr(args, "monitoring", "off") == "on" else context)
         layout = selection_layout(batch_graphs, batch_labels, args.task, args.include_out, args) if args.gnn_task == "node_selection" else None
         observed = None
         if args.gnn_task in {"node_binary", "node_regression"}:
