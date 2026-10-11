@@ -51,6 +51,12 @@ def _run_directory(command, root):
     checkpoint = _value(command, '--resume-checkpoint')
     if checkpoint:
         return Path(checkpoint).resolve().parent
+    refit_config = _value(command, '--refit-config')
+    if refit_config:
+        from training_refit import load_refit_config
+        from project_config import get_model_run_root
+        settings = load_refit_config(refit_config)
+        return get_model_run_root(settings['task'], settings['run_id']) / settings['artifact_stage']
     from project_config import get_model_run_root
     task, run_id = _value(command, '--task'), _value(command, '--run-id')
     if not task or not run_id:

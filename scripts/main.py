@@ -14,6 +14,7 @@ from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from models.inference_masks import add_inference_mask_arguments, resolve_inference_mask_configurations
 from project_config import (
     add_split_arguments,
+    add_validation_arguments,
     split_selector,
     split_cli_args,
     EPV_DIR,
@@ -149,12 +150,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--feature-run-id", default=None, help="Explicit feature-run id to reuse or assign.")
     add_split_arguments(parser)
-    parser.add_argument(
-        "--validation-mode",
-        choices=["holdout_80_20", "expanding"],
-        default="holdout_80_20",
-        help="Temporal validation protocol used during model training.",
-    )
+    add_validation_arguments(parser, wrapper=True)
+    parser.add_argument("--final-refit", action="store_true",
+                        help="Refit the full development pool using the selected validation recipe.")
     parser.add_argument("--bundle-id", default=None, help="Explicit model bundle id to reuse or assign.")
     parser.add_argument(
         "--success-intent-model-id",
@@ -328,6 +326,8 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(v_edge_feature_mode="none", relative_speed_edge_feature_mode="none")
     add_pass_height_argument(parser)
     args = parser.parse_args()
+    if not args.skip_train and args.validation_mode == "expanding" and args.training_counts is None and args.training_fractions is None:
+        parser.error("Expanding requires --training-counts or --training-fractions.")
     vars(args).update(split_selector(args))
     args.v_edge_feature_mode = normalize_v_edge_feature_mode(args.v_edge_feature_mode)
     args.use_v_edge_features = use_v_edge_features_for_mode(args.v_edge_feature_mode)
@@ -650,7 +650,7 @@ def append_generation_edge_feature_flag(command: list[str], args: argparse.Names
 def build_commands(args: argparse.Namespace) -> list[list[str]]:
     python = sys.executable
     commands: list[list[str]] = []
-    validation_mode = str(getattr(args, "validation_mode", "holdout_80_20"))
+    validation_mode = str(getattr(args, "validation_mode", "holdout"))
     feature_run_id = args.feature_run_id if args.skip_features else (args.feature_run_id or generate_run_id("feature"))
     bundle_id = args.bundle_id if args.skip_train else (args.bundle_id or generate_run_id("model_bundle"))
 
@@ -699,6 +699,13 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             "--validation-mode",
             validation_mode,
         ]
+        for name in ("validation_count", "validation_fraction", "training_counts", "training_fractions"):
+            value = getattr(args, name, None)
+            if value is not None:
+                values = value if isinstance(value, list) else [value]
+                train_command.extend(["--" + name.replace("_", "-"), *map(str, values)])
+        if getattr(args, "final_refit", False):
+            train_command.append("--final-refit")
         train_command = append_training_target_flags(train_command, args)
         train_command = append_return_type_flag(train_command, args)
         train_command = append_edge_feature_flag(train_command, args)

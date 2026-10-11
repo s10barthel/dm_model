@@ -499,6 +499,8 @@ def load_splits(
     validation_fold: int | None = None,
     final_refit: bool = False,
     *, train_count: int | None = None, manifest: dict | None = None,
+    validation_protocol: str | None = None, validation_count: int | None = None,
+    validation_fraction: float | None = None, training_count: int | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     del lineup_path
     return load_model_splits(
@@ -509,6 +511,10 @@ def load_splits(
         validation_mode=validation_mode,
         validation_fold=validation_fold,
         final_refit=final_refit,
+        validation_protocol=validation_protocol,
+        validation_count=validation_count,
+        validation_fraction=validation_fraction,
+        training_count=training_count,
     )
 
 
@@ -1825,6 +1831,9 @@ def run_epoch(
     learning_curve_rows: list[dict] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
+        identity = getattr(args, "_validation_identity", None)
+        if not train and identity is not None:
+            identity.update(batch_graphs, batch_labels)
         context = {"epoch": getattr(args, "_epoch", None), "batch": batch_index,
                    "phase": "train" if train else "validation"}
         if monitor is not None:

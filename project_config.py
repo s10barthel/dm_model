@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import hashlib
 from datetime import datetime
 from pathlib import Path
@@ -70,9 +71,10 @@ SKILLCORNER_COMPONENT_LATEST_PATH = SKILLCORNER_COMPONENT_RUNS_DIR / "latest.jso
 
 MODEL_TRAIN_FRACTION = 0.8
 DEFAULT_TRAIN_SPLIT_PERCENT = 50
-VALIDATION_MODE_HOLDOUT = "holdout_80_20"
+VALIDATION_MODE_HOLDOUT = "holdout"
 VALIDATION_MODE_EXPANDING = "expanding"
-VALIDATION_MODES = (VALIDATION_MODE_HOLDOUT, VALIDATION_MODE_EXPANDING)
+VALIDATION_MODES = (VALIDATION_MODE_HOLDOUT, "holdout_80_20", VALIDATION_MODE_EXPANDING)
+VALIDATION_PROTOCOL_SHARED = "shared_latest_v1"
 INTENT_TRAIN_OFFSETS = (12, 25)
 
 INTENDED_RECEIVER_MODE_ORIGINAL = "original"
@@ -1117,6 +1119,74 @@ def derive_expanding_folds(train_pool_ids: list[str] | np.ndarray) -> list[tuple
     return folds
 
 
+def add_validation_arguments(parser, *, wrapper=False):
+    parser.add_argument("--validation-mode", choices=VALIDATION_MODES, default="holdout")
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument("--validation-count", type=int, default=None)
+    validation.add_argument("--validation-fraction", type=float, default=None,
+                            help="Latest fraction of the saved development pool (default: 0.2).")
+    if wrapper:
+        training = parser.add_mutually_exclusive_group()
+        training.add_argument("--training-counts", type=int, nargs="+", default=None)
+        training.add_argument("--training-fractions", type=float, nargs="+", default=None,
+                              help="Fractions of the pool remaining after reserving validation.")
+    else:
+        parser.add_argument("--training-count", type=int, default=None)
+        parser.add_argument("--validation-protocol", choices=[VALIDATION_PROTOCOL_SHARED, "legacy"],
+                            default=VALIDATION_PROTOCOL_SHARED)
+
+
+def plan_validation_stages(development_ids, *, validation_mode="holdout", validation_count=None,
+                           validation_fraction=None, training_counts=None, training_fractions=None):
+    """Resolve all boundaries before filtering artifacts; never change outer membership."""
+    ids = list(development_ids)
+    size = len(ids)
+    if validation_mode not in VALIDATION_MODES:
+        raise ValueError(f"Unknown validation mode {validation_mode!r}.")
+    if validation_count is not None and validation_fraction is not None:
+        raise ValueError("--validation-count and --validation-fraction are mutually exclusive.")
+    if training_counts is not None and training_fractions is not None:
+        raise ValueError("--training-counts and --training-fractions are mutually exclusive.")
+    if validation_fraction is not None and (not math.isfinite(validation_fraction) or not 0 < validation_fraction < 1):
+        raise ValueError("--validation-fraction must be finite and strictly between 0 and 1.")
+    if validation_count is None:
+        fraction = 0.2 if validation_fraction is None else validation_fraction
+        capacity = math.floor(size * (1 - fraction))
+        validation_count = size - capacity
+    else:
+        if isinstance(validation_count, bool) or not isinstance(validation_count, (int, np.integer)):
+            raise ValueError("--validation-count must be an integer.")
+        capacity = size - validation_count
+    if not 0 < validation_count < size:
+        raise ValueError("Validation must contain games and leave a nonempty training pool.")
+    if validation_mode == "holdout_80_20" and (
+        validation_count != size - math.floor(size * 0.8)
+        or (validation_fraction is not None and validation_fraction != 0.2)
+    ):
+        raise ValueError("holdout_80_20 requires exactly 20% validation; use holdout for other sizes.")
+    mode = "holdout" if validation_mode == "holdout_80_20" else validation_mode
+    if training_counts is None and training_fractions is None:
+        if mode == "expanding":
+            raise ValueError("Expanding requires --training-counts or --training-fractions.")
+        counts = [capacity]
+    elif training_fractions is not None:
+        if any(not math.isfinite(f) or not 0 < f <= 1 for f in training_fractions):
+            raise ValueError("--training-fractions must be finite and in (0, 1].")
+        counts = [math.floor(capacity * f) for f in training_fractions]
+    else:
+        counts = list(training_counts)
+    if not counts or (mode == "holdout" and len(counts) != 1):
+        raise ValueError("Holdout permits one training size; expanding permits a nonempty list.")
+    if any(isinstance(n, bool) or not isinstance(n, (int, np.integer)) or not 0 < n <= capacity for n in counts):
+        raise ValueError(f"Training counts must be positive integers no greater than {capacity}.")
+    if any(a >= b for a, b in zip(counts, counts[1:])):
+        raise ValueError("Resolved training counts must be distinct and strictly increasing.")
+    return [{"index": i, "artifact_stage": f"fold_{i}" if mode == "expanding" else "holdout",
+             "training_count": int(n), "validation_count": int(validation_count),
+             "train_match_ids": ids[:n], "validation_match_ids": ids[capacity:]}
+            for i, n in enumerate(counts, 1)]
+
+
 def load_model_splits(
     feature_dir: str | Path | None = None,
     train_split: int | None = None,
@@ -1124,12 +1194,21 @@ def load_model_splits(
     validation_fold: int | None = None,
     final_refit: bool = False,
     *, train_count: int | None = None, manifest: dict | None = None,
+    validation_protocol: str | None = None, validation_count: int | None = None,
+    validation_fraction: float | None = None, training_count: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     train_pool_ids, test_ids = load_base_splits(None if manifest is not None else feature_dir,
                                               train_split=train_split, train_count=train_count, manifest=manifest)
     if final_refit:
         train_ids, valid_ids = train_pool_ids, np.array([], dtype=str)
-    elif validation_mode == VALIDATION_MODE_HOLDOUT:
+    elif validation_protocol == VALIDATION_PROTOCOL_SHARED:
+        stage = plan_validation_stages(train_pool_ids, validation_mode=validation_mode,
+            validation_count=validation_count, validation_fraction=validation_fraction,
+            training_counts=None if training_count is None else [training_count])[0]
+        train_ids, valid_ids = np.array(stage["train_match_ids"]), np.array(stage["validation_match_ids"])
+    elif validation_protocol not in (None, "legacy"):
+        raise ValueError(f"Unsupported validation protocol {validation_protocol!r}.")
+    elif validation_mode in (VALIDATION_MODE_HOLDOUT, "holdout_80_20"):
         train_ids, valid_ids = derive_model_train_valid(train_pool_ids)
     elif validation_mode == VALIDATION_MODE_EXPANDING:
         folds = derive_expanding_folds(train_pool_ids)

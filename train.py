@@ -4,7 +4,6 @@ import json
 import os
 import random
 import hashlib
-import shutil
 import subprocess
 import sys
 import time
@@ -26,10 +25,12 @@ from ipw_preparation import IPWPreparer
 from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
 from training_state import (add_training_runtime_arguments, validate_learning_rates, CHECKPOINT_NAME,
     atomic_torch_save, load_checkpoint, make_checkpoint, dataset_signature,
-    optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts,
+    optimizer_snapshot, restore_optimizer_snapshot, restore_rng, cpu_copy, publish_checkpoint_artifacts, publish_stage_artifacts,
     environment_versions, add_training_control_arguments, restore_training_control_defaults,
     reduce_learning_rate, lr_reduction_grace_complete)
 from training_monitor import TrainingMonitor
+from training_refit import (HISTORY_VERSION, append_rate_history, apply_refit_rate,
+                            load_refit_config, validate_rate_history, ValidationExampleIdentity)
 from models.graph_diagnostics import install_collation_diagnostics
 from datatools import config
 from models.node_feature_config import resolve_pos_node_features
@@ -69,6 +70,7 @@ import pc_xpass_versions as pc_versions
 
 from project_config import (
     add_split_arguments,
+    add_validation_arguments,
     split_selector,
     split_metadata,
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -99,6 +101,7 @@ add_dataset_loading_arguments(parser)
 add_ipw_arguments(parser)
 add_training_runtime_arguments(parser)
 parser.add_argument("--resume-checkpoint", default=None, help=argparse.SUPPRESS)
+parser.add_argument("--refit-config", default=None, help=argparse.SUPPRESS)
 
 
 def parse_lane_survival_mode(value: str) -> str:
@@ -112,10 +115,10 @@ parser.add_argument("--trial", type=int, required=False, default=None)
 parser.add_argument("--run-id", type=str, default=None, help="Checkpoint run id. Auto-generated when omitted.")
 parser.add_argument("--resume-run-id", type=str, default=None, help="Resume an existing checkpoint run id.")
 add_split_arguments(parser)
-parser.add_argument("--validation-mode", choices=["holdout_80_20", "expanding"], default="holdout_80_20")
-parser.add_argument("--validation-fold", type=int, choices=[1, 2, 3], default=None)
+add_validation_arguments(parser)
+parser.add_argument("--validation-fold", type=int, default=None)
 parser.add_argument("--final-refit", action="store_true", help="Train on the complete development pool without validation.")
-parser.add_argument("--artifact-stage", choices=["fold_1", "fold_2", "fold_3", "final_refit"], default=None)
+parser.add_argument("--artifact-stage", default=None)
 parser.add_argument("--device", type=str, default=None, help="Training device. Defaults to cuda when available, otherwise cpu.")
 parser.add_argument("--model", type=str, required=True, default="gat")
 parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID to estimate propensity scores")
@@ -520,11 +523,25 @@ if resume_options.resume_checkpoint:
     args.resume_run_id = args.run_id
     args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
     args.monitoring = resume_options.monitoring
+elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
+    refit_probe = argparse.ArgumentParser(add_help=False)
+    refit_probe.add_argument("--refit-config", required=True)
+    refit_options = refit_probe.parse_args()
+    args = argparse.Namespace(**load_refit_config(refit_options.refit_config))
 else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
 restore_ipw_defaults(args)
+if not hasattr(args, "validation_protocol"):
+    args.validation_protocol = "legacy"
+for name in ("training_count", "validation_count", "validation_fraction", "refit_recipe"):
+    if not hasattr(args, name):
+        setattr(args, name, None)
+if args.artifact_stage:
+    import re
+    if not re.fullmatch(r"holdout|final_refit|fold_[1-9][0-9]*", args.artifact_stage):
+        parser.error("Invalid artifact stage; expected holdout, final_refit, or fold_N.")
 try:
     args.pos_node_features_aware = resolve_pos_node_features(args)
 except ValueError as exc:
@@ -764,6 +781,7 @@ if __name__ == "__main__":
     )
     vars(args).update(split_selector(args.split_manifest))
     args.split_manifest_id = args.split_manifest["manifest_id"]
+    dependency_weights_sha256 = None
     if args.ipw_model_id != "none":
         dependency = get_model_record(args.ipw_model_id)
         dependency_feature_id = dependency.get("feature_run_id")
@@ -774,6 +792,10 @@ if __name__ == "__main__":
         )
         if dependency_manifest["manifest_id"] != args.split_manifest_id:
             raise ValueError("Inverse-propensity checkpoint split does not match training split.")
+        from models.utils import get_model_path
+        dependency_weights_sha256 = hashlib.sha256((get_model_path(args.ipw_model_id) / "best_weights.pt").read_bytes()).hexdigest()
+        if args.refit_recipe and dependency_weights_sha256 != args.refit_recipe.get("ipw_dependency_weights_sha256"):
+            raise ValueError("Refit propensity dependency changed since source preflight.")
     print(f"Using split {args.split_manifest_id} ({args.split_resolution_source}): "
           f"{len(args.split_manifest['train'])} development, {len(args.split_manifest['test'])} test matches.")
     args.lane_survival_cache_dir = str(pc_versions.cache_dir("sportec", args)) if args.lane_survival else None
@@ -878,7 +900,8 @@ if __name__ == "__main__":
         "sources": dataset_signature(args),
         "preprocessing": LOADED_PREPROCESSING_FINGERPRINT,
         "training_code": hashlib.sha256(b"".join(path.read_bytes() for path in
-            [Path(__file__), Path("training_state.py"), *sorted(Path("models").glob("*.py"))])).hexdigest(),
+            [Path(__file__), Path("training_state.py"), Path("training_refit.py"), Path("project_config.py"),
+             *sorted(Path("models").glob("*.py"))])).hexdigest(),
     }
     if resume_checkpoint is not None and source_identity != resume_checkpoint["dataset_identity"]:
         raise ValueError("Resume rejected: source data, split, preprocessing, or model/training code changed.")
@@ -898,6 +921,8 @@ if __name__ == "__main__":
     trial_path = str(model_run_root / args.artifact_stage) if args.artifact_stage else str(model_run_root)
     if resume_checkpoint is not None and Path(args.resume_checkpoint).resolve() != (Path(trial_path) / CHECKPOINT_NAME).resolve():
         raise ValueError("Checkpoint location does not match its saved model run/stage.")
+    if not args.resume_run_id and (Path(trial_path) / "metadata.json").exists():
+        raise ValueError(f"Training artifact already exists; use resume or a new run ID: {trial_path}")
     os.makedirs(trial_path, exist_ok=True)
     crash_log_file = open(f"{trial_path}/crash.log", "a", encoding="utf-8", buffering=1)
     faulthandler.enable(file=crash_log_file, all_threads=True)
@@ -922,7 +947,7 @@ if __name__ == "__main__":
         "monitoring": args.monitoring,
         "ipw_settings": {"batch_size": args.ipw_batch_size, "probability_cache": args.ipw_probability_cache,
                          "probability_cache_dir": args.ipw_probability_cache_dir},
-        "optimizer_policy": "persistent_adam_restore_best_optimizer_on_lr_reduction",
+        "optimizer_policy": "persistent_adam",
         "checkpoint_format": 1,
         "environment": environment_versions(),
         "resume_events": existing_metadata.get("resume_events", []) + ([{
@@ -940,6 +965,15 @@ if __name__ == "__main__":
         "split_manifest": args.split_manifest["metadata"],
         "split_resolution_source": args.split_resolution_source,
         "validation_mode": args.validation_mode,
+        "validation_protocol": args.validation_protocol,
+        "training_count": args.training_count,
+        "validation_count": args.validation_count,
+        "validation_fraction": args.validation_fraction,
+        "refit_recipe": args.refit_recipe,
+        "validation_example_identity": existing_metadata.get("validation_example_identity"),
+        "ipw_dependency_weights_sha256": dependency_weights_sha256,
+        "learning_rate_history_version": existing_metadata.get("learning_rate_history_version") if args.resume_run_id else HISTORY_VERSION,
+        "learning_rate_history": existing_metadata.get("learning_rate_history", []),
         "validation_fold": args.validation_fold,
         "final_refit": bool(args.final_refit),
         "artifact_stage": args.artifact_stage,
@@ -1037,6 +1071,10 @@ if __name__ == "__main__":
         validation_mode=args.validation_mode,
         validation_fold=args.validation_fold,
         final_refit=args.final_refit,
+        validation_protocol=args.validation_protocol,
+        training_count=args.training_count,
+        validation_count=args.validation_count,
+        validation_fraction=args.validation_fraction,
     )
     metadata.update(
         {
@@ -1174,6 +1212,10 @@ if __name__ == "__main__":
         else default_lr
     )
     last_epoch = int(existing_metadata.get("last_epoch", 0) or 0) if args.resume_run_id else 0
+    if last_epoch and metadata.get("learning_rate_history_version") == HISTORY_VERSION:
+        validate_rate_history(metadata["learning_rate_history"], last_epoch)
+        if len(metadata["learning_rate_history"]) != last_epoch:
+            raise ValueError("Checkpoint history length does not match completed epochs.")
     start_epoch = min(last_epoch + 1, args.n_epochs + 1) if args.resume_run_id else 1
     last_lr_reduction_start_epoch = existing_metadata.get("last_lr_reduction_start_epoch") if args.resume_run_id else None
     update_training_metadata(
@@ -1212,6 +1254,8 @@ if __name__ == "__main__":
     early_stop_reason = None
     for epoch in range(start_epoch, args.n_epochs + 1):
         # Set a custom learning rate schedule
+        if args.final_refit and args.refit_recipe:
+            lr = apply_refit_rate(optimizer, args.refit_recipe, epoch)
         if (not args.final_refit and epochs_since_lr_loss_improvement >= args.lr_reduction_patience
                 and lr > args.min_lr and best_loss > 0):
             new_lr = reduce_learning_rate(unwrap_model(model), optimizer, best_snapshot, lr,
@@ -1235,9 +1279,16 @@ if __name__ == "__main__":
         train_metrics = run_epoch(args, model, train_loader, optimizer, device, pos_weight, train=True)
         printlog("Train:\t" + get_losses_str(train_metrics), trial_path)
 
+        args._validation_identity = (ValidationExampleIdentity() if valid_loader is not None
+            and metadata.get("validation_example_identity") is None else None)
         valid_metrics = (
             {} if valid_loader is None else run_epoch(args, model, valid_loader, optimizer, device, pos_weight, train=False)
         )
+        if args._validation_identity is not None and args._validation_identity.count:
+            if args._validation_identity.count != len(valid_dataset):
+                raise ValueError("Validation example count differs from the loaded dataset.")
+            metadata["validation_example_identity"] = args._validation_identity.result()
+        args._validation_identity = None
         if valid_loader is not None:
             printlog("Valid:\t" + get_losses_str(valid_metrics), trial_path)
         if disk_args:
@@ -1248,6 +1299,7 @@ if __name__ == "__main__":
                      f"validation {valid_dataset.last_load_seconds if valid_dataset is not None else 0:.1f}s", trial_path)
 
         epoch_time = time.time() - start_time
+        append_rate_history(metadata, epoch, lr)
         printlog("Time:\t {:.2f}s".format(epoch_time), trial_path)
 
         epoch_loss = None
@@ -1266,6 +1318,7 @@ if __name__ == "__main__":
             best_loss = epoch_loss
             metadata["best_epoch"] = epoch
             metadata["best_valid_metrics"] = valid_metrics
+            metadata["best_train_metrics"] = train_metrics
 
             best_snapshot = optimizer_snapshot(unwrap_model(model), optimizer)
             printlog("######## Best Loss ########", trial_path)
@@ -1349,11 +1402,7 @@ if __name__ == "__main__":
         updated_at=datetime.now().isoformat(timespec="seconds"),
     )
     if args.artifact_stage:
-        model_run_root.mkdir(parents=True, exist_ok=True)
-        for name in ("args.json", "metadata.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
-            source = Path(trial_path) / name
-            if source.exists():
-                shutil.copy2(source, model_run_root / name)
+        publish_stage_artifacts(trial_path)
     monitor.close()
     faulthandler.disable()
     crash_log_file.close()

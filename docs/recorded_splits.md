@@ -28,7 +28,10 @@ manifests cause an error rather than a new split calculation.
   `train_count_765_8018228599b2` manifest: 765 development and 153 test matches.
 - Validation is derived within the saved development pool. Filtering missing
   files does not move either the test boundary or validation boundaries.
-  Final refits use the full saved development pool.
+  Final refits use the full saved development pool. New holdout and expanding
+  runs reserve one shared latest validation cohort; expanding training sizes are
+  configurable. Historical successive-block splits retain their recorded meaning.
+  See [configurable validation and refitting](configurable_validation.md).
 
 Evaluation metadata records `split_provenance`, including manifest ID, fingerprint,
 resolution source, requested/loaded/contributing match IDs and counts, and skips.

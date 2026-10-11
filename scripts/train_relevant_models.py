@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import statistics
 import subprocess
 import sys
 from collections import OrderedDict
@@ -23,6 +22,7 @@ from crash_capture import add_crash_capture_arguments, run_training
 from training_state import (add_training_runtime_arguments, validate_learning_rates,
                             resolve_resume_checkpoint, load_checkpoint, publish_checkpoint_artifacts,
                             add_training_control_arguments)
+from training_refit import OPERATIONAL_OPTIONS, prepare_refit
 from datatools.endpoint_policy import nonnegative_duration
 from physical_pass_model import PHYSICAL_XPASS_SOURCE, normalize_pc_xpass_lane_survival_mode
 from models.utils import (
@@ -44,6 +44,10 @@ import pc_xpass_versions as pc_versions
 
 from project_config import (
     add_split_arguments,
+    add_validation_arguments,
+    plan_validation_stages,
+    VALIDATION_PROTOCOL_SHARED,
+    SAVED_DIR,
     SPLIT_MANIFESTS_DIR,
     split_selector,
     split_metadata,
@@ -65,8 +69,6 @@ from project_config import (
     infer_feature_run_return_types,
     load_feature_run_metadata,
     load_model_bundle_metadata,
-    derive_expanding_folds,
-    load_base_splits,
     resolve_feature_run_id,
     resolve_feature_root,
     resolve_artifact_split,
@@ -851,12 +853,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_split_arguments(parser)
     parser._option_string_actions["--train-split"].help = "Optional development percentage assertion against the saved feature-run manifest."
     parser._option_string_actions["--train-count"].help = "Optional exact development match count assertion; defaults to the feature-run split."
-    parser.add_argument(
-        "--validation-mode",
-        choices=["holdout_80_20", "expanding"],
-        default="holdout_80_20",
-        help="Temporal model-validation protocol.",
-    )
+    add_validation_arguments(parser, wrapper=True)
+    parser.add_argument("--final-refit", action="store_true", help="Refit all development games using the largest validation stage's recipe.")
+    parser.add_argument("--refit-source-model-id", action="append", default=[],
+                        help="Refit a completed validation source, skipping all validation. Repeat for independent jobs.")
     parser.add_argument(
         "--target-family",
         choices=["goal", "xg", "xt", "goal_distance", "epv"],
@@ -1284,6 +1284,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser)
     add_pass_height_argument(parser)
     args = parser.parse_args(argv)
+    supplied = sys.argv[1:] if argv is None else argv
+    if args.refit_source_model_id:
+        allowed = set(OPERATIONAL_OPTIONS) | {"--refit-source-model-id", "--final-refit"}
+        invalid = [token.split("=", 1)[0] for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in allowed]
+        if invalid:
+            parser.error("Source refits reconstruct saved settings; conflicting options: " + ", ".join(invalid))
+        if len(args.refit_source_model_id) != len(set(args.refit_source_model_id)):
+            parser.error("Identical refit source IDs cannot be repeated.")
+        args.refit_operational = {dest: getattr(args, dest) for option, dest in OPERATIONAL_OPTIONS.items()
+                                 if any(token.split("=", 1)[0] == option for token in supplied)}
+        args.final_refit = True
+        return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
         invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
@@ -1354,12 +1366,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Feature run {args.feature_run_id} does not advertise carry-augmented artifacts. "
             "Extend it with generate_relevant_features.py --use-carries first."
         )
-    if args.validation_mode == "expanding":
-        try:
-            development_ids, _ = load_base_splits(manifest=split_manifest)
-            derive_expanding_folds(development_ids)
-        except ValueError as exc:
-            parser.error(str(exc))
+    try:
+        args.validation_stages = plan_validation_stages(split_manifest["train"],
+            validation_mode=args.validation_mode, validation_count=args.validation_count,
+            validation_fraction=args.validation_fraction, training_counts=args.training_counts,
+            training_fractions=args.training_fractions)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.validation_mode = "holdout" if args.validation_mode == "holdout_80_20" else args.validation_mode
+    args.validation_protocol = VALIDATION_PROTOCOL_SHARED
     args.split_manifest = split_manifest
 
     available_modes = infer_feature_run_intended_receiver_modes(args.feature_run_id)
@@ -1984,21 +1999,38 @@ def _replace_cli_value(command: list[str], flag: str, value: object) -> list[str
     return updated
 
 
-def _read_fold_summaries(trained_model_ids: dict[str, str]) -> dict[str, list[dict[str, object]]]:
+def _read_fold_summaries(trained_model_ids: dict[str, str], stages=None) -> dict[str, list[dict[str, object]]]:
     summaries: dict[str, list[dict[str, object]]] = {}
     for task, model_id in trained_model_ids.items():
         _, run_id = model_id.split("/", 1)
         task_rows = []
-        for fold in range(1, 4):
-            path = get_model_run_root(task, run_id) / f"fold_{fold}" / "metadata.json"
+        reference_validation = None
+        reference_identity = None
+        reference_contributing = None
+        for stage in (stages or [{"index": n, "artifact_stage": f"fold_{n}"} for n in range(1, 4)]):
+            fold = stage["index"]
+            path = get_model_run_root(task, run_id) / stage["artifact_stage"] / "metadata.json"
             metadata = json.loads(path.read_text(encoding="utf-8"))
+            if metadata.get("validation_protocol") == VALIDATION_PROTOCOL_SHARED:
+                if metadata.get("status") != "completed":
+                    raise ValueError(f"Validation stage is not completed: {path}")
+                validation = metadata.get("validation_match_ids")
+                identity = metadata.get("validation_example_identity")
+                contributing = ((metadata.get("split_datasets") or {}).get("validation") or {}).get("contributing_match_ids")
+                if reference_validation is not None and (validation != reference_validation
+                        or identity != reference_identity or contributing != reference_contributing):
+                    raise ValueError(f"Shared validation examples differ between {task} stages.")
+                reference_validation, reference_identity, reference_contributing = validation, identity, contributing
             metrics = dict(metadata.get("best_valid_metrics") or metadata.get("last_epoch_valid_metrics") or {})
             task_rows.append(
                 {
                     "fold": fold,
                     "train_matches": int(metadata.get("train_match_count", 0)),
                     "validation_matches": int(metadata.get("validation_match_count", 0)),
-                    "best_epoch": int(metadata.get("best_epoch") or metadata.get("last_epoch") or 1),
+                    "best_epoch": metadata.get("best_epoch"),
+                    "stage_model_id": f"{model_id}/{stage['artifact_stage']}",
+                    "split_datasets": metadata.get("split_datasets", {}),
+                    "validation_example_identity": metadata.get("validation_example_identity"),
                     "metrics": metrics,
                 }
             )
@@ -2019,10 +2051,16 @@ def _write_learning_curves(bundle_root: Path, summaries: dict[str, list[dict[str
         csv_path = output_dir / f"{task}.csv"
         metric_names = sorted({name for row in rows for name in row["metrics"]})
         with csv_path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["fold", "train_matches", "validation_matches", "best_epoch", *metric_names])
+            count_names = [f"{split}_{kind}_matches" for split in ("train", "validation")
+                           for kind in ("requested", "loaded", "contributing")]
+            writer = csv.DictWriter(handle, fieldnames=["fold", "train_matches", "validation_matches",
+                                                        "best_epoch", *count_names, *metric_names])
             writer.writeheader()
             for row in rows:
-                writer.writerow({**{key: row[key] for key in ("fold", "train_matches", "validation_matches", "best_epoch")}, **row["metrics"]})
+                counts = {f"{split}_{kind}_matches": ((row.get("split_datasets") or {}).get(split) or {}).get(f"{kind}_match_count")
+                          for split in ("train", "validation") for kind in ("requested", "loaded", "contributing")}
+                writer.writerow({**{key: row[key] for key in ("fold", "train_matches", "validation_matches", "best_epoch")},
+                                 **counts, **row["metrics"]})
         loss_key = "log_loss" if all("log_loss" in row["metrics"] for row in rows) else (
             "ce_loss" if all("ce_loss" in row["metrics"] for row in rows) else "mse_loss"
         )
@@ -2031,10 +2069,10 @@ def _write_learning_curves(bundle_root: Path, summaries: dict[str, list[dict[str
         axes_list = list(axes) if has_brier else [axes]
         x = [row["train_matches"] for row in rows]
         axes_list[0].plot(x, [row["metrics"][loss_key] for row in rows], marker="o")
-        axes_list[0].set(xlabel="Training matches", ylabel=loss_key, title=f"{task}: validation loss")
+        axes_list[0].set(xlabel="Requested training matches", ylabel=loss_key, title=f"{task}: validation loss")
         if has_brier:
             axes_list[1].plot(x, [row["metrics"]["brier"] for row in rows], marker="o")
-            axes_list[1].set(xlabel="Training matches", ylabel="Brier score", title=f"{task}: calibration")
+            axes_list[1].set(xlabel="Requested training matches", ylabel="Brier score", title=f"{task}: calibration")
         figure.tight_layout()
         plot_path = output_dir / f"{task}.png"
         figure.savefig(plot_path, dpi=180)
@@ -2058,8 +2096,52 @@ def _aggregate_fold_metrics(summaries: dict[str, list[dict[str, object]]]) -> di
     return aggregated
 
 
+def write_refit_config(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def run_refit_batch(args) -> None:
+    # Prepare every source before creating outputs or launching expensive training.
+    prepared = [(source, prepare_refit(source, generate_model_run_id(source.split("/", 1)[0]),
+                                      operational=args.refit_operational))
+                for source in args.refit_source_model_id]
+    batch_id = generate_run_id("refit_batch")
+    root = SAVED_DIR / "refit_batches" / batch_id
+    jobs = [{"source_model_id": source, "output_model_id": payload["args"]["model_id"],
+             "recipe": payload["recipe"], "status": "unstarted"} for source, payload in prepared]
+    metadata = {"batch_id": batch_id, "kind": "refit_batch", "status": "running",
+                "created_at": datetime.now().isoformat(timespec="seconds"), "jobs": jobs}
+    write_run_metadata(root, metadata)
+    print(f"Refit batch manifest: {root / 'metadata.json'}")
+    for index, ((source, payload), job) in enumerate(zip(prepared, jobs), 1):
+        payload["args"].update(training_step_index=index, training_step_total=len(jobs))
+        path = root / "configs" / f"job_{index}.json"
+        command = [sys.executable, "train.py", "--refit-config", str(path)]
+        job.update(status="running", command=command)
+        write_run_metadata(root, metadata)
+        try:
+            write_refit_config(path, payload)
+            run_training(command, cwd=ROOT, options=args)
+        except BaseException as exc:
+            job.update(status="failed", error=str(exc))
+            if isinstance(exc, subprocess.CalledProcessError):
+                job["returncode"] = exc.returncode
+            metadata["status"] = "failed"
+            write_run_metadata(root, metadata)
+            raise
+        job["status"] = "completed"
+        write_run_metadata(root, metadata)
+        print(f"{source} -> {job['output_model_id']}")
+    metadata.update(status="completed", completed_at=datetime.now().isoformat(timespec="seconds"))
+    write_run_metadata(root, metadata)
+
+
 def main() -> None:
     cli_args = parse_args()
+    if getattr(cli_args, "refit_source_model_id", None):
+        run_refit_batch(cli_args)
+        return
     if cli_args.resume_id:
         checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
         checkpoint = load_checkpoint(checkpoint_path)
@@ -2089,7 +2171,7 @@ def main() -> None:
         return
     if getattr(cli_args, "lane_survival_mode", None) or getattr(cli_args, "pc_xpass_id", None):
         pc_versions.cache_dir("sportec", cli_args)
-    validation_mode = str(getattr(cli_args, "validation_mode", "holdout_80_20"))
+    validation_mode = str(getattr(cli_args, "validation_mode", "holdout"))
     split_manifest = getattr(cli_args, "split_manifest", None)
     if split_manifest is None:
         split_manifest, _ = resolve_training_split(cli_args, load_feature_run_metadata(cli_args.feature_run_id, required=True))
@@ -2121,197 +2203,109 @@ def main() -> None:
         {task: task in trained_model_ids for task in MODEL_TOGGLE_DEFAULTS},
     )
 
-    expanding_summaries: dict[str, list[dict[str, object]]] = {}
-    learning_curve_paths: dict[str, str | None] = {}
-    if validation_mode == "expanding":
-        total_stages = len(commands) * 4
-        stage_index = 0
-        for fold in range(1, 4):
-            for low_level_args in commands:
-                stage_index += 1
-                command = [python, "train.py"]
-                if resolved_feature_run_id:
-                    command.extend(["--feature-run-id", str(resolved_feature_run_id)])
-                command.extend(low_level_args)
-                command.extend(
-                    [
-                        *split_cli_args(cli_args),
-                        "--validation-mode", "expanding",
-                        "--validation-fold", str(fold),
-                        "--artifact-stage", f"fold_{fold}",
-                    ]
-                )
-                command = append_runtime_flags(
-                    command,
-                    device=getattr(cli_args, "device", None),
-                    pin_memory=getattr(cli_args, "pin_memory", None),
-                )
-                command = append_training_control_flags(command, training_control_settings)
-                command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
-                print("Running:", " ".join(command))
-                try:
-                    run_training(command, cwd=ROOT, options=cli_args)
-                except subprocess.CalledProcessError as exc:
-                    write_run_metadata(
-                        bundle_root,
-                        {
-                            "bundle_id": bundle_id,
-                            "feature_run_id": resolved_feature_run_id,
-                            **split_metadata(cli_args),
-                            "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
-                            "split_manifest_id": split_manifest["manifest_id"],
-                            "validation_mode": validation_mode,
-                            "failed_command": command,
-                            "commands": executed_commands,
-                            "returncode": int(exc.returncode),
-                            "status": "failed",
-                        },
-                    )
-                    raise
-                executed_commands.append(command)
+    stages = getattr(cli_args, "validation_stages", None) or plan_validation_stages(
+        split_manifest["train"], validation_mode=validation_mode,
+        validation_count=getattr(cli_args, "validation_count", None),
+        validation_fraction=getattr(cli_args, "validation_fraction", None),
+        training_counts=getattr(cli_args, "training_counts", None),
+        training_fractions=getattr(cli_args, "training_fractions", None))
+    stage_model_ids = {task: [] for task in trained_model_ids}
+    refit_sources = {}
+    total_stages = len(commands) * (len(stages) + int(bool(getattr(cli_args, "final_refit", False))))
+    stage_index = 0
+    progress = {"bundle_id": bundle_id, "feature_run_id": resolved_feature_run_id,
+                **split_metadata(cli_args), "split_manifest_id": split_manifest["manifest_id"],
+                "validation_mode": validation_mode, "validation_protocol": VALIDATION_PROTOCOL_SHARED,
+                "stage_model_ids": stage_model_ids, "completed_model_ids": completed_model_ids,
+                "model_ids": {**dict(existing_bundle.get("model_ids", {})), **explicit_source_model_ids},
+                "commands": executed_commands, "status": "running"}
 
-        expanding_summaries = _read_fold_summaries(trained_model_ids)
+    def execute(command):
+        print("Running:", subprocess.list2cmdline(command))
+        try:
+            run_training(command, cwd=ROOT, options=cli_args)
+        except BaseException as exc:
+            failed_task, failed_run = get_cli_value(command, "--task"), get_cli_value(command, "--run-id")
+            failed_stage = get_cli_value(command, "--artifact-stage")
+            config = get_cli_value(command, "--refit-config")
+            if config:
+                settings = json.loads(Path(config).read_text(encoding="utf-8"))["args"]
+                failed_task, failed_run, failed_stage = settings["task"], settings["run_id"], settings["artifact_stage"]
+            failed_root = get_model_run_root(failed_task, failed_run) if failed_task and failed_run else None
+            if failed_root and failed_stage:
+                failed_root /= failed_stage
+            progress.update(status="failed", failed_command=command, error=str(exc),
+                            failed_task=failed_task, failed_model_id=f"{failed_task}/{failed_run}" if failed_root else None,
+                            failed_log=str(failed_root / "log.txt") if failed_root else None,
+                            failed_crash_log=str(failed_root / "crash.log") if failed_root else None)
+            if isinstance(exc, subprocess.CalledProcessError):
+                progress["returncode"] = exc.returncode
+                progress["returncode_description"] = describe_returncode(exc.returncode)
+            write_run_metadata(bundle_root, progress)
+            print(f"Training failed. Model bundle manifest: {bundle_root / 'metadata.json'}")
+            if failed_root:
+                print(f"Model log: {failed_root / 'log.txt'}")
+                print(f"Crash log: {failed_root / 'crash.log'}")
+            raise
+        executed_commands.append(command)
+
+    write_run_metadata(bundle_root, progress)
+    for stage in stages:
+        artifact_stage = stage["artifact_stage"]
         for low_level_args in commands:
             stage_index += 1
             task = get_cli_value(low_level_args, "--task")
-            best_epochs = [int(row["best_epoch"]) for row in expanding_summaries[str(task)]]
-            fixed_epochs = max(1, int(statistics.median(best_epochs) + 0.5))
+            staged_args = list(low_level_args)
+            dependency = get_cli_value(staged_args, "--ipw_model_id")
+            if dependency in trained_model_ids.values():
+                staged_args = _replace_cli_value(staged_args, "--ipw_model_id", f"{dependency}/{artifact_stage}")
             command = [python, "train.py"]
             if resolved_feature_run_id:
                 command.extend(["--feature-run-id", str(resolved_feature_run_id)])
-            command.extend(_replace_cli_value(low_level_args, "--n_epochs", fixed_epochs))
-            command.extend(
-                [
-                    *split_cli_args(cli_args),
-                    "--validation-mode", "expanding",
-                    "--final-refit",
-                    "--artifact-stage", "final_refit",
-                    "--no-early-stopping",
-                ]
-            )
-            command = append_runtime_flags(
-                command,
-                device=getattr(cli_args, "device", None),
-                pin_memory=getattr(cli_args, "pin_memory", None),
-            )
+            command.extend(staged_args)
+            command.extend([*split_cli_args(cli_args), "--validation-mode", validation_mode,
+                            "--validation-protocol", VALIDATION_PROTOCOL_SHARED,
+                            "--training-count", str(stage["training_count"]),
+                            "--validation-count", str(stage["validation_count"]),
+                            "--validation-fold", str(stage["index"]), "--artifact-stage", artifact_stage])
+            command = append_runtime_flags(command, device=getattr(cli_args, "device", None),
+                                           pin_memory=getattr(cli_args, "pin_memory", False))
+            command = append_training_control_flags(command, training_control_settings)
             command.extend(["--training-step-index", str(stage_index), "--training-step-total", str(total_stages)])
-            print("Running:", " ".join(command))
-            try:
-                run_training(command, cwd=ROOT, options=cli_args)
-            except subprocess.CalledProcessError as exc:
-                write_run_metadata(
-                    bundle_root,
-                    {
-                        "bundle_id": bundle_id,
-                        "feature_run_id": resolved_feature_run_id,
-                        **split_metadata(cli_args),
-                        "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
-                        "split_manifest_id": split_manifest["manifest_id"],
-                        "validation_mode": validation_mode,
-                        "failed_command": command,
-                        "commands": executed_commands,
-                        "returncode": int(exc.returncode),
-                        "status": "failed",
-                    },
-                )
-                raise
-            executed_commands.append(command)
-            if task:
-                completed_model_ids[task] = trained_model_ids[task]
-        learning_curve_paths = _write_learning_curves(bundle_root, expanding_summaries)
-        commands = []
-
-    total_commands = len(commands)
-    for index, args in enumerate(commands, start=1):
-        command = [python, "train.py"]
-        if resolved_feature_run_id:
-            command.extend(["--feature-run-id", str(resolved_feature_run_id)])
-        command.extend(args)
-        command.extend([*split_cli_args(cli_args), "--validation-mode", validation_mode])
-        command = append_runtime_flags(
-            command,
-            device=getattr(cli_args, "device", None),
-            pin_memory=getattr(cli_args, "pin_memory", None),
-        )
-        command = append_training_control_flags(command, training_control_settings)
-        command.extend(["--training-step-index", str(index), "--training-step-total", str(total_commands)])
-        print("Running:", " ".join(command))
-        try:
-            run_training(command, cwd=ROOT, options=cli_args)
-        except subprocess.CalledProcessError as exc:
-            failed_task = get_cli_value(command, "--task")
-            failed_run_id = get_cli_value(command, "--run-id")
-            failed_log = str(get_model_run_root(failed_task, failed_run_id) / "log.txt") if failed_task and failed_run_id else None
-            failed_crash_log = (
-                str(get_model_run_root(failed_task, failed_run_id) / "crash.log") if failed_task and failed_run_id else None
-            )
-            timestamp = datetime.now().isoformat(timespec="seconds")
-            failure_metadata = {
-                "bundle_id": bundle_id,
-                "created_at": existing_bundle.get("created_at", timestamp),
-                "updated_at": timestamp,
-                "command": subprocess.list2cmdline(sys.argv),
-                "feature_run_id": resolved_feature_run_id,
-                "use_carries": bool(getattr(cli_args, "use_carries", False)),
-                "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
-                "intended_receiver_mode": intended_receiver_mode,
-                "return_type": cli_args.return_type,
-                "target_family": cli_args.target_family,
-                **wrapper_diagnostic_metadata,
-                "use_v_edge_features": use_v_edge_features_for_mode(v_edge_feature_mode),
-                "v_edge_feature_mode": v_edge_feature_mode,
-                "use_relative_speed_edge_features": use_relative_speed_edge_features_for_mode(relative_speed_edge_feature_mode),
-                "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
-                "device": getattr(cli_args, "device", None),
-                "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
-                **training_control_settings,
-                "physical_xpass": physical_xpass_settings(cli_args),
-                "lane_survival": {
-                    "enabled": bool(feature_flags.get("lane_survival", False)),
-                    "mode": feature_flags.get("lane_survival_mode"),
-                    "cache_dir": str(pc_versions.cache_dir("sportec", cli_args)) if feature_flags.get("lane_survival", False) else None,
-                },
-                "pass_success_ipw": bool(getattr(cli_args, "pass_success_ipw", True)),
-                "pass_height_ipw": bool(getattr(cli_args, "pass_height_ipw", False)),
-                "training_feature_flags": feature_flags,
-                "batch_sizes": trained_batch_sizes,
-                "only_tasks": list(getattr(cli_args, "only_tasks", [])),
-                "success_intent_only": list(getattr(cli_args, "only_tasks", [])) == ["success_intent"],
-                "only_pass_height": list(getattr(cli_args, "only_tasks", [])) == ["pass_height"],
-                "planned_tasks": list(trained_model_ids.keys()),
-                "completed_tasks": list(completed_model_ids.keys()),
-                "completed_model_ids": completed_model_ids,
-                "model_ids": {
-                    **dict(existing_bundle.get("model_ids", {})),
-                    **explicit_source_model_ids,
-                    **completed_model_ids,
-                },
-                "commands": executed_commands,
-                "failed_command": command,
-                "failed_task": failed_task,
-                "failed_model_id": f"{failed_task}/{failed_run_id}" if failed_task and failed_run_id else None,
-                "failed_log": failed_log,
-                "failed_crash_log": failed_crash_log,
-                "returncode": int(exc.returncode),
-                "returncode_description": describe_returncode(int(exc.returncode)),
-                "error": str(exc),
-                "status": "failed",
-            }
-            if explicit_source_model_ids:
-                failure_metadata["source_model_ids"] = explicit_source_model_ids
-            write_run_metadata(bundle_root, failure_metadata)
-            print(f"Training failed for {failure_metadata['failed_model_id'] or failed_task or 'unknown task'}.")
-            print(f"Return code: {failure_metadata['returncode_description']}")
-            if failed_log:
-                print(f"Model log: {failed_log}")
-            if failed_crash_log:
-                print(f"Crash log: {failed_crash_log}")
-            print(f"Model bundle manifest: {bundle_root / 'metadata.json'}")
-            raise
-        executed_commands.append(command)
-        task = get_cli_value(command, "--task")
-        if task and task in trained_model_ids:
+            execute(command)
+            stage_model_ids[task].append(f"{trained_model_ids[task]}/{artifact_stage}")
             completed_model_ids[task] = trained_model_ids[task]
+            progress["model_ids"][task] = trained_model_ids[task]
+            write_run_metadata(bundle_root, progress)
+
+    try:
+        expanding_summaries = _read_fold_summaries(trained_model_ids, stages)
+        learning_curve_paths = _write_learning_curves(bundle_root, expanding_summaries)
+    except Exception as exc:
+        progress.update(status="failed", error=str(exc), failure_stage="validation_summary")
+        write_run_metadata(bundle_root, progress)
+        raise
+    if getattr(cli_args, "final_refit", False):
+        # Preflight every selected source before starting any refit.
+        prepared = {}
+        try:
+            for task, model_id in trained_model_ids.items():
+                source = stage_model_ids[task][-1]
+                payload = prepare_refit(source, model_id.split("/", 1)[1])
+                prepared[task] = payload
+                refit_sources[task] = payload["recipe"]["source_model_id"]
+        except (ValueError, OSError) as exc:
+            progress.update(status="failed", error=str(exc), failure_stage="refit_preflight")
+            write_run_metadata(bundle_root, progress)
+            raise
+        for task, payload in prepared.items():
+            stage_index += 1
+            payload["args"].update(training_step_index=stage_index, training_step_total=total_stages)
+            path = bundle_root / "refit_configs" / f"{task}.json"
+            write_refit_config(path, payload)
+            execute([python, "train.py", "--refit-config", str(path)])
+            stage_model_ids[task].append(f"{trained_model_ids[task]}/final_refit")
+            write_run_metadata(bundle_root, progress)
 
     final_model_ids = dict(existing_bundle.get("model_ids", {}))
     final_model_ids.update(explicit_source_model_ids)
@@ -2334,8 +2328,12 @@ def main() -> None:
         "split_manifest": split_manifest["metadata"],
         "validation_mode": validation_mode,
         "validation_folds": expanding_summaries,
-        "aggregate_validation_metrics": _aggregate_fold_metrics(expanding_summaries),
-        "final_refit_epoch_rule": "rounded_median_best_fold_epoch" if expanding_summaries else None,
+        "aggregate_validation_metrics": {},
+        "validation_protocol": VALIDATION_PROTOCOL_SHARED,
+        "validation_stages": stages,
+        "stage_model_ids": stage_model_ids,
+        "refit_source_model_ids": refit_sources,
+        "final_refit_epoch_rule": "largest_stage_best_epoch" if refit_sources else None,
         "learning_curves": learning_curve_paths,
         "intended_receiver_mode": bundle_shared.get("intended_receiver_mode"),
         "feature_run_intended_receiver_modes": feature_run_metadata.get(

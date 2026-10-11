@@ -167,9 +167,10 @@ For example, append these controls to a new wrapper run:
 Direct `train.py` launches accept the same controls, but keep their existing
 200-epoch cap and seed 128 defaults. `--max-epochs` aliases `--n_epochs`;
 supplying both is rejected. Wrapper settings apply to every selected model.
-Expanding final refits retain the rounded median best-fold epoch count, use the
-chosen seed, and keep their constant LR and absence of validation stopping.
-These controls do not add refit replay or change validation protocols.
+Optional final refits use the largest validation stage's best epoch and replay
+its recorded learning rates, without validation stopping or rollback. See
+[configurable validation and refitting](configurable_validation.md) for split
+options, saved-source refit batches, and compatibility details.
 
 Checkpoints persist the controls and latest reduction-start epoch. Resume
 restores them and rejects training overrides. Missing legacy controls normalize

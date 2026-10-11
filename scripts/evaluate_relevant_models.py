@@ -321,9 +321,13 @@ def learning_curve_selection(args: argparse.Namespace) -> tuple[dict[str, list[s
         if task in direct:
             selected[task] = direct[task]
         elif task in anchors:
-            ids = learning_curve.discover(anchors[task])
+            stage_ids = ((bundle or {}).get("stage_model_ids") or {}).get(task)
+            if stage_ids and anchors[task] == ((bundle or {}).get("model_ids") or {}).get(task):
+                ids = list(stage_ids)
+            else:
+                ids = learning_curve.discover(anchors[task])
             if len(ids) < 2:
-                skipped[task] = f"Only {len(ids)} completed expanding checkpoints found."
+                skipped[task] = f"Only {len(ids)} completed learning-curve checkpoints found."
             else:
                 selected[task] = ids
     return selected, skipped

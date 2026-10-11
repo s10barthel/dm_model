@@ -14,7 +14,7 @@ import pandas as pd
 
 from models.utils import get_model_path, parse_model_id
 from scripts.comparison_utils import metrics, paired_bootstrap
-from project_config import load_recorded_split_manifest
+from project_config import load_recorded_split_manifest, VALIDATION_PROTOCOL_SHARED
 
 
 OUTCOME_TASKS = {"outcome_scoring", "outcome_conceding"}
@@ -52,6 +52,11 @@ def checkpoint(model_id: str) -> dict:
         "requested_train_match_ids": requested_train_ids,
         "train_matches": len(train_ids), "test_match_ids": test_ids,
         "split_manifest_id": manifest_id, "seed": metadata.get("training_args", {}).get("seed"),
+        "validation_protocol": metadata.get("validation_protocol"),
+        "final_refit": bool(metadata.get("final_refit")),
+        "validation_match_ids": metadata.get("validation_match_ids", []),
+        "validation_provenance": (metadata.get("split_datasets") or {}).get("validation"),
+        "validation_example_identity": metadata.get("validation_example_identity"),
         "comparison_config": {
             key: height_definition if key == "pass_height_definition" else metadata.get(key) for key in (
                 "feature_run_id", "use_carries", "min_pass_dur", "target_family",
@@ -70,7 +75,11 @@ def discover(anchor_id: str) -> list[str]:
     root_id = f"{task}/{run_id}"
     root = get_model_path(root_id)
     ids = []
-    for fold in ("fold_1", "fold_2", "fold_3"):
+    folds = sorted((p.name for p in root.glob("fold_*") if p.is_dir() and p.name[5:].isdigit()),
+                   key=lambda name: int(name[5:]))
+    if (root / "holdout").is_dir():
+        folds.append("holdout")
+    for fold in folds:
         path = root / fold
         if (path / "metadata.json").is_file() and (path / "best_weights.pt").is_file():
             metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
@@ -113,6 +122,17 @@ def validate_series(model_ids: list[str], *, expected_task: str) -> list[dict]:
             raise ValueError(f"Training seed differs for {record['model_id']}.")
         if record.get("comparison_config") != reference_config:
             raise ValueError(f"Feature or target configuration differs for {record['model_id']}.")
+    shared = [r for r in records if r.get("validation_protocol") == VALIDATION_PROTOCOL_SHARED and not r.get("final_refit")]
+    if shared and any(r.get("validation_match_ids") != shared[0].get("validation_match_ids") for r in shared):
+        raise ValueError("Shared validation membership differs between checkpoints.")
+    for record in shared:
+        if not record.get("validation_match_ids") or set(record["validation_match_ids"]) & set(record["train_match_ids"]):
+            raise ValueError("Shared validation membership is missing or overlaps training.")
+        provenance = record.get("validation_provenance") or {}
+        reference_provenance = shared[0].get("validation_provenance") or {}
+        if (provenance.get("contributing_match_ids") != reference_provenance.get("contributing_match_ids")
+                or record.get("validation_example_identity") != shared[0].get("validation_example_identity")):
+            raise ValueError("Usable validation membership differs between checkpoints.")
     return records
 
 

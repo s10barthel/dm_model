@@ -202,40 +202,71 @@ def load_checkpoint(path):
     return checkpoint
 
 
-def publish_checkpoint_artifacts(checkpoint, directory):
-    """Repair inference files/metadata if a crash interrupted publication."""
+def publish_stage_artifacts(directory):
+    """Publish the latest completed stage, removing stale optional root weights."""
+    import shutil
     directory = Path(directory)
-    # args.json is a convenience export; resume itself reads checkpoint args.
-    (directory / "args.json").write_text(json.dumps(checkpoint["args"], indent=2), encoding="utf-8")
-    atomic_torch_save(checkpoint["model"], directory / "last_weights.pt")
+    metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
+    stage = metadata.get("artifact_stage")
+    if metadata.get("status") != "completed" or not stage:
+        return
+    root_metadata_path = directory.parent / "metadata.json"
+    def order(name):
+        if name == "final_refit":
+            return float("inf")
+        return int(name[5:]) if name and name.startswith("fold_") and name[5:].isdigit() else 0
+    if root_metadata_path.is_file():
+        root_metadata = json.loads(root_metadata_path.read_text(encoding="utf-8"))
+        if root_metadata.get("status") == "completed" and order(root_metadata.get("artifact_stage")) > order(stage):
+            return
+    for name in ("args.json", "metadata.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
+        source, target = directory / name, directory.parent / name
+        if source.exists():
+            shutil.copy2(source, target)
+        elif name == "best_acc_weights.pt":
+            target.unlink(missing_ok=True)
+
+
+def publish_checkpoint_artifacts(checkpoint, directory):
+    """Repair interrupted publication while keeping completed stage files immutable."""
+    directory = Path(directory)
+    metadata_path = directory / "metadata.json"
+    required = ["args.json", "metadata.json", "last_weights.pt"]
     if checkpoint["best"] is not None:
-        atomic_torch_save(checkpoint["best"]["model"], directory / "best_weights.pt")
+        required.append("best_weights.pt")
     if checkpoint["best_acc_weights"] is not None:
-        atomic_torch_save(checkpoint["best_acc_weights"], directory / "best_acc_weights.pt")
-    from project_config import write_run_metadata
-    write_run_metadata(directory, checkpoint["metadata"])
-    # The wrapper's expanding-validation pipeline publishes a completed stage
-    # at the model root. Finish that publication even after a native crash.
+        required.append("best_acc_weights.pt")
+    published = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.is_file() else {}
+    immutable = (checkpoint["finished"] and checkpoint["args"].get("artifact_stage")
+                 and published.get("status") == "completed"
+                 and published.get("last_epoch") == checkpoint["metadata"].get("last_epoch")
+                 and all((directory / name).is_file() for name in required))
+    if not immutable:
+        # args.json is a convenience export; resume itself reads checkpoint args.
+        (directory / "args.json").write_text(json.dumps(checkpoint["args"], indent=2), encoding="utf-8")
+        atomic_torch_save(checkpoint["model"], directory / "last_weights.pt")
+        if checkpoint["best"] is not None:
+            atomic_torch_save(checkpoint["best"]["model"], directory / "best_weights.pt")
+        if checkpoint["best_acc_weights"] is not None:
+            atomic_torch_save(checkpoint["best_acc_weights"], directory / "best_acc_weights.pt")
+        from project_config import write_run_metadata
+        write_run_metadata(directory, checkpoint["metadata"])
     if checkpoint["finished"] and checkpoint["args"].get("artifact_stage"):
-        import shutil
-        for name in ("args.json", "metadata.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
-            source = directory / name
-            if source.exists():
-                shutil.copy2(source, directory.parent / name)
+        publish_stage_artifacts(directory)
 
 
 def resolve_resume_checkpoint(model_id, saved_root):
-    """Resolve task/run or an unambiguous bare run ID; never resolve a bundle."""
+    """Resolve task/run[/stage] or an unambiguous bare run ID; never a bundle."""
     parts = model_id.replace("\\", "/").split("/")
-    if len(parts) not in (1, 2) or any(p in ("", ".", "..") or ":" in p for p in parts):
-        raise ValueError("--resume-id must be an individual task/run_id or bare run_id.")
+    if len(parts) not in (1, 2, 3) or any(p in ("", ".", "..") or ":" in p for p in parts):
+        raise ValueError("--resume-id must be task/run_id[/stage] or a bare run_id.")
     root = Path(saved_root).resolve()
-    if len(parts) == 2:
-        if parts[0] == "bundles":
+    if len(parts) >= 2:
+        if parts[0] in ("bundles", "refit_batches"):
             raise ValueError("Bundle resume is not supported; supply an individual model ID.")
         candidates = [root.joinpath(*parts)]
     else:
-        candidates = [p / parts[0] for p in root.iterdir() if p.is_dir() and p.name != "bundles" and (p / parts[0]).is_dir()]
+        candidates = [p / parts[0] for p in root.iterdir() if p.is_dir() and p.name not in ("bundles", "refit_batches") and (p / parts[0]).is_dir()]
     if len(candidates) != 1:
         raise ValueError(f"Expected one model run for {model_id!r}; found {len(candidates)}.")
     run = candidates[0]
@@ -244,7 +275,8 @@ def resolve_resume_checkpoint(model_id, saved_root):
         return direct
     # Expanding-validation stages are individual training artifacts. Resume only
     # the interrupted stage; this does not orchestrate remaining folds/refits.
-    stages = sorted(run.glob(f"*/{CHECKPOINT_NAME}"))
+    stages = sorted(run.glob(f"*/{CHECKPOINT_NAME}"),
+                    key=lambda p: int(p.parent.name[5:]) if p.parent.name.startswith("fold_") and p.parent.name[5:].isdigit() else 0)
     staged = [p for p in stages if not load_checkpoint(p)["finished"]]
     if len(staged) == 1:
         return staged[0]
