@@ -99,7 +99,7 @@ def test_checkpoint_defaults_and_signatures(tmp_path, value):
 def test_wrapper_forwarding_and_conflicts():
     with (
         patch.object(wrapper, 'resolve_feature_run_id', return_value='features'),
-        patch.object(wrapper, 'resolve_training_split', return_value=({'train': [], 'test': []}, 'test')),
+        patch.object(wrapper, 'resolve_training_split', return_value=({'train': ['m0', 'm1', 'm2', 'm3', 'm4'], 'test': []}, 'test')),
         patch.object(wrapper, 'infer_feature_run_intended_receiver_modes', return_value=['original']),
         patch.object(wrapper, 'infer_feature_run_return_types', return_value=['disc_0.9']),
     ):

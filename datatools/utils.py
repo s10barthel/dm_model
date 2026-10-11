@@ -13,6 +13,7 @@ from torch_geometric.data import Batch, Data
 
 from datatools import config
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
+from models.node_feature_config import mask_goal_poss_features
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
@@ -1601,6 +1602,8 @@ def filter_features_and_labels(
 
         if not args.get("poss_geometry_aware", True):
             graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
+
+        graph.x = mask_goal_poss_features(graph.x, args)
 
         if not args["keeper_aware"]:
             graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0

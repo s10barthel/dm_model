@@ -6,7 +6,7 @@ from torch_geometric.data import Batch
 from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
 
 from datatools import config
-from models.node_feature_config import resolve_pos_node_features
+from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.inference_masks import RuntimeInferenceMasks
 from physical_pass_model import (
     PHYSICAL_XPASS_LOGIT_ATTR,
@@ -81,6 +81,7 @@ class Encoder(nn.Module):
             graph_embeddings: [B, z] tensor.
         """
         node_features = mask_pos_node_features(batch_graphs.x, self.args)
+        node_features = mask_goal_poss_features(node_features, self.args)
         edge_features = batch_graphs.edge_attr
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
@@ -278,6 +279,7 @@ class Decoder(nn.Module):
         """
         original_node_features = node_features
         node_features = mask_pos_node_features(node_features, self.args)
+        node_features = mask_goal_poss_features(node_features, self.args)
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
             node_features = runtime.mask_nodes(

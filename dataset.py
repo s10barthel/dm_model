@@ -6,7 +6,7 @@ from torch_geometric.data import Data
 from tqdm import tqdm
 
 from datatools import config
-from models.node_feature_config import resolve_pos_node_features
+from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
@@ -237,6 +237,7 @@ class ActionDataset(Dataset):
         poss_vel_aware=True,
         poss_rel_vel_aware=False,
         poss_geometry_aware=True,
+        goal_poss_dist=False,
         goal_features_aware=True,
         goal_nodes_aware=True,
         accel_aware=True,
@@ -556,6 +557,8 @@ class ActionDataset(Dataset):
 
             if not poss_geometry_aware:  # Ignore player geometry relative to the ball possessor
                 graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
+
+            graph.x = mask_goal_poss_features(graph.x, {"goal_poss_dist": goal_poss_dist})
 
             if not keeper_aware:  # Do not distinguish between goalkeepers and outfield players
                 graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0

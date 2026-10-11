@@ -86,6 +86,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "poss_vel_aware": True,
     "poss_rel_vel_aware": False,
     "poss_geometry_aware": True,
+    "goal_poss_dist": False,
     "goal_features_aware": True,
     "goal_nodes_aware": True,
     "vel_node_features_aware": True,
@@ -104,6 +105,7 @@ LOW_LEVEL_FEATURE_FLAGS = {
     "ball_z_aware": "--ball_z_aware",
     "poss_vel_aware": "--poss_vel_aware",
     "poss_rel_vel_aware": "--poss_rel_vel_aware",
+    "goal_poss_dist": "--goal-poss-dist",
     "extend_features": "--extend_features",
 }
 
@@ -1111,6 +1113,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_false",
         default=True,
         help="Zero vx, vy, speed, and accel node features for every node, including the possessor; keep graph width unchanged.",
+    )
+    parser.add_argument(
+        "--goal-poss-dist", action="store_true", default=False,
+        help="Enable possessor distance and direction node features (14-16) on both goal nodes.",
     )
     parser.add_argument(
         "--no-poss-geometry",

@@ -33,7 +33,7 @@ from training_refit import (HISTORY_VERSION, append_rate_history, apply_refit_ra
                             load_refit_config, validate_rate_history, ValidationExampleIdentity)
 from models.graph_diagnostics import install_collation_diagnostics
 from datatools import config
-from models.node_feature_config import resolve_pos_node_features
+from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
@@ -145,6 +145,10 @@ parser.add_argument(
     help="Ignore possessor-relative geometry node features while keeping is_possessor.",
 )
 parser.set_defaults(poss_geometry_aware=True)
+parser.add_argument(
+    "--goal-poss-dist", action="store_true", default=False,
+    help="Enable possessor distance and direction node features (14-16) on both goal nodes.",
+)
 parser.add_argument(
     "--no-goal-features",
     dest="goal_features_aware",
@@ -532,6 +536,8 @@ else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+# Fresh parses explicitly default to False; saved configurations retain legacy True.
+args.goal_poss_dist = resolve_goal_poss_dist(args)
 restore_ipw_defaults(args)
 if not hasattr(args, "validation_protocol"):
     args.validation_protocol = "legacy"
@@ -933,6 +939,7 @@ if __name__ == "__main__":
     metadata = {
         "goal_context_version": args.goal_context_version,
         "goal_nodes_aware": args.goal_nodes_aware,
+        "goal_poss_dist": args.goal_poss_dist,
         "include_goals": args.include_goals,
         "model_id": args.model_id,
         "task": args.task,

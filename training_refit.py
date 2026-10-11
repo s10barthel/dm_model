@@ -10,6 +10,7 @@ from pathlib import Path
 from project_config import (SAVED_DIR, VALIDATION_PROTOCOL_SHARED, load_feature_run_metadata,
                             resolve_artifact_split, split_selector, load_model_splits)
 from dataset_loading import resolve_dataset_loading
+from models.node_feature_config import resolve_goal_poss_dist
 
 HISTORY_VERSION = 1
 OPERATIONAL_OPTIONS = {
@@ -168,6 +169,7 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
               "split_manifest_id": manifest["manifest_id"],
               "ipw_dependency_weights_sha256": metadata.get("ipw_dependency_weights_sha256")}
     args = copy.deepcopy(settings)
+    args["goal_poss_dist"] = resolve_goal_poss_dist(settings)
     args.update(split_selector(manifest))
     args.update(run_id=run_id, model_id=f"{task}/{run_id}", ipw_model_id=dependency_id, trial=None, cont=False,
                 resume_run_id=None, resume_checkpoint=None, final_refit=True, artifact_stage="final_refit",

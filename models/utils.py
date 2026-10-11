@@ -28,7 +28,7 @@ from xgboost import XGBClassifier
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.gnn import GNN
-from models.node_feature_config import resolve_pos_node_features
+from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
 from models.edge_feature_config import (
     RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
     RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
@@ -97,6 +97,7 @@ FEATURE_SIGNATURE_KEYS = (
     "poss_vel_aware",
     "poss_rel_vel_aware",
     "poss_geometry_aware",
+    "goal_poss_dist",
     "goal_features_aware",
     "goal_nodes_aware",
     "vel_node_features_aware",
@@ -165,6 +166,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "poss_vel_aware": bool(args.get("poss_vel_aware", False)),
         "poss_rel_vel_aware": bool(args.get("poss_rel_vel_aware", False)),
         "poss_geometry_aware": bool(args.get("poss_geometry_aware", True)),
+        "goal_poss_dist": resolve_goal_poss_dist(args),
         "goal_features_aware": bool(args.get("goal_features_aware", True)),
         "goal_nodes_aware": bool(args.get("goal_nodes_aware", True)),
         "vel_node_features_aware": True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"]),
@@ -265,6 +267,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
     args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
     args["pos_node_features_aware"] = resolve_pos_node_features(args)
+    args["goal_poss_dist"] = resolve_goal_poss_dist(args)
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
     enrich_model_args_from_metadata(args, metadata)
@@ -532,6 +535,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
         args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
         args["pos_node_features_aware"] = resolve_pos_node_features(args)
+        args["goal_poss_dist"] = resolve_goal_poss_dist(args)
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
