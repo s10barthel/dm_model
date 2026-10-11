@@ -66,6 +66,7 @@ class SnapshotVisualizer:
         style: str = "default",
         attacking_team_prefix: str = None,
         show_player_numbers: bool | None = None,
+        show_missing_annotations: bool = False,
     ):
         self.snapshot = snapshot.copy()
         self.sizes = player_sizes
@@ -85,6 +86,7 @@ class SnapshotVisualizer:
         self.style = style
         self.attacking_team_prefix = attacking_team_prefix if attacking_team_prefix in {"home", "away"} else None
         self.show_player_numbers = show_player_numbers
+        self.show_missing_annotations = show_missing_annotations
 
         if unnormalize:
             x_cols = [c for c in self.snapshot.columns if c.endswith("_x")]
@@ -599,7 +601,9 @@ class SnapshotVisualizer:
 
         if self.annots is not None:
             annot_type = annot_type or ""
-            if any(component_type in annot_type for component_type in COMPONENT_ANNOT_TYPES):
+            if self.show_missing_annotations:
+                annots = self.annots
+            elif any(component_type in annot_type for component_type in COMPONENT_ANNOT_TYPES):
                 annots = self.annots.dropna()
             elif "epv" in annot_type:
                 annots = self.annots[self.annots != 0.0]
@@ -611,7 +615,12 @@ class SnapshotVisualizer:
                 annots = self.annots[self.annots >= 0.005]
 
             for p, value in annots.items():
-                if "credit" in annot_type and value > 0:
+                if self.show_missing_annotations and any(column not in snapshot for column in (f"{p}_x", f"{p}_y")):
+                    # Keep unseen candidates in exports; no position can be invented for their labels.
+                    continue
+                if pd.isna(value):
+                    text = "N/A"
+                elif "credit" in annot_type and value > 0:
                     text = f"+{value:.3f}"
                 elif "credit" in annot_type and value < 0:
                     text = f"-{-value:.3f}"

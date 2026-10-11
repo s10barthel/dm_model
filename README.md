@@ -1731,7 +1731,7 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 
 ### Shared inference masks
 
-Evaluation, component inference, Hawkeye, action-component visualization, and EPV generation accept the same runtime feature masks. `scripts/main.py` forwards its combined mask configuration to learned evaluation/inference stages, including EPV generation, without changing feature generation or training. Outside evaluation, only the requested combined masked inference runs; numbered configurations are evaluation-only.
+Evaluation, component inference, Hawkeye, action-component visualization, and EPV generation accept the same runtime feature masks. `scripts/main.py` forwards its combined mask configuration to learned evaluation/inference stages, including EPV generation, without changing feature generation or training. Unnumbered masks preserve single masked inference outside evaluation. The two inference visualizers also support numbered configurations for PNG comparison, as described below; other inference scripts accept only the combined unnumbered form.
 
 ```powershell
 python scripts/evaluate_relevant_models.py --compare --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b
@@ -1763,7 +1763,78 @@ Individual semantic names such as `node.vx` and `node.goal_dist` permit column-l
 
 Masking occurs after feature derivation at encoder and decoder learned-input boundaries, including skip connections. Original positions still determine distances, angles, candidates, geometric control calculations, rendering, and physical/cache inputs. Graph topology and tensor widths remain unchanged. Masking x/y therefore measures reliance on those learned columns, not removal of every positional signal. Likewise, node-velocity masking leaves velocity edge inputs unless those are explicitly masked too.
 
-Physical xPass values remain unchanged. Masked learned predictions can change the blended result, and masked pass-intent predictions may change v5 blending weights. Output metadata records mask names, expansions, and effectiveness; evaluation artifacts and summaries distinguish configurations. Hawkeye keeps its existing visualization layouts.
+Physical xPass values remain unchanged. Masked learned predictions can change the blended result, and masked pass-intent predictions may change v5 blending weights. Output metadata records mask names, expansions, and effectiveness; evaluation artifacts and summaries distinguish configurations. Ordinary Hawkeye inference retains its existing visualization layout; comparison layouts are described below.
+
+### PNG prediction comparison visualizations
+
+Saved-component visualization supports `--compare` with repeated `--component-run-id` in
+`scripts/visualize_hawkeye.py`, `scripts/visualize_skillcorner.py`, and `scripts/visualize_benchmark.py`.
+Select at least two distinct completed runs. These scripts display stored predictions and reject all
+inference-mask arguments. Repeated component IDs require `--compare`; comparison cannot use
+`--component-dir` or tracking-only output.
+
+```powershell
+python scripts/visualize_hawkeye.py --compare `
+  --component-run-id hawkeye_run_a --component-run-id hawkeye_run_b `
+  --situation-id SITUATION --only-pass-intent --only-pass-score
+```
+
+The inference visualizers `scripts/visualize_action_components.py` and
+`scripts/run_and_visualize_hawkeye.py` support two separate modes:
+
+| Options | Behavior |
+|---|---|
+| Unnumbered `--inference-mask` alone | One masked prediction pipeline; no comparison |
+| `--compare` and repeated same-task model IDs | Compare checkpoint predictions |
+| `--compare`, repeated same-task model IDs, and unnumbered masks | Compare masked predictions; each checkpoint runs once, with no unmasked variant |
+| One or more numbered masks | One unmasked pipeline, then each independent numbered configuration |
+
+```powershell
+# Compare two checkpoints, applying the same mask to both.
+python scripts/run_and_visualize_hawkeye.py --compare `
+  --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b `
+  --inference-mask accel vel-node-features --situation-id SITUATION --only-pass-success
+
+# A single numbered mask is enough to compare against unmasked inference.
+python scripts/visualize_action_components.py --match-id MATCH --action-id 10 `
+  --pass-success-model-id pass_success/run_a --only-pass-success `
+  --inference-mask-1 accel --inference-mask-2 pos-node-features
+```
+
+Only one model task may have alternative checkpoints. Fixed supporting models can be selected
+individually or through a bundle; explicit selections override that task's bundle entry. Numbered
+masks require one checkpoint per participating task and reject `--compare`, repeated alternative
+checkpoints, and mixed numbered/unnumbered masks. Numbers must be positive and unique, and are
+processed numerically. Unscoped masks require one participating task, including dependencies;
+otherwise use `task:name` or `all:name`. Existing evaluation CLI behavior is unchanged.
+
+Comparison output is PNG only. Hawkeye, SkillCorner, and action-component comparisons use two
+columns in selection order, wrapping onto new rows; odd counts leave the final slot blank. Benchmark
+keeps game states 1 and 2 as rows, with all compared runs arranged horizontally as columns.
+The full-image title contains the scene identifier, time where available, and component. Panel
+titles identify component-run IDs, qualified model IDs, or `Unmasked` / `mask-<n>: <inputs>`.
+Common unnumbered masks appear in a shared subtitle. Long labels wrap without changing pitch sizes.
+Team colors, positions, motion, highlights, and overlays stay fixed; only numeric predictions vary.
+No prediction-based coloring or difference panels are added.
+
+Comparisons require matching selected scenes/frames and compatible component definitions.
+Hawkeye location/freeze entries match by original action, resolved time, and effective geometry,
+not selection-row numbers. Missing selected frames/components, duplicate prediction keys, or
+incompatible geometry fail. Candidate ordering is aligned by semantic identity; differing candidate
+membership produces console and metadata warnings and unavailable predictions appear as `N/A`.
+No cohorts are silently intersected, no missing predictions become zero, and probabilities are not
+renormalized. Explicitly unselected data may differ.
+
+Each comparison run retains scene/component PNG paths and exports `aligned_predictions.csv`,
+separate `variants/variant_<hash>/predictions.parquet` files, and `metadata.json`. CSV columns use
+`prediction:<variant-id>`; tables retain full precision and candidates not displayed on the pitch.
+Metadata records source runs/checkpoints, fixed dependencies, requested/resolved masks, effectiveness,
+selected frames, geometry context, warnings, and artifact paths. No difference columns or statistical
+comparison metrics are produced. Failed comparisons record a failed status.
+
+Inference masks measure reliance on learned inputs, not performance after retraining without those
+features, and may create unfamiliar inputs. Physical inputs remain unchanged; masked pass-intent
+predictions may still change v5 blending weights and downstream pass scores.
 
 ### `scripts/run_relevant_models.py`
 

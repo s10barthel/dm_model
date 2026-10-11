@@ -70,8 +70,11 @@ from scripts.visualization_selection import (
 )
 
 
+from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_compare_argument(parser)
     parser.add_argument("--mode", choices=["standard", "loc", "freeze"], default="standard")
     row_selection = parser.add_mutually_exclusive_group()
     row_selection.add_argument(
@@ -88,7 +91,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--ball-csv",
         default=str(PROJECT_ROOT / "hawkeye_data" / "ball_data_selected.csv"),
     )
-    parser.add_argument("--component-run-id", default=None, help="Optional versioned Hawkeye component run id.")
+    parser.add_argument("--component-run-id", action=RepeatableSelection, default=None, help="Optional versioned Hawkeye component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument(
@@ -202,7 +205,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--time-norm-start/--time-norm-end are only valid with --output gif or --output mp4.")
     if args.mode == "standard" and args.output == "png" and args.time_norm is None:
         args.time_norm = [0.0]
-    return args
+    return validate_comparison_args(parser, args, inference=False)
 
 
 def render_frame_image(
@@ -215,6 +218,7 @@ def render_frame_image(
     selection_labels: pd.Series | None = None,
     selections_enabled: bool = False,
     selection_denominators: dict[str, int] | None = None,
+    comparison: bool = False,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -230,7 +234,7 @@ def render_frame_image(
             for player_id in probs.index
             if isinstance(player_id, str) and player_id.startswith(attacking_prefix)
         ]
-        component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
+        component_probs = probs.loc[attack_targets].sort_values(ascending=False)
 
     player_annots = component_probs if not component_probs.empty else None
     highlight_players = (
@@ -239,6 +243,9 @@ def render_frame_image(
         else None
     )
 
+    if not comparison:
+        component_probs = component_probs.dropna()
+
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
@@ -246,6 +253,7 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
+        show_missing_annotations=comparison,
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -256,16 +264,17 @@ def render_frame_image(
         title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
-    ax.text(
-        0.5,
-        1.01,
-        title,
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=12,
-        color="black",
-    )
+    if not comparison:
+        ax.text(
+            0.5,
+            1.01,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            color="black",
+        )
     add_overlay_annotations(
         ax,
         snapshot,
@@ -817,6 +826,10 @@ def run_tracking_only_visualization(
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "visualization_comparison", None):
+        from scripts.saved_visualization_comparison import run_comparison
+        run_comparison(args, sys.modules[__name__])
+        return
     mode = str(getattr(args, "mode", "standard"))
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)

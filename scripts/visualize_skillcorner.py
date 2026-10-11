@@ -54,8 +54,11 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
+from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_compare_argument(parser)
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
         "--index",
@@ -65,7 +68,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="SkillCorner player_possession index to visualize. Repeat to visualize multiple possessions.",
     )
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
-    parser.add_argument("--component-run-id", default=None, help="Optional versioned SkillCorner component run id.")
+    parser.add_argument("--component-run-id", action=RepeatableSelection, default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
@@ -87,7 +90,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--only-first/--only-last are only valid with --output png.")
     if args.only_first and args.only_last:
         parser.error("--only-first and --only-last cannot be combined.")
-    return args
+    return validate_comparison_args(parser, args, inference=False)
 
 
 def resolve_indices(args: argparse.Namespace) -> list[int]:
@@ -107,6 +110,7 @@ def render_frame_image(
     component_name: str,
     probs: pd.Series | None,
     show_trajectories: bool = False,
+    comparison: bool = False,
 ) -> Image.Image:
     history_frames = max(int(round(possession.fps)) - 1, 0)
     snapshot_start = max(frame_id - history_frames, int(possession.tracking.index.min()))
@@ -132,7 +136,10 @@ def render_frame_image(
             and player_id.startswith(f"{attacking_prefix}_")
             and player_visible(player_id)
         ]
-        component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
+        component_probs = probs.loc[attack_targets].sort_values(ascending=False)
+
+    if not comparison:
+        component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
@@ -141,6 +148,7 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={str(frame_info["possessor_object_id"]): "#ffd400"},
+        show_missing_annotations=comparison,
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -148,16 +156,17 @@ def render_frame_image(
     title = f"{possession.match_id} | possession {possession.event_index} | frame {frame_id} | {component_name.replace('_', ' ').title()}"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
-    ax.text(
-        0.5,
-        1.01,
-        title,
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=12,
-        color="black",
-    )
+    if not comparison:
+        ax.text(
+            0.5,
+            1.01,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            color="black",
+        )
 
     image = figure_to_rgb_image(fig, dpi=150, tight=False)
     plt.close(fig)
@@ -315,6 +324,10 @@ def render_possession(
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "visualization_comparison", None):
+        from scripts.saved_visualization_comparison import run_comparison
+        run_comparison(args, sys.modules[__name__])
+        return
     component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("skillcorner_visualization")
     output_parent = Path(args.output_dir)

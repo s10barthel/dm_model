@@ -26,8 +26,12 @@ from scripts import run_benchmark, run_hawkeye, run_relevant_models, run_skillco
 def test_inference_consumers_accept_one_combined_mask(script, required):
     args = script.parse_args([*required, "--inference-mask", "all:accel", "all:goal-features"])
     assert args.inference_mask == [["all:accel", "all:goal-features"]]
-    with pytest.raises(SystemExit):
-        script.parse_args([*required, "--inference-mask-1", "accel"])
+    if script in (run_and_visualize_hawkeye, visualize_action_components):
+        numbered = script.parse_args([*required, "--inference-mask-1", "accel"])
+        assert numbered.visualization_comparison == "masks"
+    else:
+        with pytest.raises(SystemExit):
+            script.parse_args([*required, "--inference-mask-1", "accel"])
 
 
 @pytest.mark.parametrize("script", [run_hawkeye, run_benchmark])

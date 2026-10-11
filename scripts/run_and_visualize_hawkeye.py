@@ -76,9 +76,15 @@ from scripts.visualize_hawkeye import (
 )
 
 
+from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    add_inference_mask_arguments(parser)
+    add_compare_argument(parser)
+    add_inference_mask_arguments(parser, numbered=True, argv=argv)
+    parser.epilog = ("Use --compare with repeated same-task model IDs, optionally with one combined --inference-mask. "
+                     "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
+                     "against unmasked inference; numbered masks cannot be combined with --compare. PNG only.")
     parser.add_argument(
         "--situation-id",
         action="append",
@@ -138,12 +144,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="BallReceipt-relative Hawkeye end time for gif/mp4 frame range.",
     )
     parser.add_argument("--bundle-id", default=None)
-    parser.add_argument("--action-intent-model-id")
-    parser.add_argument("--pass-intent-model-id")
-    parser.add_argument("--pass-success-model-id")
-    parser.add_argument("--pass-height-model-id")
-    parser.add_argument("--outcome-scoring-model-id")
-    parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--action-intent-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-intent-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-success-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-height-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--outcome-scoring-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--outcome-conceding-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for inference blending and physical xPass rendering.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to use: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
@@ -204,7 +210,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.v5_discount = True if args.v5_discount is None else args.v5_discount
     if not math.isfinite(args.v5_intent_threshold) or args.v5_intent_threshold <= 0:
         parser.error("--v5-intent-threshold must be a positive finite float.")
-    return args
+    return validate_comparison_args(parser, args, inference=True)
 
 
 def render_frame_image(
@@ -217,6 +223,7 @@ def render_frame_image(
     selection_labels: pd.Series | None = None,
     selections_enabled: bool = False,
     selection_denominators: dict[str, int] | None = None,
+    comparison: bool = False,
 ) -> Image.Image:
     frame_start = max(frame_id - 24, int(situation.frame_meta.index.min()))
     snapshot = situation.tracking.loc[frame_start:frame_id].copy()
@@ -228,7 +235,7 @@ def render_frame_image(
         component_probs = pd.Series(dtype=float)
     else:
         attack_targets = [player_id for player_id in probs.index if isinstance(player_id, str) and player_id.startswith(attacking_prefix)]
-        component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
+        component_probs = probs.loc[attack_targets].sort_values(ascending=False)
 
     player_annots = component_probs if not component_probs.empty else None
     highlight_players = (
@@ -237,6 +244,9 @@ def render_frame_image(
         else None
     )
 
+    if not comparison:
+        component_probs = component_probs.dropna()
+
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
@@ -244,6 +254,7 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
+        show_missing_annotations=comparison,
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -254,16 +265,17 @@ def render_frame_image(
         title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
-    ax.text(
-        0.5,
-        1.01,
-        title,
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=12,
-        color="black",
-    )
+    if not comparison:
+        ax.text(
+            0.5,
+            1.01,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            color="black",
+        )
     add_overlay_annotations(
         ax,
         snapshot,
@@ -275,6 +287,90 @@ def render_frame_image(
     image = figure_to_rgb_image(fig, dpi=150, tight=False)
     plt.close(fig)
     return image
+
+
+def collect_situation_components(situation, model_specs, device, inference_frame_ids,
+                                 rendered_components, prediction_cache=None):
+    components: dict[str, pd.DataFrame] = {}
+    if situation.labels.numel() != 0 and situation.graph_features_0:
+        if "action_intent" in model_specs:
+            components["action_intent"], _ = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["action_intent"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+            )
+        if "pass_intent" in model_specs:
+            components["pass_intent"], _ = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["pass_intent"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+            )
+        if "pass_success" in model_specs:
+            components["pass_success"], _ = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["pass_success"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+                pass_intent_probs=components.get("pass_intent"),
+            )
+        if "pass_height" in model_specs:
+            components["pass_height"], _ = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["pass_height"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+            )
+        if "outcome_scoring" in model_specs:
+            scoring_failure, scoring_success = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["outcome_scoring"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+            )
+            components["outcome_scoring_success"] = scoring_success
+            components["outcome_scoring_failure"] = scoring_failure
+        if "outcome_conceding" in model_specs:
+            conceding_failure, conceding_success = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["outcome_conceding"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+            )
+            components["outcome_conceding_success"] = conceding_success
+            components["outcome_conceding_failure"] = conceding_failure
+
+    validate_derived_inputs(rendered_components, components)
+    component_frames = dict(components)
+    for case in ("failure", "success"):
+        if f"outcome_{case}" in rendered_components:
+            component_frames[f"outcome_{case}"] = compute_outcome(
+                component_frames[f"outcome_scoring_{case}"],
+                component_frames[f"outcome_conceding_{case}"],
+            )
+    if "pass_score" in rendered_components:
+        component_frames["pass_score"] = compute_pass_score(
+            pass_success=component_frames["pass_success"],
+            outcome_scoring_success=component_frames["outcome_scoring_success"],
+            outcome_scoring_failure=component_frames["outcome_scoring_failure"],
+            outcome_conceding_success=component_frames["outcome_conceding_success"],
+            outcome_conceding_failure=component_frames["outcome_conceding_failure"],
+        )
+
+    return component_frames
 
 
 def render_situation(
@@ -348,78 +444,9 @@ def render_situation(
             )
         inference_frame_ids = animation_frame_ids
 
-    components: dict[str, pd.DataFrame] = {}
-    if situation.labels.numel() != 0 and situation.graph_features_0:
-        if "action_intent" in model_specs:
-            components["action_intent"], _ = inference_gnn(
-                situation,
-                model_specs["action_intent"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-            )
-        if "pass_intent" in model_specs:
-            components["pass_intent"], _ = inference_gnn(
-                situation,
-                model_specs["pass_intent"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-            )
-        if "pass_success" in model_specs:
-            components["pass_success"], _ = inference_gnn(
-                situation,
-                model_specs["pass_success"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-                pass_intent_probs=components.get("pass_intent"),
-            )
-        if "pass_height" in model_specs:
-            components["pass_height"], _ = inference_gnn(
-                situation,
-                model_specs["pass_height"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-            )
-        if "outcome_scoring" in model_specs:
-            scoring_failure, scoring_success = inference_gnn(
-                situation,
-                model_specs["outcome_scoring"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-            )
-            components["outcome_scoring_success"] = scoring_success
-            components["outcome_scoring_failure"] = scoring_failure
-        if "outcome_conceding" in model_specs:
-            conceding_failure, conceding_success = inference_gnn(
-                situation,
-                model_specs["outcome_conceding"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
-            )
-            components["outcome_conceding_success"] = conceding_success
-            components["outcome_conceding_failure"] = conceding_failure
-
-    validate_derived_inputs(rendered_components, components)
-    component_frames = dict(components)
-    for case in ("failure", "success"):
-        if f"outcome_{case}" in rendered_components:
-            component_frames[f"outcome_{case}"] = compute_outcome(
-                component_frames[f"outcome_scoring_{case}"],
-                component_frames[f"outcome_conceding_{case}"],
-            )
-    if "pass_score" in rendered_components:
-        component_frames["pass_score"] = compute_pass_score(
-            pass_success=component_frames["pass_success"],
-            outcome_scoring_success=component_frames["outcome_scoring_success"],
-            outcome_scoring_failure=component_frames["outcome_scoring_failure"],
-            outcome_conceding_success=component_frames["outcome_conceding_success"],
-            outcome_conceding_failure=component_frames["outcome_conceding_failure"],
-        )
+    component_frames = collect_situation_components(
+        situation, model_specs, device, inference_frame_ids, rendered_components,
+    )
 
     component_names = list(rendered_components)
     if bool(getattr(args, "show_physical_xpass", False)):
@@ -492,6 +519,10 @@ def render_situation(
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "visualization_comparison", None):
+        from scripts.inference_visualization_comparison import run_comparison
+        run_comparison(args, sys.modules[__name__])
+        return
     component_selection = resolve_component_selection(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")

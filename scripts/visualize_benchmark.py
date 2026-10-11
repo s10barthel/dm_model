@@ -51,12 +51,15 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
-def parse_args() -> argparse.Namespace:
+from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_compare_argument(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "benchmark"))
     parser.add_argument("--modification", action="append", type=int, help="Restrict visualization to one or more benchmark modifications.")
     parser.add_argument("--game-state", action="append", type=int, choices=[1, 2], help="Restrict visualization to one or more benchmark game states.")
-    parser.add_argument("--component-run-id", default=None, help="Optional versioned benchmark component run id.")
+    parser.add_argument("--component-run-id", action=RepeatableSelection, default=None, help="Optional versioned benchmark component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit benchmark component-run root override.")
     parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
     parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
@@ -68,7 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-trajectories", action="store_true")
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
-    return resolve_top_pass_selector(parser, parser.parse_args())
+    args = resolve_top_pass_selector(parser, parser.parse_args(argv))
+    return validate_comparison_args(parser, args)
 
 
 def render_state_image(
@@ -76,6 +80,7 @@ def render_state_image(
     component_name: str,
     probs: pd.Series | None,
     show_trajectories: bool = False,
+    comparison: bool = False,
 ) -> Image.Image:
     frame_id = int(state.frame_meta.index.min())
     snapshot = state.tracking.loc[frame_id:frame_id].copy()
@@ -89,9 +94,12 @@ def render_state_image(
             for player_id in probs.index
             if isinstance(player_id, str) and player_id.startswith("home_")
         ]
-        component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
+        component_probs = probs.loc[attack_targets].sort_values(ascending=False)
 
     possessor_object_id = str(state.frame_meta.at[frame_id, "possessor_object_id"])
+    if not comparison:
+        component_probs = component_probs.dropna()
+
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
         ball_xy=ball_xy,
@@ -99,6 +107,7 @@ def render_state_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={possessor_object_id: "#ffd400"},
+        show_missing_annotations=comparison,
         style="pitchcontrol",
         attacking_team_prefix="home",
     )
@@ -110,18 +119,19 @@ def render_state_image(
     )
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
-    ax.text(
-        0.5,
-        1.01,
-        title,
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=12,
-        color="black",
-    )
+    if not comparison:
+        ax.text(
+            0.5,
+            1.01,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            color="black",
+        )
 
-    image = figure_to_rgb_image(fig, dpi=150)
+    image = figure_to_rgb_image(fig, dpi=150, tight=not comparison)
     plt.close(fig)
     return image
 
@@ -186,6 +196,10 @@ def _probs_for_component_frame(
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "visualization_comparison", None):
+        from scripts.saved_visualization_comparison import run_comparison
+        run_comparison(args, sys.modules[__name__])
+        return
     component_selection = resolve_component_selection(args)
     visualization_run_id = args.run_id or generate_run_id("benchmark_visualization")
     output_parent = Path(args.output_dir)

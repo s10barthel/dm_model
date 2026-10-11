@@ -14,11 +14,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 
 from datatools import config
 from datatools.graph_feature import construct_graph_features, construct_graph_for_action, summarize_ball_trajectory
 from datatools.match import Match
 from datatools.viz_helpers import (
+    figure_to_rgb_image,
     compute_outcome,
     compute_pass_score,
     validate_derived_inputs,
@@ -70,9 +72,15 @@ from project_config import (
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
+from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    add_inference_mask_arguments(parser)
+    add_compare_argument(parser)
+    add_inference_mask_arguments(parser, numbered=True, argv=argv)
+    parser.epilog = ("Use --compare with repeated same-task model IDs, optionally with one combined --inference-mask. "
+                     "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
+                     "against unmasked inference; numbered masks cannot be combined with --compare. PNG only.")
     parser.add_argument("--match-id", required=True)
     parser.add_argument(
         "--action-id",
@@ -146,13 +154,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--physical-num-workers", "--num-workers", dest="physical_num_workers", default="auto")
     parser.add_argument("--physical-worker-thread-limit", "--worker-thread-limit", dest="physical_worker_thread_limit", type=int, default=1)
     parser.add_argument("--physical-batch-size", type=int, default=16)
-    parser.add_argument("--action-intent-model-id")
-    parser.add_argument("--pass-intent-model-id")
-    parser.add_argument("--success-intent-model-id")
-    parser.add_argument("--pass-success-model-id")
-    parser.add_argument("--pass-height-model-id")
-    parser.add_argument("--outcome-scoring-model-id")
-    parser.add_argument("--outcome-conceding-model-id")
+    parser.add_argument("--action-intent-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-intent-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--success-intent-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-success-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--pass-height-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--outcome-scoring-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
+    parser.add_argument("--outcome-conceding-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
     add_component_selection_args(parser, include_intended_recipient=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
@@ -193,7 +201,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.v5_discount = True if args.v5_discount is None else args.v5_discount
     if not math.isfinite(args.v5_intent_threshold) or args.v5_intent_threshold <= 0:
         parser.error("--v5-intent-threshold must be a positive finite float.")
-    return args
+    return validate_comparison_args(parser, args, inference=True)
 
 
 def parse_bool(value: str | bool) -> bool:
@@ -551,7 +559,8 @@ def render_component(
     probs: pd.Series,
     output_path: Path,
     show_trajectories: bool = False,
-) -> None:
+    comparison: bool = False,
+) -> Image.Image | None:
     action = match.actions.loc[action_index]
     frame_id = int(action["frame_id"])
     snapshot = match.tracking.loc[max(frame_id - 24, 0) : frame_id].copy()
@@ -559,10 +568,13 @@ def render_component(
 
     attacking_prefix = action["object_id"][:4]
     attack_targets = [player_id for player_id in probs.index if player_id.startswith(attacking_prefix)]
-    component_probs = probs.loc[attack_targets].dropna().sort_values(ascending=False)
+    component_probs = probs.loc[attack_targets].sort_values(ascending=False)
     player_annots = component_probs if not component_probs.empty else None
     highlight_players = resolve_highlight_players(snapshot, action, component_name)
     ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name)
+
+    if not comparison:
+        component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
         snapshot=snapshot,
@@ -572,6 +584,7 @@ def render_component(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
+        show_missing_annotations=comparison,
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -580,16 +593,21 @@ def render_component(
     title = f"{action['spadl_type']} {display_action_id} - {component_name.replace('_', ' ').title()}"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
-    ax.text(
-        0.5,
-        1.01,
-        title,
-        transform=ax.transAxes,
-        ha="center",
-        va="bottom",
-        fontsize=12,
-        color="black",
-    )
+    if not comparison:
+        ax.text(
+            0.5,
+            1.01,
+            title,
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            color="black",
+        )
+    if comparison:
+        image = figure_to_rgb_image(fig, dpi=200, tight=False)
+        plt.close(fig)
+        return image
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -624,7 +642,7 @@ def possession_state_for_action(match, action_index, feature_root):
     return state, frame
 
 
-def render_action_components(
+def collect_action_components(
     match: Match,
     loaded_models: dict[str, object],
     feature_root: Path,
@@ -638,7 +656,8 @@ def render_action_components(
     physical_xpass_metric_name: str | None = None,
     physical_xpass_version_name: str | None = None,
     rendered_components: list[str] | None = None,
-) -> None:
+    prediction_cache: dict | None = None,
+) -> dict[str, pd.Series]:
     rendered_components = rendered_components or [
         "action_intent",
         "pass_intent",
@@ -672,7 +691,8 @@ def render_action_components(
         state_inputs = ({"graph_override": pc_state.graph_features_0, "label_override": pc_state.labels}
                         if uses_possession else {})
         if component_name.startswith("outcome_"):
-            failure_probs, success_probs = inference_gnn(
+            failure_probs, success_probs = cached_prediction(
+                prediction_cache, inference_gnn,
                 model_match,
                 model,
                 device=device,
@@ -696,7 +716,8 @@ def render_action_components(
                           if component_name == "pass_success" and "pass_intent" in component_prob_rows else None)
                 if intent is not None:
                     intent.index = [model_index]
-                probs, _ = inference_gnn(
+                probs, _ = cached_prediction(
+                    prediction_cache, inference_gnn,
                     model_match,
                     model,
                     device=device,
@@ -736,6 +757,43 @@ def render_action_components(
             outcome_conceding_failure=component_prob_rows["outcome_conceding_failure"],
         )
 
+    return component_prob_rows
+
+
+def render_action_components(
+    match: Match,
+    loaded_models: dict[str, object],
+    feature_root: Path,
+    device: str,
+    action_index: int,
+    display_action_id: str,
+    output_dir: Path,
+    show_trajectories: bool = False,
+    show_physical_xpass: bool = False,
+    physical_cache_dir: Path | str | None = None,
+    physical_xpass_metric_name: str | None = None,
+    physical_xpass_version_name: str | None = None,
+    rendered_components: list[str] | None = None,
+) -> None:
+    component_prob_rows = collect_action_components(
+        match, loaded_models, feature_root, device, action_index, display_action_id, output_dir,
+        show_trajectories, show_physical_xpass, physical_cache_dir, physical_xpass_metric_name,
+        physical_xpass_version_name, rendered_components,
+    )
+    rendered_components = rendered_components or [
+        "action_intent",
+        "pass_intent",
+        "intended_recipient",
+        "pass_success",
+        "pass_height",
+        "outcome_scoring_success",
+        "outcome_scoring_failure",
+        "outcome_conceding_success",
+        "outcome_conceding_failure",
+        "pass_score",
+        "outcome_failure",
+        "outcome_success",
+    ]
     component_order = list(rendered_components)
     if show_physical_xpass:
         component_order.append("physical_xpass")
@@ -821,6 +879,10 @@ def merge_success_intent_context(shared_context: dict[str, object], model_id: st
 
 def main() -> None:
     args = parse_args()
+    if getattr(args, "visualization_comparison", None):
+        from scripts.inference_visualization_comparison import run_comparison
+        run_comparison(args, sys.modules[__name__])
+        return
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("visualization")
     output_parent = Path(args.output_dir)

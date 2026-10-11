@@ -87,3 +87,4 @@ __pycache__/
 _vendor/defcon/saved
 
 !tests/test_sportec_seasons.py
+!tests/test_visualization_comparison.py

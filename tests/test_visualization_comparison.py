@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import numpy as np
+import pandas as pd
+import pytest
+import torch
+from PIL import Image
+
+from scripts import visualize_hawkeye as hv, visualize_skillcorner as sv, visualize_benchmark as bv
+from scripts import visualize_action_components as av, run_and_visualize_hawkeye as dv
+from scripts import inference_visualization_comparison as inference_compare
+from scripts import saved_visualization_comparison as saved_compare
+from scripts.visualization_comparison import (
+    ComparisonExport, Variant, align_rows, compose_panels, require_row, validate_metadata_definitions,
+)
+
+
+@pytest.mark.parametrize("script,required", [(hv, []), (sv, ["--match-id", "m", "--index", "1"]), (bv, [])])
+def test_saved_cli(script, required):
+    single = script.parse_args([*required, "--component-run-id", "a"])
+    assert single.component_run_id == "a"
+    assert single.visualization_comparison is None
+    compared = script.parse_args([*required, "--compare", "--component-run-id", "a", "--component-run-id", "b"])
+    assert compared.component_run_id == ["a", "b"]
+    assert compared.visualization_comparison == "components"
+    for extra in (["--compare"], ["--compare", "--component-run-id", "a"],
+                  ["--compare", "--component-run-id", "a", "--component-run-id", "a"],
+                  ["--component-run-id", "a", "--component-run-id", "b"],
+                  ["--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-dir", "root"],
+                  ["--inference-mask", "accel"], ["--inference-mask-1", "accel"], ["--comparison"]):
+        with pytest.raises(SystemExit):
+            script.parse_args([*required, *extra])
+    if script is not bv:
+        with pytest.raises(SystemExit):
+            script.parse_args([*required, "--compare", "--component-run-id", "a", "--component-run-id", "b", "--output", "gif"])
+
+
+@pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
+def test_inference_cli(script, required):
+    ids = ["--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b"]
+    args = script.parse_args([*required, "--compare", *ids, "--inference-mask", "accel"])
+    assert args.visualization_comparison == "checkpoints"
+    args = script.parse_args([*required, "--inference-mask", "accel"])
+    assert args.visualization_comparison is None
+    args = script.parse_args([*required, "--inference-mask-9", "accel", "--inference-mask-2", "goal-features"])
+    assert args.visualization_comparison == "masks"
+    for extra in (["--compare"], ["--compare", "--pass-success-model-id", "pass_success/a"], ids,
+                  ["--compare", *ids, "--pass-success-model-id", "pass_success/a"],
+                  ["--compare", *ids, "--pass-intent-model-id", "pass_intent/a", "--pass-intent-model-id", "pass_intent/b"],
+                  ["--pass-success-model-id", "pass_intent/a"],
+                  ["--compare", "--inference-mask-1", "accel"], [*ids, "--inference-mask-1", "accel"],
+                  ["--inference-mask", "accel", "--inference-mask-1", "accel"],
+                  ["--inference-mask-1", "accel", "--inference-mask-1", "goal-features"],
+                  ["--inference-mask-0", "accel"], ["--inference-mask-1"], ["--comparison"]):
+        with pytest.raises(SystemExit):
+            script.parse_args([*required, *extra])
+    if script is dv:
+        with pytest.raises(SystemExit):
+            script.parse_args(["--inference-mask-1", "accel", "--output", "mp4"])
+
+
+def test_alignment_candidates_and_strict_rows():
+    a = pd.Series({"home_1": 0.0, "home_2": 0.8})
+    b = pd.Series({"home_2": 0.3, "home_1": 0.0})
+    aligned = align_rows([a, b], ["a", "b"], [], "scene")
+    assert list(aligned[1].index) == ["home_1", "home_2"]
+    messages = []
+    with pytest.warns(UserWarning, match="membership"):
+        aligned = align_rows([a, pd.Series({"home_3": 0.5})], ["a", "b"], messages, "scene")
+    assert aligned[0]["home_1"] == 0
+    assert pd.isna(aligned[0]["home_3"])
+    assert messages
+    with pytest.raises(ValueError, match="Duplicate"):
+        align_rows([pd.Series([1, 2], index=["a", "a"])], ["a"], [], "scene")
+    with pytest.raises(ValueError, match="Missing selected frame"):
+        require_row(pd.DataFrame({"a": [1]}, index=[1]), 2, "pass_intent")
+    with pytest.raises(ValueError, match="incompatible"):
+        validate_metadata_definitions([{"return_type": "next_5"}, {"return_type": "next_10"}])
+
+
+def test_compositor_grid_and_benchmark_order():
+    colors = ["red", "green", "blue", "yellow", "purple"]
+    tiles = [Image.new("RGB", (100, 70), color) for color in colors]
+    image = compose_panels(tiles, ["long qualified/model/identifier " * 3] * 5, "Scene | Component")
+    # Every original tile is pasted without resizing; find its unique color block.
+    pixels = np.asarray(image)
+    boxes = []
+    for tile in tiles:
+        color = np.array(tile.getpixel((0, 0)))
+        y, x = np.where(np.all(pixels == color, axis=-1))
+        boxes.append((x.min(), y.min(), x.max(), y.max()))
+        assert (x.max() - x.min() + 1, y.max() - y.min() + 1) == tile.size
+    assert boxes[0][0] == boxes[2][0] == boxes[4][0]
+    assert boxes[1][0] == boxes[3][0] > boxes[0][0]
+    assert boxes[0][1] == boxes[1][1] < boxes[2][1] == boxes[3][1] < boxes[4][1]
+    benchmark = compose_panels(tiles[:4], ["a", "b", "a", "b"], "Modification 1", columns=2,
+                               row_labels=["Game state 1", "Game state 2"])
+    assert benchmark.width > image.width
+    with pytest.raises(ValueError, match="identical dimensions"):
+        compose_panels([tiles[0], Image.new("RGB", (90, 70))], ["a", "b"], "Title")
+
+
+def test_export_precision_availability_and_identity(tmp_path):
+    variants = [Variant("run/a", "run/a"), Variant("run/b", "run/b")]
+    report = ComparisonExport(tmp_path, variants, SimpleNamespace(), "components")
+    value = 0.12345678912345678
+    with pytest.warns(UserWarning):
+        report.record("match/action", 3, "pass_intent", [pd.Series({"home_1": value}), pd.Series({"home_2": 0.0})])
+    report.finish()
+    metadata = json.loads((tmp_path / "metadata.json").read_text())
+    assert metadata["status"] == "completed" and metadata["warnings"]
+    a = pd.read_parquet(metadata["variants"][0]["predictions"])
+    assert a.loc[a.candidate_id.eq("home_1"), "value"].iloc[0] == value
+    assert not a.loc[a.candidate_id.eq("home_2"), "available"].iloc[0]
+    text = (tmp_path / "aligned_predictions.csv").read_text()
+    assert "N/A" in text and "prediction:run/a" in text
+    assert len(list((tmp_path / "variants").glob("*/predictions.parquet"))) == 2
+
+
+def _args(task="pass_success"):
+    return dict(task=task, model="gat", gnn_task="node_binary", node_in_dim=26, edge_in_dim=5,
+                node_emb_dim=8, graph_emb_dim=8, gnn_layers=1, gnn_heads=1, skip_conn=True,
+                out_dim=1, include_out=False, possessor_aware=True, poss_vel_aware=True,
+                poss_rel_vel_aware=True, extend_features=True, keeper_aware=True, ball_z_aware=True)
+
+
+class TinyModel(torch.nn.Module):
+    def __init__(self, identifier):
+        super().__init__()
+        self.identifier = identifier
+        self.args = _args(identifier.split("/")[0])
+
+
+def _record(identifier):
+    task = identifier.split("/")[0]
+    return dict(task=task, model_id=identifier, is_complete=True, args=_args(task), metadata={},
+                feature_run_id="feature", intended_receiver_mode="predict", use_carries=False,
+                return_type="next_5", target_family="goal",
+                graph_schema=dict(node_in_dim=26, edge_in_dim=5, add_v_edge_features=True,
+                                  add_relative_speed_edge_features=True))
+
+
+def _subject():
+    frames = [10, 11]
+    tracking = {}
+    for i, player in enumerate(["home_1", "home_2", "away_3", "home_goal", "away_goal"]):
+        for axis, value in [("x", 10 + i * 10), ("y", 20 + i * 2), ("vx", 1), ("vy", 0)]:
+            tracking[f"{player}_{axis}"] = [value, value]
+    tracking.update(ball_x=[10., 10.], ball_y=[20., 20.], ball_z=[0., 0.])
+    return SimpleNamespace(situation_id="s", match_id="s", tracking=pd.DataFrame(tracking, index=frames),
+        frame_meta=pd.DataFrame(dict(abs_time=[0., 0.1], possession_team=["A", "A"],
+            possession_prefix=["home", "home"], possessor_object_id=["home_1", "home_1"]), index=pd.Index(frames, name="frame_id")),
+        labels=torch.ones((2, 3)), graph_features_0=[object()], team_map={"A": "home", "B": "away"})
+
+
+@pytest.fixture
+def inference_fixture(monkeypatch):
+    subject = _subject()
+    models = {}
+    calls = []
+    monkeypatch.setattr(inference_compare, "get_model_record", _record)
+    def load(identifier, device):
+        models[identifier] = TinyModel(identifier)
+        return models[identifier]
+    monkeypatch.setattr(inference_compare, "load_model", load)
+    monkeypatch.setattr(dv, "load_hawkeye_tracking", lambda path: pd.DataFrame({"id": ["s"]}))
+    monkeypatch.setattr(dv, "clean_hawkeye_tracking", lambda frame: frame)
+    monkeypatch.setattr(dv, "load_hawkeye_ball", lambda path: pd.DataFrame())
+    monkeypatch.setattr(dv, "clean_hawkeye_ball", lambda frame: frame)
+    monkeypatch.setattr(dv, "resolve_hawkeye_situation_ids", lambda *a, **k: ["s"])
+    build = Mock(return_value=(subject, None, None))
+    monkeypatch.setattr(dv, "build_hawkeye_situation", build)
+    monkeypatch.setattr(dv, "resolve_ballreceipt", lambda frame: 0.)
+    monkeypatch.setattr(dv, "resolve_hawkeye_png_frames", lambda *a: [{"frame_id": 10, "label": "0", "resolved_time_norm": 0.}])
+    monkeypatch.setattr(dv, "load_overlay_data", lambda **kw: None)
+    monkeypatch.setattr(dv, "build_situation_overlays", lambda *a, **kw: (pd.Series(dtype=float), pd.Series(dtype=str), {"selection_denominators": {}}))
+    monkeypatch.setattr(dv, "configure_lane_survival_runtime_cache", lambda *a: None)
+    def predict(scene, model, **kwargs):
+        assert not model.training
+        mask = bool(getattr(model, "inference_masks", None))
+        intent = kwargs.get("pass_intent_probs")
+        calls.append((model.identifier, mask, None if intent is None else intent.copy(deep=True)))
+        value = (0.7 if model.identifier.endswith("/a") else 0.5) - (0.2 if mask else 0)
+        if model.args.get("xpass_weight") == "v5" and intent is not None:
+            value = float(intent.iloc[0]["home_2"])
+        result = pd.DataFrame({"home_1": [0.0], "home_2": [value], "away_3": [0.1]}, index=[10])
+        return (result * 0.1, result * 0.5) if model.args["task"].startswith("outcome_") else (result, None)
+    monkeypatch.setattr(dv, "inference_gnn", predict)
+    return subject, models, calls, build
+
+
+def test_hawkeye_numbered_masks_synthetic_end_to_end(tmp_path, monkeypatch, inference_fixture):
+    subject, models, calls, build = inference_fixture
+    original = subject.tracking.copy(deep=True)
+    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success",
+        "--inference-mask-2", "pos-node-features", "--inference-mask-1", "accel",
+        "--output-dir", str(tmp_path), "--run-id", "comparison"])
+    monkeypatch.setattr(dv, "parse_args", lambda: args)
+    dv.main()
+    assert len(calls) == 3 and [item[1] for item in calls] == [False, True, True]
+    assert build.call_count == 1
+    pd.testing.assert_frame_equal(subject.tracking, original)
+    assert models["pass_success/a"].inference_masks is None
+    root = tmp_path / "comparison"
+    assert (root / "s/pass_success_0.png").exists()
+    metadata = json.loads((root / "metadata.json").read_text())
+    assert [variant["id"] for variant in metadata["variants"]] == ["unmasked", "mask_1", "mask_2"]
+    aligned = pd.read_csv(root / "aligned_predictions.csv")
+    assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:unmasked"].iloc[0] == pytest.approx(0.7)
+    assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:mask_1"].iloc[0] == pytest.approx(0.5)
+
+
+def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatch, inference_fixture):
+    subject, models, calls, build = inference_fixture
+    bundle = {"model_ids": {task: f"{task}/support" for task in ("pass_success", "outcome_scoring", "outcome_conceding")}}
+    monkeypatch.setattr(inference_compare, "load_bundle_record", lambda identifier: bundle)
+    args = dv.parse_args(["--compare", "--bundle-id", "fixed", "--pass-success-model-id", "pass_success/a",
+        "--pass-success-model-id", "pass_success/b", "--only-pass-score", "--inference-mask", "pass_success:accel",
+        "--output-dir", str(tmp_path), "--run-id", "checkpoints"])
+    monkeypatch.setattr(dv, "parse_args", lambda: args)
+    dv.main()
+    assert len([item for item in calls if item[0].startswith("pass_success/")]) == 2
+    assert all(item[1] for item in calls if item[0].startswith("pass_success/"))
+    assert len(calls) == 4  # Two pass-success checkpoints plus each fixed outcome once.
+    assert build.call_count == 1
+    assert not any(item[0] == "pass_success/support" for item in calls)
+    metadata = json.loads((tmp_path / "checkpoints/metadata.json").read_text())
+    assert [item["id"] for item in metadata["variants"]] == ["pass_success/a", "pass_success/b"]
+    assert (tmp_path / "checkpoints/s/pass_score_0.png").exists()
+
+
+def test_masked_intent_changes_v5_dependency(tmp_path, monkeypatch, inference_fixture):
+    subject, models, calls, _ = inference_fixture
+    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--pass-intent-model-id", "pass_intent/a",
+        "--only-pass-success", "--use-physical-xpass", "--xpass-weight", "v5",
+        "--inference-mask-1", "pass_intent:accel", "--output-dir", str(tmp_path), "--run-id", "v5"])
+    monkeypatch.setattr(dv, "parse_args", lambda: args)
+    dv.main()
+    success = [item for item in calls if item[0].startswith("pass_success/")]
+    assert len(success) == 2
+    assert not success[0][1] and not success[1][1]
+    assert success[0][2].iloc[0].home_2 != success[1][2].iloc[0].home_2
+
+
+def _raw_hawkeye(value=0.4):
+    return pd.DataFrame(dict(id=["s", "s"], abs_time=[0., 0.], possession_team=["A", "A"],
+        team=["A", "A"], uefa_player_id=[1, 2], pass_intent=[0.0, value]))
+
+
+@pytest.fixture
+def saved_fixture(monkeypatch):
+    subject = _subject()
+    monkeypatch.setattr(hv, "get_hawkeye_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", lambda path: (_raw_hawkeye(0.4 if str(path) == "a" else 0.6),
+        {"status": "completed", "processed_situation_ids": ["s"], "freeze_ballreceipt": True}))
+    monkeypatch.setattr(hv, "load_hawkeye_tracking", lambda path: pd.DataFrame({"id": ["s"]}))
+    monkeypatch.setattr(hv, "clean_hawkeye_tracking", lambda value: value)
+    monkeypatch.setattr(hv, "load_hawkeye_ball", lambda path: pd.DataFrame())
+    monkeypatch.setattr(hv, "clean_hawkeye_ball", lambda value: value)
+    build = Mock(return_value=(subject, None, None))
+    monkeypatch.setattr(hv, "build_hawkeye_situation", build)
+    monkeypatch.setattr(hv, "resolve_ballreceipt", lambda value: 0.)
+    monkeypatch.setattr(hv, "resolve_hawkeye_png_frames", lambda *a: [{"frame_id": 10, "label": "0", "resolved_time_norm": 0.}])
+    monkeypatch.setattr(hv, "load_overlay_data", lambda **kw: None)
+    monkeypatch.setattr(hv, "build_situation_overlays", lambda *a, **kw: (pd.Series(dtype=float), pd.Series(dtype=str), {"selection_denominators": {}}))
+    return subject, build
+
+
+def test_saved_hawkeye_synthetic_end_to_end(tmp_path, monkeypatch, saved_fixture):
+    subject, build = saved_fixture
+    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+                          "--output-dir", str(tmp_path), "--run-id", "saved"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    assert build.call_count == 1
+    root = tmp_path / "saved"
+    assert (root / "s/pass_intent_0.png").exists()
+    table = pd.read_csv(root / "aligned_predictions.csv")
+    assert table.loc[table.candidate_id.eq("home_2"), "prediction:a"].iloc[0] == 0.4
+    assert table.loc[table.candidate_id.eq("home_2"), "prediction:b"].iloc[0] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("problem", ["duplicate", "missing", "incomplete", "definition", "different_scene"])
+def test_saved_comparison_fails_without_silent_cohort_changes(tmp_path, monkeypatch, saved_fixture, problem):
+    def load(path):
+        raw = _raw_hawkeye()
+        metadata = {"status": "completed", "processed_situation_ids": ["s"], "freeze_ballreceipt": True}
+        if str(path) == "b":
+            if problem == "duplicate":
+                raw = pd.concat([raw, raw.iloc[:1]], ignore_index=True)
+            elif problem == "missing":
+                raw["abs_time"] = 0.1
+            elif problem == "incomplete":
+                metadata["status"] = "running"
+            elif problem == "definition":
+                metadata["freeze_ballreceipt"] = False
+            else:
+                metadata["processed_situation_ids"] = ["other"]
+        return raw, metadata
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+                          "--output-dir", str(tmp_path), "--run-id", "failed"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    with pytest.raises(ValueError):
+        hv.main()
+    assert not list(tmp_path.rglob("*.png"))
+
+
+def test_real_snapshot_na_and_identical_canvas(monkeypatch):
+    subject = _subject()
+    original = subject.tracking.copy(deep=True)
+    texts = []
+    import matplotlib.axes
+    annotate = matplotlib.axes.Axes.annotate
+    def record(ax, text, *a, **kw):
+        texts.append(text)
+        return annotate(ax, text, *a, **kw)
+    monkeypatch.setattr(matplotlib.axes.Axes, "annotate", record)
+    first = hv.render_frame_image(subject, 10, "pass_intent", pd.Series({"home_1": 0., "home_2": np.nan}), comparison=True)
+    second = hv.render_frame_image(subject, 10, "pass_intent", pd.Series({"home_1": 0.3, "home_2": 0.8}), comparison=True)
+    assert first.size == second.size
+    assert "N/A" in texts and "0.000" in texts
+    pd.testing.assert_frame_equal(subject.tracking, original)
+
+
+def test_location_identity_uses_time_and_geometry_not_row_id():
+    row = pd.Series(dict(_action_id="action", resolved_time_norm=0.1, PositionX=200, PositionY=300, selection_row_id=1))
+    other = row.copy()
+    other.selection_row_id = 9
+    assert saved_compare.location_key(row, "loc") == saved_compare.location_key(other, "loc")
+    other.PositionX = 300
+    assert saved_compare.location_key(row, "loc") != saved_compare.location_key(other, "loc")
+
+
+def test_incomplete_checkpoint_and_invalid_scope_fail_before_inference(tmp_path, monkeypatch, inference_fixture):
+    _, _, calls, build = inference_fixture
+    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success",
+                          "--inference-mask-1", "pass_intent:accel", "--output-dir", str(tmp_path)])
+    with pytest.raises(ValueError, match="no participating"):
+        inference_compare.run_comparison(args, dv)
+    assert not calls and not build.call_count
+    monkeypatch.setattr(inference_compare, "get_model_record", lambda identifier: {**_record(identifier), "is_complete": False})
+    with pytest.raises(ValueError, match="incomplete"):
+        inference_compare.run_comparison(args, dv)
+
+
+@pytest.mark.parametrize("mode", ["checkpoints", "masks"])
+def test_sportec_inference_end_to_end(tmp_path, monkeypatch, inference_fixture, mode):
+    subject, models, calls, _ = inference_fixture
+    subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"], spadl_type=["pass"], action_type=["pass"]), index=[10])
+    monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
+        "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
+    load = Mock(return_value=subject)
+    monkeypatch.setattr(av, "load_match", load)
+    monkeypatch.setattr(av, "resolve_action_indices", lambda *a: [(10, "42")])
+    monkeypatch.setattr(av, "inference_gnn", dv.inference_gnn)
+    monkeypatch.setattr(av, "configure_lane_survival_runtime_cache", lambda *a: None)
+    flags = ["--compare", "--pass-success-model-id", "pass_success/b", "--inference-mask", "accel"] if mode == "checkpoints" else [
+        "--inference-mask-1", "accel", "--inference-mask-2", "pos-node-features"]
+    args = av.parse_args(["--match-id", "match", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
+                          "--output-dir", str(tmp_path), "--run-id", mode, *flags])
+    monkeypatch.setattr(av, "parse_args", lambda: args)
+    av.main()
+    assert load.call_count == 1
+    assert len(calls) == (2 if mode == "checkpoints" else 3)
+    assert (tmp_path / mode / "match/42/pass_success.png").exists()
+    metadata = json.loads((tmp_path / mode / "metadata.json").read_text())
+    assert metadata["status"] == "completed"
+    if mode == "masks":
+        requested = [item["provenance"]["inference_masks"]["requested"] for item in metadata["variants"]]
+        assert requested == [[], ["accel"], ["pos-node-features"]]
+
+
+def test_skillcorner_saved_comparison_preserves_shot_export(tmp_path, monkeypatch):
+    subject = _subject()
+    subject.event_index, subject.fps = 1, 25
+    monkeypatch.setattr(sv, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(sv, "load_run_metadata", lambda *a, **kw: {"status": "completed"})
+    def load(folder, match):
+        value = 0.4 if str(folder) == "a" else 0.6
+        return {"action_intent": pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0., 0.],
+                                               "2": [value, value], "shot": [0.2, 0.2]})}
+    monkeypatch.setattr(sv, "load_skillcorner_component_tables", load)
+    monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
+    build = Mock(return_value=(subject, None))
+    monkeypatch.setattr(sv, "build_skillcorner_possession", build)
+    args = sv.parse_args(["--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
+                          "--component-run-id", "b", "--only-action-intent", "--output-dir", str(tmp_path), "--run-id", "sc"])
+    monkeypatch.setattr(sv, "parse_args", lambda: args)
+    sv.main()
+    assert build.call_count == 1
+    assert (tmp_path / "sc/m/1/action_intent_first.png").exists()
+    assert (tmp_path / "sc/m/1/action_intent_last.png").exists()
+    table = pd.read_csv(tmp_path / "sc/aligned_predictions.csv")
+    assert "home_goal" in set(table.candidate_id)
+    assert table.loc[table.candidate_id.eq("home_goal"), "prediction:a"].iloc[0] == pytest.approx(0.2)
+
+
+def test_benchmark_saved_comparison_real_states(tmp_path, monkeypatch):
+    from datatools.benchmark import build_benchmark_state
+    source = pd.DataFrame(dict(team=[0, 1, 1, 2], player=[0, 1, 2, 3], pos_x=[0., 0., 10., 20.],
+        pos_y=[0., 0., 5., 10.], pos_z=[0., np.nan, np.nan, np.nan], smooth_x_speed=[0.] * 4,
+        smooth_y_speed=[0.] * 4, event_player=[1] * 4, playing_direction_event=[True] * 4))
+    raw = []
+    for state_id in (1, 2):
+        _, export, _ = build_benchmark_state(source, 1, state_id, 2, build_graphs=False)
+        export["pass_intent"] = np.where(export.team.eq(1), 0.3, np.nan)
+        raw.append(export)
+    export = pd.concat(raw, ignore_index=True)
+    monkeypatch.setattr(bv, "get_benchmark_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(bv, "load_benchmark_component_run", lambda folder: (export.copy(), {"status": "completed"}))
+    monkeypatch.setattr(bv, "load_benchmark_modification_data", lambda *a: {"game_state_1": source, "game_state_2": source, "higher_state_id": 2})
+    build = Mock(wraps=build_benchmark_state)
+    monkeypatch.setattr(bv, "build_benchmark_state", build)
+    args = bv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-run-id", "c",
+                          "--only-pass-intent", "--output-dir", str(tmp_path), "--run-id", "benchmark"])
+    monkeypatch.setattr(bv, "parse_args", lambda: args)
+    bv.main()
+    assert build.call_count == 2
+    image = Image.open(tmp_path / "benchmark/modification_1/pass_intent.png")
+    assert image.width > image.height
+    table = pd.read_csv(tmp_path / "benchmark/aligned_predictions.csv")
+    assert set(table.scene_id) == {"modification_1/game_state_1", "modification_1/game_state_2"}
+    assert len([name for name in table if name.startswith("prediction:")]) == 3
+
+
+def test_hawkeye_geometry_conflict_and_explicit_unselected_data():
+    first = _raw_hawkeye()
+    first["centroid_x"] = [0., 10.]
+    other = first.copy()
+    other.loc[1, "centroid_x"] = 11.
+    with pytest.raises(ValueError, match="different original scene geometry"):
+        saved_compare.validate_hawkeye_geometry([first, other])
+
+
+def test_mask_status_and_real_model_prediction_cache():
+    from models.gnn import GNN
+    from models.inference_masks import configure_inference_masks
+    from torch_geometric.data import Batch, Data
+    from scripts.visualization_comparison import cached_prediction
+    torch.manual_seed(42)
+    model = GNN(_args()).eval()
+    x = torch.ones((3, 26))
+    x[:, :3] = 0
+    x[:2, 0] = 1
+    x[:, 13] = torch.tensor([1., 0., 0.])
+    graph = Data(x=x, edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]), edge_attr=torch.ones((4, 5)))
+    graph.inference_possessor_mask = x[:, 13].bool()
+    batch = Batch.from_data_list([graph])
+    original = batch.clone()
+    calls = []
+    def predict(scene, checkpoint, **kwargs):
+        calls.append(1)
+        with torch.no_grad():
+            values = checkpoint(batch).reshape(-1).numpy()
+        return pd.DataFrame([values]), None
+    cache = {}
+    configure_inference_masks({"selected": model}, [])
+    unmasked, _ = cached_prediction(cache, predict, object(), model)
+    cached, _ = cached_prediction(cache, predict, object(), model)
+    assert len(calls) == 1
+    pd.testing.assert_frame_equal(unmasked, cached)
+    metadata = configure_inference_masks({"selected": model}, ["accel"])
+    masked, _ = cached_prediction(cache, predict, object(), model)
+    assert len(calls) == 2 and not np.array_equal(unmasked.values, masked.values)
+    assert metadata["models"]["selected"]["status"] == "applied"
+    torch.testing.assert_close(batch.x, original.x)
+    torch.testing.assert_close(batch.edge_attr, original.edge_attr)
+
+
+def test_physical_table_stays_identical_across_masks(tmp_path, monkeypatch, inference_fixture):
+    subject, models, calls, _ = inference_fixture
+    table = pd.DataFrame({"home_1": [0.], "home_2": [0.9]}, index=[10])
+    original = table.copy(deep=True)
+    physical = Mock(return_value=table)
+    monkeypatch.setattr(dv, "load_runtime_physical_xpass_visualization_table", physical)
+    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success", "--show-physical-xpass",
+        "--inference-mask-1", "pos-node-features", "--output-dir", str(tmp_path), "--run-id", "physical"])
+    monkeypatch.setattr(dv, "parse_args", lambda: args)
+    dv.main()
+    assert physical.call_count == 1 and len(calls) == 2
+    pd.testing.assert_frame_equal(table, original)
+    aligned = pd.read_csv(tmp_path / "physical/aligned_predictions.csv")
+    physical_rows = aligned.loc[aligned.component.eq("physical_xpass")]
+    np.testing.assert_array_equal(physical_rows["prediction:unmasked"], physical_rows["prediction:mask_1"])
+
+
+def test_checkpoint_selection_allows_training_size_architecture_and_feature_differences(monkeypatch, inference_fixture):
+    def record(identifier):
+        result = _record(identifier)
+        result.update(train_count=10 if identifier.endswith("/a") else 20, split_manifest_id=identifier,
+                      model_name="gat" if identifier.endswith("/a") else "gcn")
+        result["args"].update(seed=1 if identifier.endswith("/a") else 2,
+                              node_emb_dim=8 if identifier.endswith("/a") else 16,
+                              pos_node_features_aware=identifier.endswith("/a"))
+        return result
+    monkeypatch.setattr(inference_compare, "get_model_record", record)
+    args = dv.parse_args(["--compare", "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
+                          "--only-pass-success"])
+    variants, _, _, _, _ = inference_compare.resolve_variants(args, dv, False)
+    assert [item.identifier for item in variants] == ["pass_success/a", "pass_success/b"]
+
+
+@pytest.mark.parametrize("problem", ["duplicate", "missing"])
+def test_skillcorner_rejects_raw_selected_rows(tmp_path, monkeypatch, problem):
+    subject = _subject()
+    subject.event_index, subject.fps = 1, 25
+    raw = pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0.1, 0.1]})
+    broken = pd.concat([raw, raw.iloc[:1]]) if problem == "duplicate" else raw.iloc[:1]
+    args = sv.parse_args(["--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
+                          "--component-run-id", "b", "--only-pass-intent"])
+    monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
+    monkeypatch.setattr(sv, "build_skillcorner_possession", lambda *a: (subject, None))
+    with pytest.raises(ValueError):
+        list(saved_compare.skillcorner_groups(args, sv, [{"pass_intent": raw}, {"pass_intent": broken}], [{}, {}], ["pass_intent"]))
+
+
+def test_hawkeye_location_comparison_matches_different_selection_row_ids(tmp_path, monkeypatch, saved_fixture):
+    def load(path):
+        raw = _raw_hawkeye(0.4 if str(path) == "a" else 0.6)
+        raw["selection_row_id"] = 1 if str(path) == "a" else 9
+        raw["original_action_id"] = "s"
+        raw["PositionX"], raw["PositionY"] = 200., 300.
+        raw["resolved_time_norm"], raw["loc_situation_id"] = 0., "cache_identity"
+        return raw, {"status": "completed", "inference_mode": "loc"}
+    monkeypatch.setattr(hv, "get_hawkeye_loc_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    monkeypatch.setattr(hv, "apply_hawkeye_possessor_offset", lambda tracking, **kw: (tracking, {}))
+    args = hv.parse_args(["--mode", "loc", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+                          "--output-dir", str(tmp_path), "--run-id", "loc"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    assert (tmp_path / "loc/s_1/pass_intent.png").exists()
+    metadata = json.loads((tmp_path / "loc/metadata.json").read_text())
+    assert metadata["scenes"][0]["location_key"] == ["s", 0., 2., -3.]
+
+
+def test_candidate_membership_warning_is_exported_in_saved_comparison(tmp_path, monkeypatch, saved_fixture):
+    def load(path):
+        raw = _raw_hawkeye()
+        if str(path) == "b":
+            raw = raw.iloc[1:].copy()
+        return raw, {"status": "completed"}
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+                          "--output-dir", str(tmp_path), "--run-id", "candidates"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    with pytest.warns(UserWarning, match="membership"):
+        hv.main()
+    metadata = json.loads((tmp_path / "candidates/metadata.json").read_text())
+    assert metadata["warnings"] and metadata["status"] == "completed"
+    table = pd.read_csv(tmp_path / "candidates/aligned_predictions.csv", keep_default_na=False)
+    assert table.loc[table.candidate_id.eq("home_1"), "prediction:b"].iloc[0] == "N/A"
