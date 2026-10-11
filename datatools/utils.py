@@ -12,7 +12,7 @@ from shapely.geometry import Point, Polygon
 from torch_geometric.data import Batch, Data
 
 from datatools import config
-from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
+from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target, node_index_invalid_reason
 from models.node_feature_config import mask_goal_poss_features
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -1561,6 +1561,14 @@ def filter_features_and_labels(
 
         graph: Data = features[feature_pos]
         graph_labels: torch.Tensor = labels[i]
+        if policy.version == 2 and args["task"] == "failure_receiver" and graph is not None:
+            # Actual receivers may be unknown during hypothetical inference.
+            # Keep index remapping safe without filtering on observed outcomes.
+            graph_labels = graph_labels.clone()
+            for key in ("intent_index", "receiver_index"):
+                index = config.LABEL_INDEX[key]
+                if node_index_invalid_reason(graph_labels[index], graph.num_nodes) is not None:
+                    graph_labels[index] = -1
         if policy.version == 2 and args["task"] == "action_intent" and not policy.include_goals and bool(graph_labels[config.LABEL_INDEX["is_shot"]]):
             continue
 

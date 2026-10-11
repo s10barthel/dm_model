@@ -314,3 +314,49 @@ def test_empty_usable_split_fails_before_any_epoch(synthetic_training, split):
     assert provenance["requested_match_ids"] == [requested]
     assert provenance["loaded_match_count"] == 0
     assert provenance["contributing_match_count"] == 0
+
+
+@pytest.mark.parametrize("task", ["pass_height", "failure_receiver"])
+@pytest.mark.parametrize("version", [None, 1, 2])
+def test_refit_reconstruction_preserves_goal_policy(sources, tmp_path, task, version):
+    from models.goal_context import goal_policy, resolve_training_goal_settings
+    create, _ = sources
+    directory, args, _ = create(f"{task}/source")
+    args["goal_nodes_aware"] = True
+    if version is not None:
+        args["goal_context_version"] = version
+    if version == 2:
+        args["include_goals"] = False
+    (directory / "args.json").write_text(json.dumps(args))
+    expected = goal_policy(args)
+    payload = refit.prepare_refit(f"{task}/source", "new")
+    config = tmp_path / "refit.json"
+    config.write_text(json.dumps(payload))
+    restored = SimpleNamespace(**refit.load_refit_config(config))
+    assert resolve_training_goal_settings(restored, vars(restored).copy()) == expected
+
+
+@pytest.mark.parametrize("version", [None, 1, 2])
+def test_actual_refit_entrypoint_preserves_goal_policy(synthetic_training, monkeypatch, version):
+    run, _, _, _, root = synthetic_training
+    run("goal_source", ["--max-epochs", "1"])
+    source_dir = root / "saved/pass_intent/goal_source"
+    args = json.loads((source_dir / "args.json").read_text())
+    args["feature_run_id"] = "fixture_feature"
+    if version is None:
+        args.pop("goal_context_version", None)
+    else:
+        args["goal_context_version"] = version
+    (source_dir / "args.json").write_text(json.dumps(args))
+    monkeypatch.setattr(refit, "load_feature_run_metadata", lambda *a, **k: {})
+    monkeypatch.setattr(refit, "resolve_artifact_split", lambda *a, **k: (args["split_manifest"], "fixture"))
+    payload = refit.prepare_refit("pass_intent/goal_source", "goal_refit", saved_root=root / "saved")
+    path = root / "goal_recipe.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setattr(sys, "argv", ["train.py", "--refit-config", str(path)])
+    try:
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"), run_name="__main__")
+    finally:
+        faulthandler.disable()
+    checkpoint = load_checkpoint(root / "saved/pass_intent/goal_refit/final_refit" / CHECKPOINT_NAME)
+    assert checkpoint["args"]["goal_context_version"] == (version or 1)

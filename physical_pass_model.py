@@ -5247,7 +5247,26 @@ def _pass_height_predictions_for_graphs(
     model_args = getattr(model, "args", None)
     if not isinstance(model_args, dict) or model_args.get("task") != "pass_height":
         raise ValueError("Pass-height cache enrichment requires a loaded model with args['task'] == 'pass_height'.")
+    from models.goal_context import goal_policy, validate_source_goals
+    policy = goal_policy(model_args)
     prediction_graphs = graphs
+    prediction_labels = labels
+    if policy.version == 2:
+        from datatools.utils import drop_goal_nodes
+        prediction_graphs = []
+        prediction_labels = []
+        for index, graph in enumerate(graphs):
+            validate_source_goals(graph, policy)
+            if labels is None:
+                label = graph.x.new_zeros(len(config.LABEL_COLUMNS))
+                label[config.LABEL_INDEX["intent_index"]] = -1
+                label[config.LABEL_INDEX["receiver_index"]] = -1
+            else:
+                label = labels[index]
+            if not policy.input_goals:
+                graph, label = drop_goal_nodes(graph, label)
+            prediction_graphs.append(graph)
+            prediction_labels.append(label)
     if bool(model_args.get("lane_survival", False)):
         if labels is None or pc_xpass_rows is None or len(labels) != len(graphs) or len(pc_xpass_rows) != len(graphs):
             raise ValueError(
@@ -5262,7 +5281,7 @@ def _pass_height_predictions_for_graphs(
                 require_observed_target=False,
                 mode=model_args.get("lane_survival_mode"),
             )
-            for graph, label, pc_xpass_row in zip(graphs, labels, pc_xpass_rows)
+            for graph, label, pc_xpass_row in zip(prediction_graphs, prediction_labels, pc_xpass_rows)
         ]
     was_training = bool(getattr(model, "training", False))
     try:

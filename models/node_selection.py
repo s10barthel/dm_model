@@ -38,11 +38,13 @@ def validate_graph_batch(graphs):
 def selection_layout(graphs, labels, task, include_out, model_args=None):
     """Group equal candidate counts to preserve the existing argsort tie behavior."""
     graph_count = graphs.num_graphs
+    policy = goal_policy(model_args or {"task": task})
     batch = graphs.batch
     teammate = graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
     target = labels[:, 5 if task.split("_")[1] == "intent" else 6].clone()
     if task.split("_")[1] != "intent":
-        target[target == -1] = labels[target == -1, 4]
+        missing = target == -1
+        target[missing] = 0 if policy.version == 2 and task == "failure_receiver" else labels[missing, 4]
     if not bool(torch.isfinite(target).all()) or not torch.equal(target, target.trunc()):
         raise ValueError(f"Node-selection targets must be finite integers: {batch_identifiers(graphs)}")
     target = target.long()
@@ -52,10 +54,10 @@ def selection_layout(graphs, labels, task, include_out, model_args=None):
         candidate_mask = teammate
     elif task == "failure_receiver":
         candidate_mask = ~teammate
-        target -= torch.bincount(batch[teammate], minlength=graph_count)
+        if policy.version == 1:
+            target -= torch.bincount(batch[teammate], minlength=graph_count)
     else:
         candidate_mask = torch.ones_like(batch, dtype=torch.bool)
-    policy = goal_policy(model_args or {"task": task})
     if policy.version == 2:
         candidate_mask = goal_candidate_mask(graphs, model_args)
     if include_out:
@@ -66,7 +68,15 @@ def selection_layout(graphs, labels, task, include_out, model_args=None):
         indices = torch.where((batch == gi) & candidate_mask)[0]
         count = indices.numel()
         if policy.version == 2:
-            graph_target = int(graphs.ptr[gi]) + int(target[gi])
+            if task == "failure_receiver" and labels[gi, 6] == -1:
+                if not include_out:
+                    raise ValueError("Missing receiver requires include_out=True.")
+                graph_target = graphs.num_nodes + gi
+            else:
+                node_count = int(graphs.ptr[gi + 1] - graphs.ptr[gi])
+                if not 0 <= int(target[gi]) < node_count:
+                    raise ValueError("Observed target index is outside its graph.")
+                graph_target = int(graphs.ptr[gi]) + int(target[gi])
             target[gi] = target_candidate_position(indices, graph_target)
         if not 0 <= int(target[gi]) < count:
             raise ValueError(f"Node-selection target {int(target[gi])} outside {count} candidates "

@@ -28,7 +28,7 @@ def settings(task="pass_intent", nodes=True, include=None, version=2):
                 include_out=False, lane_survival=False, use_physical_xpass=False)
 
 
-def source(prefix="home"):
+def source(prefix="home", task=None):
     other = "away" if prefix == "home" else "home"
     x = torch.zeros(6, 26)
     x[:, 0] = torch.tensor([1, 0, 1, 1, 0, 1])
@@ -45,6 +45,9 @@ def source(prefix="home"):
     label[5:7] = 3
     label[7] = 1
     label[config.LABEL_INDEX["success"]] = 1
+    if task == "failure_receiver":
+        label[config.LABEL_INDEX["success"]] = 0
+        label[config.LABEL_INDEX["receiver_index"]] = 1
     return graph, label
 
 
@@ -52,7 +55,7 @@ def source(prefix="home"):
 @pytest.mark.parametrize("nodes", [True, False])
 def test_dataset_and_inference_context_agree(tmp_path, task, nodes):
     args = settings(task, nodes, include=nodes if task == "action_intent" else False)
-    graph, label = source()
+    graph, label = source(task=task)
     features, labels = tmp_path / "features", tmp_path / "labels"
     features.mkdir(); labels.mkdir()
     torch.save([graph], features / "match.pt")
@@ -62,7 +65,11 @@ def test_dataset_and_inference_context_agree(tmp_path, task, nodes):
     dataset = ActionDataset(["match"], feature_dir=features, label_dir=labels, **kwargs)
     runtime, runtime_labels = filter_features_and_labels([graph], label[None], args)
     assert len(dataset) == 1
-    torch.testing.assert_close(dataset.features[0].x, runtime[0].x)
+    prepared_x = dataset.features[0].x
+    if task == "failure_receiver":
+        assert prepared_x[int(dataset.labels[0, 5]), -1] == 1
+        prepared_x = prepared_x[:, :-1]
+    torch.testing.assert_close(prepared_x, runtime[0].x)
     torch.testing.assert_close(dataset.labels, runtime_labels)
     assert runtime[0].num_nodes == (6 if nodes else 4)
     assert runtime[0].edge_index.shape[1] == (36 if nodes else 16)
@@ -197,6 +204,8 @@ class DummyModel(torch.nn.Module):
         logits = graphs.x[:, 3] / 100 + self.weight
         if self.args["task"].startswith("outcome_"):
             return torch.stack([logits, logits], dim=1)
+        if self.args.get("include_out", False):
+            return torch.cat([logits, self.weight.expand(graphs.num_graphs)])
         return logits
 
 
@@ -205,17 +214,19 @@ class DummyModel(torch.nn.Module):
 @pytest.mark.parametrize("nodes", [True, False])
 def test_exports_match_actual_candidates(task, prefix, nodes):
     args = settings(task, nodes, nodes if task == "action_intent" else False)
-    graph, label = source(prefix)
+    graph, label = source(prefix, task=task)
     tracking = pd.DataFrame({f"{pid}_{axis}": [float(graph.x[i, 3+j])]
                              for i, pid in enumerate(graph.node_ids) for j, axis in enumerate(["x", "y"])})
     match = SimpleNamespace(tracking=tracking, actions=pd.DataFrame([dict(frame_id=0, object_id=prefix+"_1")]))
     probs, _ = inference_gnn(match, DummyModel(args), device="cpu", graph_override=[graph], label_override=label[None])
     assert (prefix+"_goal" in probs.columns) == (task == "action_intent" and nodes)
-    if task in {"pass_intent", "success_intent", "action_intent"}:
+    if task in {"pass_intent", "success_intent", "action_intent", "failure_receiver"}:
         assert float(probs.iloc[0].sum()) == pytest.approx(1)
     if task in {"pass_intent", "success_intent"}:
         assert prefix+"_1" not in probs.columns
         assert set(probs.columns) == {prefix+"_3", prefix+"_4"}
+    if task == "failure_receiver":
+        assert set(probs.columns) == {("away" if prefix == "home" else "home")+"_2"}
 
 
 @pytest.mark.parametrize("aux_version", [1, 2])

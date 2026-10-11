@@ -152,7 +152,7 @@ def test_train_and_evaluate_two_thresholds_one_feature_source(height_artifacts, 
             "--start_lr", "0.002", "--min_lr", "0.00001", "--batch_size", "4",
             "--dataset-loading", "disk", "--dataset-cache-dir", str(tmp_path / "cache"),
             "--node_emb_dim", "8", "--graph_emb_dim", "8", "--gnn_heads", "2",
-            "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping"]
+            "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping", "--no-goal-nodes"]
     cache_ids = []
     for cutoff in (1, 2):
         run_id = f"height_{cutoff}"

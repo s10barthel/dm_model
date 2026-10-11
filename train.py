@@ -777,7 +777,9 @@ if __name__ == "__main__":
         elif resume_record.get("feature_run_id") != args.feature_run_id:
             raise ValueError("Resumed checkpoint feature run does not match requested feature run.")
     from models.goal_context import resolve_training_goal_settings
-    resolve_training_goal_settings(args, resume_record)
+    # Source-based refits inherit their saved policy just like resumed runs.
+    goal_source = vars(args).copy() if args.refit_recipe is not None else resume_record
+    resolve_training_goal_settings(args, goal_source)
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}

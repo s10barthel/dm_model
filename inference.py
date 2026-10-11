@@ -14,7 +14,8 @@ from xgboost import XGBClassifier
 
 from datatools import config
 from datatools.config import FIELD_SIZE, TASK_CONFIG
-from models.goal_context import goal_policy, candidate_mask as goal_candidate_mask
+from models.goal_context import (goal_policy, candidate_mask as goal_candidate_mask,
+                                 failure_receiver_intent_invalid_reason)
 from datatools.match import Match
 from datatools.utils import (
     filter_features_and_labels,
@@ -833,6 +834,19 @@ def inference_boost(
     return pd.Series(probs, index=event_indices, dtype=float)
 
 
+def _prediction_node_ids(match, graph, label, policy, post_action=False):
+    ids = getattr(graph, "node_ids", None)
+    if ids is None:
+        action = match.actions.loc[int(label[0])]
+        frame_key, player_key = ("end_frame_id", "end_player_id") if post_action else ("frame_id", "object_id")
+        sides = find_active_players(match.tracking, int(action[frame_key]), str(action[player_key])[:4],
+                                    include_goals=policy.input_goals)
+        ids = sides[0] + sides[1]
+    if len(ids) != graph.num_nodes:
+        raise ValueError("Cannot align prediction candidates with graph node identities.")
+    return ids
+
+
 def inference_gnn(
     match: Match,
     model: GNN,
@@ -889,15 +903,16 @@ def inference_gnn(
     selected_node_ids = []
     if policy.version == 2:
         for graph, label in zip(graphs, labels):
-            ids = getattr(graph, "node_ids", None)
-            if ids is None:
-                action = match.actions.loc[int(label[0])]
-                frame_key, player_key = ("end_frame_id", "end_player_id") if post_action else ("frame_id", "object_id")
-                sides = find_active_players(match.tracking, int(action[frame_key]), str(action[player_key])[:4], include_goals=policy.input_goals)
-                ids = sides[0] + sides[1]
-            if len(ids) != graph.num_nodes:
-                raise ValueError("Cannot align prediction candidates with graph node identities.")
+            ids = _prediction_node_ids(match, graph, label, policy, post_action)
             selected_node_ids.append([ids[j] for j in torch.where(goal_candidate_mask(graph, model.args))[0].tolist()])
+    if policy.version == 2 and model.args["task"] == "failure_receiver":
+        for graph, label in zip(graphs, labels):
+            reason = failure_receiver_intent_invalid_reason(graph, label)
+            if reason is not None:
+                raise ValueError(f"failure_receiver inference requires a valid intended target: {reason}.")
+            intent_onehot = graph.x.new_zeros((graph.num_nodes, 1))
+            intent_onehot[int(label[config.LABEL_INDEX["intent_index"]])] = 1
+            graph.x = torch.cat([graph.x, intent_onehot], dim=1)
     graphs = Batch.from_data_list(graphs).to(device)
     graphs = adapt_batch_graphs_for_model(graphs, model.args, context=f"{model.args['task']} model")
     use_offside_rule_mask = model.args["task"] == "pass_success" and _uses_offside_rule_mask(model, int(graphs.x.shape[1]))
@@ -923,6 +938,7 @@ def inference_gnn(
         else:  # model.args["task"].startswith("node")
             batch = graphs.batch
             out = model(graphs)
+            node_outputs_out = out[graphs.num_nodes:]
             offside_out_mask = offside_node_mask
             physical_xpass_out = getattr(graphs, PHYSICAL_XPASS_PROB_ATTR, None)
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
@@ -931,10 +947,13 @@ def inference_gnn(
             physical_pass_height_out = getattr(graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
 
             if policy.version == 2 or TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
-                # Select components corresponding to teammates
+                # Select eligible node outputs; graphwise out logits follow them.
                 teammate_mask = goal_candidate_mask(graphs, model.args) if policy.version == 2 else graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1
                 batch = batch[teammate_mask]
-                out = out[teammate_mask]  # [N',]
+                node_out = out[:graphs.num_nodes] if policy.version == 2 else out
+                out = node_out[teammate_mask]
+                if policy.version == 2 and model.args.get("include_out", False):
+                    out = torch.cat([out, node_outputs_out])
                 offside_out_mask = offside_out_mask[teammate_mask]
                 if physical_xpass_out is not None:
                     physical_xpass_out = physical_xpass_out[teammate_mask]
@@ -1038,6 +1057,10 @@ def inference_gnn(
                     player_indices_i = [player_id for player_id in player_indices_i if player_id != str(possessor_object_id)]
                     probs_i = _renormalize_probabilities(probs_i[keep_mask])
                     offside_i = offside_i[keep_mask]
+        elif out_filter == "opponents" and policy.version == 2:
+            player_indices_i = list(selected_node_ids[i])
+            if model.args.get("include_out", False):
+                player_indices_i.append("out")
         elif out_filter == "all":  # "receiver" in model.args["task"]
             player_indices_i = active_players[0] + active_players[1]
             if model.args["include_out"]:
@@ -1172,7 +1195,7 @@ def inference_gnn(
             probs_i = dict(zip(player_indices_i, probs_i.tolist()))
             probs.append(dict(**probs_i, **{"index": event_index}))
 
-    players = sorted(list(players), key=player_sort_key)
+    players = sorted(players - {"out"}, key=player_sort_key) + (["out"] if "out" in players else [])
 
     if model.args["task"] in two_case_tasks:
         probs_0 = pd.DataFrame(probs_0).set_index("index")[players]
@@ -1199,6 +1222,9 @@ def inference_gnn_posterior(
         event_indices,
         feature_action_indices=feature_action_indices,
     )
+    policy = goal_policy(model.args)
+    if policy.version == 2:
+        graphs = attach_lane_survival_for_inference(match, graphs, labels, model)
     include_goals = (graphs[0].x[:, config.NODE_FEATURE_IS_GOAL] == 1).any().item()
     posteriors = []
 
@@ -1209,10 +1235,18 @@ def inference_gnn_posterior(
         frame = int(match.actions.at[event_index, "frame_id"])
         team = match.actions.at[event_index, "object_id"][:4]
         active_players = find_active_players(match.tracking, frame, team, include_goals=include_goals)
-        n_teammates = len(active_players[0])
+        if policy.version == 2:
+            ids = _prediction_node_ids(match, graph_i, labels[data_index], policy)
+            intent_indices = torch.where(graph_i.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)[0].tolist()
+            receiver_indices = torch.where(goal_candidate_mask(graph_i, model.args))[0]
+            intent_ids = [ids[index] for index in intent_indices]
+            receiver_ids = [ids[index] for index in receiver_indices.tolist()]
+        else:
+            intent_indices = range(len(active_players[0]))
+        n_teammates = len(intent_indices)
 
         intended_graphs = []
-        for intent_index in range(n_teammates):
+        for intent_index in intent_indices:
             intent_onehot = torch.zeros(graph_i.x.shape[0]).to(device)
             intent_onehot[intent_index] = 1
             intended_nodes = torch.cat([graph_i.x, intent_onehot.unsqueeze(1)], -1)
@@ -1221,11 +1255,24 @@ def inference_gnn_posterior(
                 intended_graph.inference_possessor_mask = graph_i.inference_possessor_mask
             intended_graphs.append(intended_graph)
         intended_graphs = Batch.from_data_list(intended_graphs).to(device)
+        if policy.version == 2:
+            intended_graphs = adapt_batch_graphs_for_model(intended_graphs, model.args,
+                                                          context="failure_receiver posterior model")
 
         with torch.no_grad():
             logits = model(intended_graphs)  # [12 * 24 + 12,] if include_out else [12 * 24,]
 
-        if model.args["include_out"]:
+        if policy.version == 2:
+            node_logits = logits[:intended_graphs.num_nodes].reshape(n_teammates, graph_i.num_nodes)
+            receive_logits = node_logits[:, receiver_indices]
+            if model.args["include_out"]:
+                receive_logits = torch.cat([receive_logits, logits[intended_graphs.num_nodes:].unsqueeze(1)], dim=1)
+                receiver_ids.append("out")
+            if receive_logits.shape[1] == 0:
+                raise ValueError("failure_receiver inference has no eligible opponent candidates.")
+            posteriors_i = pd.DataFrame(torch.softmax(receive_logits, dim=1).cpu().detach().numpy(),
+                                        index=intent_ids, columns=receiver_ids)
+        elif model.args["include_out"]:
             receive_logits = logits[:-n_teammates].reshape(n_teammates, -1)  # [12, 24]
             ballout_logits = logits[-n_teammates:].unsqueeze(1)  # [12, 1]
             logits = torch.cat([receive_logits, ballout_logits], 1)  # [12, 25]
@@ -1245,10 +1292,11 @@ def inference_gnn_posterior(
     home_players = [c[:-2] for c in valid_tracking.columns if re.match(r"home_\d+_x", c)]
     away_players = [c[:-2] for c in valid_tracking.columns if re.match(r"away_\d+_x", c)]
 
-    if model.args["include_out"]:
-        posteriors = pd.concat(posteriors)[["index"] + home_players + away_players + ["out"]].reset_index()
+    columns = ["index"] + home_players + away_players + (["out"] if model.args["include_out"] else [])
+    if policy.version == 2:
+        posteriors = pd.concat(posteriors).reindex(columns=columns).reset_index()
     else:
-        posteriors = pd.concat(posteriors)[["index"] + home_players + away_players].reset_index()
+        posteriors = pd.concat(posteriors)[columns].reset_index()
 
     if melt:
         posteriors = posteriors.melt(id_vars=["index", "option"], var_name="defender", value_name="posterior")

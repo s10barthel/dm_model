@@ -7,7 +7,9 @@ from tqdm import tqdm
 
 from datatools import config
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
-from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target
+from models.goal_context import (goal_policy, validate_source_goals, validate_observed_goal_target,
+                                 node_index_invalid_reason, failure_receiver_target_invalid_reason,
+                                 failure_receiver_intent_invalid_reason)
 from datatools.config import GOAL_NEXT10_DIAGNOSTIC_COLUMNS, LABEL_COLUMNS, LABEL_INDEX, TASK_CONFIG
 from datatools.utils import (
     adapt_graph_edge_features,
@@ -117,9 +119,11 @@ def _attach_empty_evaluation_xpass(graph: Data) -> Data:
 
 
 def pass_success_observed_target_invalid_reason(graph: Data, labels: torch.Tensor) -> str | None:
-    target_index = int(labels[LABEL_INDEX["intent_index"]].item())
-    if target_index < 0 or target_index >= int(graph.x.shape[0]):
-        return "target_index_out_of_bounds"
+    value = labels[LABEL_INDEX["intent_index"]]
+    reason = node_index_invalid_reason(value, graph.num_nodes)
+    if reason is not None:
+        return "target_" + reason
+    target_index = int(value.item())
 
     target = graph.x[target_index]
     if int(target[config.NODE_FEATURE_IS_TEAMMATE].item()) != 1:
@@ -469,7 +473,13 @@ class ActionDataset(Dataset):
             if shot_success_type == "goal":
                 oppo_received = []
                 for i, graph in enumerate(features):
-                    receiver_index = int(labels[i, 6].item())
+                    value = labels[i, 6]
+                    if policy.version == 2 and task == "failure_receiver" and (
+                        graph is None or node_index_invalid_reason(value, graph.num_nodes) is not None
+                    ):
+                        oppo_received.append(False)
+                        continue
+                    receiver_index = int(value.item())
                     if graph is None or receiver_index < 0 or receiver_index >= graph.x.shape[0]:
                         oppo_received.append(False)
                     else:
@@ -484,11 +494,11 @@ class ActionDataset(Dataset):
 
             condition &= pass_failure | dribble_failure | shot_failure
 
-        if TASK_CONFIG.at[task, "intended"]:
+        if TASK_CONFIG.at[task, "intended"] and not (policy.version == 2 and task == "failure_receiver"):
             # Only include actions with valid intended receivers
             condition &= labels[:, 5] != -1
 
-        if inplay_only:
+        if inplay_only and not (policy.version == 2 and task == "failure_receiver"):
             # Only include actions with valid receivers (excluding out-of-play)
             condition &= labels[:, 6] != -1
 
@@ -510,6 +520,20 @@ class ActionDataset(Dataset):
             if graph is None:
                 _increment_count(self.skipped_rows, "graph_none")
                 continue
+            if policy.version == 2 and task == "failure_receiver":
+                reason = failure_receiver_target_invalid_reason(graph, graph_labels, allow_out=not inplay_only)
+                if reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_failure_receiver_target:{reason}")
+                    continue
+                reason = failure_receiver_intent_invalid_reason(graph, graph_labels, input_goals)
+                if reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_failure_receiver_intent:{reason}")
+                    continue
+            if policy.version == 2 and task in {"pass_success", "pass_height"}:
+                reason = pass_success_observed_target_invalid_reason(graph, graph_labels)
+                if reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_{task}_target:{reason}")
+                    continue
             auxiliary_source = graph.clone() if auxiliary_model_args is not None else None
             auxiliary_label = graph_labels.clone() if auxiliary_model_args is not None else None
             graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
@@ -527,7 +551,7 @@ class ActionDataset(Dataset):
             if self.mask_possessor_relative_speed_edge_features:
                 graph = _mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
 
-            if task == "failure_receiver" and inplay_only:
+            if task == "failure_receiver" and inplay_only and policy.version == 1:
                 n_teammates = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).sum().item())
                 n_opponents = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 0).sum().item())
                 receiver_index = int(graph_labels[6].item()) - n_teammates
@@ -601,12 +625,21 @@ class ActionDataset(Dataset):
                     config.NODE_FEATURE_IS_POSSESSOR,
                 )
 
-            validate_observed_goal_target(graph, graph_labels, goal_args)
             if task in {"pass_success", "pass_height"}:
                 invalid_reason = pass_success_observed_target_invalid_reason(graph, graph_labels)
                 if invalid_reason is not None:
                     _increment_count(self.skipped_rows, f"invalid_{task}_target:{invalid_reason}")
                     continue
+            if policy.version == 2 and task == "failure_receiver":
+                reason = failure_receiver_intent_invalid_reason(graph, graph_labels)
+                if reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_failure_receiver_intent:{reason}")
+                    continue
+                reason = failure_receiver_target_invalid_reason(graph, graph_labels, allow_out=not inplay_only)
+                if reason is not None:
+                    _increment_count(self.skipped_rows, f"invalid_failure_receiver_target:{reason}")
+                    continue
+            validate_observed_goal_target(graph, graph_labels, goal_args)
 
             if task == "pass_height":
                 pass_high = graph_labels[LABEL_INDEX["pass_high"]]
@@ -652,7 +685,8 @@ class ActionDataset(Dataset):
 
             if task == "failure_receiver":
                 intent_onehot = torch.zeros(graph.x.shape[0])
-                intent_onehot[labels[i, 5].long()] = 1
+                intent_index = graph_labels[5] if policy.version == 2 else labels[i, 5]
+                intent_onehot[intent_index.long()] = 1
                 graph.x = torch.cat([graph.x, intent_onehot.unsqueeze(1)], -1)
 
             if self.use_physical_xpass:

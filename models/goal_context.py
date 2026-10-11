@@ -7,7 +7,8 @@ import torch
 from datatools import config
 
 GOAL_CONTEXT_TASKS = frozenset({"action_intent", "pass_intent", "success_intent",
-                               "pass_success", "outcome_scoring", "outcome_conceding"})
+                               "pass_success", "pass_height", "failure_receiver",
+                               "outcome_scoring", "outcome_conceding"})
 
 
 def _get(args, key, default=None):
@@ -38,7 +39,7 @@ def goal_policy(args):
     if version == 1 or task not in GOAL_CONTEXT_TASKS:
         return GoalPolicy(1, nodes, default_candidates, nodes and default_candidates)
     candidates = _get(args, "include_goals")
-    candidates = default_candidates if candidates is None else bool(candidates)
+    candidates = (task == "action_intent") if candidates is None else bool(candidates)
     if candidates and task != "action_intent":
         raise ValueError(f"{task} requires include_goals=False; goals may only provide input context.")
     if candidates and not nodes:
@@ -55,7 +56,7 @@ def resolve_training_goal_settings(args, resume=None):
                 raise ValueError(f"Cannot change {key} when resuming; start a new training run.")
     else:
         if _get(args, "task") not in GOAL_CONTEXT_TASKS and requested["include_goals"] is not None:
-            raise ValueError("Explicit include_goals is supported only for the six goal-context tasks.")
+            raise ValueError("Explicit include_goals is supported only for goal-context tasks.")
         policy = goal_policy({"task": _get(args, "task"), "goal_context_version": 2, **requested})
     for key, value in policy.settings().items():
         setattr(args, key, value)
@@ -94,9 +95,47 @@ def target_candidate_position(indices, target):
 
 
 def validate_observed_goal_target(graph, label, args):
-    if goal_policy(args).version != 2:
+    # Receiver observations are checked during dataset preparation, never while
+    # predicting hypothetical actions whose actual receiver is not yet known.
+    if goal_policy(args).version != 2 or _get(args, "task") == "failure_receiver":
         return
     target = label[config.LABEL_INDEX["intent_index"]]
     if not torch.isfinite(target) or target != target.trunc():
         raise ValueError("Observed target must be a finite integer node index.")
     target_candidate_position(torch.where(candidate_mask(graph, args))[0], int(target))
+
+
+def node_index_invalid_reason(value: torch.Tensor, node_count: int) -> str | None:
+    if not bool(torch.isfinite(value)):
+        return "nonfinite_index"
+    if value != value.trunc():
+        return "noninteger_index"
+    if not 0 <= int(value) < node_count:
+        return "index_out_of_bounds"
+    return None
+
+
+def failure_receiver_target_invalid_reason(graph, label, allow_out: bool) -> str | None:
+    """Validate observations before graph transforms can remap them to out."""
+    value = label[config.LABEL_INDEX["receiver_index"]]
+    if value == -1:
+        return None if allow_out else "missing_receiver"
+    reason = node_index_invalid_reason(value, graph.num_nodes)
+    if reason is not None:
+        return reason
+    target = graph.x[int(value)]
+    if target[config.NODE_FEATURE_IS_GOAL] == 1:
+        return "receiver_is_goal"
+    if target[config.NODE_FEATURE_IS_TEAMMATE] != 0:
+        return "receiver_not_opponent"
+    return None
+
+
+def failure_receiver_intent_invalid_reason(graph, label, input_goals: bool = True) -> str | None:
+    value = label[config.LABEL_INDEX["intent_index"]]
+    reason = node_index_invalid_reason(value, graph.num_nodes)
+    if reason is not None:
+        return reason
+    if not input_goals and graph.x[int(value), config.NODE_FEATURE_IS_GOAL] == 1:
+        return "intent_removed_with_goal"
+    return None
