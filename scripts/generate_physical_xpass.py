@@ -133,6 +133,7 @@ from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_f
 
 
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
+from datatools.sportec_possessions import STATE_CONTRACT as SPORTEC_STATE_CONTRACT
 from datatools.sportec_possessions import build_sportec_possessions
 from datatools.sportec_seasons import add_season_argument, select_season_match_ids
 
@@ -1538,6 +1539,10 @@ def write_runtime_dataset_metadata(
             storage="wide_parquet_one_row_per_match_possession_frame_player_id_columns",
             state_identity="match_id + possession_id + state_frame_id",
         )
+    elif source_inputs.get("state_contract") == SPORTEC_STATE_CONTRACT:
+        metadata.update(state_contract=SPORTEC_STATE_CONTRACT,
+                        storage="wide_parquet_one_row_per_physical_state_player_id_columns",
+                        state_identity="match_id + period_id + state_frame_id + possessor_id + provenance")
     if bool(getattr(args, "export_lane_control", False)):
         metadata["lane_control_export"] = {
             "enabled": True,
@@ -1584,7 +1589,7 @@ def write_runtime_dataset_metadata(
     if getattr(args, "pc_xpass_id", None):
         metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=getattr(args, "pc_xpass_namespace", "normal"))
     if bool(getattr(args, "pc_xpass", False)) and dataset in match_cache.DATASETS:
-        metadata["cache_format"] = match_cache.FORMAT
+        metadata["cache_format"] = match_cache.expected_format(cache_dir)
     write_run_metadata(cache_dir, metadata)
 
 
@@ -1756,16 +1761,9 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
                 add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                 add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
             ):
-                pc_resume.record_source(args, "sportec", state.pc_cache_match_id, {
-                    "match_id": str(match_id), "possession_id": state.event_index,
-                    "possessor_id": str(state.actions.object_id.iloc[0]),
-                    "feature_run_id": str(feature_run_id), "carry_definition": report["carry_definition"],
-                    "spell_artifact_sha256": report["spell_artifact_sha256"],
-                })
+                pc_resume.record_source(args, "sportec", state.pc_cache_match_id, state.pc_state_descriptor)
                 reports[str(match_id)] = report
-                partitions[state.pc_cache_match_id] = {"match_id": str(match_id), "possession_id": state.event_index,
-                    "possessor_id": str(state.actions.object_id.iloc[0]), "feature_run_id": str(feature_run_id),
-                    "spell_artifact_sha256": report["spell_artifact_sha256"]}
+                partitions[state.pc_cache_match_id] = state.pc_state_descriptor
                 unit = make_runtime_buffer_unit(
                     display_key=f"sportec {match_id}:spell:{state.event_index}",
                     skip_keys=[f"{match_id}:spell:{state.event_index}"],
@@ -1783,6 +1781,7 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
                                  progress_desc=f"sportec {match_id}")
             reports[str(match_id)] = match.possession_report
             transaction.set_provenance(match.possession_report)
+            transaction.set_manifest(match.sportec_state_plan.manifest())
             transaction.selection_report = match.possession_report
             match_cache.finish(transaction, args)
         except Exception as exc:
@@ -1792,7 +1791,7 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
             match_cache.end(transaction)
     write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
         source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,
-                       "state_contract": STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
+                       "state_contract": SPORTEC_STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
                        "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION]}, skipped=skipped)
     return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 

@@ -4082,6 +4082,8 @@ def load_physical_xpass_match(
         frame = transaction.read(str(match_id))
     elif cache_selection is not None:
         frame = match_cache.load_possession(cache_root, str(match_id), cache_selection)
+    elif match_cache.read_json(cache_root / "metadata.json").get("cache_format") == match_cache.SPORTEC_FORMAT:
+        frame = match_cache.load_action_rows(cache_root, str(match_id), frame_scope=frame_scope)
     else:
         if match_cache.read_json(cache_root / "metadata.json").get("cache_format") == match_cache.FORMAT:
             raise ValueError("Possession selection is required; frame rows cannot be used as event-action rows")
@@ -4510,7 +4512,7 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
-            if ("generation_settings" in metadata or metadata.get("cache_format") == match_cache.FORMAT) and "source" not in metadata:
+            if ("generation_settings" in metadata or match_cache.is_match_format(metadata.get("cache_format"))) and "source" not in metadata:
                 metadata = {**metadata, **expected_metadata}
                 if create_if_missing:
                     from pc_xpass_versions import atomic_json
@@ -6473,6 +6475,8 @@ def append_pc_xpass_lane_survival_row_to_graph(
 ) -> Data:
     """Append lane-survival values from one already-resolved pc-xPass row."""
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
+    if "state_id" in pc_xpass_row and pc_xpass_row.get("physical_state_hash") != physical_state_hash(graph):
+        raise ValueError(f"pc-xPass canonical state differs from training/inference graph: {match_id}/{action_index}")
     normalized_mode = normalize_pc_xpass_lane_survival_mode(mode)
     row = pd.Series(pc_xpass_row)
     node_ids = _node_ids(graph)

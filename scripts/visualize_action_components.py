@@ -614,24 +614,19 @@ def render_component(
 
 
 def possession_state_for_action(match, action_index, feature_root):
-    """Resolve an exact terminal possession endpoint for event visualization."""
-    from datatools.sportec_possessions import load_control_spells, build_sportec_possessions
+    """Resolve the exact canonical pre-action observation, including partial spells."""
+    from datatools.sportec_possessions import build_sportec_possessions
 
     action = match.actions.loc[action_index]
     match_id = resolve_match_id(match)
-    spells, _ = load_control_spells(match_id, feature_root)
-    candidates = spells.loc[
-        spells.terminal_frame.eq(action.frame_id)
-        & spells.carrier_id.eq(action.object_id)
-        & spells.period_id.eq(action.period_id)
-    ]
-    if len(candidates) != 1:
-        raise ValueError("Action has no unique terminal possession state for pc-xPass visualization")
     states = list(build_sportec_possessions(match, match_id, feature_root, scope="actions",
-                                           possession_ids=candidates.carry_id.tolist()))
-    if len(states) != 1:
+                                           **getattr(match, "runtime_graph_options", {})))
+    association = next((row for row in match.sportec_state_plan.actions if row["action_index"] == action_index), None)
+    key = association["pre_state_id"] if association else None
+    candidates = [state for state, _ in states if state.actions.state_id.eq(key).any()]
+    if len(candidates) != 1:
         raise ValueError("Action has no valid possession state for pc-xPass visualization")
-    state = states[0][0]
+    state = candidates[0]
     frame = int(action.frame_id)
     if frame not in state.actions.index:
         raise ValueError("Action frame was excluded by possession validity checks")
@@ -675,7 +670,7 @@ def collect_action_components(
     component_prob_rows: dict[str, pd.Series] = {}
 
     cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json") if physical_cache_dir else {}
-    possession_cache = cache_metadata.get("cache_format") == match_cache.FORMAT or cache_metadata.get("source") == "pc_xpass"
+    possession_cache = match_cache.is_match_format(cache_metadata.get("cache_format")) or cache_metadata.get("source") == "pc_xpass"
     pc_state, pc_frame = None, None
     if possession_cache or any(getattr(model, "args", {}).get("pc_xpass") for model in loaded_models.values()):
         if physical_cache_dir:

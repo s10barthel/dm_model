@@ -196,7 +196,7 @@ def test_numerical_batch_round_trip_reuse_extension_and_visualization(tmp_path, 
     table = physics.load_runtime_physical_xpass_visualization_table(root, "match", [10, 15, 20],
              metric="max_xpass", cache_selection=cache.Selection(1, "one", {}))
     assert table.index.tolist() == [10, 15, 20]
-    with pytest.raises(ValueError, match="Possession selection"):
+    with pytest.raises(ValueError, match="canonical action manifest" if dataset == "sportec" else "Possession selection"):
         physics.load_physical_xpass_match(root, "match")
 
 
@@ -223,6 +223,7 @@ def test_dataset_runner_publishes_actual_match_once(tmp_path, monkeypatch, datas
             label[physics.LABEL_INDEX["action_index"]] = frame
             labels.append(label)
         return SimpleNamespace(pc_cache_match_id=str(pid), match_id="match", event_index=pid,
+            pc_state_descriptor=descriptor(pid),
             actions=pd.DataFrame({"object_id": f"home_{pid}", "player_id": pid, "period_id": 1}, index=frames),
             labels=torch.stack(labels), graph_features_0=[make_graph() for _ in frames],
             original_start_frame=10, original_end_frame=20, frame_selection={})
@@ -233,7 +234,8 @@ def test_dataset_runner_publishes_actual_match_once(tmp_path, monkeypatch, datas
         monkeypatch.setattr(generate, "resolve_feature_root", lambda *a: tmp_path / "feature")
         monkeypatch.setattr(generate, "resolve_reference_label_context", lambda *a: (None, "disc_0.7", "model"))
         monkeypatch.setattr(generate, "resolve_match_ids", lambda *a: ["match"])
-        monkeypatch.setattr(run_relevant_models, "load_match", lambda *a, **k: SimpleNamespace(possession_report=report))
+        monkeypatch.setattr(run_relevant_models, "load_match", lambda *a, **k: SimpleNamespace(possession_report=report,
+            sportec_state_plan=SimpleNamespace(manifest=lambda: {"provenance": report, "spells": [], "actions": []})))
         monkeypatch.setattr(generate, "build_sportec_possessions", lambda *a, **k: iter([(state(1), report), (state(2), report)]))
     else:
         monkeypatch.setattr(generate, "discover_skillcorner_matches", lambda *a, **k: (["match"], {}))

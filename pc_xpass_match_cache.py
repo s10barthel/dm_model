@@ -17,10 +17,26 @@ import pyarrow.parquet as pq
 from datatools.possession_frames import STATE_CONTRACT
 
 FORMAT = "match_possession_frames_v1"
+SPORTEC_FORMAT = "match_physical_states_v2"
 DATASETS = {"sportec", "skillcorner"}
 IDENTITY = ["match_id", "possession_id", "state_frame_id"]
 REQUIRED = IDENTITY + ["possessor_id", "possession_provenance_id", "action_index", "physical_state_hash", "frame_scope"]
 _ACTIVE = ContextVar("pc_xpass_match_transaction", default=None)
+
+
+def expected_format(root):
+    return SPORTEC_FORMAT if Path(root).name == "sportec" else FORMAT
+
+
+def is_match_format(value):
+    return value in (FORMAT, SPORTEC_FORMAT)
+
+
+def state_contract(root):
+    if Path(root).name == "sportec":
+        from datatools.sportec_possessions import STATE_CONTRACT as sportec_contract
+        return sportec_contract
+    return STATE_CONTRACT
 
 
 def read_json(path, *, memo=None):
@@ -47,17 +63,17 @@ def require_format(root, *, allow_new=False, memo=None):
     metadata = read_json(root / "metadata.json", memo=memo)
     if allow_new and not metadata and not any((root / "matches").glob("*.parquet")):
         return
-    if metadata.get("cache_format") != FORMAT:
+    if metadata.get("cache_format") != expected_format(root):
         raise ValueError(f"Unsupported {root.name} pc-xPass cache format. Regenerate this dataset into a new "
-                         "pc-xPass cache version; expected match-level possession/frame schema.")
+                         f"pc-xPass cache version; expected {expected_format(root)}.")
 
 
 def initialize(root, *, dry_run=False):
     require_format(root, allow_new=True)
     if not dry_run:
         metadata = read_json(Path(root) / "metadata.json")
-        if metadata.get("cache_format") != FORMAT:
-            metadata["cache_format"] = FORMAT
+        if metadata.get("cache_format") != expected_format(root):
+            metadata["cache_format"] = expected_format(root)
             atomic_json(Path(root) / "metadata.json", metadata)
 
 
@@ -98,12 +114,18 @@ def validate_rows(frame, match_id, *, lane=False):
         raise ValueError("Duplicate possession/frame cache identities")
     if not frame.empty and (frame.groupby("possession_id").possession_provenance_id.nunique() > 1).any():
         raise ValueError("Multiple provenance variants for a possession")
+    if "state_id" in frame:
+        keys = ["state_id"] + (["receiver_id", "opponent_id"] if lane else [])
+        if frame[keys].isna().any().any() or frame.duplicated(keys).any():
+            raise ValueError("Invalid or duplicate physical state identity")
+        if not frame.state_partition_id.eq(frame.possession_id).all():
+            raise ValueError("Inconsistent physical state partition")
 
 
 def _read_parquet(path):
     table = pq.read_table(path)
     metadata = json.loads((table.schema.metadata or {}).get(b"pc_xpass", b"{}"))
-    if metadata.get("cache_format") != FORMAT:
+    if not is_match_format(metadata.get("cache_format")):
         raise ValueError("Missing embedded possession/frame metadata; regenerate the cache")
     return table.to_pandas(), metadata
 
@@ -141,6 +163,8 @@ def load_match(root, match_id, *, memo=None, include_lane=True):
                 raise ValueError("Lane-control completion row count differs")
             continue
         frames[name], details = _read_parquet(path)
+        if details.get("cache_format") != expected_format(root):
+            raise ValueError("Embedded cache format differs from the selected dataset")
         validate_rows(frames[name], match_id, lane=name == "lane_control")
         if len(frames[name]) != info["rows"]:
             raise ValueError("Match completion row count differs")
@@ -150,7 +174,8 @@ def load_match(root, match_id, *, memo=None, include_lane=True):
     if "matches" not in frames:
         raise ValueError("Completed match has no main output")
     if (embedded.get("descriptors") != record.get("descriptors")
-            or embedded.get("provenance", {}) != record.get("provenance", {})):
+            or embedded.get("provenance", {}) != record.get("provenance", {})
+            or embedded.get("manifest") != record.get("manifest")):
         raise ValueError("Embedded match provenance differs from completion record")
     result = frames, embedded, record
     if memo is not None:
@@ -211,6 +236,28 @@ def load_possession(root, match_id, selection, *, lane=False, requested_frames=N
     return result
 
 
+def load_action_rows(root, match_id, *, frame_scope=None):
+    """Canonical training/evaluation view, explicitly mapped to physical states."""
+    if frame_scope not in (None, "frame_id", "receive_frame_id"):
+        raise ValueError("Canonical action lookup expects frame_id or receive_frame_id")
+    frames, _, record = load_match(root, match_id, include_lane=False)
+    manifest = record.get("manifest")
+    if manifest is None:
+        raise ValueError("Sportec cache has no canonical action manifest; regenerate into a new version")
+    physical = frames["matches"].set_index("state_id", drop=False)
+    scopes = (frame_scope,) if frame_scope else ("frame_id", "receive_frame_id")
+    rows = []
+    for action in manifest["actions"]:
+        for scope in scopes:
+            reference = "pre_state_id" if scope == "frame_id" else "post_state_id"
+            key = action[reference]
+            if key is not None and key in physical.index:
+                row = physical.loc[key].to_dict()
+                row.update(action_index=action["action_index"], frame_scope=scope)
+                rows.append(row)
+    return pd.DataFrame(rows, columns=frames["matches"].columns)
+
+
 class MatchAccumulator:
     def __init__(self, root, match_id, *, dry_run=False, request=None):
         validate_match_id(match_id)
@@ -226,6 +273,7 @@ class MatchAccumulator:
         self.failed = False
         self.old_record = read_json(self.root / "completion" / f"{self.match_id}.json")
         self.provenance = self.old_record.get("provenance", {})
+        self.manifest = self.old_record.get("manifest")
         if self.old_record.get("status") == "completed":
             frames, details, _ = load_match(self.root, self.match_id)
             self.descriptors = details["descriptors"]
@@ -247,7 +295,8 @@ class MatchAccumulator:
 
     @staticmethod
     def _internal(frame, key):
-        frame = frame.drop(columns=["possession_id", "possessor_id", "possession_provenance_id"]).copy()
+        frame = frame.drop(columns=["possession_id", "possessor_id", "possession_provenance_id",
+                                    "state_partition_id", "state_id", "period_id"], errors="ignore").copy()
         frame["match_id"] = key
         frame.attrs = {}
         return frame
@@ -280,8 +329,27 @@ class MatchAccumulator:
             self.dirty = True
         self.descriptors[key] = descriptor
 
+    def set_manifest(self, manifest):
+        if self.manifest is not None and self.manifest.get("provenance") != manifest.get("provenance"):
+            raise ValueError("Changed Sportec reconstruction provenance; create a new pc-xPass version")
+        if self.manifest is not None and any(self.manifest.get(k) != manifest.get(k) for k in ("spells", "actions")):
+            raise ValueError("Changed Sportec spell associations; create a new pc-xPass version")
+        if not self.record_coverage:
+            return  # Height enrichment keeps the published observation/coverage manifest.
+        if "observations" in manifest:
+            merged = {row["state_id"]: dict(row) for row in (self.manifest or {}).get("observations", [])}
+            for row in manifest["observations"]:
+                previous = merged.get(row["state_id"], {})
+                merged[row["state_id"]] = {**row, "roles": sorted(set(previous.get("roles", [])) | set(row["roles"]))}
+            manifest = {**manifest, "observations": [merged[key] for key in sorted(merged)]}
+        if self.manifest != manifest:
+            self.dirty = True
+        self.manifest = manifest
+
     def set_provenance(self, report):
-        provenance = {key: report[key] for key in ("feature_run_id", "carry_definition", "spell_artifact_sha256")
+        provenance = {key: report[key] for key in ("feature_run_id", "carry_definition", "spell_artifact_sha256",
+                      "state_contract", "canonical_sha256", "control_sha256", "resolved_actions_sha256",
+                      "tracking_sha256", "lineup_sha256", "graph_options")
                       if key in report}
         if self.provenance and self.provenance != provenance:
             raise ValueError("Changed match provenance; create a new pc-xPass version")
@@ -348,6 +416,14 @@ class MatchAccumulator:
         frame["possession_id"] = int(descriptor["possession_id"])
         frame["possessor_id"] = str(descriptor["possessor_id"])
         frame["possession_provenance_id"] = key
+        if self.root.name == "sportec":
+            from datatools.sportec_possessions import state_identity
+            frame["state_partition_id"] = frame["possession_id"]
+            frame["period_id"] = int(descriptor.get("period_id", 1))
+            provenance = {k: v for k, v in descriptor.items()
+                          if k not in {"match_id", "possession_id", "state_partition_id", "possessor_id", "period_id"}}
+            frame["state_id"] = [state_identity(self.match_id, descriptor.get("period_id", 1), f,
+                                                descriptor["possessor_id"], provenance) for f in frame.state_frame_id]
         return frame
 
     def commit(self, *, export_lane=False):
@@ -365,19 +441,24 @@ class MatchAccumulator:
                     if int(row["action_index"]) in expected and _lane_control_state_key(row) not in completed:
                         raise ValueError("Incomplete match: missing lane-control coverage")
         outputs = dict(self.old_record.get("outputs", {}))
-        details = {"cache_format": FORMAT, "state_contract": STATE_CONTRACT,
+        details = {"cache_format": expected_format(self.root), "state_contract": state_contract(self.root),
                    "dataset": self.root.name, "descriptors": self.descriptors, "provenance": self.provenance}
+        if self.manifest is not None:
+            details["manifest"] = self.manifest
         staged = []
         write = self.dirty or not self.old_record or self.provenance != self.old_record.get("provenance", {})
         if write:
             collections = {"matches": self.parts}
             if (self.lane_dirty or (export_lane and "lane_control" not in outputs)
-                    or ("lane_control" in outputs and (self.descriptors != self.old_record.get("descriptors") or self.provenance != self.old_record.get("provenance", {})))):
+                    or ("lane_control" in outputs and (self.descriptors != self.old_record.get("descriptors")
+                        or self.provenance != self.old_record.get("provenance", {}) or self.manifest != self.old_record.get("manifest")))):
                 collections["lane_control"] = self.lanes
             for name, parts in collections.items():
                 frames = [self._external(frame, key) for key, frame in parts.items()]
                 from physical_pass_model import LANE_CONTROL_COLUMNS
                 columns = list(dict.fromkeys(REQUIRED + (LANE_CONTROL_COLUMNS if name == "lane_control" else [])))
+                if self.root.name == "sportec":
+                    columns += ["state_id", "state_partition_id", "period_id"]
                 frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
                 validate_rows(frame, self.match_id, lane=name == "lane_control")
                 for column in ("possession_id", "state_frame_id", "action_index"):
@@ -400,15 +481,17 @@ class MatchAccumulator:
             history.append(coverage)
         lane_states = [self._external(pd.DataFrame([row]), key).iloc[0].to_dict()
                        for key, states in self.lane_states.items() for row in states.values()]
-        record = {"status": "completed", "cache_format": FORMAT, "descriptors": self.descriptors, "provenance": self.provenance,
+        record = {"status": "completed", "cache_format": expected_format(self.root), "descriptors": self.descriptors, "provenance": self.provenance,
                   "outputs": outputs, "coverage": history, "lane_states": lane_states,
                   "selection_report": self.selection_report if self.record_coverage else self.old_record.get("selection_report")}
+        if self.manifest is not None:
+            record["manifest"] = self.manifest
         record_path = self.root / "completion" / f"{self.match_id}.json"
         if staged:
             atomic_json(record_path, {**record, "status": "pending"})
             for temp, path in staged:
                 temp.replace(path)
-        if record != self.old_record:
+        if staged or record != self.old_record:
             atomic_json(record_path, record)
 
 

@@ -36,6 +36,7 @@ FRAME_SCOPE_COLUMN = "frame_scope"
 STATE_FRAME_ID_COLUMN = "state_frame_id"
 FRAME_ID_SCOPE = "frame_id"
 RECEIVE_FRAME_ID_SCOPE = "receive_frame_id"
+SPELL_START_SCOPE = "spell_start"
 SCOPED_COMPONENT_IDENTIFIER_COLUMNS = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
 ACTION_JOIN_COLUMNS = COMPONENT_BASE_IDENTIFIER_COLUMNS
 REQUIRED_SCOPED_COMPONENTS = [
@@ -617,14 +618,18 @@ def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataF
     if not path.exists():
         raise FileNotFoundError(f"Missing required component file: {path}")
 
-    component = sportec_event_endpoint_view(pd.read_parquet(path))
+    import json
+    manifest_path = match_dir / "possession_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
+    raw_component = pd.read_parquet(path)
+    component = sportec_event_endpoint_view(raw_component, manifest)
     required_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
     validate_required_columns(component, required_columns, str(path))
     component = normalize_component_identifiers(component)
     observed_scopes = set(component[FRAME_SCOPE_COLUMN].dropna().astype(str).tolist())
     required_scopes = {FRAME_ID_SCOPE, RECEIVE_FRAME_ID_SCOPE}
     missing_scopes = sorted(required_scopes - observed_scopes)
-    if missing_scopes:
+    if missing_scopes and "state_id" not in raw_component:
         raise ValueError(
             f"{path} is missing required frame_scope values: {', '.join(missing_scopes)}. "
             "Regenerate the component run with scoped frame_id/receive_frame_id predictions."
@@ -633,6 +638,8 @@ def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataF
     id_columns = COMPONENT_BASE_IDENTIFIER_COLUMNS + [FRAME_SCOPE_COLUMN]
     if STATE_FRAME_ID_COLUMN in component.columns:
         id_columns.append(STATE_FRAME_ID_COLUMN)
+    if "value_sign" in component:
+        id_columns.append("value_sign")
     value_columns = component_value_columns(component, id_columns)
     if not value_columns:
         raise ValueError(f"{path} has no object/player probability columns.")
@@ -651,7 +658,8 @@ def read_scoped_component_long(match_dir: Path, component_name: str) -> pd.DataF
     )
     if duplicate_mask.any():
         raise ValueError(f"{path} produces duplicate identifier/scope/object rows.")
-    return long_component[SCOPED_COMPONENT_IDENTIFIER_COLUMNS + ["object_id", component_name]]
+    extra = ["value_sign"] if component_name == "pass_intent" and "value_sign" in long_component else []
+    return long_component[SCOPED_COMPONENT_IDENTIFIER_COLUMNS + ["object_id", component_name] + extra]
 
 
 def read_frame_component_long(match_dir: Path, component_name: str) -> pd.DataFrame:
@@ -709,6 +717,22 @@ def build_match_model_data(match_dir: Path) -> pd.DataFrame:
     if merged is None:
         raise ValueError(f"No component data loaded for {match_dir}")
 
+    manifest_path = match_dir / "possession_manifest.json"
+    if manifest_path.exists():
+        import json
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        identifiers = normalize_component_identifiers(pd.DataFrame([
+            dict(stats_perform_match_id=manifest["match_id"], action_id=a["action_id"],
+                 original_event_id=a["original_event_id"], frame_scope=scope)
+            for a in manifest["actions"] for scope in (FRAME_ID_SCOPE, RECEIVE_FRAME_ID_SCOPE, SPELL_START_SCOPE)
+        ], columns=SCOPED_COMPONENT_IDENTIFIER_COLUMNS))
+        present = merged[SCOPED_COMPONENT_IDENTIFIER_COLUMNS].drop_duplicates()
+        missing = identifiers.merge(present, on=SCOPED_COMPONENT_IDENTIFIER_COLUMNS, how="left", indicator=True)
+        missing = missing.loc[missing.pop("_merge").eq("left_only")]
+        # Preserve event rows with unavailable states; their values remain missing.
+        if not missing.empty:
+            merged = pd.concat([merged, missing], ignore_index=True)
+
     merged["pass_score"] = (
         merged["pass_success"]
         * (merged["outcome_scoring_success"] - merged["outcome_conceding_success"])
@@ -733,6 +757,10 @@ def build_match_model_data(match_dir: Path) -> pd.DataFrame:
         .rename("game_state_value")
         .reset_index()
     )
+    if "value_sign" in merged:
+        signs = merged.groupby(SCOPED_COMPONENT_IDENTIFIER_COLUMNS, dropna=False)["value_sign"].first().reset_index()
+        game_state_values = game_state_values.merge(signs, on=SCOPED_COMPONENT_IDENTIFIER_COLUMNS, how="left")
+        game_state_values["game_state_value"] *= game_state_values.pop("value_sign")
     pass_score_std = (
         merged.groupby(SCOPED_COMPONENT_IDENTIFIER_COLUMNS, dropna=False)["pass_score"]
         .std()
@@ -811,8 +839,7 @@ def add_scores_to_events(model_data: pd.DataFrame, event_synced_dir: Path) -> pd
 
     frame_model = model_data.loc[model_data[FRAME_SCOPE_COLUMN].eq(FRAME_ID_SCOPE)].copy()
     receive_model = model_data.loc[model_data[FRAME_SCOPE_COLUMN].eq(RECEIVE_FRAME_ID_SCOPE)].copy()
-    if frame_model.empty or receive_model.empty:
-        raise ValueError("Scoped model data must contain both frame_id and receive_frame_id rows.")
+    start_model = model_data.loc[model_data[FRAME_SCOPE_COLUMN].eq(SPELL_START_SCOPE)].copy()
 
     if "success_intent" in frame_model.columns:
         best_intent_receivers = (
@@ -878,23 +905,9 @@ def add_scores_to_events(model_data: pd.DataFrame, event_synced_dir: Path) -> pd
     bundesliga_actions = bundesliga_actions.merge(frame_state_lookup, on=ACTION_JOIN_COLUMNS, how="left")
     bundesliga_actions = bundesliga_actions.merge(receive_state_lookup, on=ACTION_JOIN_COLUMNS, how="left")
 
-    original_order = pd.Series(range(len(bundesliga_actions)), index=bundesliga_actions.index)
-    bundesliga_actions["__original_order"] = original_order
-    bundesliga_actions = bundesliga_actions.sort_values(
-        ["stats_perform_match_id", "action_id", "__original_order"],
-        kind="mergesort",
-    ).reset_index(drop=True)
-    grouped = bundesliga_actions.groupby("stats_perform_match_id", dropna=False)
-    bundesliga_actions["__previous_receiver_id"] = grouped["receiver_id"].shift(1)
-    bundesliga_actions["__previous_game_state_value_next"] = grouped["game_state_value_next"].shift(1)
-    bundesliga_actions["__previous_pass_score_std_next"] = grouped["pass_score_std_next"].shift(1)
-    same_possessor = bundesliga_actions["__previous_receiver_id"].eq(bundesliga_actions["object_id"]).fillna(False)
-    bundesliga_actions["game_state_value_start"] = bundesliga_actions["__previous_game_state_value_next"].where(
-        same_possessor
-    )
-    bundesliga_actions["pass_score_std_start"] = bundesliga_actions["__previous_pass_score_std_next"].where(
-        same_possessor
-    )
+    start_lookup = start_model[ACTION_JOIN_COLUMNS + ["game_state_value", "pass_score_std"]].drop_duplicates(ACTION_JOIN_COLUMNS)
+    start_lookup = start_lookup.rename(columns={"game_state_value": "game_state_value_start", "pass_score_std": "pass_score_std_start"})
+    bundesliga_actions = bundesliga_actions.merge(start_lookup, on=ACTION_JOIN_COLUMNS, how="left")
 
     bundesliga_actions["action_epv"] = (
         bundesliga_actions["game_state_value_next"] - bundesliga_actions["game_state_value_start"]
@@ -926,7 +939,6 @@ def add_scores_to_events(model_data: pd.DataFrame, event_synced_dir: Path) -> pd
             bundesliga_actions.loc[z_pass_dm_mask, "pass_dm_score"] / z_pass_dm_denominator.loc[z_pass_dm_mask]
         )
 
-    bundesliga_actions = bundesliga_actions.sort_values("__original_order", kind="mergesort").reset_index(drop=True)
     helper_columns = [
         "__original_order",
         "__previous_receiver_id",

@@ -10,7 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
+from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments
+from datatools.sportec_possessions import STATE_CONTRACT
 from datatools.sportec_possessions import build_sportec_possessions, sportec_component_table
 from datatools.skillcorner import infer_skillcorner_components
 
@@ -170,7 +171,10 @@ def load_match(
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
+    match.sportec_canonical_source = events
     match.runtime_feature_root = feature_root
+    match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
+                                       add_relative_speed_edge_features=add_relative_speed_edge_features)
     resolved_action_path = get_resolved_action_path(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -838,8 +842,10 @@ def main() -> None:
                         metadata.setdefault(attr, {}).setdefault(str(match_id), {})[str(state.event_index)] = value
             metadata.setdefault("possession_reports", {})[str(match_id)] = match.possession_report
             if not tables.get("action_intent"):
-                raise ValueError("No valid possession states; check whole-spell artifacts and tracking coverage.")
+                raise ValueError("No valid possession states; check synchronized source events and tracking coverage.")
             match_output_dir.mkdir(parents=True, exist_ok=True)
+            import pc_xpass_versions
+            pc_xpass_versions.atomic_json(match_output_dir / "possession_manifest.json", match.sportec_state_plan.manifest())
             for name, parts in tables.items():
                 pd.concat(parts, ignore_index=True).to_parquet(match_output_dir / f"{name}.parquet", index=False)
 

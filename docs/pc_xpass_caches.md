@@ -74,7 +74,7 @@ explicit directory retains zero deceleration. No automatic migration occurs.
 Resume with `--pc-xpass --pc-xpass-id <id>`. Omitted calculation settings and
 `--export-lane-control` inherit recorded values; explicit conflicts require a new
 version. Physics and ranking dependencies are validated. Sportec pins the resolved
-feature run and whole-spell provenance; Hawkeye pins `--freeze-ballreceipt`
+feature run and source/reconstruction provenance; Hawkeye pins `--freeze-ballreceipt`
 (initial default: true). Contracts and reconstruction sources are saved before
 computation. Paths may move if source identities and reconstructed hashes match.
 
@@ -84,9 +84,9 @@ restored. Workers, device, and batch/window sizes may change. Repeat the origina
 selection to finish the same requested coverage, or change it to extend the cache.
 Partition/source coverage accumulates, and sampling reports are saved per invocation.
 
-An older interrupted Sportec cache lacking resolved input provenance requires
-explicit `--sportec-feature-run-id <id>`. Saved states are reconstructed and checked
-before new partitions are added; unknown or incompatible sources cause an error.
+Older Sportec cache formats require a fresh version. Saved states in the current
+format are reconstructed and checked before new partitions are added; unknown
+or incompatible sources cause an error.
 Ctrl+C marks the invocation incomplete where possible. Saved rows remain reusable
 if abrupt shutdown leaves status marked running.
 
@@ -121,36 +121,53 @@ Both `--scope actions` and `--scope frames` write one parquet per actual match:
 <dataset>/completion/<match_id>.json
 ```
 
-Dataset metadata declares `cache_format: "match_possession_frames_v1"`. Older
-action-based match files and hashed possession files require regeneration into a
-new cache version. There is no conversion or fallback reader. This check applies
-to the selected dataset; Benchmark and Hawkeye retain their existing formats.
+Sportec declares `cache_format: "match_physical_states_v2"` and state contract
+`sportec_possession_states_v2`. SkillCorner retains `match_possession_frames_v1`
+and `possession_states_v1`. All older Sportec formats require regeneration into
+a new cache version, without conversion or fallback. Benchmark and Hawkeye retain
+their existing formats.
 
-Rows contain actual `match_id`, integer `possession_id`, `possessor_id`,
-`state_frame_id`, and `possession_provenance_id` (the existing possession hash).
-The main row key is `(match_id, possession_id, state_frame_id)`: two possessions
-can share a boundary frame. Lane-control rows add `receiver_id` and `opponent_id`
-to that key. `action_index` is a compatibility alias for `state_frame_id`, never
-an event action ID. Full provenance and reconstruction descriptors are embedded
-in each parquet under the Arrow metadata key `pc_xpass`.
+SkillCorner rows contain actual `match_id`, integer `possession_id`, `possessor_id`,
+`state_frame_id`, and `possession_provenance_id`. Their key is match, possession,
+and frame; lane rows additionally identify receiver and opponent.
 
-Computation still processes possessions in bounded graph batches. Results are
-buffered in memory and saved once per completed match. Runtime row-window flags
-control computation batching, not checkpoint frequency. Interrupted or failed
-matches lose unsaved work; completed compatible matches reuse their cached rows.
-Changing scope or stride adds missing states without removing compatible rows.
-Unchanged matches do not rewrite their parquets. Validity exclusions and matches
-with no valid selected states are recorded separately from computation failures.
+Sportec rows additionally contain `state_id`, `period_id`, and `state_partition_id`.
+The physical identity is match, period, frame, actual possessor, and reconstruction
+provenance. Workers group states by period and actual possessor and keep frame IDs
+as action indexes. The internal `possession_id` column aliases the worker partition;
+it is **not** a semantic spell ID. Semantic spell IDs, owners, nullable endpoint
+references, successors, and canonical action associations live in the per-match
+manifest, embedded in both parquet metadata and the completion record. One physical
+state can serve multiple roles, including the end of a lost carry and the opponent's
+next acquisition.
 
-The completion record contains requested/completed coverage, row counts, and
-output checksums. Publication first marks the match pending, then replaces its
-outputs, and finally marks it completed. Readers reject pending or inconsistent
-commits. Resume the interrupted generation request to recompute an unfinished
-match. Completion records protect publication; they are not needed to identify
-the rows in a parquet read independently.
+Sportec source fingerprints cover canonical events, synchronized controls, canonical
+resolved action fields, tracking, lineups, graph options, and the reconstruction
+version. Training-only carry columns do not change physical state identity.
+`--scope actions` includes exact spell endpoints and canonical pre/post observations;
+`--scope frames` adds strided interior states only where control is supported.
+Invalid canonical endpoints stay missing; nearby frames are not replacements.
 
-Inference reads a match once per context, validates provenance, selects the
-possession, and looks up its frame. Legacy event-action consumers cannot read
-these tables without an explicit possession selection. Sportec action
-visualization resolves an exact terminal possession endpoint and fails if the
-event has no unique valid endpoint; it does not guess by frame proximity.
+Results are buffered in memory and published once per completed match. Interrupted
+or failed matches lose unsaved work; compatible completed rows remain reusable.
+Changing scope or stride adds coverage without removing existing physical rows.
+Worker counts, numerical calculations, and batching policy are unchanged.
+
+Completion records contain requested coverage, row counts, output checksums, and
+reconstruction metadata. Publication marks a match pending, replaces its outputs,
+and marks it completed. Readers reject pending or inconsistent commits. Resume the
+original request to recompute an unfinished match. Height refresh preserves the
+published spell manifest and lane-control data.
+
+Inference validates provenance, selects its physical partition, and looks up the
+frame. Sportec training and evaluation obtain explicit canonical action views through
+the manifest, mapping event action indexes to physical rows. Their existing labels
+and carry handling are unchanged. Sportec visualization resolves the exact canonical
+pre-action observation, including partial spells, and fails when that state is
+invalid. It does not guess by frame proximity.
+
+Component inference exports `possession_manifest.json`. Ranking resolves spell
+start/end/next roles through this manifest, never through a shift of filtered pass
+rows. Unknown successors stay missing; restart outcomes are retained and goals/period
+boundaries terminate links. Opponent values are converted to the original actor's
+perspective. See [the Sportec validation notes](sportec_possession_states.md).

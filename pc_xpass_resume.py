@@ -154,7 +154,7 @@ def prepare_contracts(args, selected):
         source = dataset_metadata(cache_root, dataset).get("source_inputs", {})
         if dataset in {"sportec", "skillcorner"}:
             saved_state_contract = old.get("state_contract") or source.get("state_contract")
-            if saved_state_contract is not None and saved_state_contract != STATE_CONTRACT:
+            if saved_state_contract is not None and saved_state_contract != match_cache.state_contract(cache_root / dataset):
                 raise ValueError(f"Incompatible {dataset} state contract; create a new version.")
         if dataset == "sportec":
             saved = old.get("feature_run_id") or source.get("feature_run_id")
@@ -170,7 +170,7 @@ def prepare_contracts(args, selected):
             from project_config import resolve_feature_run_id
             saved = saved or resolve_feature_run_id(requested, required=True, allow_latest=True)
             args.sportec_feature_run_id = saved
-            contracts[dataset] = {**old, "feature_run_id": saved, "state_contract": STATE_CONTRACT}
+            contracts[dataset] = {**old, "feature_run_id": saved, "state_contract": match_cache.state_contract(cache_root / dataset)}
         elif dataset == "hawkeye":
             saved = old.get("freeze_ballreceipt")
             if saved is None:
@@ -219,10 +219,11 @@ def record_source(args, dataset, match_id, descriptor):
         if saved_definition is not None and saved_definition != definition:
             raise ValueError(f"Changed SkillCorner possession definition for {descriptor['match_id']}:{descriptor['possession_id']}")
     if dataset == "sportec":
-        artifact = {k: descriptor[k] for k in ("feature_run_id", "spell_artifact_sha256", "carry_definition")}
+        artifact = {k: descriptor[k] for k in ("feature_run_id", "state_contract", "canonical_sha256",
+                    "control_sha256", "resolved_actions_sha256", "tracking_sha256", "lineup_sha256", "graph_options") if k in descriptor}
         old_artifact = metadata.get("sportec_artifacts", {}).get(descriptor["match_id"])
         if old_artifact and old_artifact != artifact:
-            raise ValueError(f"Changed Sportec spell artifact for {descriptor['match_id']}")
+            raise ValueError(f"Changed Sportec source provenance for {descriptor['match_id']}")
     if previous:
         # Locators can move, but state-defining provenance cannot change.
         for key in ("feature_run_id", "spell_artifact_sha256", "carry_definition", "possessor_id"):

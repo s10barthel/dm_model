@@ -1437,10 +1437,8 @@ python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo -
 Replace the example IDs with real feature-run, cache, and model IDs. A resume
 restores omitted physical calculation settings and `--export-lane-control`;
 explicit conflicts require a new version. Sportec also pins its resolved feature
-run and whole-spell provenance; Hawkeye pins `--freeze-ballreceipt` (initial
-default: true). An older interrupted Sportec version lacking resolved provenance
-requires explicit `--sportec-feature-run-id <feature_run_id>`; saved identities
-and hashes are checked before adding new partitions.
+run and canonical/control/tracking provenance; Hawkeye pins `--freeze-ballreceipt`
+(initial default: true). Older Sportec formats require a fresh cache version.
 
 Season, match/situation IDs, limits, dataset switches, Hawkeye time selections,
 `--scope`, and `--frames` are **not automatically restored or frozen**. Repeat
@@ -1478,9 +1476,11 @@ See [pc-xPass version and cache documentation](docs/pc_xpass_caches.md) for deta
 #### Matching inference and pc-xPass frame coverage
 
 For receipt 102, release 119, and `--scope frames --frames 5`, both paths select
-102, 107, 112, 117, and 119. Invalid endpoints fall back inward to the nearest
-valid state; missing interior samples do not shift the original sampling grid.
-The ball carrier remains the spell's player even at possession-loss endpoints.
+102, 107, 112, 117, and 119. Sportec keeps invalid exact endpoints missing;
+interior samples do not replace their event values or shift the sampling grid.
+At a supported loss endpoint, the graph uses the winning player, matching the
+existing training carry's post-state. The spell owner remains the original player.
+SkillCorner retains its existing inward endpoint fallback.
 
 For example (replace the example feature run, bundle, and cache IDs):
 
@@ -1493,20 +1493,23 @@ Use the same `--scope`/`--frames` for SkillCorner inference and generation too;
 the generator takes `--skillcorner-input-dir` / `--skillcorner-match-id` while
 the inference runner takes `--input-dir` / `--match-id`.
 
-pc-xPass calculations retain the `possession_states_v1` identity. Sportec and
-SkillCorner now write one `matches/<match_id>.parquet` per actual match, with
-explicit match, possession, possessor, frame, and provenance columns. Optional
-lane-control output also uses one file per match. The dataset format marker is
-`match_possession_frames_v1`; both older event caches and hashed possession files
-require regeneration into a new version. See [the cache format documentation](docs/pc_xpass_caches.md#sportec-and-skillcorner-match-checkpoints).
+Sportec uses `sportec_possession_states_v2` and cache format
+`match_physical_states_v2`: physical states identify match, period, frame, actual
+possessor, and provenance. A spell/association manifest separates ownership and
+canonical event roles from physical state identity. SkillCorner retains
+`possession_states_v1` and `match_possession_frames_v1`. Both datasets write one
+`matches/<match_id>.parquet` per actual match, plus optional lane-control output.
+Older Sportec caches require regeneration into a **new version**; no migration
+or fallback reader is provided. See [the cache format documentation](docs/pc_xpass_caches.md#sportec-and-skillcorner-match-checkpoints).
 
 Results are buffered across computation batches and saved after each complete
 match. An interrupted match loses unsaved work; compatible completed rows are
 reused without rewriting an unchanged parquet. Scope/stride are outside state
-identity, so expanding coverage preserves overlapping states. Inference selects
-the possession before its frame, keeping shared boundary frames distinct.
-Sportec provenance includes the feature run and whole-spell artifact fingerprint;
-full reconstruction descriptors are embedded in each parquet. Inference remains
+identity, so expanding coverage preserves overlapping states. Sportec groups
+worker inputs by period and actual possessor; different players at one frame stay
+distinct, and the same physical state can serve several spell or event roles.
+Sportec provenance includes the feature run and source fingerprints;
+full reconstruction descriptors and the spell manifest are embedded in each parquet. Inference remains
 cache-read-only and rejects pending or inconsistent match commits.
 For Sportec possession-state inference, physical blending requires pc-xPass;
 legacy ordinary physical-xPass rows use event indexes and cannot safely supply
@@ -1524,8 +1527,8 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--match-id <id>`: restrict Sportec matches. Default: all matches in the canonical preprocessed match universe.
 - `--season {22_23,23_24,24_25}`: restrict Sportec to selected seasons; repeat to select multiple seasons. Intersects with `--match-id`. Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Other datasets remain enabled. Cannot be combined with `--no-sportec`. Default: no season filter.
 - `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`: SkillCorner runtime selectors.
-- `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Default: possession endpoints (`actions`); `frames` samples every Nth frame ID, starting at possession start, plus both endpoints. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
-- `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass. Default for a new version: latest; on resume: the recorded resolved run. Explicitly selecting a different run is rejected. Required explicitly when an older interrupted cache lacks resolved input provenance. Select the **same feature run as inference**. Existing whole-spell audit artifacts are required; neither generator nor inference derives new control spells.
+- `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Sportec `actions` selects exact spell endpoints and preserved canonical observations; `frames` adds every Nth interior frame in supported control intervals. SkillCorner retains its endpoint/stride selection. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
+- `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass. Default for a new version: latest; on resume: the recorded resolved run. Explicitly selecting a different run is rejected. Select the **same feature run as inference**. Both paths reconstruct inference spells from canonical actions and `data/control_events_synced/<match_id>.parquet`; training carry audits do not control inference eligibility.
 - `--benchmark-input-dir`, `--benchmark-modification`, `--benchmark-limit`: benchmark runtime selectors.
 - `--hawkeye-tracking-csv`, `--hawkeye-ball-csv`, `--hawkeye-situation-id`, `--hawkeye-limit`: Hawkeye runtime selectors.
 - `--freeze-ballreceipt` / `--no-freeze-ballreceipt`: Hawkeye state construction. Initial default: enabled. A versioned pc-xPass resume inherits the recorded value and rejects an explicit conflict.
@@ -1638,7 +1641,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--lane-survival [{max,top_N,top_pass_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects `max`, `--lane-survival top_25` selects top-25, and `--lane-survival top_pass_10` selects top-pass 10. The selected aggregation must be available in the cache.
-- `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches must use the current match-level possession/frame format; older action-based caches must be regenerated into a new version.
+- `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches require `match_physical_states_v2` and a canonical action manifest; older caches must be regenerated into a new version.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the wrapper training defaults. Pass-lane mode retains only `nearest_opponent_to_pass` and `potential_interceptors`; full extended mode takes precedence.
 - `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-pos-node-features`: zero `x` and `y` at the encoder and decoder inputs for every node, including the possessor and goal nodes, while preserving graph width. Original coordinates remain available for graph processing, physical calculations, and destination features. Incompatible with `--xy-only`. Default: off, so positional node features are used.
@@ -1841,21 +1844,28 @@ predictions may still change v5 blending weights and downstream pass scores.
 
 ### `scripts/run_relevant_models.py`
 
-Sportec state inference uses the existing control-spell audit artifacts under
-`data/carry_segments/audits/<match_id>.parquet`, not one-second carry segments.
-Short, reliable spells are included even when excluded from carry training or
-missing a return-event label. Ambiguous/incomplete spells are excluded. Feature
-runs remain required; this is not feature-run-independent inference.
+Sportec reconstructs inference spells from canonical actions and synchronized
+control events. Opponent receptions and supported claims/tackles can start spells;
+identified passing restarts are single-frame spells. Partial or ambiguous spells
+retain their known observations and leave unknown boundaries missing. This does
+not change training carry definitions, segments, eligibility, or labels. Feature
+runs remain required.
 
-- `--scope {actions,frames}`: select spell endpoints (default: `actions`) or strided states.
+- `--scope {actions,frames}`: select exact spell endpoints and preserved canonical observations (default: `actions`), or add strided states in supported intervals.
 - `--frames N`: positive integer frame-ID stride, valid only with `--scope frames`; default 1.
 
 Both scopes evaluate all applicable state-based components, including action
 intent at possession start. Event-specific success intent remains event-based.
-Outputs identify the possession, possessor, actual frame, endpoint/interior role,
-original boundaries, and pc-xPass cache partition. Event-based ranking reads only
-unambiguously linked endpoints; intermediate predictions do not change scoring
-formulas or get averaged into action scores.
+Outputs identify each physical state and its roles. Each match also exports
+`possession_manifest.json` with ordered spells and canonical event associations.
+Ranking obtains start/end values directly from a pass's spell and its next value
+from the next genuine spell's start, in the original actor's team perspective.
+It does not skip unknown successors or cross goals/period boundaries. Intermediate
+predictions are not averaged into action scores. Carry value is `V(end)-V(start)`;
+pass value is `V(next)-V(end)`; possession value is `V(next)-V(start)`.
+
+See [Sportec possession validation and regeneration](docs/sportec_possession_states.md)
+for the coverage audit and commands to create the required fresh cache.
 
 - `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups. It does not change an exported `pass_height` checkpoint's probability meaning; compatible predicted-height cache provenance is required when relevant.
 - `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.

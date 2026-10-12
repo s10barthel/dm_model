@@ -187,12 +187,12 @@ def test_contracts_for_automatically_named_fresh_run(tmp_path, monkeypatch):
     assert versions.read_metadata(resume.root(args))["dataset_contracts"]["hawkeye"]["freeze_ballreceipt"] is True
 
 
-def test_sportec_spell_artifact_cannot_change_partition_identity(setup_cache):
+def test_sportec_control_provenance_cannot_change_partition_identity(setup_cache):
     args, _, _ = setup_cache
-    first = {"match_id": "match", "feature_run_id": "features", "carry_definition": "v1", "spell_artifact_sha256": "a"}
+    first = {"match_id": "match", "feature_run_id": "features", "control_sha256": "a"}
     resume.record_source(args, "sportec", "partition1", first)
-    with pytest.raises(ValueError, match="spell artifact"):
-        resume.record_source(args, "sportec", "partition2", {**first, "spell_artifact_sha256": "b"})
+    with pytest.raises(ValueError, match="source provenance"):
+        resume.record_source(args, "sportec", "partition2", {**first, "control_sha256": "b"})
 
 
 def test_lane_export_restored_and_selections_remain_flexible(tmp_path, monkeypatch):

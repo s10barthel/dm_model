@@ -131,7 +131,12 @@ def write_scoped_component_run(match_dir: Path) -> None:
         "outcome_conceding_failure": zero_component,
     }
     for component_name, values in components.items():
-        scoped_component_frame(values).to_parquet(match_dir / f"{component_name}.parquet", index=False)
+        table = scoped_component_frame(values)
+        # The second actor acquired the ball at this explicitly associated start.
+        start = table.loc[table.action_id.eq(0) & table.frame_scope.eq(ranking.RECEIVE_FRAME_ID_SCOPE)].copy()
+        start["action_id"], start["original_event_id"] = 1, 101
+        start["frame_scope"] = ranking.SPELL_START_SCOPE
+        pd.concat([table, start], ignore_index=True).to_parquet(match_dir / f"{component_name}.parquet", index=False)
 
 
 def write_synced_events(event_dir: Path) -> None:
