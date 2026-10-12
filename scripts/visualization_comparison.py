@@ -306,8 +306,23 @@ def cached_prediction(cache, predict, scene, model, **kwargs):
     intent_signature = None
     if intent is not None and model.args.get("xpass_weight") == "v5":
         intent_signature = (tuple(intent.columns), pd.util.hash_pandas_object(intent).values.tobytes())
+    height = kwargs.get("pass_height_probs")
+    height_signature = None if height is None else (tuple(height.columns), pd.util.hash_pandas_object(height).values.tobytes())
+    auxiliary_signature = tuple((role, id(auxiliary), inference_mask_metadata(auxiliary)["configuration_id"],
+                                 repr(sorted(auxiliary.args.items())))
+                                for role, auxiliary in sorted(getattr(model, "_xpass_auxiliary_models", {}).items()))
+    from pc_xpass_auxiliary import original_input_fingerprint
+    source_graphs = kwargs.get("graph_override")
+    source_labels = kwargs.get("label_override")
+    if source_graphs is None:
+        source_graphs = getattr(scene, "graph_features_1" if kwargs.get("post_action") else "graph_features_0", None)
+        source_labels = getattr(scene, "labels", None)
+    source_signature = (original_input_fingerprint(source_graphs, source_labels)
+                        if source_graphs is not None and source_labels is not None else None)
     key = (id(model), inference_mask_metadata(model)["configuration_id"],
-           tuple(kwargs.get("event_indices") or ()), intent_signature)
+           id(scene), tuple(kwargs.get("event_indices") or ()), intent_signature,
+           height_signature, auxiliary_signature, repr(sorted(model.args.items())),
+           bool(kwargs.get("post_action")), source_signature)
     if key not in cache:
         cache[key] = predict(scene, model, **kwargs)
     return tuple(value.copy(deep=True) if isinstance(value, pd.DataFrame) else value for value in cache[key])

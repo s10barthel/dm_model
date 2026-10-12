@@ -251,6 +251,7 @@ def test_inference_preserves_carrier_probability(monkeypatch, version, use_carri
         match, model, device="cpu", post_action=post_action,
         graph_override=[graph], label_override=match.labels,
         pass_intent_probs=pd.DataFrame({"home_1": [0.5], "home_2": [0.5]}, index=[7]),
+        pass_height_probs=pd.DataFrame({"home_1": [.25], "home_2": [.25]}, index=[7]),
     )
     assert probs.at[7, carrier] == pytest.approx(torch.sigmoid(torch.tensor(model.logit)).item())
     teammate = "home_1" if post_action else "home_2"
@@ -876,22 +877,12 @@ class PhysicalXPassTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "top25_xpass"):
             physical_pass_model.validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, "top_25")
 
-    def test_runtime_cache_adds_selected_top_n_only_for_lane_survival_model(self) -> None:
-        top_n_model = SimpleNamespace(args={"lane_survival": True, "lane_survival_mode": "top_25"})
+    def test_pc_generation_rejects_model_driven_metric_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "pc_xpass"
-            prewarm_physical_xpass_runtime_cache(
-                [],
-                cache_dir=cache_dir,
-                source=PC_XPASS_SOURCE,
-                teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                pass_height_model=top_n_model,
-                dry_run=False,
-            )
-            metadata = json.loads((cache_dir / "metadata.json").read_text(encoding="utf-8"))
-
-        self.assertIn("top25_xpass", metadata["available_metrics"])
-        self.assertIn(25, metadata["top_n_values"])
+            with self.assertRaisesRegex(ValueError, "does not accept height models"):
+                prewarm_physical_xpass_runtime_cache([], cache_dir=tmpdir, source=PC_XPASS_SOURCE,
+                    pass_height_model=ConstantPassHeightModel(), pass_height_model_id="pass_height/test")
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
     def test_lane_survival_checkpoint_reports_precompute_instruction_for_missing_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4733,93 +4724,19 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_1")]), 0.7, places=6)
         self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.7, places=6)
 
-    def test_runtime_pc_xpass_cache_miss_supplies_lane_survival_to_pass_height_model(self) -> None:
-        labels = torch.stack([make_label(action_index=5)])
-        graph = make_graph()
-        pass_height_model = ConstantPassHeightModel(probability=0.7, node_in_dim=26)
-        pass_height_model.args["lane_survival"] = True
+    def test_pc_generation_rejects_height_enrichment(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "pc_xpass"
-            with patch(
-                "physical_pass_model.compute_graphs_pc_xpass_metrics",
-                return_value=[
-                    pd.Series(
-                        {
-                            "home_2__max_xpass": 0.61,
-                            pc_xpass_lane_survival_column("home_2"): 0.42,
-                        },
-                        dtype=float,
-                    )
-                ],
-            ) as compute:
-                stats = prewarm_physical_xpass_runtime_cache(
-                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
-                    cache_dir=cache_dir,
-                    source=PC_XPASS_SOURCE,
-                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
-                    num_workers=1,
-                    pass_height_model=pass_height_model,
-                    pass_height_model_id="pass_height/lane-model",
-                    pass_height_device="cpu",
-                )
-            rows = load_physical_xpass_match(cache_dir, "runtime_match")
+            with self.assertRaisesRegex(ValueError, "does not accept height models"):
+                prewarm_physical_xpass_runtime_cache([], cache_dir=tmpdir, source=PC_XPASS_SOURCE,
+                    pass_height_model=ConstantPassHeightModel(), pass_height_model_id="pass_height/test")
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
-        compute.assert_called_once()
-        self.assertEqual(graph.x.shape[1], 25)
-        self.assertEqual(stats["pass_height_filled"], 1)
-        self.assertAlmostEqual(float(rows.loc[5, pc_xpass_lane_survival_column("home_2")]), 0.42)
-        self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.7, places=6)
-
-    def test_runtime_pc_xpass_refreshes_lane_model_pass_height_without_recomputing_xpass(self) -> None:
-        labels = torch.stack([make_label(action_index=5)])
-        graph = make_graph()
-        pass_height_model = ConstantPassHeightModel(probability=0.8, node_in_dim=26)
-        pass_height_model.args["lane_survival"] = True
+    def test_pc_generation_rejects_height_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            cache_dir = Path(tmpdir) / "pc_xpass"
-            (cache_dir / "matches").mkdir(parents=True)
-            (cache_dir / "metadata.json").write_text(
-                json.dumps(pc_xpass_metadata(PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER) | {"pass_height_model_id": "pass_height/old-model"}),
-                encoding="utf-8",
-            )
-            pd.DataFrame(
-                [
-                    {
-                        "match_id": "runtime_match",
-                        "action_index": 5,
-                        "physical_state_hash": physical_state_hash(graph),
-                        PHYSICAL_XPASS_PASS_DISTANCE_COLUMN: observed_pass_distance(graph, labels[0]),
-                        PHYSICAL_XPASS_BALL_Z_COLUMN: graph_ball_z(graph),
-                        **graph_nearest_opponent_distance_row_values(graph),
-                        "home_2__max_xpass": 0.77,
-                        pc_xpass_lane_survival_column("home_2"): 0.42,
-                        physical_xpass_pass_height_column("home_1"): 0.1,
-                        physical_xpass_pass_height_column("home_2"): 0.2,
-                    }
-                ]
-            ).to_parquet(cache_dir / "matches" / "runtime_match.parquet", index=False)
-
-            with patch("physical_pass_model.compute_graphs_pc_xpass_metrics") as compute:
-                stats = prewarm_physical_xpass_runtime_cache(
-                    [{"match_id": "runtime_match", "graphs": [graph], "labels": labels}],
-                    cache_dir=cache_dir,
-                    source=PC_XPASS_SOURCE,
-                    teammate_policy=PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
-                    speed_aggregation=PHYSICAL_XPASS_SPEED_AGGREGATION_PACKAGE_MAX,
-                    num_workers=1,
-                    pass_height_model=pass_height_model,
-                    pass_height_model_id="pass_height/new-model",
-                    pass_height_device="cpu",
-                )
-            rows = load_physical_xpass_match(cache_dir, "runtime_match")
-
-        compute.assert_not_called()
-        self.assertEqual(stats["cache_misses"], 0)
-        self.assertEqual(stats["copied_from_reuse"], 1)
-        self.assertEqual(stats["pass_height_refreshed"], 1)
-        self.assertAlmostEqual(float(rows.loc[5, "home_2__max_xpass"]), 0.77)
-        self.assertAlmostEqual(float(rows.loc[5, physical_xpass_pass_height_column("home_2")]), 0.8, places=6)
+            with self.assertRaisesRegex(ValueError, "does not accept height models"):
+                prewarm_physical_xpass_runtime_cache([], cache_dir=tmpdir, source=PC_XPASS_SOURCE,
+                    pass_height_model=ConstantPassHeightModel(), pass_height_model_id="pass_height/test")
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
     def test_lane_survival_pass_height_model_requires_pc_xpass_generation(self) -> None:
         labels = torch.stack([make_label(action_index=5)])
@@ -6586,12 +6503,18 @@ class PhysicalXPassTests(unittest.TestCase):
             v4_zero=0.7,
         )
 
+        for graph in (first_graph, second_graph):
+            graph.source_node_positions = torch.arange(graph.num_nodes)
+            graph.xpass_pass_height_graph = graph.clone()
+        height_model = DummyOffsetModel(output_values=[0., float(torch.logit(torch.tensor(.8))), 0., 0.])
+        height_model.args = {"task": "pass_height", "node_in_dim": 25, "edge_in_dim": 2}
         metrics = run_epoch(
             args,
             DummyOffsetModel(output_values=[0.0, 1.0, 0.0, -1.0]),
             loader,
             device="cpu",
             train=False,
+            auxiliary_models={"pass_height": height_model},
         )
         weights = physical_xpass_blend_weight_v4(np.array([20.0, 40.0]), np.array([0.8, 0.5]))
         expected = model_utils.calc_weighted_binary_probability_metrics(
@@ -6651,13 +6574,19 @@ class PhysicalXPassTests(unittest.TestCase):
         )
         pass_intent_model.args = {"task": "pass_intent", "node_in_dim": 25, "edge_in_dim": 2}
 
+        graph.source_node_positions = torch.arange(graph.num_nodes)
+        graph.xpass_pass_height_graph = graph.clone()
+        # Avoid nesting an auxiliary graph inside the next auxiliary input.
+        graph.xpass_pass_intent_graph = Data(x=graph.x.clone(), edge_index=graph.edge_index.clone(),
+            edge_attr=graph.edge_attr.clone(), source_node_positions=torch.arange(graph.num_nodes))
+        height_model = ConstantPassHeightModel(probability=.8)
         _, evaluation = run_epoch(
             args,
             DummyOffsetModel(output_values=[-10.0, 0.0, -10.0]),
             loader,
             device="cpu",
             train=False,
-            pass_intent_model=pass_intent_model,
+            auxiliary_models={"pass_intent": pass_intent_model, "pass_height": height_model},
         )
 
         diagnostics = evaluation["predictor_diagnostics"]

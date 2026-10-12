@@ -33,6 +33,7 @@ from datatools.hawkeye import (
     load_hawkeye_tracking,
 )
 from inference import configure_lane_survival_runtime_cache
+from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.utils import (
     extract_model_feature_signature,
     get_model_provenance,
@@ -41,6 +42,7 @@ from models.utils import (
 )
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
 from physical_pass_model import (
     PC_XPASS_DEFAULT_BALL_DEC,
@@ -314,6 +316,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
+    add_inference_mask_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.prepare_generation_args(parser, args, argv, location=True)
     resolve_top_pass_selector(parser, args, pc_only=True)
@@ -593,6 +597,8 @@ def _configure_models(args: argparse.Namespace):
         outcome_conceding_model_id=resolved_ids["outcome_conceding"],
         device=device,
     )
+    configure_auxiliary_models(args, specs, device, active=True)
+    configure_inference_masks(specs, getattr(args, "inference_mask", None))
     schema = validate_model_graph_schemas(specs)
     pass_model = specs["pass_success"]
     pass_model.args.update(
@@ -622,16 +628,9 @@ def _configure_models(args: argparse.Namespace):
         pass_model.args["pass_height_threshold"] = args.pass_height_threshold
     configure_lane_survival_runtime_cache(specs, args.lane_survival_cache_dir or args.pc_xpass_cache_dir)
     args._runtime_graph_schema = schema
-    args._pass_height_model = specs.get("pass_height")
-    args._pass_height_model_record = (
-        get_model_provenance(resolved_ids["pass_height"]) if "pass_height" in resolved_ids else None
-    )
+    args._pass_height_model = None
+    args._pass_height_model_record = None
     args.pass_height_device = device
-    args.pass_height_model_id = resolved_ids.get("pass_height")
-    if args._pass_height_model_record is not None:
-        from models.pass_height import check_height_probability
-        check_height_probability(args._pass_height_model_record.get("pass_height_definition"),
-                                 getattr(args, "pass_height_threshold", None))
     return resolved_ids, shared_context, specs, schema, device
 
 
@@ -969,6 +968,7 @@ def _run_location(args: argparse.Namespace) -> None:
 
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_ids.items()}
     metadata = {
+        "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "run_id": run_id,
         "run_type": "hawkeye_loc_component",
         "inference_mode": args.mode,

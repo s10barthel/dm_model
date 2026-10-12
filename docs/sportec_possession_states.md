@@ -42,7 +42,9 @@ are reported and stay missing; nearby valid frames do not replace them.
 Corroborating control observations are retained in the manifest; they do not add
 spell boundaries or bypass the selected scope/stride.
 
-Sportec now requires `match_physical_states_v2` / `sportec_possession_states_v2`.
+Sportec now requires `match_physical_states_v3` / `sportec_possession_states_v3`
+with `physical_input_contract = pc_xpass_physical_inputs_v1`. Learned model graph
+options, masks, and checkpoints do not participate in physical state identities.
 Physical identity includes match, period, frame, actual possessor and provenance;
 semantic spells and event associations live in a separate manifest. Cache manifests
 are published with match checkpoints; component runs export
@@ -59,7 +61,7 @@ started as part of this implementation.
 
 ```powershell
 python scripts/generate_physical_xpass.py `
-  --pc-xpass --pc-xpass-id sportec_spells_v2 `
+  --pc-xpass --pc-xpass-id sportec_spells_v3 `
   --sportec-feature-run-id feature_20260910T110759_053479_8b508137 `
   --top-pass 5 10 --top-n-values 10 25 --top-xt `
   --reaction-time dist_pass --dist-pass-div 50 --dist-pass-min 0 --dist-pass-max 0.7 `
@@ -71,15 +73,14 @@ python scripts/generate_physical_xpass.py `
   --max-speed 25 --min-speed 3 --speed-step 2 --angle-step 3 --radial-gridsize 1 `
   --physical-eps 0.0001 --num-workers 8 --physical-batch-size 16 --worker-thread-limit 1 `
   --scope actions `
-  --pass-height-model-id pass_height/pass_height_20260703T120403_205360_c72e946d `
   --no-skillcorner --no-hawkeye --no-benchmark
 ```
 
 Add your existing model/split options to these consumer examples:
 
 ```powershell
-python scripts/run_relevant_models.py --bundle-id BUNDLE --feature-run-id feature_20260910T110759_053479_8b508137 --scope actions --use-physical-xpass --pc-xpass --pc-xpass-id sportec_spells_v2
-python scripts/train_relevant_models.py --feature-run-id feature_20260910T110759_053479_8b508137 --only-pass-height --lane-survival top_pass_10 --pc-xpass-id sportec_spells_v2
+python scripts/run_relevant_models.py --bundle-id BUNDLE --feature-run-id feature_20260910T110759_053479_8b508137 --scope actions --use-physical-xpass --pc-xpass --pc-xpass-id sportec_spells_v3
+python scripts/train_relevant_models.py --feature-run-id feature_20260910T110759_053479_8b508137 --only-pass-height --lane-survival top_pass_10 --pc-xpass-id sportec_spells_v3
 ```
 
 ## Six-match coverage audit

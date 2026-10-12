@@ -16,8 +16,9 @@ import torch
 from datatools import config, preprocess, utils
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
 from project_config import CONTROL_EVENTS_SYNCED_DIR
+from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
-STATE_CONTRACT = "sportec_possession_states_v2"
+STATE_CONTRACT = "sportec_possession_states_v3"
 START_SCOPE = "spell_start"
 PASSING_RESTARTS = {
     "throw_in": "ThrowIn", "goalkick": "GoalKick", "corner_short": "CornerKick",
@@ -143,7 +144,7 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
                           else _canonical_fingerprint(canonical)), control_sha256=_table_fingerprint(control_events),
         resolved_actions_sha256=_action_fingerprint(actions), tracking_sha256=_table_fingerprint(match.tracking),
         lineup_sha256=_table_fingerprint(getattr(match, "lineup", pd.DataFrame())),
-        graph_options=graph_options or dict(add_v_edge_features=False, add_relative_speed_edge_features=False))
+        physical_input_contract=PHYSICAL_INPUT_CONTRACT)
     plan = SportecStatePlan(str(match_id), provenance)
     canonical["_event_key"] = canonical.original_event_id.map(_event_id)
     ambiguous_events = {event for event, rows in canonical.groupby("_event_key")

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 import torch
 from PIL import Image
+from torch_geometric.data import Data
 
 from scripts import visualize_hawkeye as hv, visualize_skillcorner as sv, visualize_benchmark as bv
 from scripts import visualize_action_components as av, run_and_visualize_hawkeye as dv
@@ -156,7 +157,7 @@ def _subject():
     return SimpleNamespace(situation_id="s", match_id="s", tracking=pd.DataFrame(tracking, index=frames),
         frame_meta=pd.DataFrame(dict(abs_time=[0., 0.1], possession_team=["A", "A"],
             possession_prefix=["home", "home"], possessor_object_id=["home_1", "home_1"]), index=pd.Index(frames, name="frame_id")),
-        labels=torch.ones((2, 3)), graph_features_0=[object()], team_map={"A": "home", "B": "away"})
+        labels=torch.ones((2, 3)), graph_features_0=[Data(x=torch.zeros((1, 26)))], team_map={"A": "home", "B": "away"})
 
 
 @pytest.fixture
@@ -235,17 +236,50 @@ def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatc
     assert (tmp_path / "checkpoints/s/pass_score_0.png").exists()
 
 
-def test_masked_intent_changes_v5_dependency(tmp_path, monkeypatch, inference_fixture):
-    subject, models, calls, _ = inference_fixture
-    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--pass-intent-model-id", "pass_intent/a",
-        "--only-pass-success", "--use-physical-xpass", "--xpass-weight", "v5",
-        "--inference-mask-1", "pass_intent:accel", "--output-dir", str(tmp_path), "--run-id", "v5"])
-    monkeypatch.setattr(dv, "parse_args", lambda: args)
-    dv.main()
-    success = [item for item in calls if item[0].startswith("pass_success/")]
-    assert len(success) == 2
-    assert not success[0][1] and not success[1][1]
-    assert success[0][2].iloc[0].home_2 != success[1][2].iloc[0].home_2
+def test_masked_auxiliary_changes_v5_prediction_cache_dependency():
+    from scripts.visualization_comparison import cached_prediction
+    from models.inference_masks import configure_inference_masks
+    primary = TinyModel("pass_success/a")
+    intent = TinyModel("pass_intent/auxiliary")
+    height = TinyModel("pass_height/auxiliary")
+    primary.args["xpass_weight"] = "v5"
+    primary._xpass_auxiliary_models = {"pass_intent": intent, "pass_height": height}
+    models = {"pass_success": primary, "xpass_pass_intent": intent, "xpass_pass_height": height}
+    cache, calls, subject = {}, [], object()
+    def predict(scene, model, **kwargs):
+        calls.append(bool(getattr(intent, "inference_masks", None)))
+        return pd.DataFrame({"home_2": [.5 if calls[-1] else .7]}, index=[10]), None
+    configure_inference_masks(models, [])
+    first = cached_prediction(cache, predict, subject, primary, event_indices=[10])[0]
+    cached_prediction(cache, predict, subject, primary, event_indices=[10])
+    assert len(calls) == 1
+    configure_inference_masks(models, ["pass_intent:accel"])
+    second = cached_prediction(cache, predict, subject, primary, event_indices=[10])[0]
+    assert calls == [False, True]
+    assert first.at[10, "home_2"] != second.at[10, "home_2"]
+
+
+
+def test_prediction_reuse_requires_matching_original_state_inputs():
+    from datatools import config
+    from scripts.visualization_comparison import cached_prediction
+    from torch_geometric.data import Data
+    model = TinyModel("pass_height/auxiliary")
+    source = Data(x=torch.zeros((2, 26)), edge_index=torch.tensor([[0, 1], [1, 0]]),
+                  edge_attr=torch.zeros((2, 2)), node_ids=["home_1", "home_2"])
+    labels = torch.zeros((1, len(config.LABEL_COLUMNS)))
+    scene, calls, cache = object(), [], {}
+    def predict(scene, model, **kwargs):
+        calls.append(float(kwargs["graph_override"][0].x[1, 3]))
+        return pd.DataFrame({"home_2": [calls[-1]]}, index=[10]), None
+    options = dict(graph_override=[source], label_override=labels, event_indices=[10])
+    cached_prediction(cache, predict, scene, model, **options)
+    cached_prediction(cache, predict, scene, model, **options)
+    assert len(calls) == 1
+    source.x[1, 3] = 20
+    result = cached_prediction(cache, predict, scene, model, **options)[0]
+    assert calls == [0., 20.]
+    assert result.at[10, "home_2"] == 20.
 
 
 def _raw_hawkeye(value=0.4):
@@ -460,14 +494,14 @@ def test_mask_status_and_real_model_prediction_cache():
         with torch.no_grad():
             values = checkpoint(batch).reshape(-1).numpy()
         return pd.DataFrame([values]), None
-    cache = {}
+    cache, subject = {}, object()
     configure_inference_masks({"selected": model}, [])
-    unmasked, _ = cached_prediction(cache, predict, object(), model)
-    cached, _ = cached_prediction(cache, predict, object(), model)
+    unmasked, _ = cached_prediction(cache, predict, subject, model)
+    cached, _ = cached_prediction(cache, predict, subject, model)
     assert len(calls) == 1
     pd.testing.assert_frame_equal(unmasked, cached)
     metadata = configure_inference_masks({"selected": model}, ["accel"])
-    masked, _ = cached_prediction(cache, predict, object(), model)
+    masked, _ = cached_prediction(cache, predict, subject, model)
     assert len(calls) == 2 and not np.array_equal(unmasked.values, masked.values)
     assert metadata["models"]["selected"]["status"] == "applied"
     torch.testing.assert_close(batch.x, original.x)

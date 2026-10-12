@@ -14,6 +14,7 @@ from pathlib import Path
 
 import project_config as config
 import reachability as reach
+from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle_step radial_gridsize
     top_n top_n_values top_pass_values top_xt reaction_time reaction_time_mode dist_pass_div dist_pass_min dist_pass_max
@@ -96,17 +97,12 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
         root = version_root(run_id, location)
         if location or root.exists():
             metadata = read_metadata(root)
+            if metadata.get("physical_input_contract") != PHYSICAL_INPUT_CONTRACT:
+                raise ValueError("Incompatible pc-xPass physical input contract; create a new cache version.")
             if not location:
                 for key, expected in (("schema_version", 1), ("physics_version", 2)):
                     if metadata.get(key, expected) != expected:
                         raise ValueError(f"Incompatible pc-xPass {key}; create a new version.")
-                enrichment = metadata.get("pass_height_enrichment", {})
-                pending = enrichment.get("pending") or {}
-                inherited = pending.get("model_id") or enrichment.get("model_id") or metadata.get("generation_settings", {}).get("pass_height_model_id")
-                if pending and "pass_height_model_id" in explicit and args.pass_height_model_id != inherited:
-                    raise ValueError("Finish the pending pass-height refresh before switching models again.")
-                if "pass_height_model_id" not in explicit:
-                    args.pass_height_model_id = inherited
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
             metadata["generation_settings"].setdefault("export_lane_control", False)
@@ -177,15 +173,16 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
         raise ValueError("Effective pc-xPass settings differ from selected version.")
     now = datetime.now(timezone.utc).isoformat()
     metadata = dict(old)
-    legacy_height = getattr(args, "_pc_existing_metadata", {}).get("generation_settings", {}).get("pass_height_model_id")
-    if legacy_height and not location:
-        metadata.setdefault("pass_height_enrichment", {"model_id": legacy_height})
     metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=args.pc_xpass_namespace,
                     schema_version=1, physics_version=2, ball_dec=float(args.ball_dec),
+                    physical_input_contract=PHYSICAL_INPUT_CONTRACT,
                     generation_settings=effective, created_at=old.get("created_at", now),
                     updated_at=now, status="running")
     history = list(old.get("invocations", []))
-    history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items() if not k.startswith("_")}, "status": "running"})
+    history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items()
+                    if not k.startswith("_") and not k.startswith("pass_height")
+                    and not k.startswith("xpass_pass_") and not k.endswith("model_id")
+                    and k != "inference_mask"}, "status": "running"})
     metadata["invocations"] = history
     atomic_json(root / "metadata.json", metadata)
     args._pc_generation_started = True
@@ -199,8 +196,6 @@ def finish_generation(args: Namespace, *, success: bool = True, coverage: dict[s
     if not (root / "metadata.json").exists():
         return
     metadata = read_metadata(root)
-    if metadata.get("pass_height_enrichment", {}).get("pending"):
-        success = False
     now = datetime.now(timezone.utc).isoformat()
     metadata.update(updated_at=now, status="completed" if success else "incomplete")
     if coverage is not None:

@@ -1362,6 +1362,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
         masked_graph.node_self_edge_attr = graph.node_self_edge_attr[node_mask]
     if hasattr(graph, "source_node_positions"):
         masked_graph.source_node_positions = graph.source_node_positions[node_mask]
+    if hasattr(graph, "pc_xpass_input_hash"):
+        masked_graph.pc_xpass_input_hash = graph.pc_xpass_input_hash
     if hasattr(graph, "inference_possessor_mask"):
         masked_graph.inference_possessor_mask = graph.inference_possessor_mask[node_mask]
     if hasattr(graph, "node_ids"):
@@ -1523,6 +1525,7 @@ def filter_features_and_labels(
     args: Dict[str, Any],
     event_indices: np.ndarray = None,
     feature_action_indices: np.ndarray | torch.Tensor | list[int] | None = None,
+    *, validate_targets: bool = True,
 ) -> Tuple[List[Data], torch.Tensor]:
     policy = goal_policy(args)
     filtered_features = []
@@ -1580,6 +1583,9 @@ def filter_features_and_labels(
             continue
         else:
             graph = graph.clone()
+            if args.get("lane_survival", False):
+                from physical_pass_model import physical_state_hash
+                graph.pc_xpass_input_hash = physical_state_hash(graph)
             graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
             capture_self_attributes(graph)
             if not hasattr(graph, "inference_possessor_mask"):
@@ -1661,7 +1667,8 @@ def filter_features_and_labels(
         elif args["sparsify"] == "delaunay" and graph.x.shape[0] > 3:
             graph = sparsify_edges(graph, "delaunay")
 
-        validate_observed_goal_target(graph, graph_labels, args)
+        if validate_targets:
+            validate_observed_goal_target(graph, graph_labels, args)
         filtered_features.append(graph)
         filtered_labels.append(graph_labels)
 

@@ -472,6 +472,7 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             [
                 "--evaluate-combined-success", "--xpass-version", "top25", "--xpass-weight", "v4",
                 "--discount", "true", "--v4-power", "4", "--v4-zero", "0.75",
+                "--xpass-pass-height-model-id", "pass_height/auxiliary",
             ]
         )
         evaluate_relevant_models.validate_pass_success_predictor_args(combined)
@@ -1096,8 +1097,7 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
 
             args.v4_zero = 0.7
             (cache_dir / "metadata.json").write_text(json.dumps({"source": "pc_xpass"}), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "pass-height provenance"):
-                evaluation_script.resolve_weighted_pass_success_cache(args, model_args)
+            self.assertEqual(evaluation_script.resolve_weighted_pass_success_cache(args, model_args), str(cache_dir))
 
             (cache_dir / "metadata.json").write_text(json.dumps({"source": "physical_xpass"}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "incompatible source"):

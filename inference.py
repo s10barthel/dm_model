@@ -135,12 +135,16 @@ def _aligned_pass_intent_values(
     event_index: int,
     player_indices: list[str],
 ) -> np.ndarray:
-    if event_index not in pass_intent_probs.index:
-        raise ValueError(f"Physical xPass weight v5 has no pass_intent row for event {event_index}.")
-    intent_row = pass_intent_probs.loc[event_index]
-    if isinstance(intent_row, pd.DataFrame):
-        raise ValueError(f"Physical xPass weight v5 requires a unique pass_intent row for event {event_index}.")
-    return pd.to_numeric(intent_row.reindex(player_indices), errors="coerce").to_numpy(dtype=float)
+    return _aligned_auxiliary_values(pass_intent_probs, event_index, player_indices, "pass_intent")
+
+
+def _aligned_auxiliary_values(table, event_index, player_indices, role):
+    if table is None or event_index not in table.index:
+        raise ValueError(f"PC-xPass auxiliary {role} has no prediction for state/action {event_index}.")
+    row = table.loc[event_index]
+    if isinstance(row, pd.DataFrame) or not row.index.is_unique:
+        raise ValueError(f"PC-xPass auxiliary {role} has ambiguous predictions for state/action {event_index}.")
+    return pd.to_numeric(row.reindex(player_indices), errors="coerce").to_numpy(dtype=float)
 
 
 def _physical_xpass_blend_finite_mask(
@@ -178,7 +182,7 @@ def _physical_xpass_blend_finite_mask(
         pass_height_values = np.asarray(pass_height, dtype=float)
         missing_pass_height_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(pass_height_values)
         if bool(missing_pass_height_mask.any()):
-            raise ValueError(f"Physical xPass weight {weight_version} requires finite cached pass_height for every blended player.")
+            raise ValueError(f"Physical xPass weight {weight_version} requires finite auxiliary pass_height for every blended player.")
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(pass_height_values)
         if weight_version == "v5":
             pass_intent_values = np.asarray(pass_intent, dtype=float)
@@ -834,14 +838,14 @@ def inference_boost(
     return pd.Series(probs, index=event_indices, dtype=float)
 
 
-def _prediction_node_ids(match, graph, label, policy, post_action=False):
+def _prediction_node_ids(match, graph, label, policy, post_action=False, teammates_only=False):
     ids = getattr(graph, "node_ids", None)
     if ids is None:
         action = match.actions.loc[int(label[0])]
         frame_key, player_key = ("end_frame_id", "end_player_id") if post_action else ("frame_id", "object_id")
         sides = find_active_players(match.tracking, int(action[frame_key]), str(action[player_key])[:4],
                                     include_goals=policy.input_goals)
-        ids = sides[0] + sides[1]
+        ids = sides[0] if teammates_only else sides[0] + sides[1]
     if len(ids) != graph.num_nodes:
         raise ValueError("Cannot align prediction candidates with graph node identities.")
     return ids
@@ -857,6 +861,8 @@ def inference_gnn(
     *,
     graph_override: list | None = None,
     label_override: torch.Tensor | None = None,
+    pass_height_probs: pd.DataFrame | None = None,
+    auxiliary_prediction: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if (graph_override is None) != (label_override is None):
         raise ValueError("graph_override and label_override must be supplied together.")
@@ -866,13 +872,6 @@ def inference_gnn(
     gnn_task = TASK_CONFIG.at[model.args["task"], "gnn_task"]
     include_goals = policy.include_goals
     out_filter = TASK_CONFIG.at[model.args["task"], "out_filter"]
-    if (
-        model.args["task"] == "pass_success"
-        and inference_uses_physical_xpass(model.args)
-        and physical_xpass_weight_version(model.args) == "v5"
-        and pass_intent_probs is None
-    ):
-        raise ValueError("Physical xPass weight v5 requires aligned pass_intent probabilities from a pass-intent model.")
     if graph_override is None:
         match_graphs, feature_action_indices = resolve_match_graphs(match, model, post_action)
         source_labels = match.labels
@@ -885,6 +884,7 @@ def inference_gnn(
         model.args,
         event_indices,
         feature_action_indices=feature_action_indices,
+        validate_targets=not auxiliary_prediction,
     )
     if graph_override is not None and not graphs:
         raise ValueError("No usable graphs remain for the selected inference actions.")
@@ -896,14 +896,28 @@ def inference_gnn(
             model,
             post_action=post_action,
         )
+    if (model.args["task"] == "pass_success" and inference_uses_physical_xpass(model.args)
+            and bool((labels[:, config.LABEL_INDEX["is_dribble"]] == 0).any())):
+        from pc_xpass_auxiliary import predict_auxiliaries
+        auxiliary = predict_auxiliaries(match, model, device, graphs=match_graphs, labels=source_labels,
+                                        event_indices=labels[:, 0].tolist(), post_action=post_action,
+                                        feature_action_indices=feature_action_indices)
+        pass_height_probs = auxiliary.get("pass_height", pass_height_probs)
+        pass_intent_probs = auxiliary.get("pass_intent", pass_intent_probs)
+        version = physical_xpass_weight_version(model.args)
+        if version in {"v4", "v5"} and pass_height_probs is None:
+            raise ValueError(f"PC-xPass {version} requires explicit auxiliary pass_height predictions.")
+        if version == "v5" and pass_intent_probs is None:
+            raise ValueError("PC-xPass v5 requires explicit auxiliary pass_intent predictions.")
     if requires_physical_xpass_for_inference(model.args):
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
     graphs = attach_lane_survival_for_inference(match, graphs, labels, model)
 
     selected_node_ids = []
-    if policy.version == 2:
+    if policy.version == 2 or out_filter == "teammates":
         for graph, label in zip(graphs, labels):
-            ids = _prediction_node_ids(match, graph, label, policy, post_action)
+            ids = _prediction_node_ids(match, graph, label, policy, post_action,
+                                       teammates_only=model.args["task"].endswith("oppo_agn"))
             selected_node_ids.append([ids[j] for j in torch.where(goal_candidate_mask(graph, model.args))[0].tolist()])
     if policy.version == 2 and model.args["task"] == "failure_receiver":
         for graph, label in zip(graphs, labels):
@@ -944,7 +958,7 @@ def inference_gnn(
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
             physical_nearest_opponent_out = getattr(graphs, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
             physical_ball_z_out = getattr(graphs, PHYSICAL_XPASS_BALL_Z_ATTR, None)
-            physical_pass_height_out = getattr(graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
+            physical_pass_height_out = None  # Height is supplied by the selected auxiliary, never the physical cache.
 
             if policy.version == 2 or TASK_CONFIG.at[model.args["task"], "out_filter"] == "teammates":
                 # Select eligible node outputs; graphwise out logits follow them.
@@ -1050,7 +1064,7 @@ def inference_gnn(
         offside_i = offside_out_mask[batch == i].cpu().detach().numpy().astype(bool)
 
         if out_filter == "teammates":
-            player_indices_i = selected_node_ids[i] if policy.version == 2 else list(active_players[0])
+            player_indices_i = selected_node_ids[i]
             if gnn_task == "node_selection":
                 if model.args["task"] in PASS_ONLY_INTENT_TASKS and str(possessor_object_id) in player_indices_i:
                     keep_mask = np.array([player_id != str(possessor_object_id) for player_id in player_indices_i], dtype=bool)
@@ -1090,8 +1104,6 @@ def inference_gnn(
                 ball_z_limit = physical_xpass_ball_z_limit(model.args)
                 if weight_version == "v2" and physical_nearest_opponent_out is None:
                     raise ValueError("Inference physical xPass weight v2 requires attached distance_to_nearest_opponent tensors.")
-                if weight_version in {"v4", "v5"} and physical_pass_height_out is None:
-                    raise ValueError(f"Inference physical xPass weight {weight_version} requires attached cached pass_height tensors.")
                 if ball_z_limit is not None and physical_ball_z_out is None:
                     raise ValueError("Inference physical xPass ball_z_limit requires attached cached ball_z tensors.")
                 xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
@@ -1106,11 +1118,9 @@ def inference_gnn(
                     if physical_ball_z_out is not None
                     else None
                 )
-                pass_height_i = (
-                    physical_pass_height_out[batch == i].cpu().detach().numpy().astype(float)
-                    if physical_pass_height_out is not None
-                    else None
-                )
+                pass_height_i = None
+                if weight_version in {"v4", "v5"}:
+                    pass_height_i = _aligned_auxiliary_values(pass_height_probs, event_index, player_indices_i, "pass_height")
                 pass_intent_i = None
                 if weight_version == "v5":
                     pass_intent_i = _aligned_pass_intent_values(pass_intent_probs, event_index, player_indices_i)
@@ -1141,6 +1151,14 @@ def inference_gnn(
                         raise ValueError(
                             "Physical xPass ball_z_limit tensors do not match pass-success probabilities: "
                             f"probs={probs_i.shape}, ball_z={None if ball_z_i is None else ball_z_i.shape}."
+                        )
+                required_candidates = pass_candidate_mask & ~offside_i & np.isfinite(xpass_i) & np.isfinite(distance_i)
+                for role, values in (("pass_height", pass_height_i), ("pass_intent", pass_intent_i)):
+                    if values is not None and bool((required_candidates & ~np.isfinite(values)).any()):
+                        missing = [player for player, invalid in zip(player_indices_i, required_candidates & ~np.isfinite(values)) if invalid]
+                        raise ValueError(
+                            f"PC-xPass auxiliary {role} has missing or nonfinite predictions in match "
+                            f"{match.match_id}, state/action {event_index}, frame {frame}, possessor {possessor_object_id}: {missing}."
                         )
                 finite_mask, missing_physical_mask = _physical_xpass_blend_finite_mask(
                     xpass=xpass_i,

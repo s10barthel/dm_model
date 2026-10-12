@@ -96,6 +96,8 @@ def build_action_dataset_kwargs(
         "include_goals": goal_policy(args).include_goals,
         "goal_input_nodes": None,
         "auxiliary_model_args": None,
+        "auxiliary_models_args": None,
+        "pass_distance_cache_dir": None,
         "vel_node_features_aware": _bool_arg(args, "vel_node_features_aware", True),
         "pos_node_features_aware": resolve_pos_node_features(args),
         "accel_aware": _bool_arg(args, "accel_aware", True),

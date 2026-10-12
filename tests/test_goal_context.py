@@ -264,19 +264,20 @@ def test_separate_auxiliary_graphs_and_ipw_identities(tmp_path, monkeypatch, mai
     torch.save(label[None], labels / "m.pt")
     main_args = settings("pass_success", version=main_version)
     aux_args = settings("pass_intent", version=aux_version)
+    height_args = settings("pass_height", version=aux_version)
     kwargs = build_action_dataset_kwargs(main_args, train=False, diagnostic_label_dir=None,
                                         require_goal_next10_diagnostics=False)
     main = ActionDataset(["m"], feature_dir=features, label_dir=labels,
-                         **dict(kwargs, auxiliary_model_args=aux_args))
+                         **dict(kwargs, auxiliary_models_args={"pass_intent": aux_args, "pass_height": height_args}))
     aux_kwargs = build_ipw_dataset_kwargs(kwargs, aux_args, {}, diagnostic_label_dir=None,
                                          require_goal_next10_diagnostics=False)
     aux = ActionDataset(["m"], feature_dir=features, label_dir=labels, **aux_kwargs)
     assert sample_records(main) == sample_records(aux)
     batch, _, _ = next(iter(DataLoader(main, batch_size=1)))
     assert batch.num_nodes == (6 if main_version == 2 else 4)
-    rebuilt = Batch.from_data_list(batch.auxiliary_graph)
+    rebuilt = Batch.from_data_list(batch.xpass_pass_intent_graph)
     assert rebuilt.num_nodes == (6 if aux_version == 2 else 4)
-    assert rebuilt.node_ids[0][int(batch.auxiliary_label[0, 5])] == "home_3"
+    assert rebuilt.node_ids[0][int(batch.xpass_pass_intent_label[0, 5])] == "home_3"
     # Legacy node-selection historically relies on teammates-first ordering;
     # the v2 path must handle our deliberately interleaved graph.
     if aux_version == 2:
@@ -305,7 +306,8 @@ def test_separate_auxiliary_graphs_and_ipw_identities(tmp_path, monkeypatch, mai
         xpass_weight="v5", xpass_metric="top10_xpass", v5_intent_threshold=.01,
         v5_discount=True, classification_threshold=.5))
     model_utils.run_epoch(epoch_args, DummyModel(main_args), DataLoader(main, batch_size=1),
-                          device="cpu", train=False, pass_intent_model=DummyModel(aux_args))
+                          device="cpu", train=False, auxiliary_models={"pass_intent": DummyModel(aux_args),
+                                                                       "pass_height": DummyModel(height_args)})
     assert observed_probabilities == pytest.approx([torch.tensor([.3, .5]).softmax(0)[0].item()])
 
 

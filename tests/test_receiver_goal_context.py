@@ -202,7 +202,7 @@ def test_pass_height_ipw_membership_and_dependency_context(tmp_path, main_versio
     aux = ActionDataset(["m"], feature_dir=tmp_path / "features", label_dir=tmp_path / "labels", **ipw_kwargs)
     assert sample_records(main) == sample_records(aux)
     assert main.features[0].num_nodes == (6 if main_version == 2 else 4)
-    assert main.features[0].auxiliary_graph.num_nodes == aux.features[0].num_nodes == (6 if aux_version == 2 else 4)
+    assert main.features[0].xpass_pass_intent_graph.num_nodes == aux.features[0].num_nodes == (6 if aux_version == 2 else 4)
 
 
 def test_prepared_cache_separates_policy_versions(tmp_path):

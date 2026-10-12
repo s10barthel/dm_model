@@ -23,6 +23,7 @@ from models.inference_masks import (
     resolve_inference_mask_configurations, resolve_scoped_masks, resolve_model_masks,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, validate_auxiliary_selectors
 
 from project_config import EVALUATION_RUNS_DIR
 
@@ -104,12 +105,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
     return resolve_top_pass_selector(parser, args, pc_only=True)
 
 
 def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
+    validate_auxiliary_selectors(args)
     enabled = bool(args.evaluate_xpass or args.evaluate_combined_success)
     if enabled and not args.xpass_version:
         raise ValueError("--evaluate-xpass/--evaluate-combined-success require --xpass-version.")
@@ -118,9 +121,6 @@ def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
     if args.evaluate_combined_success and not args.xpass_weight:
         raise ValueError("--evaluate-combined-success requires --xpass-weight.")
     if args.evaluate_combined_success and args.xpass_weight == "v5":
-        intent_ids = model_id_list(args.pass_intent_model_id)
-        if len(intent_ids) != 1:
-            raise ValueError("Combined v5 evaluation requires exactly one explicit --pass-intent-model-id as the shared auxiliary.")
         args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
         args.v5_discount = True if args.v5_discount is None else args.v5_discount
         if not math.isfinite(float(args.v5_intent_threshold)) or float(args.v5_intent_threshold) <= 0.0:
@@ -256,11 +256,15 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
             if args.xpass_weight == "v5":
                 command.extend(
                     [
-                        "--pass-intent-model-id", model_id_list(args.pass_intent_model_id)[0],
                         "--v5-intent-threshold", str(args.v5_intent_threshold),
                         "--v5-discount", str(bool(args.v5_discount)).lower(),
                     ]
                 )
+    if task == "pass_success":
+        for role in ("pass_height", "pass_intent"):
+            value = getattr(args, f"xpass_{role}_model_id", None)
+            if value:
+                command.extend(["--xpass-" + role.replace("_", "-") + "-model-id", value])
     if task in {"outcome_scoring", "outcome_conceding"} and args.f1_outcome_threshold is not None:
         command.extend(["--f1-outcome-threshold", str(args.f1_outcome_threshold)])
     return command
@@ -445,7 +449,8 @@ def evaluation_options(args: argparse.Namespace) -> dict:
         "xpass_version": args.xpass_version, "xpass_weight": args.xpass_weight,
         "v5_intent_threshold": args.v5_intent_threshold if args.xpass_weight == "v5" else None,
         "v5_discount": args.v5_discount if args.xpass_weight == "v5" else None,
-        "pass_intent_model_id": model_id_list(args.pass_intent_model_id)[0] if args.xpass_weight == "v5" else None,
+        "xpass_pass_height_model_id": getattr(args, "xpass_pass_height_model_id", None),
+        "xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None),
         "observed_pass_height_stratification": not bool(args.no_observed_pass_height_stratification),
         "classification_threshold": args.classification_threshold,
         "f1_outcome_threshold": args.f1_outcome_threshold,
@@ -464,8 +469,8 @@ def _comparison_threshold(args: argparse.Namespace, task: str) -> float | None:
 
 def _participating_entry_tasks(args: argparse.Namespace, task: str) -> set[str]:
     tasks = {task}
-    if task == "pass_success" and args.evaluate_combined_success and args.xpass_weight == "v5":
-        tasks.add("pass_intent")
+    if task == "pass_success":
+        tasks.update(validate_auxiliary_selectors(args))
     return tasks
 
 
@@ -494,15 +499,12 @@ def main() -> None:
         if args.bundle_id:
             raise ValueError("--compare without masks requires direct task-specific selections without --bundle-id.")
         subjects = entries
-        if args.evaluate_combined_success and args.xpass_weight == "v5":
-            subjects = [entry for entry in entries if entry["task"] != "pass_intent"]
         if len(subjects) < 2 or len({entry["task"] for entry in subjects}) != 1:
             raise ValueError("--compare requires at least two distinct checkpoints of the same task.")
         model_comparison.validate_target_definitions(subjects)
         entries = subjects
     participating_tasks = {entry["task"] for entry in entries}
-    if args.evaluate_combined_success and args.xpass_weight == "v5":
-        participating_tasks.add("pass_intent")
+    participating_tasks.update(validate_auxiliary_selectors(args))
     for configuration in configurations:
         configuration["scoped_masks"] = resolve_scoped_masks(configuration["masks"], participating_tasks)
         for entry in all_entries:

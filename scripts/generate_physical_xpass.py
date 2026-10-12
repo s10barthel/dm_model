@@ -497,6 +497,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.speed_step = PC_XPASS_DEFAULT_SPEED_STEP if args.pc_xpass else AS_DEFAULT_SPEED_STEP
     if args.pass_height_device is None:
         args.pass_height_device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    if args.pc_xpass and (args.pass_height_model_id or getattr(args, "pass_height_threshold", None) is not None
+                         or "pass_height_device" in getattr(args, "_pc_explicit", set())):
+        parser.error("PC-xPass generation is model independent. Remove height options and select "
+                     "--xpass-pass-height-model-id during inference/evaluation.")
     if args.pass_height_model_id:
         try:
             pass_height_task, _pass_height_run_id = parse_model_id(str(args.pass_height_model_id))
@@ -709,6 +713,10 @@ def pc_ignore_teammates_control_from_args(args: argparse.Namespace) -> bool:
 
 
 def prepare_pass_height_context(args: argparse.Namespace) -> None:
+    if getattr(args, "pc_xpass", False):
+        args._pass_height_model = None
+        args._pass_height_model_record = None
+        return
     model_id = getattr(args, "pass_height_model_id", None)
     if not model_id:
         if getattr(args, "pass_height_threshold", None) is not None:
@@ -731,7 +739,7 @@ def prepare_pass_height_context(args: argparse.Namespace) -> None:
 def prepare_runtime_graph_schema(args: argparse.Namespace) -> None:
     model_specs: dict[str, Any] = {}
     pass_height_model = getattr(args, "_pass_height_model", None)
-    if pass_height_model is not None:
+    if pass_height_model is not None and not getattr(args, "pc_xpass", False):
         model_specs["pass_height"] = pass_height_model
     args._runtime_graph_schema = validate_model_graph_schemas(model_specs)
 
@@ -1072,6 +1080,8 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
         "serial_retry_recovered",
         "serial_retry_failed",
     ]:
+        if key.startswith("pass_height") and key not in source and key not in target:
+            continue
         target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
     target["cache_dir"] = source.get("cache_dir", target.get("cache_dir"))
     target["dry_run"] = bool(target.get("dry_run", False)) or bool(source.get("dry_run", False))
@@ -1113,8 +1123,6 @@ def empty_runtime_stats(cache_dir: Path) -> dict[str, Any]:
         "pass_distance_filled": 0,
         "nearest_opponent_distance_filled": 0,
         "ball_z_filled": 0,
-        "pass_height_filled": 0,
-        "pass_height_refreshed": 0,
         "hash_mismatch_recomputed": 0,
         "online_graphs": 0,
         "compute_chunks": 0,
@@ -1237,10 +1245,8 @@ def prewarm_runtime_items(
     if not items:
         return None
     transaction = match_cache.active(cache_dir)
-    if transaction is not None and getattr(args, "_pc_refresh", None) is None:
+    if transaction is not None:
         transaction.expect(items)
-    if getattr(args, "_pc_refresh", None) is not None:
-        return args._pc_refresh.consume(items)
     if progress_desc is None:
         match_ids = sorted({str(item.get("match_id")) for item in items})
         progress_desc = f"physical xPass {match_ids[0]}" if len(match_ids) == 1 else "physical xPass runtime"
@@ -1300,9 +1306,9 @@ def prewarm_runtime_items(
         position_discount_power=float(args.position_discount_power),
         position_discount_distance=float(args.position_discount_distance),
         top_xt=bool(getattr(args, "top_xt", False)),
-        pass_height_model=getattr(args, "_pass_height_model", None),
-        pass_height_model_id=getattr(args, "pass_height_model_id", None),
-        pass_height_identity=getattr(args, "_pass_height_identity", None),
+        pass_height_model=None if args.pc_xpass else getattr(args, "_pass_height_model", None),
+        pass_height_model_id=None if args.pc_xpass else getattr(args, "pass_height_model_id", None),
+        pass_height_identity=None if args.pc_xpass else getattr(args, "_pass_height_identity", None),
         pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
         dry_run=bool(args.dry_run),
         show_progress=not bool(args.dry_run),
@@ -1436,8 +1442,6 @@ def write_runtime_dataset_metadata(
     source_inputs: dict[str, Any],
     skipped: dict[str, Any],
 ) -> None:
-    if getattr(args, "_pc_refresh", None) is not None:
-        return
     if bool(getattr(args, "dry_run", False)):
         print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
         return
@@ -1533,6 +1537,11 @@ def write_runtime_dataset_metadata(
         ],
         "storage": "wide_parquet_one_row_per_action_player_id_columns",
     }
+    if args.pc_xpass:
+        from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
+        metadata["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
+        metadata["source_inputs"] = {**source_inputs, "physical_input_contract": PHYSICAL_INPUT_CONTRACT}
+        metadata.pop("runtime_graph_schema", None)
     if source_inputs.get("state_contract") == STATE_CONTRACT:
         metadata.update(
             state_contract=STATE_CONTRACT,
@@ -1553,7 +1562,7 @@ def write_runtime_dataset_metadata(
             "coverage": "lane_control/coverage/<match_id>.json",
             "selection": "same_as_main_cache_best_option",
         }
-    if getattr(args, "pass_height_model_id", None):
+    if getattr(args, "pass_height_model_id", None) and not args.pc_xpass:
         metadata.update(
             {
                 "pass_height_model_id": str(args.pass_height_model_id),
@@ -2303,15 +2312,13 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
         "benchmark": run_runtime_benchmark,
         "hawkeye": run_runtime_hawkeye,
     }
-    pc_resume.recover_sources(args, runners)
     pc_resume.persist_contracts(args)
-    pc_resume.refresh_all(args, runners)
     summaries = []
     cache_label = "pc-xPass" if bool(getattr(args, "pc_xpass", False)) else "physical xPass"
     for dataset in selected_runtime_datasets(args):
         print(f"Generating runtime {cache_label} cache for {dataset}...")
         summaries.append(runners[dataset](args))
-    success = bool(summaries or getattr(args, "_pc_height_refresh_completed", False)) and all(not _flatten_skip_reasons(item.get("skipped") or {}) and not int(item["stats"].get("skipped_all_nan", 0)) for item in summaries)
+    success = bool(summaries) and all(not _flatten_skip_reasons(item.get("skipped") or {}) and not int(item["stats"].get("skipped_all_nan", 0)) for item in summaries)
     pc_versions.finish_generation(args, success=success, coverage={item["dataset"]: item for item in summaries})
     print(f"Runtime {cache_label} cache generation complete.")
     for summary in summaries:
@@ -2321,8 +2328,6 @@ def run_runtime_mode(args: argparse.Namespace) -> None:
             f"hits={int(stats.get('cache_hits', 0))}, misses={int(stats.get('cache_misses', 0))}, "
             f"written={int(stats.get('cache_written', 0))}, filled_distance={int(stats.get('pass_distance_filled', 0))}, "
             f"filled_ball_z={int(stats.get('ball_z_filled', 0))}, "
-            f"pass_height_filled={int(stats.get('pass_height_filled', 0))}, "
-            f"pass_height_refreshed={int(stats.get('pass_height_refreshed', 0))}, "
             f"skipped={len(_flatten_skip_reasons(summary.get('skipped') or {}))}, "
             f"skip_reasons={summarize_skip_reasons(summary.get('skipped') or {})}"
         )

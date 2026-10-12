@@ -54,6 +54,7 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 import pc_xpass_match_cache as match_cache
 
 from project_config import (
@@ -166,6 +167,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
@@ -678,6 +680,8 @@ def collect_action_components(
         pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root)
 
     for component_name, model in loaded_models.items():
+        if component_name.startswith("xpass_"):
+            continue
         uses_possession = pc_state is not None and (
             getattr(model, "args", {}).get("pc_xpass") or getattr(model, "args", {}).get("lane_survival")
         )
@@ -911,9 +915,6 @@ def main() -> None:
         ]
         if task in initial_component_selection.required_component_groups
     ]
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in initial_component_selection.required_component_groups:
-        if "pass_intent" not in required_model_tasks:
-            required_model_tasks.append("pass_intent")
     if required_model_tasks:
         resolved_model_ids, shared_context, bundle = resolve_model_selection(
             required_tasks=required_model_tasks,
@@ -951,12 +952,11 @@ def main() -> None:
         for name, model_id in model_ids.items()
         if name in component_selection.required_component_groups
     }
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
-        selected_model_ids = {"pass_intent": resolved_model_ids["pass_intent"], **selected_model_ids}
     loaded_models = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
+    configure_auxiliary_models(args, loaded_models, device)
     inference_mask_config = configure_inference_masks(loaded_models, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(loaded_models)
     runtime_feature_context = resolve_runtime_feature_run_context(
@@ -1082,6 +1082,7 @@ def main() -> None:
     if not saved_dirs:
         raise RuntimeError("All selected actions were skipped or failed during rendering.")
     metadata = {
+        "xpass_auxiliaries": auxiliary_metadata(loaded_models),
         "run_id": visualization_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": " ".join(sys.argv),
@@ -1160,7 +1161,7 @@ def main() -> None:
             and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
             else None
         ),
-        "physical_xpass_pass_intent_model_id": selected_model_ids.get("pass_intent") if getattr(args, "xpass_weight", "v3") == "v5" else None,
+        "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if getattr(args, "xpass_weight", "v3") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,

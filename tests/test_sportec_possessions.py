@@ -46,6 +46,20 @@ def reconstruct(match):
     return sp.reconstruct_sportec_states(match, "match", Path("feature"))
 
 
+def test_model_graph_options_do_not_change_physical_ids_or_spell_associations(monkeypatch):
+    match, _ = fixture(monkeypatch)
+    basic = sp.reconstruct_sportec_states(match, "match", Path("feature"),
+        graph_options=dict(add_v_edge_features=False, add_relative_speed_edge_features=False))
+    extended = sp.reconstruct_sportec_states(match, "match", Path("feature"),
+        graph_options=dict(add_v_edge_features=True, add_relative_speed_edge_features=True))
+    assert basic.provenance == extended.provenance
+    assert "graph_options" not in basic.provenance
+    assert basic.provenance["physical_input_contract"] == "pc_xpass_physical_inputs_v1"
+    assert basic.observations == extended.observations
+    assert basic.spells == extended.spells
+    assert basic.actions == extended.actions
+
+
 def test_chain_restart_opponent_receipt_and_shared_roles(monkeypatch):
     match, _ = fixture(monkeypatch)
     plan = reconstruct(match)

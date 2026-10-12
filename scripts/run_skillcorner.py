@@ -46,6 +46,7 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
 from project_config import (
     PROJECT_ROOT,
@@ -96,6 +97,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_frame_selection_arguments(parser)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     resolve_frame_selection_arguments(parser, args)
     pc_versions.check_selectors(args)
@@ -320,6 +322,8 @@ def main() -> None:
         pass_success_model.args["physical_runtime_cache_read_only"] = True
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
+    configure_auxiliary_models(args, model_specs, device)
+    configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("skillcorner", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
@@ -509,6 +513,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),

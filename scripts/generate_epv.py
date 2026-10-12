@@ -35,6 +35,7 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata
 
 from project_config import (
     EPV_DIR,
@@ -85,6 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--physical-cache-dir", help="Sportec runtime physical xPass cache override.")
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
@@ -226,7 +228,7 @@ def epv_physical_xpass_metadata(
         "physical_xpass_v5_intent_threshold": lookup_config.get("v5_intent_threshold") if lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_v5_discount": lookup_config.get("v5_discount") if lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_pass_intent_model_id": (
-            model_specs["pass_intent"].args.get("model_id", args.pass_intent_model_id)
+            getattr(args, "xpass_pass_intent_model_id", None)
             if lookup_config.get("weight_version") == "v5"
             else None
         ),
@@ -358,6 +360,7 @@ def main() -> None:
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
     model_specs = load_epv_models(resolved_model_ids, device)
+    configure_auxiliary_models(args, model_specs, device)
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     physical_cache_dir = configure_epv_physical_xpass(args, model_specs)
     graph_schema = validate_model_graph_schemas(model_specs)
@@ -407,6 +410,7 @@ def main() -> None:
 
     metadata = {
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
+        "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "created_at_utc": datetime.now(UTC).isoformat(),
         "export_match_ids": processed_export_ids,

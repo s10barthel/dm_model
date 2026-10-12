@@ -1,8 +1,4 @@
-"""Input contracts and transactional enrichment for versioned runtime caches.
-
-Dataset runners reconstruct states; refresh consumes only exact saved identities.
-No physical calculation or lane-control write is performed by a refresh.
-"""
+"""Model-independent source contracts for versioned runtime caches."""
 from __future__ import annotations
 
 import copy
@@ -18,6 +14,7 @@ import torch
 import pc_xpass_versions as versions
 import pc_xpass_match_cache as match_cache
 from datatools.possession_frames import STATE_CONTRACT
+from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 MODEL_COLUMN = "pass_height_model_fingerprint"
 INPUT_COLUMN = "pass_height_input_sha256"
@@ -111,7 +108,7 @@ def dataset_metadata(cache_root, dataset):
 
 
 def prepare_contracts(args, selected):
-    """Validate existing contracts without writes, including legacy recovery."""
+    """Validate physical source contracts without writes."""
     if not getattr(args, "pc_xpass", False) or getattr(args, "_pc_location", False):
         return
     cache_root = root(args) if getattr(args, "_pc_version_root", None) else versions.config.PC_XPASS_DIR / ".new-generation"
@@ -125,6 +122,7 @@ def prepare_contracts(args, selected):
     dependencies = {key: effective.get(key) for key in (
         "physics_version", "ranking_mode", "lane_function", "control_function", "lane_survival_aggregation",
         "top_pass_definition", "position_discount_function", "xt_surface", "reachability_config")}
+    dependencies["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
     if dependencies["xt_surface"]:
         dependencies["xt_surface"] = {key: value for key, value in dependencies["xt_surface"].items() if key != "path"}
     saved_dependencies = metadata.get("computation_dependencies")
@@ -144,8 +142,6 @@ def prepare_contracts(args, selected):
     contracts = copy.deepcopy(metadata.get("dataset_contracts", {}))
     explicit = args._pc_explicit
     needed = set(selected)
-    if args.pass_height_model_id:
-        needed.update(d for d in DATASETS if any((cache_root / d / "matches").glob("*.parquet")))
     history = metadata.get("invocations", [])
     for dataset in needed:
         if dataset in match_cache.DATASETS:
@@ -186,6 +182,8 @@ def prepare_contracts(args, selected):
         else:
             contracts.setdefault(dataset, {"state_contract": STATE_CONTRACT} if dataset == "skillcorner" else {})
     args._pc_dataset_contracts = contracts
+    for contract in contracts.values():
+        contract["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
 
 
 def persist_contracts(args):
@@ -201,9 +199,6 @@ def persist_contracts(args):
 def record_source(args, dataset, match_id, descriptor):
     transaction = match_cache.active(root(args) / dataset) if enabled(args) else None
     if transaction is not None:
-        refresh = getattr(args, "_pc_refresh", None)
-        if refresh is not None and str(match_id) not in refresh.frames:
-            return
         transaction.register(str(match_id), descriptor)
         return
     if not enabled(args):
@@ -220,7 +215,7 @@ def record_source(args, dataset, match_id, descriptor):
             raise ValueError(f"Changed SkillCorner possession definition for {descriptor['match_id']}:{descriptor['possession_id']}")
     if dataset == "sportec":
         artifact = {k: descriptor[k] for k in ("feature_run_id", "state_contract", "canonical_sha256",
-                    "control_sha256", "resolved_actions_sha256", "tracking_sha256", "lineup_sha256", "graph_options") if k in descriptor}
+                    "control_sha256", "resolved_actions_sha256", "tracking_sha256", "lineup_sha256", "physical_input_contract") if k in descriptor}
         old_artifact = metadata.get("sportec_artifacts", {}).get(descriptor["match_id"])
         if old_artifact and old_artifact != artifact:
             raise ValueError(f"Changed Sportec source provenance for {descriptor['match_id']}")
@@ -231,12 +226,6 @@ def record_source(args, dataset, match_id, descriptor):
                 raise ValueError(f"Changed {dataset} provenance for {match_id}: {key}")
     if args.dry_run:
         return
-    if getattr(args, "_pc_refresh", None) is not None:
-        if str(match_id) not in args._pc_refresh.frames:
-            return
-        if args._pc_refresh.identity is None:
-            args._pc_recovered_sources[str(match_id)] = descriptor
-            return
     metadata.setdefault("reconstruction", {}).setdefault(dataset, {})[str(match_id)] = descriptor
     if dataset == "sportec":
         metadata.setdefault("sportec_artifacts", {})[descriptor["match_id"]] = artifact
@@ -248,226 +237,3 @@ def record_source(args, dataset, match_id, descriptor):
 def assert_height_readable(metadata):
     if metadata.get("pass_height_refresh_pending"):
         raise ValueError("Pass-height refresh is pending; resume cache generation before reading height predictions.")
-
-
-class HeightRefresh:
-    def __init__(self, args, dataset, frames, identity):
-        self.args, self.dataset, self.frames, self.identity = args, dataset, frames, identity
-        if dataset in match_cache.DATASETS:
-            match_cache.require_format(root(args) / dataset)
-            self.frames = {str(key): match_cache.MatchAccumulator._internal(part, str(key))
-                           for frame in frames.values()
-                           for key, part in frame.groupby("possession_provenance_id")}
-        self.verified = set()
-
-    @staticmethod
-    def key(row):
-        import physical_pass_model as physics
-        scope = row.get("frame_scope")
-        scope = physics.PHYSICAL_XPASS_FRAME_SCOPE_ACTION if scope is None or pd.isna(scope) else str(scope)
-        return int(row["action_index"]), scope
-
-    def consume(self, items):
-        import physical_pass_model as physics
-        stats = physics._runtime_physical_xpass_stats(root(self.args) / self.dataset)
-        target = fingerprint(self.identity) if self.identity is not None else None
-        for item in items:
-            match_id = str(item["match_id"])
-            frame = self.frames.get(match_id)
-            if frame is None:
-                continue
-            lookup = {self.key(row): row for row in frame.to_dict("records")}
-            updates = []
-            confirmed = set()
-            for graph, label in zip(item["graphs"], item["labels"]):
-                key = self.key({"action_index": int(label[physics.LABEL_INDEX["action_index"]]),
-                                "frame_scope": item.get("frame_scope")})
-                if key not in lookup:
-                    continue
-                row = lookup[key]
-                if row.get("physical_state_hash") != physics.physical_state_hash(graph):
-                    raise ValueError(f"Changed input state: {self.dataset}/{match_id}/{key}")
-                if self.identity is None:
-                    self.verified.add((match_id, key))
-                    continue
-                digest = input_digest(graph, label, row, omit_missing=self.dataset in match_cache.DATASETS)
-                if (row.get(MODEL_COLUMN) != target or row.get(INPUT_COLUMN) != digest
-                        or not physics._has_finite_pass_height_predictions(pd.Series(row), graph)):
-                    prediction = physics._pass_height_predictions_for_graphs(
-                        [graph], self.args._pass_height_model, device=str(self.args.pass_height_device),
-                        labels=[label], pc_xpass_rows=[row], match_id=match_id)[0]
-                    # Remove old probabilities for players no longer in the model output.
-                    for column in list(row):
-                        if column.endswith("__pass_height"):
-                            row[column] = float("nan")
-                    physics._apply_pass_height_predictions(row, prediction)
-                    if not physics._has_finite_pass_height_predictions(pd.Series(row), graph):
-                        raise ValueError(f"Incomplete height prediction: {self.dataset}/{match_id}/{key}")
-                    row[MODEL_COLUMN], row[INPUT_COLUMN] = target, digest
-                    updates.append(row)
-                    stats["pass_height_refreshed"] += 1
-                confirmed.add((match_id, key))
-            if updates:
-                physics._write_runtime_physical_xpass_rows(root(self.args) / self.dataset, match_id, pd.DataFrame(updates))
-                transaction = match_cache.active(root(self.args) / self.dataset)
-                self.frames[match_id] = (transaction.read(match_id) if transaction is not None else
-                    pd.read_parquet(root(self.args) / self.dataset / "matches" / f"{match_id}.parquet"))
-            self.verified.update(confirmed)
-        return stats
-
-    def verify(self):
-        expected = {(match_id, self.key(row)) for match_id, frame in self.frames.items()
-                    for row in frame.to_dict("records")}
-        missing = expected - self.verified
-        if missing:
-            raise ValueError(f"Unresolved pass-height states in {self.dataset}: {len(missing)}; examples: {sorted(missing)[:5]}")
-
-
-def replay_args(args, dataset, metadata):
-    replay = copy.copy(args)
-    replay.scope, replay.frames = "frames", 1
-    replay.season = None
-    replay.limit = None
-    replay.skillcorner_limit = replay.benchmark_limit = replay.hawkeye_limit = None
-    replay.time_norm = None
-    replay._preflight_season_match_ids = None
-    saved = dataset_metadata(root(args), dataset).get("source_inputs", {})
-    descriptors = list(metadata.get("reconstruction", {}).get(dataset, {}).values())
-    history = [entry.get("arguments", {}) for entry in metadata.get("invocations", [])]
-    if dataset == "sportec":
-        matches = {d["match_id"] for d in descriptors if "match_id" in d}
-        matches.update(saved.get("selected_match_ids", []))
-        for invocation in history:
-            matches.update(invocation.get("selected_sportec_match_ids") or invocation.get("match_id") or [])
-        replay.match_id = sorted(matches) or None
-    elif dataset == "skillcorner":
-        replay.skillcorner_match_id = sorted({d["match_id"] for d in descriptors if "match_id" in d}
-                                            | set(saved.get("match_ids", []))
-                                            | {str(value) for entry in history for value in (entry.get("skillcorner_match_id") or [])}) or None
-    elif dataset == "benchmark":
-        replay.benchmark_modification = sorted({d["modification_id"] for d in descriptors if "modification_id" in d}
-                                              | set(saved.get("modifications", []))
-                                              | {int(value) for entry in history for value in (entry.get("benchmark_modification") or [])}) or None
-    else:
-        replay.hawkeye_situation_id = sorted({d["situation_id"] for d in descriptors if "situation_id" in d}
-                                            | {str(value) for value in saved.get("situation_ids", [])}
-                                            | {str(value) for entry in history for value in (entry.get("hawkeye_situation_id") or [])}) or None
-    locator_keys = {"skillcorner": ("skillcorner_input_dir",), "benchmark": ("benchmark_input_dir",),
-                    "hawkeye": ("hawkeye_tracking_csv", "hawkeye_ball_csv")}.get(dataset, ())
-    for key in locator_keys:
-        if key in args._pc_explicit:
-            continue
-        candidates = [d[key] for d in descriptors if d.get(key)]
-        candidates += [inv[key] for inv in history if inv.get(key)]
-        if candidates:
-            setattr(replay, key, candidates[-1])
-    return replay
-
-
-def refresh_all(args, runners):
-    if not enabled(args) or not getattr(args, "_pass_height_model", None):
-        return
-    cache_root = root(args)
-    frames = inventory(cache_root, lazy_possessions=True)
-    for dataset in match_cache.DATASETS:
-        if frames.get(dataset):
-            match_cache.require_format(cache_root / dataset)
-    identity = model_identity(args)
-    args._pass_height_identity = identity
-    target = fingerprint(identity)
-    metadata = versions.read_metadata(cache_root) if (cache_root / "metadata.json").exists() else {}
-    enrichment = metadata.get("pass_height_enrichment", {})
-    if enrichment.get("pending") and fingerprint(enrichment["pending"]) != target:
-        raise ValueError("Pending pass-height model artifact changed; restore it before resuming.")
-    stale = any(frame.attrs.get("pending_match_commit") or (not frame.empty and (
-                MODEL_COLUMN not in frame or INPUT_COLUMN not in frame
-                or not frame[MODEL_COLUMN].eq(target).all() or frame[INPUT_COLUMN].isna().any()))
-                for dataset in frames.values() for frame in dataset.values())
-    if args.dry_run:
-        print(f"Pass-height full refresh required: {bool(stale or enrichment.get('pending'))}")
-        return
-    if stale or enrichment.get("pending"):
-        from models.pass_height import cached_height_definition, check_height_probability
-        for dataset, matches in frames.items():
-            old = dataset_metadata(cache_root, dataset)
-            if matches and old.get("pass_height_model_id"):
-                check_height_probability(cached_height_definition(old), (identity.get("definition") or {}).get("threshold_meters"))
-        metadata.setdefault("pass_height_enrichment", {})["pending"] = identity
-        versions.atomic_json(cache_root / "metadata.json", metadata)
-        # Mark every dataset before refreshing any rows, so readers never see a mixture.
-        for dataset, matches in frames.items():
-            if matches:
-                old = dataset_metadata(cache_root, dataset)
-                old["pass_height_refresh_pending"] = identity
-                versions.atomic_json(cache_root / dataset / "metadata.json", old)
-        for dataset, matches in frames.items():
-            if not matches:
-                continue
-            if dataset in match_cache.DATASETS:
-                for match_id, frame in matches.items():
-                    replay = replay_args(args, dataset, metadata)
-                    setattr(replay, "match_id" if dataset == "sportec" else "skillcorner_match_id", [match_id])
-                    pending = bool(frame.attrs.get("pending_match_commit"))
-                    refresh = None if pending else HeightRefresh(replay, dataset, {match_id: frame}, identity)
-                    if refresh is not None:
-                        replay._pc_refresh = refresh
-                    print(f"Refreshing saved pass-height states for {dataset}/{match_id}...")
-                    result = runners[dataset](replay)
-                    if _has_failures((result or {}).get("skipped")):
-                        raise ValueError(f"Pass-height refresh failed for {dataset}/{match_id}; resume generation")
-                    if refresh is not None:
-                        refresh.verify()
-                continue
-            replay = replay_args(args, dataset, metadata)
-            refresh = HeightRefresh(replay, dataset, matches, identity)
-            replay._pc_refresh = refresh
-            print(f"Refreshing all saved pass-height states for {dataset}...")
-            result = runners[dataset](replay)
-            if _has_failures((result or {}).get("skipped")):
-                raise ValueError(f"Pass-height refresh failed for {dataset}; resume generation")
-            refresh.verify()
-        # Root pending remains the barrier until every dataset is committed.
-        for dataset, matches in frames.items():
-            if matches:
-                old = dataset_metadata(cache_root, dataset)
-                old.pop("pass_height_refresh_pending", None)
-                old.update(pass_height_model_id=identity["model_id"], pass_height_definition=identity["definition"],
-                           pass_height_model_record=args._pass_height_model_record,
-                           runtime_graph_schema=getattr(args, "_runtime_graph_schema", old.get("runtime_graph_schema")))
-                versions.atomic_json(cache_root / dataset / "metadata.json", old)
-        args._pc_height_refresh_completed = True
-    metadata = versions.read_metadata(cache_root)
-    metadata["pass_height_enrichment"] = {**identity, "status": "completed"}
-    versions.atomic_json(cache_root / "metadata.json", metadata)
-
-
-def _has_failures(value):
-    if isinstance(value, dict):
-        return any(_has_failures(item) for item in value.values())
-    return bool(value)
-
-
-def recover_sources(args, runners):
-    """Audit legacy states before allowing a guessed input source to add partitions."""
-    if not enabled(args):
-        return
-    metadata = versions.read_metadata(root(args)) if (root(args) / "metadata.json").exists() else {}
-    for dataset in match_cache.DATASETS:
-        if (args.pass_height_model_id or not getattr(args, "no_" + dataset, False)) and MatchInventory(root(args) / dataset):
-            match_cache.require_format(root(args) / dataset)
-    for dataset, matches in inventory(root(args), datasets=[d for d in DATASETS if d not in match_cache.DATASETS]).items():
-        if not args.pass_height_model_id and getattr(args, "no_" + dataset, False):
-            continue
-        known = metadata.get("reconstruction", {}).get(dataset, {})
-        missing = {key: frame for key, frame in matches.items() if key not in known}
-        if not missing:
-            continue
-        replay = replay_args(args, dataset, metadata)
-        audit = HeightRefresh(replay, dataset, missing, None)
-        replay._pc_refresh = audit
-        replay._pc_recovered_sources = {}
-        print(f"Recovering saved state provenance for {dataset}...")
-        runners[dataset](replay)
-        audit.verify()
-        for match_id, descriptor in replay._pc_recovered_sources.items():
-            record_source(args, dataset, match_id, descriptor)

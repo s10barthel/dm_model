@@ -45,6 +45,7 @@ from physical_pass_model import (
     summarize_physical_xpass_cache_usage,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
 from project_config import (
     checked_split_selector,
@@ -109,6 +110,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--physical-batch-size", type=int, default=16)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     resolve_frame_selection_arguments(parser, args)
     pc_versions.check_selectors(args)
@@ -623,6 +625,7 @@ def main() -> None:
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
+    configure_auxiliary_models(args, model_specs, device)
     graph_schema = validate_model_graph_schemas(model_specs)
     runtime_feature_context = resolve_runtime_feature_run_context(
         getattr(args, "feature_run_id", None),
@@ -726,6 +729,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
@@ -783,7 +787,7 @@ def main() -> None:
         "physical_xpass_v4_discount": physical_lookup_config.get("v4_discount") if physical_lookup_config.get("weight_version") == "v4" else None,
         "physical_xpass_v5_intent_threshold": physical_lookup_config.get("v5_intent_threshold") if physical_lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_v5_discount": physical_lookup_config.get("v5_discount") if physical_lookup_config.get("weight_version") == "v5" else None,
-        "physical_xpass_pass_intent_model_id": resolved_model_ids.get("pass_intent") if physical_lookup_config.get("weight_version") == "v5" else None,
+        "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if physical_lookup_config.get("weight_version") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_lookup_config.get("ball_z_limit"),
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "physical_cache_disabled": no_physical_cache,

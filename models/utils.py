@@ -1789,6 +1789,7 @@ def run_epoch(
     return_learning_curve_rows: bool = False,
     pass_intent_model: nn.Module | None = None,
     return_semantic_prediction_rows: bool = False,
+    auxiliary_models: dict | None = None,
 ):
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
@@ -1816,8 +1817,15 @@ def run_epoch(
     evaluate_combined_v5 = bool(
         getattr(args, "evaluate_combined_success", False) and str(getattr(args, "xpass_weight", "")).lower() == "v5"
     )
-    if evaluate_combined_v5 and pass_intent_model is None:
+    auxiliary_models = dict(auxiliary_models or {})
+    if pass_intent_model is not None:
+        auxiliary_models.setdefault("pass_intent", pass_intent_model)
+    if evaluate_combined_v5 and "pass_intent" not in auxiliary_models:
         raise ValueError("Combined v5 evaluation requires an explicit pass-intent model.")
+    needs_auxiliary_height = weighted_pass_success_eval or bool(
+        getattr(args, "evaluate_combined_success", False) and getattr(args, "xpass_weight", None) in {"v4", "v5"})
+    if needs_auxiliary_height and "pass_height" not in auxiliary_models:
+        raise ValueError("PC-xPass evaluation requires an explicit pass-height auxiliary model.")
     if pass_intent_model is not None:
         pass_intent_model.eval()
     weighted_predictions: list[np.ndarray] = []
@@ -1870,36 +1878,10 @@ def run_epoch(
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
         diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(batch_labels)
-        observed_v5_pass_intent: list[torch.Tensor] = []
-        if evaluate_combined_v5:
-            if hasattr(batch_graphs, "auxiliary_graph"):
-                intent_graphs = Batch.from_data_list(batch_graphs.auxiliary_graph).to(device)
-                intent_labels = batch_graphs.auxiliary_label.to(device)
-            else:
-                if goal_policy(args).input_goals != goal_policy(pass_intent_model.args).input_goals:
-                    raise ValueError("Combined v5 evaluation requires separately prepared pass-intent input graphs.")
-                intent_graphs, intent_labels = batch_graphs.clone(), batch_labels
-            intent_graphs = adapt_batch_graphs_for_model(
-                intent_graphs, pass_intent_model.args, context="v5 evaluation pass_intent model",
-            )
-            with torch.no_grad():
-                intent_logits = pass_intent_model(intent_graphs)
-            for graph_index in torch.unique(intent_graphs.batch):
-                if not bool(batch_labels[graph_index, config.LABEL_INDEX["is_pass"]].item()):
-                    continue
-                graph_mask = intent_graphs.batch == graph_index
-                eligible_mask = candidate_mask(intent_graphs, pass_intent_model.args, exclude_possessor=True)[graph_mask]
-                target_index = int(intent_labels[graph_index, config.LABEL_INDEX["intent_index"]].item())
-                if target_index < 0 or target_index >= int(graph_mask.sum()):
-                    raise ValueError(f"Combined v5 evaluation has invalid intent target index {target_index}.")
-                target_node_position = target_index
-                candidate_positions = torch.nonzero(eligible_mask, as_tuple=False).flatten()
-                target_candidate = torch.nonzero(candidate_positions == target_node_position, as_tuple=False).flatten()
-                if target_candidate.numel() != 1:
-                    raise ValueError("Combined v5 evaluation target is not a unique non-possessor teammate.")
-                candidate_logits = intent_logits[graph_mask][eligible_mask].reshape(-1)
-                candidate_probs = torch.softmax(candidate_logits, dim=0)
-                observed_v5_pass_intent.append(candidate_probs[target_candidate.item()])
+        from pc_xpass_auxiliary import observed_auxiliary_predictions
+        auxiliary_values = observed_auxiliary_predictions(batch_graphs, batch_labels, auxiliary_models, device) if auxiliary_models else {}
+        observed_v5_pass_intent = auxiliary_values.get("pass_intent", batch_graphs.x.new_empty((0,)))
+        observed_auxiliary_height = auxiliary_values.get("pass_height", batch_graphs.x.new_empty((0,)))
 
         batch_labels[batch_labels[:, 6] == -1, 6] = batch_labels[batch_labels[:, 6] == -1, 4]  # -1 to n_players
 
@@ -2004,14 +1986,13 @@ def run_epoch(
                     xpass_values = getattr(batch_graphs, EVALUATION_XPASS_PROB_ATTR, None)
                     distance_values = getattr(batch_graphs, EVALUATION_XPASS_DISTANCE_ATTR, None)
                     nearest_values = getattr(batch_graphs, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
-                    height_values = getattr(batch_graphs, EVALUATION_XPASS_PASS_HEIGHT_ATTR, None)
                     if xpass_values is None or distance_values is None:
                         raise ValueError("Physical xPass evaluation requires cached xPass and pass-distance tensors.")
                     pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
                     observed_xpass = xpass_values[pass_positions]
                     observed_distance = distance_values[pass_positions]
                     observed_nearest = nearest_values[pass_positions] if nearest_values is not None else []
-                    observed_height = height_values[pass_positions] if height_values is not None else []
+                    observed_height = observed_auxiliary_height
                     xpass_array = observed_xpass.detach().cpu().numpy().astype(float)
                     distance_array = observed_distance.detach().cpu().numpy().astype(float)
                     if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
@@ -2029,7 +2010,7 @@ def run_epoch(
                             blend_kwargs["distance_to_nearest_opponent"] = observed_nearest.detach().cpu().numpy()
                         if weight_version in {"v4", "v5"}:
                             if len(observed_height) != len(observed_xpass):
-                                raise ValueError(f"Combined xPass weight {weight_version} requires cached pass-height probabilities.")
+                                raise ValueError(f"Combined xPass weight {weight_version} requires aligned auxiliary pass-height probabilities.")
                             blend_kwargs["pass_height"] = observed_height.detach().cpu().numpy()
                         if weight_version == "v4":
                             blend_kwargs.update(
@@ -2041,7 +2022,7 @@ def run_epoch(
                             if len(observed_v5_pass_intent) != len(observed_xpass):
                                 raise ValueError("Combined xPass weight v5 requires one pass_intent probability per pass.")
                             blend_kwargs.update(
-                                pass_intent=torch.stack(observed_v5_pass_intent).cpu().numpy(),
+                                pass_intent=observed_v5_pass_intent.cpu().numpy(),
                                 v5_intent_threshold=float(args.v5_intent_threshold),
                                 v5_discount=bool(args.v5_discount),
                             )
@@ -2078,14 +2059,13 @@ def run_epoch(
                             learning_weight = physical_xpass_blend_weight(distance_array)
                         combined_learning_weights.append(np.asarray(learning_weight, dtype=float))
                 if weighted_pass_success_eval and pass_diagnostic_mask.any():
-                    pass_heights = getattr(batch_graphs, PHYSICAL_XPASS_PASS_HEIGHT_ATTR, None)
                     pass_distances = getattr(batch_graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
-                    if pass_heights is None or pass_distances is None:
+                    if pass_distances is None or len(observed_auxiliary_height) != int(pass_diagnostic_mask.sum()):
                         raise ValueError(
-                            "Weighted pass-success evaluation requires cached pass-height probabilities and pass distances."
+                            "Weighted pass-success evaluation requires auxiliary height predictions and pass distances."
                         )
                     pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
-                    observed_heights = pass_heights[pass_positions]
+                    observed_heights = observed_auxiliary_height
                     observed_distances = pass_distances[pass_positions]
                     effective_weights = physical_xpass_blend_weight_v4(
                         observed_distances,

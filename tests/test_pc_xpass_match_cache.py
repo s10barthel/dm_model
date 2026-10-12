@@ -256,32 +256,6 @@ def test_dataset_runner_publishes_actual_match_once(tmp_path, monkeypatch, datas
     assert (root / "matches/match.parquet").stat().st_mtime_ns == previous
 
 
-def test_height_refresh_shared_frames_commits_match_and_preserves_lanes(tmp_path, monkeypatch):
-    import pc_xpass_resume as resume
-    root = tmp_path / "sportec"
-    save(root, lane=True)
-    args = Namespace(_pc_version_root=str(tmp_path), _pass_height_model=Namespace(args={}), pass_height_device="cpu")
-    with cache.MatchAccumulator(root, "match") as transaction:
-        transaction.register("two", descriptor(2))
-        transaction.write("two", rows("two"))
-        transaction.write_lane("two", [], rows("two").to_dict("records"))
-        transaction.commit(export_lane=True)
-    before_lane = (root / "lane_control/match.parquet").read_bytes()
-    source = pd.read_parquet(root / "matches/match.parquet")
-    refresh = resume.HeightRefresh(args, "sportec", {"match": source}, {"model_id": "new"})
-    monkeypatch.setattr(physics, "_pass_height_predictions_for_graphs", lambda graphs, model, **k:
-        [{player: 0.3 for player in physics._pass_height_output_player_ids(graph)} for graph in graphs])
-    with cache.MatchAccumulator(root, "match") as transaction:
-        for key in ("one", "two"):
-            for frame in (10, 20):
-                label = make_label().clone()
-                label[physics.LABEL_INDEX["action_index"]] = frame
-                refresh.consume([dict(match_id=key, graphs=[make_graph()], labels=torch.stack([label]), frame_scope="frame_id")])
-        refresh.verify()
-        transaction.commit()
-    after = pd.read_parquet(root / "matches/match.parquet")
-    assert after[resume.MODEL_COLUMN].notna().all()
-    assert (root / "lane_control/match.parquet").read_bytes() == before_lane
 
 
 def test_match_height_digest_ignores_columns_from_other_possessions():
@@ -320,57 +294,3 @@ def test_corrupt_commit_and_missing_lane_coverage_are_rejected(tmp_path):
         stream.write(b"corrupt")
     with pytest.raises(ValueError, match="Inconsistent"):
         cache.load_match(tmp_path, "match")
-
-
-def test_full_height_refresh_streams_matches_and_recovers_pending_commit(tmp_path, monkeypatch):
-    import pc_xpass_resume as resume
-    import pc_xpass_versions as versions
-    from scripts import generate_physical_xpass as generate
-    monkeypatch.setattr(versions.config, "PC_XPASS_DIR", tmp_path / "versions")
-    args = generate.parse_args(["--pc-xpass", "--no-sportec", "--no-skillcorner", "--no-benchmark",
-        "--min-speed", "3", "--max-speed", "3", "--angle-step", "90", "--radial-gridsize", "5", "--num-workers", "1"])
-    versions.start_generation(args)
-    root = Path(args._pc_version_root)
-    for dataset in ("sportec", "skillcorner"):
-        save(root / dataset, lane=True)
-    # An interrupted publication must be recomputed, not treated as refreshed.
-    path = root / "skillcorner/completion/match.json"
-    pending = cache.read_json(path)
-    pending["status"] = "pending"
-    cache.atomic_json(path, pending)
-    model_path = tmp_path / "model"
-    model_path.mkdir()
-    (model_path / "best_weights.pt").write_bytes(b"test model")
-    args.pass_height_model_id = "height/new"
-    args._pass_height_model = Namespace(args={"task": "pass_height"})
-    args._pass_height_model_record = {"model_path": str(model_path)}
-    args.export_lane_control = True
-    monkeypatch.setattr(physics, "_pass_height_predictions_for_graphs", lambda graphs, model, **k:
-        [{player: 0.3 for player in physics._pass_height_output_player_ids(graph)} for graph in graphs])
-    seen = []
-    def runner(dataset):
-        def run(replay):
-            assert getattr(replay, "match_id" if dataset == "sportec" else "skillcorner_match_id") == ["match"]
-            seen.append(dataset)
-            transaction = cache.begin(replay, root / dataset, "match")
-            try:
-                transaction.register("one", descriptor())
-                for frame in (10, 20):
-                    item = dict(match_id="one", graphs=[make_graph()], labels=torch.stack([make_label(action_index=frame)]),
-                                frame_scope="frame_id", state_frame_id=[frame])
-                    generate.prewarm_runtime_items([item], cache_dir=root / dataset, args=replay)
-                cache.finish(transaction, replay)
-            finally:
-                cache.end(transaction)
-            return {"skipped": {}}
-        return run
-    runners = {dataset: runner(dataset) for dataset in ("sportec", "skillcorner")}
-    resume.refresh_all(args, runners)
-    assert seen == ["sportec", "skillcorner"]
-    for dataset in seen:
-        frame = cache.load_match(root / dataset, "match")[0]["matches"]
-        assert frame[resume.MODEL_COLUMN].notna().all()
-    assert "pending" not in versions.read_metadata(root)["pass_height_enrichment"]
-    resume.refresh_all(args, runners)
-    assert seen == ["sportec", "skillcorner"]
-

@@ -17,7 +17,7 @@ import pyarrow.parquet as pq
 from datatools.possession_frames import STATE_CONTRACT
 
 FORMAT = "match_possession_frames_v1"
-SPORTEC_FORMAT = "match_physical_states_v2"
+SPORTEC_FORMAT = "match_physical_states_v3"
 DATASETS = {"sportec", "skillcorner"}
 IDENTITY = ["match_id", "possession_id", "state_frame_id"]
 REQUIRED = IDENTITY + ["possessor_id", "possession_provenance_id", "action_index", "physical_state_hash", "frame_scope"]
@@ -349,7 +349,7 @@ class MatchAccumulator:
     def set_provenance(self, report):
         provenance = {key: report[key] for key in ("feature_run_id", "carry_definition", "spell_artifact_sha256",
                       "state_contract", "canonical_sha256", "control_sha256", "resolved_actions_sha256",
-                      "tracking_sha256", "lineup_sha256", "graph_options")
+                      "tracking_sha256", "lineup_sha256", "physical_input_contract")
                       if key in report}
         if self.provenance and self.provenance != provenance:
             raise ValueError("Changed match provenance; create a new pc-xPass version")
@@ -501,14 +501,14 @@ def begin(args, root, match_id):
     initialize(root, dry_run=args.dry_run)
     transaction = MatchAccumulator(root, match_id, dry_run=args.dry_run,
                                    request={"scope": args.scope, "frames": args.frames})
-    transaction.record_coverage = getattr(args, "_pc_refresh", None) is None
+    transaction.record_coverage = True
     transaction.__enter__()
     return transaction
 
 
 def finish(transaction, args):
     if transaction is not None:
-        transaction.commit(export_lane=bool(getattr(args, "export_lane_control", False)) and getattr(args, "_pc_refresh", None) is None)
+        transaction.commit(export_lane=bool(getattr(args, "export_lane_control", False)))
         if not transaction.dry_run:
             metadata_path = transaction.root.parent / "metadata.json"
             metadata = read_json(metadata_path)
@@ -518,12 +518,6 @@ def finish(transaction, args):
                     **{key: value for descriptor in transaction.descriptors.values() for key, value in descriptor.items()
                        if key in {"feature_run_id", "skillcorner_input_dir"}}}
                 atomic_json(metadata_path, metadata)
-            metadata = read_json(transaction.root / "metadata.json")
-            if getattr(args, "pass_height_model_id", None):
-                from models.pass_height import model_definition
-                metadata.update(pass_height_model_id=args.pass_height_model_id,
-                                pass_height_definition=model_definition(args._pass_height_model.args))
-                atomic_json(transaction.root / "metadata.json", metadata)
 
 
 def end(transaction):

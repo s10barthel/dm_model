@@ -655,7 +655,9 @@ Useful options:
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/sportec` first
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 
 ### 7. Visualize action components
 
@@ -715,7 +717,9 @@ Useful options:
 - `--show-physical-xpass` to render the cached physical xPass metric itself
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 - `--action-id <id>`, `--row-index <index>`, and `--original-event-id <sportec_event_id>` can each be repeated to visualize multiple selected actions from the same match
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
 - `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
@@ -751,7 +755,9 @@ Useful options:
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/hawkeye` first
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 
 To visualize one HawkEye situation as MP4s:
 
@@ -819,7 +825,9 @@ Useful options:
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/benchmark` first
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 
 To visualize one benchmark state as PNGs:
 
@@ -862,7 +870,9 @@ Useful options:
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/skillcorner` first
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 
 To visualize one SkillCorner possession as MP4s:
 
@@ -1059,7 +1069,7 @@ python scripts/generate_physical_xpass.py
 python scripts/generate_physical_xpass.py --no-skillcorner
 python scripts/generate_physical_xpass.py --no-sportec --benchmark-modification <id> --hawkeye-situation-id <id>
 python scripts/generate_physical_xpass.py --pass-height-model-id pass_height/<model_run_id>
-python scripts/generate_physical_xpass.py --pc-xpass --top-n 10 --pass-height-model-id pass_height/<model_run_id>
+python scripts/generate_physical_xpass.py --pc-xpass --top-n 10 --top-pass 10
 python scripts/generate_physical_xpass.py --pc-xpass --top-n 10 --top-pass 5 10
 python scripts/generate_physical_xpass.py --pc-xpass --export-lane-control --pc-xpass-id <new_run_id>
 ```
@@ -1085,14 +1095,14 @@ The cached row contains `pass_distance`, per-player nearest-opponent distances f
 - `<player_id>__max_xpass`: original max-over-grid xPass
 - `<player_id>__topmean_xpass`: mean of the top `N` finite grid values; `N` is controlled by `scripts/generate_physical_xpass.py --top-n` and defaults to `10`
 - `<player_id>__distance_to_nearest_opponent`: distance in meters from that player to the nearest finite opponent node; this is filled from graph geometry and is not an xPass probability column
-- `<player_id>__pass_height`: optional predicted probability that the candidate pass to that player is high, written only when `--pass-height-model-id pass_height/<model_run_id>` is supplied
+- `<player_id>__pass_height`: legacy physical-xPass enrichment only; new PC-xPass generation omits it and PC-xPass consumers ignore obsolete values
 - `ball_z`: row-level cached ball height. Existing xPass metric rows are reused and updated in place when only `ball_z` is missing.
 
 Current runtime defaults are `--consider-teammates`, `--speed-aggregation package_max`, speeds `3..22 m/s` in `1 m/s` steps, coarse angle search plus adaptive `2.5` degree local refinement, `--top-n 10`, `--num-workers auto`, `--physical-batch-size 16`, and `--worker-thread-limit 1`. Runtime caches are updated in place and compatible existing rows are reused; old max-only runtime caches are incompatible and should be deleted or moved before regeneration.
 
-Add `--pass-height-model-id pass_height/<model_run_id>` to enrich either cache family with per-passing-option high-pass probabilities from a trained `pass_height` checkpoint, preserving compatible physical xPass metrics. For versioned pc-xPass, changing the height model or adding enrichment to saved states triggers a full, resumable refresh across all populated datasets; omission inherits the recorded or pending model. Ordinary unversioned physical caches retain selected-row backfilling. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height) for commands and interruption behavior. Use `--pass-height-device <device>` to choose the inference device for this model; by default it uses `cuda:0` when CUDA is available, otherwise `cpu`. This enrichment is runtime-cache only and cannot be combined with legacy `--feature-run-id` mode.
+PC-xPass generation loads no learned models and stores no pass-height predictions. Select height and intent auxiliaries explicitly during inference/evaluation. Generation rejects `--pass-height-model-id`, `--pass-height-device`, and `--pass-height-threshold` in PC-xPass mode. Ordinary legacy physical-xPass behavior is outside this workflow.
 
-Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<run_id>/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; top-N generation requires an explicit `--top-n` or `--top-n-values`. To export several pc top-N columns in one cache, use `--top-n-values 5 10 25`; `--top-n` still controls the unsuffixed default player columns. Supply `--pc-xpass-id <run_id>` to resume an existing version; omitting the ID creates a new version. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height).
+Add `--pc-xpass` to generate the pitch-control-style cache family under `data/pc_xpass/<run_id>/<dataset>` instead. pc-xPass uses the same dataset selectors and runtime workflow, but stores top-N columns as `<player_id>__top<N>_xpass`; top-N generation requires an explicit `--top-n` or `--top-n-values`. To export several pc top-N columns in one cache, use `--top-n-values 5 10 25`; `--top-n` still controls the unsuffixed default player columns. Supply `--pc-xpass-id <run_id>` to resume an existing version; omitting the ID creates a new version. See [resuming physical generation](#resuming-a-version).
 
 pc-xPass motion and control assumptions are generation-time settings. `--reaction-time` accepts a fixed seconds value or `dist_pass`, where each player uses `clip(distance_to_passer / --dist-pass-div, --dist-pass-min, --dist-pass-max)` with defaults `50`, `0.2`, and `0.7`. Player movement speed defaults to `--max-player-speed 5.0`; `--max-player-speed-off` and `--max-player-speed-def` can override attacking and defending players separately. Lane survival and endpoint control use separate sigmoid settings: `--lane-power`, `--lane-inflection-point`, `--control-power`, and `--control-inflection-point`, all defaulting to `15` and `0.3` for their respective power/inflection values.
 
@@ -1135,7 +1145,7 @@ w = clip(0.75 / (1.0 + (x * (1.0 - x) / 0.25)^(-8)), 0, 1)
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-`v4` uses cached per-player pass-height probability and discounts the model weight for very long passes:
+`v4` uses auxiliary per-player pass-height probability and discounts the model weight for very long passes:
 
 ```text
 x = pass_distance / 100
@@ -1145,7 +1155,7 @@ pass_success = (1 - w) * physical_xpass + w * pass_success_model
 
 The defaults are `n=2` and `z=0.8`; override them with `--v4-power <float>` and `--v4-zero <float>` when using `--xpass-weight v4`. Add `--discount false` to disable the cosine distance discount and use `w = pass_height` directly.
 
-`v5` uses the same cached per-player pass-height probability as v4, but replaces the distance discount with a linear discount based on the runtime pass-intent probability:
+`v5` uses the same auxiliary per-player pass-height probability as v4, but replaces the distance discount with a linear discount based on the runtime pass-intent probability:
 
 ```text
 intent_factor = clip(pass_intent / t, 0, 1)
@@ -1153,11 +1163,19 @@ w = pass_height * intent_factor
 pass_success = (1 - w) * physical_xpass + w * pass_success_model
 ```
 
-The default threshold is `t=0.01`; override it with `--v5-intent-threshold <float>`. Thus intent probabilities `0`, `0.005`, `0.009`, and at least `0.01` apply discounts of 100%, 50%, 10%, and 0% to the learning-model weight. Use `--v5-discount false` to disable the intent discount and use `w = pass_height`. V5 requires a resolved pass-intent model at inference and an explicit `--pass-intent-model-id` for combined evaluation. Pass intent is computed once at runtime, aligned by event and player, and is not stored in the physical xPass cache.
+The default threshold is `t=0.01`; override it with `--v5-intent-threshold <float>`. Thus intent probabilities `0`, `0.005`, `0.009`, and at least `0.01` apply discounts of 100%, 50%, 10%, and 0% to the learning-model weight. Use `--v5-discount false` to disable the intent discount and use `w = pass_height`. V5 requires explicit `--xpass-pass-intent-model-id pass_intent/<id>` and `--xpass-pass-height-model-id pass_height/<id>` selectors, including when `--v5-discount false` is used. Both auxiliary predictions are computed at runtime and aligned by physical state and candidate player; neither is stored in the PC-xPass cache.
 
 `--xpass-weight v2` requires the cached `<player_id>__distance_to_nearest_opponent` columns. If they are missing or non-finite for a blended player, inference fails clearly instead of falling back to v1 or pure model predictions. Rerun `scripts/generate_physical_xpass.py` to backfill these columns; existing xPass metric values are reused and are not recomputed when only nearest-opponent distances are missing.
 
-`--xpass-weight v4` and `v5` require cached per-player `<player_id>__pass_height` columns. If they are missing or non-finite for a blended player, inference fails clearly. Generate or backfill them with `scripts/generate_physical_xpass.py --pass-height-model-id pass_height/<model_run_id>`.
+PC-xPass `--xpass-weight v4` requires `--xpass-pass-height-model-id pass_height/<id>`. V5 additionally requires `--xpass-pass-intent-model-id pass_intent/<id>`. Height-weighted evaluation also requires the height auxiliary. Component `--pass-height-model-id`, component `--pass-intent-model-id`, and bundles select displayed/exported models independently and cannot satisfy these auxiliary requirements. Different component and auxiliary checkpoints are allowed. Unused auxiliary selectors are rejected.
+
+Each auxiliary uses its own features, goal policy, masks, and lane-survival inputs from the original state graph, even when its component is hidden. Height probabilities are independent sigmoids, not normalized across candidates. Missing or nonfinite required predictions raise an error; obsolete cache height columns are ignored. Existing behavior for unavailable physical states is preserved. `--pass-height-threshold` asserts the auxiliary checkpoint's height definition for blending and cannot change prediction meaning. Required lane-survival metrics must already exist; for example, generate `--top-pass 10` for a checkpoint using `top_pass_10`.
+
+```powershell
+python scripts/run_relevant_models.py --bundle-id BUNDLE --feature-run-id FEATURE_RUN --use-physical-xpass --pc-xpass --pc-xpass-id CACHE --xpass-weight v4 --xpass-pass-height-model-id pass_height/HEIGHT
+python scripts/run_relevant_models.py --bundle-id BUNDLE --feature-run-id FEATURE_RUN --use-physical-xpass --pc-xpass --pc-xpass-id CACHE --xpass-weight v5 --xpass-pass-height-model-id pass_height/HEIGHT --xpass-pass-intent-model-id pass_intent/INTENT
+python scripts/evaluate_relevant_models.py --pass-success-model-id pass_success/SUCCESS --evaluate-combined-success --pc-xpass-id CACHE --xpass-version top10 --xpass-weight v5 --xpass-pass-height-model-id pass_height/HEIGHT --xpass-pass-intent-model-id pass_intent/INTENT
+```
 
 Add `--ball-z-limit <float>` to ignore physical xPass for high-ball passes. When cached `ball_z` is greater than the limit, the blend weight is forced to `1.0`, so the final pass-success value is the pass-success model output. The default is `--ball-z-limit none`, which ignores `ball_z` and keeps existing behavior. Cached `ball_z` is required only when a numeric limit is set; rerun `scripts/generate_physical_xpass.py` to backfill it without recomputing existing xPass metrics.
 
@@ -1229,7 +1247,9 @@ Only the `pass_success` low-level training command receives physical xPass flags
 - `--pc-xpass` / `--pc_xpass`: read `data/pc_xpass/<dataset>` instead of `data/runtime_physical_xpass/<dataset>`.
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--xpass-weight {v1,v2,v3,v4}` / `--xpass_weight {v1,v2,v3,v4}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values and `v4` requires cached `<player_id>__pass_height` values.
+- `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values. PC-xPass v4/v5 require explicit runtime auxiliaries below.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
 - `--discount <true|false>`: with `--xpass-weight v4`, enable or disable the cosine distance discount. Default: `true`; `false` uses `w = pass_height`.
@@ -1328,7 +1348,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 #### Shared pass-height target option
 
-`--pass-height-threshold <meters>` accepts a finite, positive observed maximum-ball-height cutoff, with the inclusive definition `pass_max_ball_z >= cutoff`. It is distinct from `--classification-threshold`, which thresholds predicted probabilities. New `pass_height` training uses the explicit cutoff or, when omitted, the selected feature run's recorded cutoff; it fails if neither is known. Evaluation defaults to the checkpoint's saved target definition, while an explicit value relabels only the observed evaluation targets and diagnostics—not the meaning of its predictions. Legacy checkpoints keep their stored labels unless explicitly overridden. The option is available on `scripts/main.py`, `scripts/train_relevant_models.py`, `train.py`, `scripts/evaluate_relevant_models.py`, `test.py`, and the height-aware physical/xPass generation and inference commands below. In xPass consumers it asserts the selected predicted-height/cache definition where one is required; it cannot turn a model trained at one cutoff into a predictor for another.
+`--pass-height-threshold <meters>` accepts a finite, positive observed maximum-ball-height cutoff, with the inclusive definition `pass_max_ball_z >= cutoff`. It is distinct from `--classification-threshold`, which thresholds predicted probabilities. New `pass_height` training uses the explicit cutoff or, when omitted, the selected feature run's recorded cutoff; it fails if neither is known. Evaluation defaults to the checkpoint's saved target definition, while an explicit value relabels only the observed evaluation targets and diagnostics—not the meaning of its predictions. Legacy checkpoints keep their stored labels unless explicitly overridden. The option is available on `scripts/main.py`, `scripts/train_relevant_models.py`, `train.py`, `scripts/evaluate_relevant_models.py`, `test.py`, and the height-aware physical/xPass generation and inference commands below. In xPass consumers it asserts the selected auxiliary checkpoint height definition where one is required; it cannot turn a model trained at one cutoff into a predictor for another.
 
 ### `scripts/main.py`
 
@@ -1402,7 +1422,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -1412,66 +1434,22 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 
 ### `scripts/generate_physical_xpass.py`
 
-#### Resuming a version and refreshing pass-height
+#### Resuming a version
 
-For versioned pc-xPass, `--pc-xpass-id <run_id>` is the resume option; there is no
-separate `--resume` flag. Stop with Ctrl+C, let the generator and its workers exit,
-then restart with the same ID. Saved rows are reused; unfinished buffered work is
-recomputed. Ctrl+C marks the invocation incomplete where possible; a status left
-as `running` after abrupt shutdown does not prevent resumption.
+Create a fresh physical-only Sportec cache, then resume it with the same ID:
 
 ```powershell
-# Create a named Sportec version with explicit inputs and sampling.
-python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --sportec-feature-run-id FEATURE_RUN --season 24_25 --scope frames --frames 5 --no-skillcorner --no-benchmark --no-hawkeye
-
-# Resume that coverage; calculation settings and the resolved feature run inherit.
-python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --season 24_25 --scope frames --frames 5 --no-skillcorner --no-benchmark --no-hawkeye
-
-# Replace/add height predictions across ALL saved states, without adding physical rows.
-python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --pass-height-model-id pass_height/NEW_MODEL_RUN --no-sportec --no-skillcorner --no-benchmark --no-hawkeye
-
-# Resume an interrupted height refresh; the pending target model inherits.
-python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id frames_demo --no-sportec --no-skillcorner --no-benchmark --no-hawkeye
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id states_v3 --sportec-feature-run-id FEATURE_RUN --top-pass 5 10 --top-n-values 10 25 --scope actions --no-skillcorner --no-benchmark --no-hawkeye
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id states_v3 --scope actions --no-skillcorner --no-benchmark --no-hawkeye
 ```
 
-Replace the example IDs with real feature-run, cache, and model IDs. A resume
-restores omitted physical calculation settings and `--export-lane-control`;
-explicit conflicts require a new version. Sportec also pins its resolved feature
-run and canonical/control/tracking provenance; Hawkeye pins `--freeze-ballreceipt`
-(initial default: true). Older Sportec formats require a fresh cache version.
+Replace IDs and retain your intended numerical settings. Omitted physical settings and the resolved Sportec feature run inherit on resume; explicit conflicts require a new version. Match checkpoints publish physical rows, manifests, and lane-control coverage together. Interrupted work is recomputed while completed work is reused. There is no height enrichment or refresh phase.
 
-Season, match/situation IDs, limits, dataset switches, Hawkeye time selections,
-`--scope`, and `--frames` are **not automatically restored or frozen**. Repeat
-them to finish the original coverage, or change them to extend the same version.
-Worker counts, device, and batch/window sizes may change. Saved coverage accumulates.
+Selection options, including matches, seasons, dataset switches, `--scope`, and `--frames`, are not restored automatically. Worker/batch/window settings may change. Physical source and reconstruction fingerprints remain validated.
 
-For an existing pc-xPass version, explicitly changing `--pass-height-model-id`
-starts a **full, resumable refresh of every saved state in every populated
-dataset**, regardless of the current data selections or `--no-*` switches.
-Adding height enrichment to existing rows, or encountering legacy predictions
-without trustworthy provenance, also triggers full refresh. Physical xPass
-values and lane-control artifacts are preserved. The selected model must predict
-a compatible height-event definition; `--pass-height-threshold` asserts that
-definition and does not convert probabilities.
+New generation records `physical_input_contract = pc_xpass_physical_inputs_v1`; resume requires that contract. Sportec requires a fresh cache using `sportec_possession_states_v3` / `match_physical_states_v3`. Old caches remain intact, with no migration or identity mapping. Compatible physical caches for other datasets remain readable; their obsolete height fields are ignored. Model graph options, masks, checkpoints, and height cutoffs do not participate in the new physical identities.
 
-The original sources are needed to reconstruct saved states. Model/artifact and
-input fingerprints are written atomically with each row's predictions. If
-interrupted, rerun the refresh command or omit the model flag to inherit its
-pending target: verified rows are skipped and unfinished rows are refreshed.
-Another model switch is rejected until the pending refresh finishes. Missing or
-changed sources and incomplete predictions leave the refresh pending with an
-error identifying unresolved work.
-
-While refresh is pending, height-consuming reads (including v4/v5 blending) fail;
-physical-only reads remain available and `latest` is not advanced. Completed model
-metadata is committed only after full verification. When generation switches
-remain enabled, additional selected physical states are generated afterward using
-the current height model. The all-disabled examples above perform only the refresh.
-`--dry-run` checks contracts and reports refresh requirements without updating
-cache rows or metadata. These full-refresh guarantees apply to versioned pc-xPass;
-ordinary unversioned runtime physical caches retain their existing behavior.
-
-See [pc-xPass version and cache documentation](docs/pc_xpass_caches.md) for details.
+See [PC-xPass cache documentation](docs/pc_xpass_caches.md) for details.
 
 #### Matching inference and pc-xPass frame coverage
 
@@ -1493,8 +1471,8 @@ Use the same `--scope`/`--frames` for SkillCorner inference and generation too;
 the generator takes `--skillcorner-input-dir` / `--skillcorner-match-id` while
 the inference runner takes `--input-dir` / `--match-id`.
 
-Sportec uses `sportec_possession_states_v2` and cache format
-`match_physical_states_v2`: physical states identify match, period, frame, actual
+Sportec uses `sportec_possession_states_v3` and cache format
+`match_physical_states_v3`: physical states identify match, period, frame, actual
 possessor, and provenance. A spell/association manifest separates ownership and
 canonical event roles from physical state identity. SkillCorner retains
 `possession_states_v1` and `match_possession_frames_v1`. Both datasets write one
@@ -1548,7 +1526,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--top-pass <N...>` / `--top_pass <N...>`: pc-xPass only; export `__top_pass<N>_xpass` and matching diagnostics for the best N distinct speed-angle pairs after endpoint optimization. Opt-in; accepts multiple positive integers.
 - `--pc-xpass` / `--pc_xpass`: generate versioned pc-xPass caches under `data/pc_xpass/<run_id>/<dataset>` instead of runtime physical xPass caches.
 - `--ball-dec <m/s^2>`: pc-xPass ball deceleration. Default: `0.45`; `0` disables slowing.
-- `--pc-xpass-id <run_id>`: create a named pc-xPass version or resume an existing one, reusing saved rows and restoring omitted calculation/input contracts. Data selections and execution settings remain flexible; repeat the original selections to finish the same coverage. Default without an ID: create a new version. See [resumption and full pass-height refresh](#resuming-a-version-and-refreshing-pass-height).
+- `--pc-xpass-id <run_id>`: create a named pc-xPass version or resume an existing one, reusing saved rows and restoring omitted calculation/input contracts. Data selections and execution settings remain flexible; repeat the original selections to finish the same coverage. Default without an ID: create a new version. See [resuming physical generation](#resuming-a-version).
 - `--export-lane-control`: pc-xPass only; export per-opponent interception controls for each receiver's selected best pass to `lane_control/<match_id>.parquet` within the dataset cache. Default: off. Uses long-format state/receiver/opponent rows and includes state identifiers and selected-pass geometry; does not change the main cache or scoring. Enable only when creating a fresh version; no backfill of existing cache rows is performed. Resume inherits the recorded option, and missing sidecars for cache hits raise an incomplete-coverage error. Valid with `--no-max` when another xPass metric remains enabled; incompatible with `--reuse-cache-dir` and legacy `--feature-run-id` mode. See [export schema and semantics](docs/lane_control_export.md).
 - `--top-xt`: pc-xPass only; rank max, top-N, and top-pass options by xPass × interpolated xT while exporting xPass probabilities. Best-pass details and optional opponent lane controls follow the same selected option. Default: off.
 - `--margin {tta,reachability}`: pc-xPass only; choose the player-movement margin model. `tta` retains the reaction-time/max-speed model and is the default. `reachability` uses a fitted empirical reachability artifact and requires `--reachability-model-id`; see [Empirical reachability circles for pc-xPass](docs/reachability.md).
@@ -1569,12 +1547,12 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--use-position-discount <true|false>`: pc-xPass only; apply the goal-distance target-position discount before max/top-N aggregation. Default: `true`.
 - `--position-discount-power <float>`: pc-xPass only; power for the target-position discount. Default: `2.0`.
 - `--position-discount-distance <m>`: pc-xPass only; backward goal-distance delta where the target-position discount reaches zero. Default: `20.0`.
-- `--pass-height-model-id pass_height/<model_run_id>`: runtime mode only; enrich xPass rows with per-player `<player_id>__pass_height` probabilities. For versioned pc-xPass, omission inherits the completed or pending model; selecting a different compatible model refreshes **all saved states across all populated datasets**, even those excluded from this command. Refresh is resumable and preserves physical metrics/lane controls. Existing legacy height rows without verified provenance are refreshed too. Use all four `--no-*` dataset switches for refresh only; otherwise additional selected states are generated after refresh. Ordinary unversioned physical caches retain selected-row backfilling.
-- `--pass-height-threshold <meters>`: assert that an explicitly selected pass-height checkpoint predicts this cutoff before its probabilities are cached. It does not relabel or convert those probabilities.
-- `--pass-height-device <device>`: device used for `--pass-height-model-id`. Default: `cuda:0` when CUDA is available, otherwise `cpu`.
+- `--pass-height-model-id`, `--pass-height-device`, `--pass-height-threshold`: rejected in PC-xPass generation; select height during inference with `--xpass-pass-height-model-id`.
+
+
 - `--no-noise-kernel`, `--no-max`, `--no-topmean`: skip selected physical xPass output metrics. At least one metric must remain enabled. For top-only inference caches, use `--no-noise-kernel --no-max` and pass the matching `--xpass-version top<N>` during inference/visualization.
 - `--num-workers <N|auto>`, `--max-auto-workers <N>`, `--worker-thread-limit <N>`, and `--physical-batch-size <N>`: runtime cache generation parallelism controls.
-- `--dry-run`: inspect cache compatibility/hits and report whether a full height refresh is required, without computing predictions or changing cache rows/metadata.
+- `--dry-run`: inspect physical cache compatibility/hits without computing or changing cache rows/metadata.
 - `--no-normalize`: deprecated compatibility flag; ignored because the AS-default max source uses `normalize=True`.
 
 ### `scripts/generate_relevant_features.py`
@@ -1641,7 +1619,7 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: on.
 - `--lane-survival [{max,top_N,top_pass_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects `max`, `--lane-survival top_25` selects top-25, and `--lane-survival top_pass_10` selects top-pass 10. The selected aggregation must be available in the cache.
-- `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches require `match_physical_states_v2` and a canonical action manifest; older caches must be regenerated into a new version.
+- `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches require `match_physical_states_v3` and a canonical action manifest; older caches must be regenerated into a new version.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the wrapper training defaults. Pass-lane mode retains only `nearest_opponent_to_pass` and `potential_interceptors`; full extended mode takes precedence.
 - `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-pos-node-features`: zero `x` and `y` at the encoder and decoder inputs for every node, including the possessor and goal nodes, while preserving graph width. Original coordinates remain available for graph processing, physical calculations, and destination features. Incompatible with `--xy-only`. Default: off, so positional node features are used.
@@ -1709,9 +1687,8 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 - `--diagnostic-feature-run-id <feature_run_id>`: optional diagnostic feature run passed to `test.py` for outcome models.
 - `--device <device>`: device passed to `test.py`. Default: `cuda:0`.
 - `--weighted-pass-success-metrics`: additionally report high-pass-weighted ROC-AUC and Brier score for the
-  learning-based `pass_success` checkpoint. Requires a compatible, enriched pc-xPass cache whose metadata records
-  the cached pass-height provenance. An explicitly selected `pass_height` checkpoint is evaluated independently and
-  is not used or compared with the cache provenance.
+  learning-based `pass_success` checkpoint. Requires a compatible physical PC-xPass cache for distances and an
+  explicit `--xpass-pass-height-model-id` auxiliary. Component height models are evaluated independently.
 - `--evaluate-xpass`: evaluate cached receiver-specific physical pc-xPass probabilities with the same pooled and
   observed-pass-height-stratified pass-success metrics. Requires a selected `pass_success` model and either `--top-pass N` or `--xpass-version`.
 - `--evaluate-combined-success`: evaluate the deployed blend of the learning-based pass-success prediction and cached
@@ -1721,9 +1698,11 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
   `--evaluate-xpass` and `--evaluate-combined-success`; the requested metric must be present in the read-only cache.
 - `--xpass-weight {v1,v2,v3,v4,v5}`: blend weighting rule for `--evaluate-combined-success`. `v4` also requires explicit
   `--discount`, `--v4-power`, and `--v4-zero`; those arguments are rejected for other combined-weight versions.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for combined-v5 evaluation. Default: `0.01`; requires explicit `--pass-intent-model-id` and cached per-player pass-height probabilities.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for combined-v5 evaluation. Default: `0.01`; requires the explicit height and intent auxiliary selectors.
 - `--v5-discount <true|false>`: apply the pass-intent discount during combined-v5 evaluation. Default: `true`; `false` uses `w = pass_height`. Both v5 options are valid only with `--evaluate-combined-success --xpass-weight v5`.
-- `--pc-xpass-cache-dir <path>`: optional enriched pc-xPass cache directory for weighted pass-success evaluation;
+- `--pc-xpass-cache-dir <path>`: optional physical pc-xPass cache directory for weighted pass-success evaluation;
   physical-xPass evaluation, or combined pass-success evaluation; default: the Sportec pc-xPass cache.
 - `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
   weighted pass-success evaluation (defaults: `true`, `4`, and `0.7`) or required explicit settings for combined-v4
@@ -1867,7 +1846,7 @@ pass value is `V(next)-V(end)`; possession value is `V(next)-V(start)`.
 See [Sportec possession validation and regeneration](docs/sportec_possession_states.md)
 for the coverage audit and commands to create the required fresh cache.
 
-- `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups. It does not change an exported `pass_height` checkpoint's probability meaning; compatible predicted-height cache provenance is required when relevant.
+- `--pass-height-threshold <meters>`: select observed-height diagnostic labels. For PC-xPass blending, assert the explicitly selected auxiliary checkpoint's recorded cutoff without changing prediction meaning.
 - `--train-split <percentage>`: optional check that the requested development percentage matches the selected bundle/model split. Default: infer from model provenance (`50` for legacy artifacts); mismatches fail.
 - `--train-count <int>`: exact number of development matches in canonical `MatchId` order, including validation. Mutually exclusive with `--train-split`; for the 918-match dataset use `--train-count 765`. In evaluation, this optionally checks the count recorded by the selected model.
 - Carry-augmented inference is selected automatically from checkpoint metadata and requires a feature run with carry artifacts; there is no runtime `--use-carries` flag.
@@ -1891,7 +1870,9 @@ for the coverage audit and commands to create the required fresh cache.
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -1934,7 +1915,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -1965,7 +1948,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -1998,7 +1983,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -2029,7 +2016,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -2123,7 +2112,9 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
-- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires cached per-player pass-height probabilities and runtime pass-intent predictions from the selected model.
+- `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
+- `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
+- `--v5-intent-threshold <float>`: positive finite pass-intent threshold for `v5`, with model weight `w = pass_height * clip(pass_intent / threshold, 0, 1)`. Default: `0.01`; only valid with `--xpass-weight v5`. Requires explicit height and intent auxiliaries, computed at inference.
 - `--v5-discount <true|false>`: enable the `v5` pass-intent discount. Default: `true`; `false` uses `w = pass_height`. Only valid with `--xpass-weight v5`.
 - `--v4-power <float>`: power for the `v4` pass-height distance discount. Default: `2.0`; only valid with `--xpass-weight v4`.
 - `--v4-zero <float>`: zero point for the `v4` pass-height distance discount in `x = pass_distance / 100`. Default: `0.8`; only valid with `--xpass-weight v4`.
@@ -2243,7 +2234,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - optional opponent lane controls with `--export-lane-control`: `data/pc_xpass/<run_id>/<dataset>/lane_control/<match_id>.parquet` (one row per state/receiver/opponent)
   - optional lane-control coverage manifests: `data/pc_xpass/<run_id>/<dataset>/lane_control/coverage/<match_id>.json` (including completed states with no export rows)
   - legacy feature-run sidecars with `--feature-run-id`: `data/features/runs/<feature_run_id>/physical_xpass/...`
-  - optional per-player `<player_id>__pass_height` columns in runtime/pc cache rows when pass-height enrichment is enabled
+  - obsolete per-player `<player_id>__pass_height` columns may exist in older caches; PC-xPass consumers ignore them
 
 ### `scripts/generate_relevant_features.py`
 

@@ -146,7 +146,7 @@ def test_auxiliary_and_ipw_use_own_setting(artifacts, target, auxiliary):
                             auxiliary_model_args=dict(FEATURE_OPTIONS, goal_poss_dist=auxiliary))
     result = dataset[0][0]
     torch.testing.assert_close(result.x, graph().x if target else expected_mask(graph().x))
-    torch.testing.assert_close(result.auxiliary_graph.x,
+    torch.testing.assert_close(result.xpass_pass_intent_graph.x,
                                graph().x if auxiliary else expected_mask(graph().x))
     legacy_dependency = build_ipw_dataset_kwargs(kwargs, FEATURE_OPTIONS, None,
         diagnostic_label_dir=None, require_goal_next10_diagnostics=False)

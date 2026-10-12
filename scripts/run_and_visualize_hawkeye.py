@@ -49,6 +49,7 @@ from datatools.viz_helpers import (
 )
 from datatools.viz_snapshot import SnapshotVisualizer
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
 from project_config import (
     HAWKEYE_VISUALIZATION_DIR,
@@ -173,6 +174,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(freeze_ballreceipt=True)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
@@ -590,9 +592,6 @@ def main() -> None:
         ]
         if task in component_selection.required_component_groups
     ]
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
-        if "pass_intent" not in required_model_tasks:
-            required_model_tasks.append("pass_intent")
     model_ids, shared_context, _ = resolve_model_selection(
         required_tasks=required_model_tasks,
         bundle_id=args.bundle_id,
@@ -607,15 +606,12 @@ def main() -> None:
         for name, model_id in model_ids.items()
         if name in component_selection.required_component_groups
     }
-    if getattr(args, "xpass_weight", "v3") == "v5" and "pass_success" in component_selection.required_component_groups:
-        pass_intent_model_id = model_ids.get("pass_intent")
-        if not pass_intent_model_id:
-            raise ValueError("Physical xPass weight v5 requires a resolved pass-intent model ID.")
-        selected_model_ids["pass_intent"] = pass_intent_model_id
     model_specs = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
+    configure_auxiliary_models(args, model_specs, device)
+    configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("hawkeye", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
@@ -698,6 +694,7 @@ def main() -> None:
         print(f"Saved Hawkeye {selected_output_mode} visualizations to {output_dir}")
 
     metadata = {
+        "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
         "run_id": visualization_run_id,
@@ -767,7 +764,7 @@ def main() -> None:
             and physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["weight_version"] == "v5"
             else None
         ),
-        "physical_xpass_pass_intent_model_id": selected_model_ids.get("pass_intent") if getattr(args, "xpass_weight", "v3") == "v5" else None,
+        "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if getattr(args, "xpass_weight", "v3") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
         "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),

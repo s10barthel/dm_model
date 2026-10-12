@@ -50,6 +50,7 @@ from physical_pass_model import (
     validate_pc_xpass_lane_survival_mode_cache_metadata,
 )
 import pc_xpass_versions as pc_versions
+from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata
 
 from project_config import (
     resolve_artifact_split,
@@ -66,8 +67,8 @@ from project_config import (
     resolve_feature_root,
     resolve_feature_run_id,
 )
-from models.pass_height import (add_pass_height_argument, evaluation_height, check_height_probability,
-                               cached_height_definition, height_export_context, definition)
+from models.pass_height import (add_pass_height_argument, evaluation_height,
+                               height_export_context, definition)
 
 
 def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_id):
@@ -129,9 +130,6 @@ def resolve_weighted_pass_success_cache(args: argparse.Namespace, model_args: ar
 
     cache_dir = Path(args.pc_xpass_cache_dir) if args.pc_xpass_cache_dir else pc_versions.cache_dir("sportec", args)
     metadata = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
-    cached_model_id = metadata.get("pass_height_model_id")
-    if not cached_model_id:
-        raise ValueError("Weighted pass-success evaluation requires pass-height provenance in cache metadata pass_height_model_id.")
     return str(cache_dir)
 
 
@@ -153,8 +151,6 @@ def resolve_evaluation_xpass_cache(
     if args.evaluate_combined_success and not args.xpass_weight:
         raise ValueError("--evaluate-combined-success requires --xpass-weight.")
     if args.evaluate_combined_success and args.xpass_weight == "v5":
-        if not getattr(args, "pass_intent_model_id", None):
-            raise ValueError("Combined v5 evaluation requires explicit --pass-intent-model-id.")
         args.v5_intent_threshold = 0.01 if getattr(args, "v5_intent_threshold", None) is None else args.v5_intent_threshold
         args.v5_discount = True if getattr(args, "v5_discount", None) is None else args.v5_discount
         if not math.isfinite(float(args.v5_intent_threshold)) or float(args.v5_intent_threshold) <= 0.0:
@@ -181,10 +177,9 @@ def resolve_evaluation_xpass_cache(
     available = {str(value) for value in metadata.get("available_metrics", [])}
     if metric not in available:
         raise ValueError(
-            f"Requested pc-xPass metric {metric!r} is not available in {cache_dir}; available={sorted(available)}."
+            f"Requested pc-xPass metric {metric!r} is not available in {cache_dir}; available={sorted(available)}. "
+            "Create a fresh cache with scripts/generate_physical_xpass.py --pc-xpass and the required metric selectors."
         )
-    if args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"} and not metadata.get("pass_height_model_id"):
-        raise ValueError(f"Combined {args.xpass_weight} evaluation requires cache metadata pass_height_model_id provenance.")
     metadata_path = cache_dir / "metadata.json"
     metadata = dict(metadata)
     metadata["metadata_sha256"] = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
@@ -370,7 +365,8 @@ def resolve_lane_survival_context(model_args: argparse.Namespace, selection_args
     if expected_fingerprint is not None and actual_fingerprint != expected_fingerprint:
         raise ValueError(
             "Lane-survival pc-xPass cache does not match the checkpoint metadata fingerprint: "
-            f"cache={actual_fingerprint}, checkpoint={expected_fingerprint}."
+            f"cache={actual_fingerprint}, checkpoint={expected_fingerprint}. "
+            "Select a compatible cache or regenerate PC-xPass with the checkpoint's physical settings."
         )
     model_args.lane_survival_cache_dir = str(cache_dir)
     return str(cache_dir)
@@ -858,6 +854,7 @@ if __name__ == "__main__":
     parser.add_argument("--v5-discount", type=parse_bool_text, default=None)
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
+    add_auxiliary_arguments(parser)
     args, unknown_args = parser.parse_known_args()
     if any(token.startswith("--inference-mask-") for token in unknown_args):
         parser.error("Numbered inference masks are supported by scripts/evaluate_relevant_models.py only.")
@@ -884,11 +881,6 @@ if __name__ == "__main__":
     evaluation_xpass_cache_dir, evaluation_xpass_metric, evaluation_xpass_metadata = (
         resolve_evaluation_xpass_cache(args, model_args)
     )
-    for cache_dir in (weighted_pc_xpass_cache_dir,
-                      evaluation_xpass_cache_dir if args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"} else None):
-        if cache_dir and model_args.pass_height_threshold is not None:
-            cache_meta = validate_physical_xpass_cache_metadata(cache_dir, expected_source=PC_XPASS_SOURCE)
-            check_height_probability(cached_height_definition(cache_meta), model_args.pass_height_threshold)
     model_args.weighted_pass_success_metrics = bool(args.weighted_pass_success_metrics)
     model_args.observed_pass_height_stratification = bool(args.observed_pass_height_stratification)
     model_args.return_pass_success_height_evaluation = bool(
@@ -908,19 +900,13 @@ if __name__ == "__main__":
     model_args.v4_zero = 0.7 if args.v4_zero is None else float(args.v4_zero)
     model_args.v5_intent_threshold = float(0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold)
     model_args.v5_discount = True if args.v5_discount is None else bool(args.v5_discount)
-    pass_intent_model = None
-    if args.evaluate_combined_success and args.xpass_weight == "v5":
-        pass_intent_model = utils.load_model(args.pass_intent_model_id, device)
-        if pass_intent_model is None:
-            raise FileNotFoundError(f"Missing pass_intent model checkpoint: {args.pass_intent_model_id}")
-        if str(pass_intent_model.args.get("task")) != "pass_intent":
-            raise ValueError("--pass-intent-model-id must reference a pass_intent checkpoint.")
+    participating_models = {model_args.task: model}
+    auxiliary_models = configure_auxiliary_models(args, participating_models, device)
+    for auxiliary in auxiliary_models.values():
+        auxiliary.args["lane_survival_cache_dir"] = resolve_lane_survival_context(argparse.Namespace(**auxiliary.args), args)
 
     mask_configurations = resolve_inference_mask_configurations(args)
     inference_masks = mask_configurations[0]["masks"] if mask_configurations else []
-    participating_models = {model_args.task: model}
-    if pass_intent_model is not None:
-        participating_models["pass_intent"] = pass_intent_model
     mask_metadata = configure_inference_masks(participating_models, inference_masks)
     configuration_id = args.inference_configuration_id or mask_metadata["configuration_id"]
 
@@ -1012,20 +998,19 @@ if __name__ == "__main__":
         lane_survival_cache_dir=lane_survival_cache_dir,
     )
     if weighted_pc_xpass_cache_dir is not None:
-        # These attributes are evaluation sidecars; they do not modify node or edge features.
-        dataset_args["pass_height_cache_dir"] = weighted_pc_xpass_cache_dir
-        dataset_args["require_observed_pass_height"] = True
-    if pass_intent_model is not None:
-        dataset_args["auxiliary_model_args"] = dict(pass_intent_model.args)
+        dataset_args["pass_distance_cache_dir"] = weighted_pc_xpass_cache_dir
+    if auxiliary_models:
+        dataset_args["auxiliary_models_args"] = {role: dict(auxiliary.args) for role, auxiliary in auxiliary_models.items()}
+        for role, auxiliary in auxiliary_models.items():
+            validate_feature_graph_schema(feature_schema, utils.validate_model_graph_schemas({role: auxiliary}),
+                                          context=f"Selected {role} auxiliary feature artifacts")
     if evaluation_xpass_cache_dir is not None:
         dataset_args["evaluation_xpass_cache_dir"] = evaluation_xpass_cache_dir
         dataset_args["evaluation_xpass_metric"] = evaluation_xpass_metric
         dataset_args["evaluation_xpass_require_nearest"] = bool(
             args.evaluate_combined_success and args.xpass_weight == "v2"
         )
-        dataset_args["evaluation_xpass_require_height"] = bool(
-            args.evaluate_combined_success and args.xpass_weight in {"v4", "v5"}
-        )
+        dataset_args["evaluation_xpass_require_height"] = False
         dataset_args["require_pass_height_labels"] = True
     if args.observed_pass_height_stratification:
         if getattr(model_args, "task", None) != "pass_success":
@@ -1076,7 +1061,7 @@ if __name__ == "__main__":
         train=False,
         return_outcome_evaluation=collect_outcome_evaluation,
         return_learning_curve_rows=args.learning_curve_rows,
-        pass_intent_model=pass_intent_model,
+        auxiliary_models=auxiliary_models,
         return_semantic_prediction_rows=args.comparison_rows,
     )
     outcome_metrics = None
@@ -1182,9 +1167,9 @@ if __name__ == "__main__":
                 "xpass_cache_metadata_sha256": (
                     evaluation_xpass_metadata.get("metadata_sha256") if evaluation_xpass_metadata else None
                 ),
-                "xpass_pass_height_model_id": (
-                    evaluation_xpass_metadata.get("pass_height_model_id") if evaluation_xpass_metadata else None
-                ),
+                "xpass_pass_height_model_id": args.xpass_pass_height_model_id,
+                "xpass_pass_intent_model_id": args.xpass_pass_intent_model_id,
+                "xpass_auxiliaries": auxiliary_metadata(participating_models),
                 "xpass_missing_data_policy": "error" if evaluation_xpass_metadata else None,
                 "xpass_blend_formula": (
                     "(1 - learning_weight) * physical_xpass + learning_weight * learning_probability"
@@ -1200,7 +1185,7 @@ if __name__ == "__main__":
                 "v4_zero": model_args.v4_zero if args.evaluate_combined_success and args.xpass_weight == "v4" else args.v4_zero,
                 "v5_intent_threshold": model_args.v5_intent_threshold if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
                 "v5_discount": model_args.v5_discount if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
-                "pass_intent_model_id": args.pass_intent_model_id if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
+                "pass_intent_model_id": args.xpass_pass_intent_model_id if args.evaluate_combined_success and args.xpass_weight == "v5" else None,
                 "pc_xpass_id": getattr(args, "pc_xpass_id", None),
                 "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
             },

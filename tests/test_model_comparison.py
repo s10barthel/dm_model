@@ -179,17 +179,19 @@ class EvaluationWrapperTests(unittest.TestCase):
                 self.run_wrapper(["--compare", "--bundle-id", "bundle",
                                   "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b"], Path(folder))
 
-    def test_v5_exactly_one_auxiliary_and_auxiliary_excluded_from_comparison(self):
+    def test_v5_explicit_auxiliaries_are_excluded_from_comparison(self):
         args = wrapper.parse_args(["--evaluate-combined-success", "--xpass-version", "max", "--xpass-weight", "v5",
-                                   "--pass-intent-model-id", "pass_intent/a", "--pass-intent-model-id", "pass_intent/b"])
-        with self.assertRaisesRegex(ValueError, "exactly one"):
+                                   "--pass-intent-model-id", "pass_intent/component"])
+        with self.assertRaisesRegex(ValueError, "required explicitly"):
             wrapper.validate_pass_success_predictor_args(args)
         with tempfile.TemporaryDirectory() as folder, patch.object(wrapper.pc_versions, "cache_dir", return_value=Path(folder)):
             commands = self.run_wrapper(["--compare", "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
                                          "--evaluate-combined-success", "--xpass-version", "max", "--xpass-weight", "v5",
-                                         "--pass-intent-model-id", "pass_intent/a"], Path(folder))
-            self.assertEqual(len(commands), 2)
-            self.assertTrue(all(command[command.index("--pass-intent-model-id") + 1] == "pass_intent/a" for command in commands))
+                                         "--xpass-pass-height-model-id", "pass_height/aux", "--xpass-pass-intent-model-id", "pass_intent/aux"], Path(folder))
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(all("--xpass-pass-height-model-id" in command for command in commands))
+        self.assertTrue(all("--xpass-pass-intent-model-id" in command for command in commands))
+        self.assertTrue(all("--pass-intent-model-id" not in command for command in commands))
 
     def test_parser_mask_conflicts_and_learning_curve_rejected(self):
         from models.inference_masks import resolve_inference_mask_configurations

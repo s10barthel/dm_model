@@ -299,7 +299,7 @@ def test_auxiliary_models_keep_their_own_architecture_and_masks(artifacts, targe
     target_args = dict(FEATURE_OPTIONS, **settings(target, edge_in_dim=5),
                        v_edge_feature_mode="no_poss", relative_speed_edge_feature_mode="no_poss")
     target_batch = Batch.from_data_list([data[0][0]])
-    auxiliary_batch = Batch.from_data_list([data[0][0].auxiliary_graph])
+    auxiliary_batch = Batch.from_data_list([data[0][0].xpass_pass_intent_graph])
     target_input = utils.adapt_batch_graphs_for_model(target_batch, target_args)
     auxiliary_input = utils.adapt_batch_graphs_for_model(auxiliary_batch, auxiliary_args)
     target_index, target_attrs = explicit_self_edges(target_input, target_args)

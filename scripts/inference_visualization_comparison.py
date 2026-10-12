@@ -6,6 +6,7 @@ import pandas as pd
 import torch
 
 from models.inference_masks import configure_inference_masks, flatten_mask_values, resolve_inference_mask_configurations
+from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
 from models.utils import (
     aggregate_graph_schemas, get_model_record, load_bundle_record, load_model,
     validate_model_record_consistency, validate_model_graph_schemas,
@@ -26,8 +27,6 @@ def resolve_variants(args, mod, sportec):
     required = ["success_intent" if task == "intended_recipient" else task
                 for task in selection.required_component_groups
                 if task in MODEL_TASKS or task == "intended_recipient"]
-    if "pass_success" in required and args.xpass_weight == "v5" and "pass_intent" not in required:
-        required.insert(0, "pass_intent")
     base = {}
     for task in required:
         identifiers = explicit[task] or selection_list(bundle_ids.get(task))
@@ -73,6 +72,9 @@ def resolve_variants(args, mod, sportec):
         context = validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
             require_intended_receiver_mode=False, require_return_type=False, require_target_family=True)
         contexts.append(context)
+        auxiliaries = configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
+        for role, auxiliary in auxiliaries.items():
+            models[f"auxiliary:{identifier}:{role}"] = auxiliary
         variants.append(Variant(identifier, label, {"model_ids": ids, "models": pipeline_records}, masks, pipeline_models))
     if varied:
         validate_metadata_definitions([records[identifier] for identifier in explicit[varied]])
@@ -119,8 +121,13 @@ def configure_physical(args, mod, variants, dataset):
 
 
 def _configure_variant(variant):
+    primary = variant.models.get("pass_success")
+    if primary is not None:
+        primary._xpass_auxiliary_models = {role: variant.models[f"xpass_{role}"]
+                                         for role in ("pass_height", "pass_intent") if f"xpass_{role}" in variant.models}
     metadata = configure_inference_masks(variant.models, variant.masks)
     variant.provenance["inference_masks"] = metadata
+    variant.provenance["xpass_auxiliaries"] = auxiliary_metadata(variant.models)
 
 
 def hawkeye_groups(args, mod, variants, selection, schema, device):

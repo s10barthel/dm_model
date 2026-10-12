@@ -283,12 +283,17 @@ class ActionDataset(Dataset):
         include_goals=None,
         goal_input_nodes=None,
         auxiliary_model_args=None,
+        auxiliary_models_args=None,
+        pass_distance_cache_dir=None,
     ):
         # Preserve geometry here; encoder and decoder mask only learned inputs.
         resolve_pos_node_features(dict(xy_only=xy_only, pos_node_features_aware=pos_node_features_aware))
         goal_args = dict(task=task, goal_context_version=goal_context_version, goal_nodes_aware=goal_nodes_aware, include_goals=include_goals)
         policy = goal_policy(goal_args)
         input_goals = policy.input_goals if goal_input_nodes is None else bool(goal_input_nodes)
+        auxiliary_models_args = dict(auxiliary_models_args or {})
+        if auxiliary_model_args is not None:
+            auxiliary_models_args.setdefault("pass_intent", auxiliary_model_args)
         if pass_height_threshold is not None:
             pass_height_threshold = positive_height(pass_height_threshold)
         feature_root = Path(feature_dir)
@@ -535,8 +540,14 @@ class ActionDataset(Dataset):
                 if reason is not None:
                     _increment_count(self.skipped_rows, f"invalid_{task}_target:{reason}")
                     continue
-            auxiliary_source = graph.clone() if auxiliary_model_args is not None else None
-            auxiliary_label = graph_labels.clone() if auxiliary_model_args is not None else None
+            auxiliary_source = graph.clone() if auxiliary_models_args else None
+            auxiliary_label = graph_labels.clone() if auxiliary_models_args else None
+            if auxiliary_source is not None:
+                auxiliary_source.source_node_positions = torch.arange(graph.num_nodes)
+            if self.lane_survival:
+                from physical_pass_model import physical_state_hash
+                graph = graph.clone()
+                graph.pc_xpass_input_hash = physical_state_hash(graph)
             graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
             capture_self_attributes(graph)
             graph.source_node_positions = torch.arange(graph.num_nodes)
@@ -749,18 +760,32 @@ class ActionDataset(Dataset):
                         require_pass_height=self.evaluation_xpass_require_height,
                     )
 
-            if auxiliary_model_args is not None:
+            if pass_distance_cache_dir is not None and not bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
+                from physical_pass_model import attach_pass_distance_to_graph
+                cache_key = (str(pass_distance_cache_dir), feature_match_ids[int(i)])
+                if cache_key not in pass_height_rows_by_match:
+                    pass_height_rows_by_match[cache_key] = load_physical_xpass_match(
+                        pass_distance_cache_dir, cache_key[1], frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+                graph = attach_pass_distance_to_graph(graph, graph_labels, pass_height_rows_by_match[cache_key], match_id=cache_key[1])
+
+            for auxiliary_role, auxiliary_args in auxiliary_models_args.items():
                 from datatools.utils import filter_features_and_labels
-                aux_graphs, aux_labels = filter_features_and_labels([auxiliary_source], auxiliary_label.unsqueeze(0), auxiliary_model_args)
+                aux_graphs, aux_labels = filter_features_and_labels([auxiliary_source], auxiliary_label.unsqueeze(0), auxiliary_args,
+                                                                  validate_targets=False)
+                if len(aux_graphs) != 1:
+                    raise ValueError(f"PC-xPass auxiliary {auxiliary_role} has no input for match {feature_match_ids[int(i)]}, action {int(auxiliary_label[0])}.")
                 aux_graph = aux_graphs[0]
-                if auxiliary_model_args.get("lane_survival", False):
-                    aux_cache = Path(auxiliary_model_args["lane_survival_cache_dir"])
-                    aux_key = (str(aux_cache), feature_match_ids[int(i)])
-                    if aux_key not in lane_survival_rows_by_match:
-                        lane_survival_rows_by_match[aux_key] = load_physical_xpass_match(aux_cache, aux_key[1], frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
-                    aux_graph = append_pc_xpass_lane_survival_to_graph(aux_graph, aux_labels[0], lane_survival_rows_by_match[aux_key], match_id=aux_key[1], require_observed_target=True, mode=auxiliary_model_args.get("lane_survival_mode"))
-                graph.auxiliary_graph = aux_graph
-                graph.auxiliary_label = aux_labels[0].unsqueeze(0)
+                if auxiliary_args.get("lane_survival", False):
+                    if bool(aux_labels[0][LABEL_INDEX["is_dribble"]].item()):
+                        aux_graph.x = torch.cat([aux_graph.x, aux_graph.x.new_zeros((aux_graph.num_nodes, 1))], dim=-1)
+                    else:
+                        aux_cache = Path(auxiliary_args["lane_survival_cache_dir"])
+                        aux_key = (str(aux_cache), feature_match_ids[int(i)])
+                        if aux_key not in lane_survival_rows_by_match:
+                            lane_survival_rows_by_match[aux_key] = load_physical_xpass_match(aux_cache, aux_key[1], frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION)
+                        aux_graph = append_pc_xpass_lane_survival_to_graph(aux_graph, aux_labels[0], lane_survival_rows_by_match[aux_key], match_id=aux_key[1], require_observed_target=False, mode=auxiliary_args.get("lane_survival_mode"))
+                setattr(graph, f"xpass_{auxiliary_role}_graph", aux_graph)
+                setattr(graph, f"xpass_{auxiliary_role}_label", aux_labels[0].unsqueeze(0))
             graph.evaluation_match_id = str(feature_match_ids[int(i)])
             # Preserve the source row through task-specific filtering for paired evaluations.
             # Avoid "index" in the graph attribute name: PyG offsets index-like

@@ -17,6 +17,7 @@ import numpy as np
 import reachability as reach
 import pandas as pd
 import pc_xpass_match_cache as match_cache
+from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 import torch
 from tqdm import tqdm
 from torch_geometric.data import Batch, Data
@@ -506,6 +507,7 @@ def pc_xpass_metadata(
         "min_speed": min_speed_value,
         "ball_dec": float(ball_dec),
         "physics_version": PC_XPASS_PHYSICS_VERSION,
+        "physical_input_contract": PHYSICAL_INPUT_CONTRACT,
         "speed_step": speed_step_value,
         "angle_step": float(angle_step),
         "radial_gridsize": radial_gridsize_value,
@@ -1122,11 +1124,11 @@ def physical_xpass_ball_z_limit(args: Any) -> float | None:
 
 def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path | None = None) -> dict[str, Any]:
     from models.pass_height import cached_height_definition, check_height_probability
-    height_definition = None
-    if cache_dir is not None and (Path(cache_dir) / "metadata.json").is_file():
+    height_definition = _get_arg(args, "xpass_pass_height_definition", None)
+    if not pc_xpass_enabled(args) and cache_dir is not None and (Path(cache_dir) / "metadata.json").is_file():
         height_definition = cached_height_definition(json.loads((Path(cache_dir) / "metadata.json").read_text(encoding="utf-8-sig")))
     if physical_xpass_weight_version(args) in {"v4", "v5"}:
-        if cache_dir is not None:
+        if cache_dir is not None and not pc_xpass_enabled(args):
             from pc_xpass_resume import assert_height_readable
             for metadata_path in (Path(cache_dir) / "metadata.json", Path(cache_dir).parent / "metadata.json"):
                 if metadata_path.exists():
@@ -5595,6 +5597,8 @@ def prewarm_physical_xpass_runtime_cache(
 ) -> dict[str, object]:
     if export_lane_control and (source != PC_XPASS_SOURCE or reuse_cache_dir is not None):
         raise ValueError("Lane-control export requires fresh pc-xPass computation without cache reuse.")
+    if source == PC_XPASS_SOURCE and (pass_height_model is not None or pass_height_model_id is not None):
+        raise ValueError("PC-xPass generation does not accept height models; use --xpass-pass-height-model-id at inference.")
     lane_completed_by_match: dict[str, set[tuple]] = {}
     pass_height_lane_survival_mode = None
     if pass_height_model is not None and bool(getattr(pass_height_model, "args", {}).get("lane_survival", False)):
@@ -5968,13 +5972,16 @@ def prewarm_physical_xpass_runtime_cache(
                 f"hits={int(match_stats.get('cache_hits', 0))} "
                 f"misses={int(match_stats.get('cache_misses', 0))} "
                 f"to_compute={int(match_stats.get('cache_misses', 0))} "
-                f"copied={int(match_stats.get('copied_from_reuse', 0))} "
-                f"pass_height_filled={int(match_stats.get('pass_height_filled', 0))} "
-                f"pass_height_refreshed={int(match_stats.get('pass_height_refreshed', 0))}"
+                f"copied={int(match_stats.get('copied_from_reuse', 0))}"
             )
 
     if dry_run:
         stats["matches"] = {match_id: dict(match_stats) for match_id, match_stats in sorted(match_stats_by_id.items())}
+        if source == PC_XPASS_SOURCE:
+            for record in [stats, *stats["matches"].values()]:
+                for key in list(record):
+                    if key.startswith("pass_height"):
+                        record.pop(key)
         return stats
 
     pending_lane_records: dict[str, list[dict[str, Any]]] = {}
@@ -6148,6 +6155,11 @@ def prewarm_physical_xpass_runtime_cache(
     if compute_seconds > 0.0:
         stats["rows_per_second"] = float(stats.get("online_graphs", 0) or 0) / compute_seconds
         stats["chunks_per_second"] = float(stats.get("compute_chunks", 0) or 0) / compute_seconds
+    if source == PC_XPASS_SOURCE:
+        for record in [stats, *stats["matches"].values()]:
+            for key in list(record):
+                if key.startswith("pass_height"):
+                    record.pop(key)
     return stats
 
 
@@ -6290,7 +6302,8 @@ def attach_physical_xpass_to_graph(
         if nearest_column in row.index and not pd.isna(row[nearest_column]):
             nearest_opponent_distances[node_index] = float(row[nearest_column])
         pass_height_column = physical_xpass_pass_height_column(str(node_id))
-        if (not physical_rows.attrs.get("physical_xpass_cache_metadata", {}).get("pass_height_refresh_pending")
+        if (physical_rows.attrs.get("physical_xpass_cache_metadata", {}).get("source") != PC_XPASS_SOURCE
+                and not physical_rows.attrs.get("physical_xpass_cache_metadata", {}).get("pass_height_refresh_pending")
                 and pass_height_column in row.index and not pd.isna(row[pass_height_column])):
             pass_heights[node_index] = float(row[pass_height_column])
 
@@ -6387,6 +6400,15 @@ def attach_evaluation_xpass_to_graph(
     return graph
 
 
+def attach_pass_distance_to_graph(graph, labels, physical_rows, *, match_id):
+    """Attach the existing distance sidecar without reading obsolete height enrichment."""
+    action = int(labels[LABEL_INDEX["action_index"]])
+    if action not in physical_rows.index:
+        raise FileNotFoundError(f"PC-xPass cache has no state for match {match_id}, action_index={action}; regenerate the cache.")
+    setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
+    return graph
+
+
 def attach_pass_height_to_graph(
     graph: Data,
     labels: torch.Tensor,
@@ -6475,7 +6497,8 @@ def append_pc_xpass_lane_survival_row_to_graph(
 ) -> Data:
     """Append lane-survival values from one already-resolved pc-xPass row."""
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
-    if "state_id" in pc_xpass_row and pc_xpass_row.get("physical_state_hash") != physical_state_hash(graph):
+    input_hash = getattr(graph, "pc_xpass_input_hash", None) or physical_state_hash(graph)
+    if "state_id" in pc_xpass_row and pc_xpass_row.get("physical_state_hash") != input_hash:
         raise ValueError(f"pc-xPass canonical state differs from training/inference graph: {match_id}/{action_index}")
     normalized_mode = normalize_pc_xpass_lane_survival_mode(mode)
     row = pd.Series(pc_xpass_row)
