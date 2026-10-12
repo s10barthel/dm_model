@@ -43,7 +43,8 @@ def inference_fingerprint():
         selected[name] = ast.dump(node, include_attributes=False)
         pending.extend(n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in definitions)
     return _digest({"helpers": selected, "files": {
-        name: _file_digest(_ROOT / name) for name in ("ipw_preparation.py", "models/gnn.py", "models/goal_context.py")}})
+        name: _file_digest(_ROOT / name) for name in ("ipw_preparation.py", "models/gnn.py", "models/goal_context.py",
+            "models/architecture.py", "models/relationship.py", "models/self_loops.py", "models/inference_masks.py")}})
 
 
 LOADED_INFERENCE_FINGERPRINT = inference_fingerprint()

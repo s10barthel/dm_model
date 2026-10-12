@@ -94,6 +94,8 @@ from project_config import (
     write_run_metadata,
 )
 
+from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity
+
 parser = argparse.ArgumentParser()
 from models.pass_height import add_pass_height_argument, resolve_training_height
 add_pass_height_argument(parser)
@@ -120,7 +122,7 @@ parser.add_argument("--validation-fold", type=int, default=None)
 parser.add_argument("--final-refit", action="store_true", help="Train on the complete development pool without validation.")
 parser.add_argument("--artifact-stage", default=None)
 parser.add_argument("--device", type=str, default=None, help="Training device. Defaults to cuda when available, otherwise cpu.")
-parser.add_argument("--model", type=str, required=True, default="gat")
+add_architecture_arguments(parser)
 parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID to estimate propensity scores")
 parser.add_argument("--weight_bce", action="store_true", default=False, help="use weighted BCE to balance classes")
 
@@ -536,6 +538,10 @@ else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+try:
+    normalize_architecture(vars(args), fresh=resume_checkpoint is None and "--refit-config" not in sys.argv and not args.cont)
+except ValueError as exc:
+    parser.error(str(exc))
 # Fresh parses explicitly default to False; saved configurations retain legacy True.
 args.goal_poss_dist = resolve_goal_poss_dist(args)
 restore_ipw_defaults(args)
@@ -779,6 +785,13 @@ if __name__ == "__main__":
     from models.goal_context import resolve_training_goal_settings
     # Source-based refits inherit their saved policy just like resumed runs.
     goal_source = vars(args).copy() if args.refit_recipe is not None else resume_record
+    if resume_record is not None:
+        source_architecture = normalize_architecture(dict(resume_record))
+        explicitly_selected = any(token.split("=", 1)[0] in ("--model", "--gnn-architecture") for token in sys.argv[1:])
+        if explicitly_selected and args.model != source_architecture["model"]:
+            raise ValueError("Resume cannot change the saved GNN architecture.")
+        args.model = source_architecture["model"]
+        vars(args).update(architecture_identity(source_architecture))
     resolve_training_goal_settings(args, goal_source)
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
@@ -939,6 +952,7 @@ if __name__ == "__main__":
         json.dump(args_dict, f, indent=4)
 
     metadata = {
+        **architecture_identity(vars(args)),
         "goal_context_version": args.goal_context_version,
         "goal_nodes_aware": args.goal_nodes_aware,
         "goal_poss_dist": args.goal_poss_dist,

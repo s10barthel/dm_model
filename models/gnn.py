@@ -3,7 +3,11 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
-from torch_geometric.nn import GATConv, GCNConv, GINConv, global_mean_pool
+from torch_geometric.nn import GATConv, GCNConv, GINConv, TransformerConv, global_mean_pool
+
+from models.architecture import ARCHITECTURES, consumes_edge_attributes, normalize_architecture
+from models.relationship import RelationshipConv
+from models.self_loops import explicit_self_edges
 
 from datatools import config
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
@@ -32,13 +36,17 @@ class Encoder(nn.Module):
 
         self.args = args
         resolve_pos_node_features(args)
-        self.model_type = args.get("model", "gat")
+        normalize_architecture(args)
+        self.model_type = args["gnn_architecture"]
         node_in_dim = args["node_in_dim"]
         edge_in_dim = args["edge_in_dim"]
         node_emb_dim = args["node_emb_dim"]
         graph_emb_dim = args["graph_emb_dim"]
         n_layers = args["gnn_layers"]
         n_heads = args["gnn_heads"]
+        if self.model_type in ARCHITECTURES:
+            if n_layers < 1 or n_heads < 1 or node_emb_dim < 1 or node_emb_dim % n_heads:
+                raise ValueError("GNN layers/heads must be positive and embedding width must be divisible by heads.")
 
         self.node_in_fc = nn.Sequential(nn.Linear(node_in_dim, node_emb_dim), nn.ReLU(inplace=True))
 
@@ -49,7 +57,15 @@ class Encoder(nn.Module):
         for _ in range(n_layers):
             gnn_in_dim = node_in_dim + node_emb_dim if args["skip_conn"] else node_emb_dim
             if self.model_type == "gat":
-                conv = GATConv(gnn_in_dim, node_emb_dim // n_heads, heads=n_heads, edge_dim=edge_in_dim)
+                conv = GATConv(gnn_in_dim, node_emb_dim // n_heads, heads=n_heads, edge_dim=edge_in_dim,
+                               add_self_loops=args["self_loop_policy"] == "legacy")
+            elif self.model_type == "transformer":
+                conv = TransformerConv(gnn_in_dim, node_emb_dim // n_heads, heads=n_heads,
+                                       edge_dim=edge_in_dim, concat=True, root_weight=True,
+                                       beta=False, dropout=0.0)
+            elif self.model_type in ("relationship", "relationship-attention"):
+                conv = RelationshipConv(gnn_in_dim, node_emb_dim, edge_in_dim, n_heads,
+                                        attention=self.model_type == "relationship-attention")
             elif self.model_type == "gcn":
                 conv = GCNConv(gnn_in_dim, node_emb_dim)
             elif self.model_type == "gin":
@@ -83,12 +99,15 @@ class Encoder(nn.Module):
         node_features = mask_pos_node_features(batch_graphs.x, self.args)
         node_features = mask_goal_poss_features(node_features, self.args)
         edge_features = batch_graphs.edge_attr
+        edge_index = batch_graphs.edge_index
+        if self.args["self_loop_policy"] == "explicit_v1":
+            edge_index, edge_features = explicit_self_edges(batch_graphs, self.args)
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
             possessor_mask = getattr(batch_graphs, "inference_possessor_mask", None)
             node_features = runtime.mask_nodes(node_features, training=self.training, possessor_mask=possessor_mask)
             edge_features = runtime.mask_edges(
-                edge_features, batch_graphs.edge_index, batch_graphs.x,
+                edge_features, edge_index, batch_graphs.x,
                 training=self.training, possessor_mask=possessor_mask,
             )
         node_embeddings = self.node_in_fc(node_features)  # [N, z]
@@ -98,8 +117,8 @@ class Encoder(nn.Module):
             else:
                 gnn_inputs = node_embeddings  # [N, z]
 
-            if self.model_type == "gat":
-                node_embeddings = gnn_layer(gnn_inputs, batch_graphs.edge_index, edge_features)  # [N, z]
+            if consumes_edge_attributes(self.args):
+                node_embeddings = gnn_layer(gnn_inputs, edge_index, edge_features)  # [N, z]
             else:  # gcn or gin
                 node_embeddings = gnn_layer(gnn_inputs, batch_graphs.edge_index)  # [N, z]
             node_embeddings = self.activation(self.node_layernorms[i](node_embeddings))

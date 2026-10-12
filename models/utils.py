@@ -27,6 +27,8 @@ from xgboost import XGBClassifier
 
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
+from models.architecture import GNN_ARCHITECTURES, normalize_architecture, architecture_identity, resolve_architecture
+from models.self_loops import capture_self_attributes
 from models.gnn import GNN
 from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
 from models.edge_feature_config import (
@@ -314,7 +316,8 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "target_family": target_family,
         "return_type": return_type,
         "use_carries": bool(metadata.get("use_carries", args.get("use_carries", False))),
-        "model_name": str(args.get("model", metadata.get("model", "unknown"))),
+        "model_name": str(resolve_architecture(args)),
+        "architecture_identity": architecture_identity(args),
         "feature_signature": feature_signature,
         "graph_schema": {
             "node_in_dim": feature_signature["node_in_dim"],
@@ -351,6 +354,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "return_type",
             "use_carries",
             "model_name",
+            "architecture_identity",
             "feature_signature",
             "graph_schema",
             "status",
@@ -402,6 +406,7 @@ def resolve_latest_model_id(
         json.dumps(
             {
                 "model_name": record["model_name"],
+                "architecture_identity": record.get("architecture_identity", architecture_identity(record.get("args", {}))),
                 "feature_signature": record["feature_signature"],
             },
             sort_keys=True,
@@ -543,7 +548,8 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         normalize_v_edge_feature_args(args)
         args.update(goal_policy(args).settings())
 
-        if args["model"] in ["gcn", "gin", "gat"]:  # GNN models
+        if resolve_architecture(args) in GNN_ARCHITECTURES:  # GNN models
+            normalize_architecture(args)
             model = GNN(args).to(device)
             weights_path = model_path / "best_weights.pt"
             state_dict = torch.load(weights_path, weights_only=False, map_location=lambda storage, _: storage)
@@ -1177,6 +1183,7 @@ def adapt_batch_graphs_for_model(
 ) -> Batch:
     # Model-specific transforms must not affect inputs reused by another model.
     batch_graphs = batch_graphs.clone()
+    capture_self_attributes(batch_graphs)
     if model_args.get("vel_node_features_aware") is not None and not model_args["vel_node_features_aware"]:
         batch_graphs.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
 

@@ -2468,3 +2468,43 @@ IPW, and combined xPass evaluation. Auxiliary models use their own input policy.
 
 The Hawkeye goal-position/annotation correction is separate from this change;
 correct Hawkeye goal geometry before using newly goal-aware models on those scenes.
+
+### GNN architecture selection
+
+Both `train.py` and `scripts/train_relevant_models.py` accept
+`--gnn-architecture {gat,transformer,relationship,relationship-attention}`.
+Fresh runs default to `gat`; the wrapper forwards the selection to every task.
+`--model` remains a compatibility alias, including existing GCN/GIN commands.
+Supplying conflicting architecture selections is an error.
+
+| Choice | Message construction and aggregation |
+| --- | --- |
+| `gat` | Existing GAT; edge attributes influence attention weights. |
+| `transformer` | PyG TransformerConv; edges contribute to attention and message content. |
+| `relationship` | Joint sender/receiver/edge MLP, separate incoming/outgoing means, then a node-update MLP. |
+| `relationship-attention` | Same relationship blocks with separate multi-head incoming/outgoing attention. |
+
+The relationship options are Stöckl-inspired adaptations, not exact reproductions.
+Both blocks have three linear layers with ELU between them; widths and head count
+follow the existing GNN settings. Each graph layer recomputes relationships using
+updated player representations and original edge inputs. TransformerConv uses
+concatenated heads, a root contribution, no beta gate, and zero attention dropout.
+For these four options, embedding width must be divisible by the positive head
+count, and the number of graph layers must be positive.
+
+Fresh models record architecture version 1 and self-loop policy `explicit_v1`.
+All four receive exactly one explicit self-edge per node, including after
+sparsification. Original self-edge values are preserved in preprocessing metadata;
+missing values follow the existing feature rules. Training and inference masks
+also apply to restored loops. GAT no longer replaces these values with incoming
+edge averages. Optional velocity-angle conventions and feature defaults are
+unchanged. Existing graph artifacts remain usable; prepared caches rebuild through
+normal code-fingerprint invalidation and remain shared across architectures.
+
+Checkpoints without the new settings resolve their architecture from `model` and
+retain `legacy` self-loop behaviour, including historical GAT loop averaging.
+Resume and source refit inherit the saved architecture and policy; existing code
+compatibility checks still apply. Auxiliary/IPW models use their own saved settings.
+Use a newly trained GAT baseline to compare against the new architectures under
+the corrected self-loop policy. Architecture identity is recorded separately from
+input-feature signatures in model and bundle metadata.

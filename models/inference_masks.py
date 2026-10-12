@@ -239,7 +239,8 @@ def _edge_mode(args, relative=False):
 
 def _disabled(args, feature: str, column: int, subset: str) -> str | None:
     if feature.startswith("edge."):
-        if args.get("model", "gat") != "gat":
+        from models.architecture import consumes_edge_attributes
+        if not consumes_edge_attributes(args):
             return "architecture does not consume edge attributes"
         if column >= 2:
             mode = _edge_mode(args, relative=column == 4)

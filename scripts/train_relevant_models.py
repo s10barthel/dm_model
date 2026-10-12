@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools import config
+from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity, resolve_architecture
 from models.node_feature_config import resolve_pos_node_features
 from models.goal_context import goal_policy, resolve_training_goal_settings
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
@@ -802,6 +803,8 @@ def derive_bundle_shared_context(
             "v_edge_feature_mode": v_edge_feature_mode,
             "use_relative_speed_edge_features": bool(graph_schema.get("add_relative_speed_edge_features", False)),
             "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
+            "source_architectures": {task: record.get("architecture_identity", architecture_identity(record.get("args", {})))
+                                     for task, record in model_records.items()},
             "source_feature_run_ids": shared.get("source_feature_run_ids", {}),
             "source_intended_receiver_modes": shared.get("source_intended_receiver_modes", {}),
             "source_return_types": shared.get("source_return_types", {}),
@@ -842,6 +845,7 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from models.pass_height import add_pass_height_argument
     parser = argparse.ArgumentParser()
+    add_architecture_arguments(parser)
     add_dataset_loading_arguments(parser)
     add_ipw_arguments(parser)
     add_crash_capture_arguments(parser)
@@ -1312,6 +1316,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         validate_learning_rates(args.start_lr, args.min_lr)
     except ValueError as exc:
         parser.error(str(exc))
+    try:
+        normalize_architecture(vars(args), fresh=True)
+    except ValueError as exc:
+        parser.error(str(exc))
     pc_versions.check_selectors(args)
     args.learn_physical_scale = not bool(args.freeze_beta1)
     args.v_edge_feature_mode = cli_v_edge_feature_mode(args)
@@ -1464,8 +1472,6 @@ def base_gnn_args(
     command = [
         "--run-id",
         run_id,
-        "--model",
-        "gat",
         "--sparsify",
         "none",
         "--node_emb_dim",
@@ -1975,6 +1981,8 @@ def build_training_commands(
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
     for index, command in enumerate(commands):
+        architecture = resolve_architecture(vars(args))
+        command = _replace_cli_value(command, "--gnn-architecture" if architecture not in ("gcn", "gin") else "--model", architecture)
         command = _replace_cli_value(command, "--n_epochs", getattr(args, "max_epochs", 100))
         command = _replace_cli_value(command, "--seed", getattr(args, "seed", 100))
         for flag in ("--start_lr", "--min_lr"):
@@ -2348,6 +2356,13 @@ def main() -> None:
         ),
         "feature_run_return_types": feature_run_metadata.get("return_types", cli_args.available_return_types),
         "feature_run_intended_receiver_model_id": feature_run_metadata.get("intended_receiver_model_id"),
+        **architecture_identity(normalize_architecture(dict(vars(cli_args)), fresh=True)),
+        "model_architectures": {
+            **existing_bundle.get("model_architectures", {}),
+            **bundle_shared.get("source_architectures", {}),
+            **{task: architecture_identity(normalize_architecture(dict(vars(cli_args)), fresh=True))
+               for task in trained_model_ids},
+        },
         "training_feature_flags": feature_flags,
         "batch_sizes": trained_batch_sizes,
         "physical_xpass": physical_xpass_settings(cli_args),

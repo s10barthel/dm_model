@@ -6,6 +6,7 @@ from torch_geometric.data import Data
 from tqdm import tqdm
 
 from datatools import config
+from models.self_loops import capture_self_attributes
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.goal_context import (goal_policy, validate_source_goals, validate_observed_goal_target,
                                  node_index_invalid_reason, failure_receiver_target_invalid_reason,
@@ -537,6 +538,7 @@ class ActionDataset(Dataset):
             auxiliary_source = graph.clone() if auxiliary_model_args is not None else None
             auxiliary_label = graph_labels.clone() if auxiliary_model_args is not None else None
             graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
+            capture_self_attributes(graph)
             graph.source_node_positions = torch.arange(graph.num_nodes)
             # Preserve roles used by runtime subset masks before training feature masks.
             graph.inference_possessor_mask = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1

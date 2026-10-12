@@ -12,6 +12,7 @@ from shapely.geometry import Point, Polygon
 from torch_geometric.data import Batch, Data
 
 from datatools import config
+from models.self_loops import capture_self_attributes
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target, node_index_invalid_reason
 from models.node_feature_config import mask_goal_poss_features
 from project_config import (
@@ -1357,6 +1358,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     edge_index = index_map[graph.edge_index[:, edge_mask]]
     edge_attr = graph.edge_attr[edge_mask]
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
+    if hasattr(graph, "node_self_edge_attr"):
+        masked_graph.node_self_edge_attr = graph.node_self_edge_attr[node_mask]
     if hasattr(graph, "source_node_positions"):
         masked_graph.source_node_positions = graph.source_node_positions[node_mask]
     if hasattr(graph, "inference_possessor_mask"):
@@ -1578,6 +1581,7 @@ def filter_features_and_labels(
         else:
             graph = graph.clone()
             graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
+            capture_self_attributes(graph)
             if not hasattr(graph, "inference_possessor_mask"):
                 graph.inference_possessor_mask = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
 

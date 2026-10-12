@@ -91,3 +91,5 @@ _vendor/defcon/saved
 
 !tests/test_sportec_seasons.py
 !tests/test_visualization_comparison.py
+
+!tests/test_gnn_architectures.py
