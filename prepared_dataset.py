@@ -19,6 +19,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 from tqdm import tqdm
 
 from dataset import ActionDataset
+from project_config import assert_feature_paths_usable
 from dataset_loading import DEFAULT_CACHE_DIR, PREPARED_TASKS
 from models.pass_height import positive_height, relabel_height
 
@@ -122,6 +123,8 @@ class PreparedActionDataset(IterableDataset):
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
                  buffer_matches=4, shuffle=False, seed=100, progress=True, **options):
         super().__init__()
+        assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
+                                    options.get("pass_height_diagnostic_label_dir"))
         if options.get("task") not in PREPARED_TASKS:
             raise ValueError("Prepared datasets support pass_intent, action_intent and pass_height only.")
         if int(buffer_matches) < 1:
@@ -293,6 +296,8 @@ class PreparedActionDataset(IterableDataset):
         return payload
 
     def __iter__(self):
+        assert_feature_paths_usable(self.feature_dir, self.label_dir, self.options.get("diagnostic_label_dir"),
+                                    self.options.get("pass_height_diagnostic_label_dir"))
         if get_worker_info() is not None:
             raise RuntimeError("PreparedActionDataset requires num_workers=0")
         rng = random.Random(f"{self.seed}:{self.epoch}")

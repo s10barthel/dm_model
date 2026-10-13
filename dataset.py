@@ -42,7 +42,7 @@ from physical_pass_model import (
     graph_pass_distances,
     load_physical_xpass_match,
 )
-from project_config import get_pc_xpass_dir
+from project_config import get_pc_xpass_dir, assert_feature_paths_usable
 from models.pass_height import positive_height, relabel_height
 
 
@@ -295,6 +295,7 @@ class ActionDataset(Dataset):
         auxiliary_models_args=None,
         pass_distance_cache_dir=None,
     ):
+        assert_feature_paths_usable(feature_dir, label_dir, diagnostic_label_dir, pass_height_diagnostic_label_dir)
         # Preserve geometry here; encoder and decoder mask only learned inputs.
         resolve_pos_node_features(dict(xy_only=xy_only, pos_node_features_aware=pos_node_features_aware))
         goal_args = dict(task=task, goal_context_version=goal_context_version, goal_nodes_aware=goal_nodes_aware, include_goals=include_goals)

@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import math
 import hashlib
+import os
+import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -463,6 +466,7 @@ def resolve_feature_run_id(
     run_root = get_feature_run_root(resolved)
     if not run_root.exists():
         raise FileNotFoundError(f"Feature run {resolved} does not exist at {run_root}.")
+    assert_feature_run_usable(run_root)
     return resolved
 
 
@@ -511,14 +515,82 @@ def resolve_component_root(component_run_id: str | None = None) -> Path:
     return get_component_run_root(resolved) if resolved else COMPONENT_DIR
 
 
-def write_run_metadata(run_root: Path, payload: dict[str, Any]) -> Path:
-    run_root.mkdir(parents=True, exist_ok=True)
-    metadata_path = run_root / "metadata.json"
-    metadata_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    from datatools.metadata_summary import update_summary_for_run
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> Path:
+    """Publish a complete JSON file, preserving the previous file on write failure."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(payload, indent=2)
+    temporary = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    except BaseException as primary:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as secondary:
+            primary.add_note(f"Metadata cleanup failed for {temporary}: {secondary}")
+            print(f"Metadata cleanup failed for {temporary}: {secondary}", file=sys.stderr)
+        raise
+    return path
 
-    update_summary_for_run(run_root)
+
+def write_run_metadata(run_root: Path, payload: dict[str, Any]) -> Path:
+    metadata_path = atomic_write_json(Path(run_root) / "metadata.json", payload)
+    # The summary is an index; it must not undo successful metadata publication.
+    try:
+        from datatools.metadata_summary import update_summary_for_run
+        update_summary_for_run(run_root)
+    except Exception as exc:
+        message = f"Skipping metadata summary refresh for {run_root}: {type(exc).__name__}: {exc}"
+        try:
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+        except Warning:
+            print(message, file=sys.stderr)
     return metadata_path
+
+
+def assert_feature_run_usable(run_root: Path) -> None:
+    """Guard consumption, leaving raw metadata inspection available for repair."""
+    run_root = Path(run_root)
+    metadata_path = run_root / "metadata.json"
+    if not metadata_path.exists():
+        return  # Legacy artifact directories need not have run metadata.
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot verify feature run metadata {metadata_path}; inspect it before use.") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Invalid feature run metadata {metadata_path}; inspect it before use.")
+    attempt = metadata.get("extension_attempt") or {}
+    if not isinstance(attempt, dict):
+        raise ValueError(f"Invalid extension diagnostics in {metadata_path}; inspect it before use.")
+    status = metadata.get("status")
+    state = attempt.get("artifact_state")
+    if status in ("failed", "in_progress", "running", "incomplete") or state in ("partial", "unknown"):
+        raise ValueError(
+            f"Feature run {run_root.name} is not usable: status={status!r}, "
+            f"artifact_state={state!r}, phase={attempt.get('phase', 'unknown')!r}. "
+            f"Inspect {metadata_path} and repair or regenerate the affected artifacts before use."
+        )
+
+
+def assert_feature_paths_usable(*paths) -> None:
+    """Check feature-run parents for direct dataset paths, including resolved symlinks."""
+    seen = set()
+    for value in paths:
+        if value is None:
+            continue
+        path = Path(value).resolve()
+        for candidate in (path, *path.parents):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.parent.name == "runs" and (candidate / "metadata.json").exists():
+                assert_feature_run_usable(candidate)
+                break
 
 
 def load_run_metadata(run_root: Path, required: bool = True) -> dict[str, Any] | None:

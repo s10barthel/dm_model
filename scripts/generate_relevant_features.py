@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 
 from models.edge_schema import (edge_names, schema_for_names, generation_edge_names, add_interaction_arguments,
                                 generation_kwargs, interaction_values, CANONICAL_FEATURES, INTERACTION_GROUPS, EDGE_GROUPS)
+from scripts.feature_extension_diagnostics import ExtensionAttempt, extend_graph_files
 from datatools import config
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
@@ -297,11 +298,15 @@ def run_command(args: list[str]) -> None:
     subprocess.run(args, cwd=ROOT, check=True)
 
 
-def run_generation_steps(steps: list[FeatureGenerationStep]) -> None:
+def run_generation_steps(steps: list[FeatureGenerationStep], attempt: ExtensionAttempt | None = None) -> None:
     total = len(steps)
     for index, step in enumerate(steps, start=1):
         print(f"Feature generation step {index}/{total}: {step.description}")
+        if attempt is not None:
+            attempt.begin_mutation("generating", current_command=step.command)
         run_command(step.command)
+        if attempt is not None:
+            attempt.mutation_finished()
 
 
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
@@ -1117,7 +1122,8 @@ def mutating_metadata(
             "extension_relative_speed_edge_features": (
                 plan.extend_relative_speed_edge_features if advertise_final_state else False
             ),
-            "pass_height_threshold_meters": pass_height_threshold_meters(args),
+            "pass_height_threshold_meters": (pass_height_threshold_meters(args) if advertise_final_state
+                                             else plan.base_metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)),
             "extension_refreshed_return_types": plan.refreshed_return_types if advertise_final_state else [],
             "extension_refreshed_intended_receiver_modes": (
                 plan.refreshed_intended_receiver_modes if advertise_final_state else []
@@ -1158,7 +1164,10 @@ def copy_base_feature_run(base_run_id: str, output_run_id: str) -> Path:
             return {"metadata.json"}
         return set()
 
-    shutil.copytree(base_root, output_root, ignore=ignore_root_metadata)
+    # The extension publishes its copying phase before copying starts.
+    if output_root.exists() and any(path.name != "metadata.json" for path in output_root.iterdir()):
+        raise FileExistsError(f"Derived feature run directory is not empty: {output_root}")
+    shutil.copytree(base_root, output_root, ignore=ignore_root_metadata, dirs_exist_ok=True)
     return output_root
 
 
@@ -1234,43 +1243,16 @@ def append_relative_speed_to_graph(graph: object) -> object:
     return graph
 
 
-def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_modes: list[str]) -> list[Path]:
-    graph_files = [
-        graph_file
-        for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
-        for graph_file in sorted(directory.glob("*.pt"))
-    ]
+def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_modes: list[str],
+                                        attempt: ExtensionAttempt | None = None) -> list[Path]:
+    graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
+                   for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
-
-    temp_files: list[tuple[Path, Path]] = []
-    graphs_extended = 0
-    null_graphs_preserved = 0
-    try:
-        for graph_file in graph_files:
-            graphs = torch.load(graph_file, weights_only=False)
-            if not isinstance(graphs, list):
-                raise TypeError(f"Graph artifact {graph_file} is not a list.")
-            null_graphs_preserved += sum(graph is None for graph in graphs)
-            graphs_extended += sum(graph is not None for graph in graphs)
-            extended_graphs = [append_relative_speed_to_graph(graph) for graph in graphs]
-            temp_file = graph_file.with_name(f"{graph_file.name}.relative_speed.tmp")
-            torch.save(extended_graphs, temp_file)
-            temp_files.append((graph_file, temp_file))
-
-        for graph_file, temp_file in temp_files:
-            temp_file.replace(graph_file)
-    except Exception:
-        for _, temp_file in temp_files:
-            if temp_file.exists():
-                temp_file.unlink()
-        raise
-    print(
-        "Extended relative-speed edge features for "
-        f"{len(temp_files)} graph files, {graphs_extended} graphs; "
-        f"preserved {null_graphs_preserved} null graph placeholders."
-    )
-    return [graph_file for graph_file, _ in temp_files]
+    attempt = attempt or ExtensionAttempt(feature_root, "relative_speed", EXTENSION_MODE_IN_PLACE, {})
+    result = extend_graph_files(graph_files, append_relative_speed_to_graph, ".relative_speed.tmp", attempt)
+    print(f"Extended relative-speed edge features in {len(result)} graph files.")
+    return result
 
 
 def append_interactions_to_graph(graph):
@@ -1296,87 +1278,75 @@ def append_interactions_to_graph(graph):
     return graph
 
 
-def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes: list[str]) -> list[Path]:
+def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes: list[str],
+                                     attempt: ExtensionAttempt | None = None) -> list[Path]:
     graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
                    for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
-    temporary = []
-    try:
-        # Validate and stage every artifact before replacing any source file.
-        for path in graph_files:
-            graphs = torch.load(path, weights_only=False)
-            if not isinstance(graphs, list):
-                raise TypeError(f"Graph artifact {path} is not a list.")
-            upgraded = [append_interactions_to_graph(graph) for graph in graphs]
-            temp = path.with_name(path.name + ".interactions.tmp")
-            temporary.append((path, temp))
-            torch.save(upgraded, temp)
-        for path, temp in temporary:
-            temp.replace(path)
-    finally:
-        for _, temp in temporary:
-            if temp.exists():
-                temp.unlink()
-    print(f"Extended interaction edge features in {len(graph_files)} graph files.")
-    return graph_files
+    attempt = attempt or ExtensionAttempt(feature_root, "interaction", EXTENSION_MODE_IN_PLACE, {})
+    result = extend_graph_files(graph_files, append_interactions_to_graph, ".interactions.tmp", attempt)
+    print(f"Extended interaction edge features in {len(result)} graph files.")
+    return result
 
 
 def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
-    if plan.extension_mode == EXTENSION_MODE_DERIVED:
-        output_root = copy_base_feature_run(plan.base_run_id, plan.output_run_id)
-        write_run_metadata(output_root, derived_metadata(args, plan, "in_progress"))
-        try:
-            if plan.regenerate_model_mode:
-                remove_model_mode_artifacts(output_root, plan.final_return_types)
-            run_generation_steps(plan.command_steps)
-            if plan.extend_relative_speed_edge_features:
-                extend_relative_speed_edge_features(output_root, plan.final_intended_receiver_modes)
-            if plan.extend_interaction_edge_features:
-                extend_interaction_edge_features(output_root, plan.final_intended_receiver_modes)
-        except Exception as exc:
-            write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
-            raise
+    derived = plan.extension_mode == EXTENSION_MODE_DERIVED
+    target_root = get_feature_run_root(plan.target_run_id)
 
-        write_run_metadata(output_root, derived_metadata(args, plan, "completed"))
+    def metadata_factory(status, error, final):
+        if derived:
+            payload = derived_metadata(args, plan, status, error=error)
+            if not final:
+                payload.update(graph_schema=copy.deepcopy(plan.base_metadata.get("graph_schema")),
+                               return_types=plan.base_return_types,
+                               return_type=plan.base_return_types[0] if len(plan.base_return_types) == 1 else None,
+                               intended_receiver_modes=plan.base_intended_receiver_modes,
+                               intended_receiver_model_id=plan.base_metadata.get("intended_receiver_model_id"),
+                               pass_height_threshold_meters=plan.base_metadata.get(
+                                   "pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS))
+            return payload
+        return mutating_metadata(args, plan, status, error=error, advertise_final_state=final,
+                                 history_status="failed" if error is not None else status)
+
+    target = dict(graph_schema=plan.graph_schema, return_types=plan.final_return_types,
+                  intended_receiver_modes=plan.final_intended_receiver_modes,
+                  intended_receiver_model_id=plan.intended_receiver_model_id,
+                  relative_speed_edge_features=plan.extend_relative_speed_edge_features,
+                  interaction_edge_features=plan.extend_interaction_edge_features,
+                  refresh_target_families=plan.refresh_target_families,
+                  pass_height_threshold_meters=pass_height_threshold_meters(args),
+                  next_action_conditions_enabled=plan.next_action_conditions_enabled)
+    attempt = ExtensionAttempt(target_root, "feature_extension", plan.extension_mode, target,
+                               metadata_factory, lambda root, payload: write_run_metadata(root, payload))
+    try:
+        if derived:
+            attempt.begin_mutation("copying", current_file=target_root)
+            copy_base_feature_run(plan.base_run_id, plan.output_run_id)
+            attempt.mutation_finished()
+        else:
+            attempt.enter("staging")
+        if plan.regenerate_model_mode:
+            attempt.begin_mutation("removing_artifacts", current_file=target_root)
+            remove_model_mode_artifacts(target_root, plan.final_return_types)
+            attempt.mutation_finished()
+        run_generation_steps(plan.command_steps, attempt=attempt)
+        if plan.extend_relative_speed_edge_features:
+            extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
+        if plan.extend_interaction_edge_features:
+            extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
+        attempt.finish()
+    except BaseException as exc:
+        attempt.fail(exc)
+        raise
+    if derived:
         write_latest_run("feature", plan.output_run_id)
         print(f"Derived feature run id: {plan.output_run_id}")
         print(f"Derived from feature run id: {plan.base_run_id}")
-        return
-
-    target_root = get_feature_run_root(plan.target_run_id)
-    if plan.extension_mode == EXTENSION_MODE_OVERWRITE_FEATURE_RUN:
-        write_run_metadata(target_root, mutating_metadata(args, plan, "in_progress"))
-
-    try:
-        if plan.regenerate_model_mode:
-            remove_model_mode_artifacts(target_root, plan.final_return_types)
-        run_generation_steps(plan.command_steps)
-        if plan.extend_relative_speed_edge_features:
-            extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes)
-        if plan.extend_interaction_edge_features:
-            extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes)
-    except Exception as exc:
-        if plan.extension_mode == EXTENSION_MODE_IN_PLACE:
-            write_run_metadata(
-                target_root,
-                mutating_metadata(
-                    args,
-                    plan,
-                    "completed",
-                    error=str(exc),
-                    advertise_final_state=False,
-                    history_status="failed",
-                ),
-            )
-        else:
-            write_run_metadata(target_root, mutating_metadata(args, plan, "failed", error=str(exc)))
-        raise
-
-    write_run_metadata(target_root, mutating_metadata(args, plan, "completed"))
-    print(f"Updated feature run id: {plan.target_run_id}")
-    print(f"Extension mode: {plan.extension_mode}")
+    else:
+        print(f"Updated feature run id: {plan.target_run_id}")
+        print(f"Extension mode: {plan.extension_mode}")
 
 
 def carry_extension_steps(
@@ -1437,62 +1407,61 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
     if bool((metadata.get("carry_variant") or {}).get("available", False)):
         raise ValueError(f"Feature run {base_run_id} already contains carry-augmented artifacts.")
 
-    if args.in_place:
-        output_run_id = base_run_id
-        output_root = get_feature_run_root(base_run_id)
-    else:
-        output_run_id = args.run_id or generate_run_id("feature")
-        output_root = copy_base_feature_run(base_run_id, output_run_id)
-
-    updated = copy.deepcopy(metadata)
-    updated["run_id"] = output_run_id
-    updated["status"] = "in_progress"
-    if output_run_id != base_run_id:
-        updated["base_feature_run_id"] = base_run_id
-    write_run_metadata(output_root, updated)
+    mode = EXTENSION_MODE_IN_PLACE if args.in_place else EXTENSION_MODE_DERIVED
+    output_run_id = base_run_id if args.in_place else (args.run_id or generate_run_id("feature"))
+    output_root = get_feature_run_root(output_run_id)
+    if not args.in_place and output_root.exists():
+        raise FileExistsError(f"Derived feature run {output_run_id} already exists at {output_root}.")
     steps = carry_extension_steps(args, metadata, output_run_id)
     extend_interactions = bool(getattr(args, "extend_interaction_edge_features", False))
-    try:
-        run_generation_steps(steps)
-        if extend_interactions:
-            extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata))
-            source_names = edge_names(normalize_graph_schema(metadata.get("graph_schema")))
-            updated["graph_schema"] = schema_for_names(tuple(
-                name for name in CANONICAL_FEATURES
-                if name in source_names or any(name in EDGE_GROUPS[group] for group in INTERACTION_GROUPS)
-            ))
-    except Exception as exc:
-        updated["status"] = "completed" if args.in_place else "failed"
-        updated["carry_variant_error"] = str(exc)
-        write_run_metadata(output_root, updated)
-        raise
+    final_schema = copy.deepcopy(metadata.get("graph_schema"))
+    if extend_interactions:
+        source_names = edge_names(normalize_graph_schema(final_schema))
+        final_schema = {**(final_schema or {}), **schema_for_names(tuple(
+            name for name in CANONICAL_FEATURES
+            if name in source_names or any(name in EDGE_GROUPS[group] for group in INTERACTION_GROUPS)
+        ))}
 
-    history = list(updated.get("extension_history") or [])
-    history.append(
-        {
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "type": "carry_variant",
-            "interaction_edge_features": extend_interactions,
-            "status": "completed",
-            "base_feature_run_id": base_run_id,
-            "commands": [step.command for step in steps],
-        }
-    )
-    updated.update(
-        {
-            "status": "completed",
-            "carry_variant": {
-                "available": True,
-                "definition": CARRY_DEFINITION_VERSION,
-                "artifact_suffix": "_carries",
-                "generated_at": datetime.now().isoformat(timespec="seconds"),
-            },
-            "extension_history": history,
-        }
-    )
-    updated.pop("carry_variant_error", None)
-    write_run_metadata(output_root, updated)
-    if output_run_id != base_run_id:
+    def metadata_factory(status, error, final):
+        updated = copy.deepcopy(metadata)
+        updated.update(run_id=output_run_id, status=status)
+        if not args.in_place:
+            updated["base_feature_run_id"] = base_run_id
+        entry = dict(created_at=datetime.now().isoformat(timespec="seconds"), type="carry_variant",
+                     interaction_edge_features=extend_interactions, status="failed" if error is not None else status,
+                     base_feature_run_id=base_run_id, commands=[step.command for step in steps])
+        if error is not None:
+            entry["error"] = error
+            updated["carry_variant_error"] = error
+        else:
+            updated.pop("carry_variant_error", None)
+        updated["extension_history"] = list(updated.get("extension_history") or []) + [entry]
+        if final:
+            updated["graph_schema"] = final_schema
+            updated["carry_variant"] = dict(available=True, definition=CARRY_DEFINITION_VERSION,
+                                            artifact_suffix="_carries",
+                                            generated_at=datetime.now().isoformat(timespec="seconds"))
+        return updated
+
+    attempt = ExtensionAttempt(output_root, "carry_extension", mode,
+                               dict(graph_schema=final_schema, carry_variant=True,
+                                    interaction_edge_features=extend_interactions),
+                               metadata_factory, lambda root, payload: write_run_metadata(root, payload))
+    try:
+        if not args.in_place:
+            attempt.begin_mutation("copying", current_file=output_root)
+            copy_base_feature_run(base_run_id, output_run_id)
+            attempt.mutation_finished()
+        else:
+            attempt.enter("staging")
+        run_generation_steps(steps, attempt=attempt)
+        if extend_interactions:
+            extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata), attempt=attempt)
+        attempt.finish()
+    except BaseException as exc:
+        attempt.fail(exc)
+        raise
+    if not args.in_place:
         write_latest_run("feature", output_run_id)
     print(f"Feature run id with carry variant: {output_run_id}")
 
