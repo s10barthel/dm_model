@@ -96,3 +96,4 @@ _vendor/defcon/saved
 !tests/test_gnn_architectures.py
 
 !tests/test_interaction_inputs.py
+!tests/test_pc_xpass_scheduling.py

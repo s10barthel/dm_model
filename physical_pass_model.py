@@ -9,7 +9,8 @@ import time
 import uuid
 import warnings
 from collections.abc import Callable, Mapping
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -5473,6 +5474,193 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     return result
 
 
+def _timed_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
+    result = _compute_runtime_physical_xpass_chunk(task)
+    return {"result": result, "started": started, "finished": time.perf_counter(), "pid": os.getpid()}
+
+
+class RuntimeComputeSession:
+    """Parent-owned, lazy worker pool; scheduling metadata never enters physical rows."""
+
+    def __init__(self, *, num_workers: int, worker_thread_limit: int, row_window: int):
+        if min(num_workers, worker_thread_limit, row_window) < 1:
+            raise ValueError("Runtime workers, thread limit, and row window must be positive")
+        self.num_workers = int(num_workers)
+        self.worker_thread_limit = int(worker_thread_limit)
+        self.row_window = int(row_window)
+        self._executor = None
+        self._closed = False
+        self._started = self._idle_since = time.perf_counter()
+        self._parent_since_idle = 0.0
+        self._window = None
+        self.windows = []
+        self.pool_creations = 0
+        self.pool_discards = 0
+        self.pool_shutdown_seconds = 0.0
+        self.publication_seconds = 0.0
+        self.recovery_seconds = 0.0
+        self._finished = None
+
+    def __enter__(self):
+        if self._closed:
+            raise RuntimeError("Runtime compute session is closed")
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _shutdown(self, *, discard=False):
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            started = time.perf_counter()
+            try:
+                executor.shutdown(wait=True, cancel_futures=True)
+            finally:
+                self.pool_shutdown_seconds += time.perf_counter() - started
+                self.pool_discards += int(discard)
+
+    def close(self):
+        if self._closed:
+            return
+        try:
+            self._shutdown()
+        finally:
+            self._closed = True
+            self._finished = time.perf_counter()
+
+    @contextmanager
+    def publication(self):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - started
+            self.publication_seconds += elapsed
+            self._parent_since_idle += elapsed
+
+    @contextmanager
+    def recovery(self):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - started
+            self.recovery_seconds += elapsed
+            self._parent_since_idle += elapsed
+
+    @contextmanager
+    def window(self, input_states):
+        if self._window is not None:
+            raise RuntimeError("Overlapping runtime compute windows are unsupported")
+        started = time.perf_counter()
+        record = dict(input_states=int(input_states),
+                      preparation_seconds=max(0.0, started - self._idle_since - self._parent_since_idle),
+                      initial=not self.windows, status="complete")
+        self._window = record
+        try:
+            yield record
+        except BaseException:
+            record["status"] = "failed"
+            raise
+        finally:
+            record["elapsed_seconds"] = time.perf_counter() - started
+            self.windows.append(record)
+            self._window = None
+            self._idle_since = time.perf_counter()
+            self._parent_since_idle = 0.0
+
+    def summary(self):
+        return dict(row_window=self.row_window, max_workers=self.num_workers,
+                    pool_creations=self.pool_creations, pool_discards=self.pool_discards,
+                    pool_shutdown_seconds=self.pool_shutdown_seconds,
+                    publication_seconds=self.publication_seconds,
+                    recovery_seconds=self.recovery_seconds,
+                    elapsed_seconds=(self._finished or time.perf_counter()) - self._started,
+                    initial_preparation_seconds=sum(w["preparation_seconds"] for w in self.windows if w.get("initial")),
+                    between_window_preparation_seconds=sum(w["preparation_seconds"] for w in self.windows if not w.get("initial")),
+                    windows=list(self.windows))
+
+    def compute(self, misses, task_template, on_result):
+        if self._closed:
+            raise RuntimeError("Runtime compute session is closed")
+        task_size = min(int(task_template["physical_batch_size"]), self.row_window)
+        chunks = iter(_chunk_items_by_size(misses, task_size))
+        task_count = math.ceil(len(misses) / task_size)
+        available_tasks = min(task_count, self.row_window // task_size)
+        parallel = self.num_workers > 1 and (self._executor is not None or available_tasks > 1)
+        cold_pool = parallel and self._executor is None
+        started = time.perf_counter()
+        pending = {}
+        timings, sizes = [], []
+        outstanding = peak = 0
+        next_chunk = next(chunks, None)
+        parent_seconds = 0.0
+        record = self._window if self._window is not None else {}
+        try:
+            if parallel:
+                if self._executor is None:
+                    self._executor = ProcessPoolExecutor(
+                        max_workers=self.num_workers, initializer=configure_physical_worker_thread_limit,
+                        initargs=(self.worker_thread_limit,))
+                    self.pool_creations += 1
+                while next_chunk is not None or pending:
+                    while next_chunk is not None and outstanding + len(next_chunk) <= self.row_window:
+                        future = self._executor.submit(_timed_runtime_physical_xpass_chunk,
+                                                       {**task_template, "misses": next_chunk})
+                        pending[future] = len(next_chunk)
+                        outstanding += len(next_chunk)
+                        peak = max(peak, outstanding)
+                        sizes.append(len(next_chunk))
+                        next_chunk = next(chunks, None)
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        outstanding -= pending.pop(future)
+                        result = future.result()
+                        timings.append(result)
+                        handling = time.perf_counter()
+                        on_result(result.pop("result"))
+                        parent_seconds += time.perf_counter() - handling
+            else:
+                configure_physical_worker_thread_limit(self.worker_thread_limit)
+                while next_chunk is not None:
+                    sizes.append(len(next_chunk))
+                    peak = max(peak, len(next_chunk))
+                    result = _timed_runtime_physical_xpass_chunk({**task_template, "misses": next_chunk})
+                    timings.append(result)
+                    handling = time.perf_counter()
+                    on_result(result.pop("result"))
+                    parent_seconds += time.perf_counter() - handling
+                    next_chunk = next(chunks, None)
+        except BaseException:
+            for future in pending:
+                future.cancel()
+            # Settle running work before a caller can retry or clean up transactions.
+            self._shutdown(discard=True)
+            raise
+        finally:
+            elapsed = time.perf_counter() - started
+            durations = [t["finished"] - t["started"] for t in timings]
+            first = min((t["started"] for t in timings), default=started)
+            last = max((t["finished"] for t in timings), default=started)
+            tail = max((t["started"] for t in timings), default=started)
+            capacity = self.num_workers if parallel else 1
+            tail_busy = sum(max(0.0, t["finished"] - max(tail, t["started"])) for t in timings)
+            record.update(compute_dispatch_seconds=elapsed, parent_result_seconds=parent_seconds,
+                          parallel=parallel, cold_pool=bool(cold_pool), tasks=len(sizes),
+                          worker_processes_used=len({t["pid"] for t in timings}),
+                          task_sizes={str(size): sizes.count(size) for size in sorted(set(sizes))},
+                          peak_outstanding_rows=peak, task_seconds=durations,
+                          task_p50_seconds=float(np.percentile(durations, 50)) if durations else 0.0,
+                          task_p95_seconds=float(np.percentile(durations, 95)) if durations else 0.0,
+                          worker_busy_seconds=sum(durations),
+                          task_occupancy=sum(durations) / (capacity * (last - first)) if last > first else 0.0,
+                          startup_to_first_task_seconds=max(0.0, first - started) if cold_pool else 0.0,
+                          final_drain_seconds=max(0.0, last - tail),
+                          tail_unused_worker_seconds=max(0.0, capacity * (last - tail) - tail_busy))
+        return record
+
+
 def _has_finite_pass_distance(row: pd.Series) -> bool:
     if PHYSICAL_XPASS_PASS_DISTANCE_COLUMN not in row.index:
         return False
@@ -5550,6 +5738,7 @@ def prewarm_physical_xpass_runtime_cache(
     worker_thread_limit: int = 1,
     physical_batch_size: int = 16,
     reuse_cache_dir: str | Path | None = None,
+    compute_session: RuntimeComputeSession | None = None,
     pass_height_model: Any | None = None,
     pass_height_model_id: str | None = None,
     pass_height_identity: dict[str, Any] | None = None,
@@ -5632,6 +5821,11 @@ def prewarm_physical_xpass_runtime_cache(
         raise ValueError("--physical-batch-size must be positive.")
 
     resolved_workers = resolve_physical_num_workers(num_workers, max_auto_workers=max_auto_workers)
+    if compute_session is not None:
+        if source != PC_XPASS_SOURCE:
+            raise ValueError("Reusable runtime compute sessions are PC-xPass only")
+        if compute_session.num_workers != resolved_workers or compute_session.worker_thread_limit != int(worker_thread_limit):
+            raise ValueError("Runtime compute session worker configuration differs from prewarming")
     cache_metadata = _ensure_runtime_physical_xpass_cache(
         cache_dir,
         source=source,
@@ -5991,7 +6185,7 @@ def prewarm_physical_xpass_runtime_cache(
 
     if misses:
         worker_count = min(int(resolved_workers), len(misses))
-        chunks = _chunk_items_by_size(misses, int(physical_batch_size))
+        chunks = _chunk_items_by_size(misses, int(physical_batch_size)) if compute_session is None else None
 
         def miss_key(row: Mapping[str, Any]) -> tuple[str, int, str | None]:
             frame_scope = row.get(PHYSICAL_XPASS_FRAME_SCOPE_COLUMN)
@@ -6093,24 +6287,28 @@ def prewarm_physical_xpass_runtime_cache(
                     1 for row in match_rows if not _physical_xpass_row_has_finite_metric(row, available_metrics)
                 )
 
-        if worker_count == 1:
-            for chunk in chunks:
-                result = _compute_runtime_physical_xpass_chunk({**task_template, "misses": chunk})
-                handle_chunk_result(result)
-        else:
-            with ProcessPoolExecutor(
-                max_workers=worker_count,
-                initializer=configure_physical_worker_thread_limit,
-                initargs=(int(worker_thread_limit),),
-            ) as executor:
-                futures = [
-                    executor.submit(_compute_runtime_physical_xpass_chunk, {**task_template, "misses": chunk})
-                    for chunk in chunks
-                ]
-                for future in as_completed(futures):
-                    result = future.result()
+        try:
+            if compute_session is not None:
+                compute_session.compute(misses, task_template, handle_chunk_result)
+            elif worker_count == 1:
+                for chunk in chunks:
+                    result = _compute_runtime_physical_xpass_chunk({**task_template, "misses": chunk})
                     handle_chunk_result(result)
-        progress.close()
+            else:
+                with ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    initializer=configure_physical_worker_thread_limit,
+                    initargs=(int(worker_thread_limit),),
+                ) as executor:
+                    futures = [
+                        executor.submit(_compute_runtime_physical_xpass_chunk, {**task_template, "misses": chunk})
+                        for chunk in chunks
+                    ]
+                    for future in as_completed(futures):
+                        result = future.result()
+                        handle_chunk_result(result)
+        finally:
+            progress.close()
         write_seconds_during_compute = float(stats.get("write_seconds", 0.0) or 0.0) - write_seconds_before_compute
         stats["compute_seconds"] = float(stats.get("compute_seconds", 0.0) or 0.0) + max(
             0.0,

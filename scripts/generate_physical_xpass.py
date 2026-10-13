@@ -5,7 +5,9 @@ import math
 import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +113,7 @@ from physical_pass_model import (
     physical_xpass_as_default_metadata,
     pc_xpass_metadata,
     prewarm_physical_xpass_runtime_cache,
+    RuntimeComputeSession,
     resolve_physical_num_workers,
     validate_physical_xpass_cache_metadata,
 )
@@ -161,7 +164,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
-    parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Number of Sportec matches to prewarm per worker-pool window.")
+    parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Legacy physical-xPass only: matches per compute window.")
+    for dataset in ("sportec", "hawkeye"):
+        parser.add_argument(
+            f"--{dataset}-runtime-row-window", type=int, default=None,
+            help="PC-xPass only: input states per window and maximum outstanding compute rows. "
+                 "Defaults to physical_batch_size * num_workers * 2.",
+        )
     parser.add_argument(
         "--skillcorner-runtime-row-window",
         type=int,
@@ -516,6 +525,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         value = getattr(args, name, None)
         if value is not None and int(value) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
+    explicit_options = {token.split("=", 1)[0] for token in (sys.argv[1:] if argv is None else argv)}
+    if args.pc_xpass and "--sportec-runtime-match-window" in explicit_options:
+        parser.error("--sportec-runtime-match-window is legacy physical-xPass only; use --sportec-runtime-row-window.")
+    for dataset in ("sportec", "hawkeye"):
+        value = getattr(args, f"{dataset}_runtime_row_window")
+        if value is not None:
+            if not args.pc_xpass:
+                parser.error(f"--{dataset}-runtime-row-window requires --pc-xpass.")
+            if value < 1:
+                parser.error(f"--{dataset}-runtime-row-window must be positive.")
     if args.sportec_runtime_match_window < 1:
         parser.error("--sportec-runtime-match-window must be positive.")
     if args.skillcorner_runtime_row_window is not None and int(args.skillcorner_runtime_row_window) < 1:
@@ -1243,6 +1262,7 @@ def prewarm_runtime_items(
     args: argparse.Namespace,
     reuse_cache_dir: Path | None = None,
     progress_desc: str | None = None,
+    compute_session: RuntimeComputeSession | None = None,
 ) -> dict[str, Any] | None:
     if not items:
         return None
@@ -1252,71 +1272,81 @@ def prewarm_runtime_items(
     if progress_desc is None:
         match_ids = sorted({str(item.get("match_id")) for item in items})
         progress_desc = f"physical xPass {match_ids[0]}" if len(match_ids) == 1 else "physical xPass runtime"
-    return prewarm_physical_xpass_runtime_cache(
-        items,
-        cache_dir=cache_dir,
-        export_lane_control=bool(getattr(args, "export_lane_control", False)),
-        source=PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
-        eps=float(args.physical_eps),
-        teammate_policy=teammate_policy_from_args(args),
-        ignore_teammates_lane_survival=pc_ignore_teammates_lane_survival_from_args(args)
-        if bool(getattr(args, "pc_xpass", False))
-        else None,
-        ignore_teammates_control=pc_ignore_teammates_control_from_args(args)
-        if bool(getattr(args, "pc_xpass", False))
-        else None,
-        speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
-        refresh=False,
-        num_workers=args.num_workers,
-        max_auto_workers=int(args.max_auto_workers),
-        worker_thread_limit=int(args.worker_thread_limit),
-        physical_batch_size=int(args.physical_batch_size),
-        reuse_cache_dir=reuse_cache_dir,
-        max_speed=args.max_speed,
-        min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
-        ball_dec=float(getattr(args, "ball_dec", PC_XPASS_DEFAULT_BALL_DEC)),
-        speed_step=args.speed_step,
-        coarse_n_angles=int(args.coarse_n_angles),
-        refine_top_k_angles=int(args.refine_top_k_angles),
-        refine_angle_radius=float(args.refine_angle_radius),
-        angle_step=float(args.angle_step),
-        radial_gridsize=float(args.radial_gridsize) if bool(getattr(args, "pc_xpass", False)) else PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
-        sigma_angle=float(args.sigma_angle),
-        sigma_speed=float(args.sigma_speed),
-        sigma_distance=float(args.sigma_distance),
-        top_n=args.top_n,
-        top_n_values=pc_top_n_values_from_args(args) if bool(getattr(args, "pc_xpass", False)) else None,
-        top_pass_values=getattr(args, "top_pass_values", None),
-        available_metrics=enabled_physical_xpass_metrics_from_args(args),
-        lane_power=float(args.lane_power),
-        lane_inflection_point=float(args.lane_inflection_point),
-        control_power=float(args.control_power),
-        control_inflection_point=float(args.control_inflection_point),
-        endpoint_normalization=str(args.endpoint_normalization),
-        boost_def_endpoint_control=float(args.boost_def_endpoint_control),
-        reaction_time=None if args.reaction_time is None else float(args.reaction_time),
-        reaction_time_mode=str(args.reaction_time_mode),
-        margin=getattr(args, "margin", "tta"),
-        reachability_config=getattr(args, "reachability_config", None),
-        dist_pass_div=float(args.dist_pass_div),
-        dist_pass_min=float(args.dist_pass_min),
-        dist_pass_max=float(args.dist_pass_max),
-        max_player_speed=float(args.max_player_speed),
-        max_player_speed_off=None if args.max_player_speed_off is None else float(args.max_player_speed_off),
-        max_player_speed_def=None if args.max_player_speed_def is None else float(args.max_player_speed_def),
-        use_position_discount=bool(args.use_position_discount),
-        position_discount_power=float(args.position_discount_power),
-        position_discount_distance=float(args.position_discount_distance),
-        top_xt=bool(getattr(args, "top_xt", False)),
-        pass_height_model=None if args.pc_xpass else getattr(args, "_pass_height_model", None),
-        pass_height_model_id=None if args.pc_xpass else getattr(args, "pass_height_model_id", None),
-        pass_height_identity=None if args.pc_xpass else getattr(args, "_pass_height_identity", None),
-        pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
-        dry_run=bool(args.dry_run),
-        show_progress=not bool(args.dry_run),
-        progress_desc=progress_desc,
-        verbose_status=True,
-    )
+    def prewarm():
+        return prewarm_physical_xpass_runtime_cache(
+            items,
+            cache_dir=cache_dir,
+            **({"compute_session": compute_session} if compute_session is not None else {}),
+            export_lane_control=bool(getattr(args, "export_lane_control", False)),
+            source=PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
+            eps=float(args.physical_eps),
+            teammate_policy=teammate_policy_from_args(args),
+            ignore_teammates_lane_survival=pc_ignore_teammates_lane_survival_from_args(args)
+            if bool(getattr(args, "pc_xpass", False))
+            else None,
+            ignore_teammates_control=pc_ignore_teammates_control_from_args(args)
+            if bool(getattr(args, "pc_xpass", False))
+            else None,
+            speed_aggregation=normalize_physical_xpass_speed_aggregation(args.speed_aggregation),
+            refresh=False,
+            num_workers=args.num_workers,
+            max_auto_workers=int(args.max_auto_workers),
+            worker_thread_limit=int(args.worker_thread_limit),
+            physical_batch_size=int(args.physical_batch_size),
+            reuse_cache_dir=reuse_cache_dir,
+            max_speed=args.max_speed,
+            min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
+            ball_dec=float(getattr(args, "ball_dec", PC_XPASS_DEFAULT_BALL_DEC)),
+            speed_step=args.speed_step,
+            coarse_n_angles=int(args.coarse_n_angles),
+            refine_top_k_angles=int(args.refine_top_k_angles),
+            refine_angle_radius=float(args.refine_angle_radius),
+            angle_step=float(args.angle_step),
+            radial_gridsize=float(args.radial_gridsize) if bool(getattr(args, "pc_xpass", False)) else PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
+            sigma_angle=float(args.sigma_angle),
+            sigma_speed=float(args.sigma_speed),
+            sigma_distance=float(args.sigma_distance),
+            top_n=args.top_n,
+            top_n_values=pc_top_n_values_from_args(args) if bool(getattr(args, "pc_xpass", False)) else None,
+            top_pass_values=getattr(args, "top_pass_values", None),
+            available_metrics=enabled_physical_xpass_metrics_from_args(args),
+            lane_power=float(args.lane_power),
+            lane_inflection_point=float(args.lane_inflection_point),
+            control_power=float(args.control_power),
+            control_inflection_point=float(args.control_inflection_point),
+            endpoint_normalization=str(args.endpoint_normalization),
+            boost_def_endpoint_control=float(args.boost_def_endpoint_control),
+            reaction_time=None if args.reaction_time is None else float(args.reaction_time),
+            reaction_time_mode=str(args.reaction_time_mode),
+            margin=getattr(args, "margin", "tta"),
+            reachability_config=getattr(args, "reachability_config", None),
+            dist_pass_div=float(args.dist_pass_div),
+            dist_pass_min=float(args.dist_pass_min),
+            dist_pass_max=float(args.dist_pass_max),
+            max_player_speed=float(args.max_player_speed),
+            max_player_speed_off=None if args.max_player_speed_off is None else float(args.max_player_speed_off),
+            max_player_speed_def=None if args.max_player_speed_def is None else float(args.max_player_speed_def),
+            use_position_discount=bool(args.use_position_discount),
+            position_discount_power=float(args.position_discount_power),
+            position_discount_distance=float(args.position_discount_distance),
+            top_xt=bool(getattr(args, "top_xt", False)),
+            pass_height_model=None if args.pc_xpass else getattr(args, "_pass_height_model", None),
+            pass_height_model_id=None if args.pc_xpass else getattr(args, "pass_height_model_id", None),
+            pass_height_identity=None if args.pc_xpass else getattr(args, "_pass_height_identity", None),
+            pass_height_device=str(getattr(args, "pass_height_device", "cpu")),
+            dry_run=bool(args.dry_run),
+            show_progress=not bool(args.dry_run),
+            progress_desc=progress_desc,
+            verbose_status=True,
+        )
+
+    if compute_session is None:
+        return prewarm()
+    with compute_session.window(runtime_items_row_count(items)) as record:
+        result = prewarm()
+        record.update({key: result.get(key, 0) for key in (
+            "cache_hits", "cache_misses", "compute_chunks", "cache_scan_seconds", "write_seconds")})
+        return result
 
 
 def resolve_runtime_row_window(args: argparse.Namespace, attr_name: str) -> int:
@@ -1326,6 +1356,24 @@ def resolve_runtime_row_window(args: argparse.Namespace, attr_name: str) -> int:
     batch_size = int(args.physical_batch_size)
     workers = resolve_num_workers(args.num_workers, max_auto_workers=int(args.max_auto_workers))
     return max(batch_size, batch_size * workers * 2)
+
+
+def runtime_compute_runner(dataset: str):
+    def decorate(runner):
+        @wraps(runner)
+        def run(args, *, compute_session=None):
+            if not bool(getattr(args, "pc_xpass", False)) or compute_session is not None:
+                return runner(args, compute_session=compute_session)
+            with RuntimeComputeSession(
+                num_workers=resolve_num_workers(args.num_workers, max_auto_workers=int(args.max_auto_workers)),
+                worker_thread_limit=int(args.worker_thread_limit),
+                row_window=resolve_runtime_row_window(args, f"{dataset}_runtime_row_window"),
+            ) as session:
+                result = runner(args, compute_session=session)
+            result["stats"]["scheduling"] = session.summary()
+            return result
+        return run
+    return decorate
 
 
 def runtime_items_row_count(items: list[dict[str, Any]]) -> int:
@@ -1365,6 +1413,7 @@ def flush_runtime_buffer(
     skipped: dict[str, Any],
     progress_desc: str,
     reuse_cache_dir: Path | None = None,
+    compute_session: RuntimeComputeSession | None = None,
 ) -> int:
     if not buffer:
         return 0
@@ -1380,6 +1429,7 @@ def flush_runtime_buffer(
             args=args,
             reuse_cache_dir=reuse_cache_dir,
             progress_desc=progress_desc,
+            **({"compute_session": compute_session} if compute_session is not None else {}),
         )
         merge_stats(stats, unit_stats)
         if unit_stats and _runtime_stats_has_work(unit_stats):
@@ -1392,46 +1442,47 @@ def flush_runtime_buffer(
         )
         tqdm.write(f"{progress_desc}: batch retry per unit after {type(batch_exc).__name__}: {batch_exc}")
 
-    serial_args = argparse.Namespace(**vars(args))
-    serial_args.num_workers = 1
-    for unit in units:
-        display_key = str(unit["display_key"])
-        stats["serial_retry_attempts"] = int(stats.get("serial_retry_attempts", 0) or 0) + 1
-        try:
-            unit_stats = prewarm_runtime_items(
-                list(unit["items"]),
-                cache_dir=cache_dir,
-                args=serial_args,
-                reuse_cache_dir=reuse_cache_dir,
-                progress_desc=display_key,
-            )
-            merge_stats(stats, unit_stats)
-            verification = prewarm_runtime_items(
-                list(unit["items"]),
-                cache_dir=cache_dir,
-                args=serial_args,
-                reuse_cache_dir=reuse_cache_dir,
-                progress_desc=f"{display_key} cache audit",
-            )
-            if _runtime_stats_have_remaining_misses(verification):
-                raise RuntimeError("runtime physical xPass cache remained missing or unusable after serial retry")
-            stats["serial_retry_recovered"] = int(stats.get("serial_retry_recovered", 0) or 0) + 1
-            if unit_stats and _runtime_stats_has_work(unit_stats):
-                tqdm.write(_format_runtime_stats_line(display_key, unit_stats))
-            tqdm.write(f"{display_key}: serial retry recovered and verified")
-        except Exception as exc:
-            stats["write_permission_retries"] = int(stats.get("write_permission_retries", 0) or 0) + int(
-                getattr(exc, "write_permission_retries", 0) or 0
-            )
-            stats["serial_retry_failed"] = int(stats.get("serial_retry_failed", 0) or 0) + 1
-            reason = f"{type(exc).__name__}: {exc}"
-            for skip_key in unit["skip_keys"]:
-                skipped[str(skip_key)] = reason
-            failed_units += 1
-            transaction = match_cache.active(cache_dir)
-            if transaction is not None:
-                transaction.failed = True
-            tqdm.write(f"{display_key}: skipped={_skip_reason_label(reason)}")
+    with compute_session.recovery() if compute_session is not None else nullcontext():
+        serial_args = argparse.Namespace(**vars(args))
+        serial_args.num_workers = 1
+        for unit in units:
+            display_key = str(unit["display_key"])
+            stats["serial_retry_attempts"] = int(stats.get("serial_retry_attempts", 0) or 0) + 1
+            try:
+                unit_stats = prewarm_runtime_items(
+                    list(unit["items"]),
+                    cache_dir=cache_dir,
+                    args=serial_args,
+                    reuse_cache_dir=reuse_cache_dir,
+                    progress_desc=display_key,
+                )
+                merge_stats(stats, unit_stats)
+                verification = prewarm_runtime_items(
+                    list(unit["items"]),
+                    cache_dir=cache_dir,
+                    args=serial_args,
+                    reuse_cache_dir=reuse_cache_dir,
+                    progress_desc=f"{display_key} cache audit",
+                )
+                if _runtime_stats_have_remaining_misses(verification):
+                    raise RuntimeError("runtime physical xPass cache remained missing or unusable after serial retry")
+                stats["serial_retry_recovered"] = int(stats.get("serial_retry_recovered", 0) or 0) + 1
+                if unit_stats and _runtime_stats_has_work(unit_stats):
+                    tqdm.write(_format_runtime_stats_line(display_key, unit_stats))
+                tqdm.write(f"{display_key}: serial retry recovered and verified")
+            except Exception as exc:
+                stats["write_permission_retries"] = int(stats.get("write_permission_retries", 0) or 0) + int(
+                    getattr(exc, "write_permission_retries", 0) or 0
+                )
+                stats["serial_retry_failed"] = int(stats.get("serial_retry_failed", 0) or 0) + 1
+                reason = f"{type(exc).__name__}: {exc}"
+                for skip_key in unit["skip_keys"]:
+                    skipped[str(skip_key)] = reason
+                failed_units += 1
+                transaction = match_cache.active(cache_dir)
+                if transaction is not None:
+                    transaction.failed = True
+                tqdm.write(f"{display_key}: skipped={_skip_reason_label(reason)}")
     return failed_units
 
 
@@ -1443,7 +1494,10 @@ def write_runtime_dataset_metadata(
     stats: dict[str, Any],
     source_inputs: dict[str, Any],
     skipped: dict[str, Any],
+    compute_session: RuntimeComputeSession | None = None,
 ) -> None:
+    if compute_session is not None:
+        stats["scheduling"] = compute_session.summary()
     if bool(getattr(args, "dry_run", False)):
         print(f"Dry run: not writing runtime metadata for {dataset} at {cache_dir}.")
         return
@@ -1747,7 +1801,8 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
     print(f"Wrote legacy Sportec physical xPass sidecars at {output_root}: {total_computed} computed, {total_reused} reused.")
 
 
-def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
+@runtime_compute_runner("sportec")
+def run_runtime_sportec_possessions(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
     from scripts.run_relevant_models import load_match
 
     if args.reuse_cache_dir:
@@ -1787,15 +1842,16 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
                     pending_rows += int(unit["row_count"])
                 if pending_rows >= resolve_runtime_row_window(args, "sportec_runtime_row_window"):
                     flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
-                                         progress_desc=f"sportec {match_id}")
+                                         progress_desc=f"sportec {match_id}", compute_session=compute_session)
                     pending_rows = 0
             flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
-                                 progress_desc=f"sportec {match_id}")
+                                 progress_desc=f"sportec {match_id}", compute_session=compute_session)
             reports[str(match_id)] = match.possession_report
             transaction.set_provenance(match.possession_report)
             transaction.set_manifest(match.sportec_state_plan.manifest())
             transaction.selection_report = match.possession_report
-            match_cache.finish(transaction, args)
+            with compute_session.publication() if compute_session is not None else nullcontext():
+                match_cache.finish(transaction, args)
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"sportec {match_id}: {skipped[str(match_id)]}")
@@ -1804,7 +1860,7 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
     write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
         source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,
                        "state_contract": SPORTEC_STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
-                       "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION]}, skipped=skipped)
+                       "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION]}, skipped=skipped, compute_session=compute_session)
     return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
 
@@ -1945,7 +2001,8 @@ def run_runtime_sportec(args: argparse.Namespace) -> dict[str, Any]:
     return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
 
-def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+@runtime_compute_runner("benchmark")
+def run_runtime_benchmark(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
     cache_dir = pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
@@ -1974,6 +2031,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             stats=stats,
             skipped=skipped,
             progress_desc=progress_desc,
+            compute_session=compute_session,
         )
         pending_rows = 0
         pending_modifications = []
@@ -2034,6 +2092,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         stats=stats,
         source_inputs={"input_dir": str(args.benchmark_input_dir), "modifications": selected},
         skipped={"discovery": skipped_discovery, "processing": skipped},
+        compute_session=compute_session,
     )
     return {"dataset": "benchmark", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
@@ -2077,11 +2136,21 @@ def filter_hawkeye_runtime_graphs_by_time_norm(
     return kept_graphs, filtered_labels, ordered_selections
 
 
-def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
+@runtime_compute_runner("hawkeye")
+def run_runtime_hawkeye(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
     cache_dir = pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
     resolved_time_norms: dict[str, list[dict[str, object]]] = {}
+    pending_units = []
+    pending_rows = 0
+    row_window = resolve_runtime_row_window(args, "hawkeye_runtime_row_window")
+
+    def flush_pending_window():
+        nonlocal pending_rows
+        flush_runtime_buffer(pending_units, cache_dir=cache_dir, args=args, stats=stats,
+                             skipped=skipped, progress_desc="hawkeye runtime", compute_session=compute_session)
+        pending_rows = 0
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.hawkeye_tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.hawkeye_ball_csv))
     situation_ids = resolve_situation_ids(tracking, requested_ids=args.hawkeye_situation_id, limit=args.hawkeye_limit)
@@ -2113,22 +2182,23 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 items=runtime_cache_items_from_graphs(str(situation.match_id), graphs, labels),
             )
             if unit is not None:
-                flush_runtime_buffer(
-                    [unit],
-                    cache_dir=cache_dir,
-                    args=args,
-                    stats=stats,
-                    skipped=skipped,
-                    progress_desc=f"hawkeye situation {situation_id}",
-                )
-                unit_stats = _runtime_unit_stats(stats, str(situation.match_id))
-                if unit_stats:
-                    tqdm.write(_format_runtime_stats_line(f"hawkeye situation {situation_id}", unit_stats))
+                if args.pc_xpass:
+                    pending_units.append(unit)
+                    pending_rows += int(unit["row_count"])
+                    if pending_rows >= row_window:
+                        flush_pending_window()
+                else:
+                    flush_runtime_buffer([unit], cache_dir=cache_dir, args=args, stats=stats,
+                                         skipped=skipped, progress_desc=f"hawkeye situation {situation_id}")
+                    unit_stats = _runtime_unit_stats(stats, str(situation.match_id))
+                    if unit_stats:
+                        tqdm.write(_format_runtime_stats_line(f"hawkeye situation {situation_id}", unit_stats))
             else:
                 tqdm.write(f"hawkeye situation {situation_id}: rows=0 passes=0 hits=0 misses=0 written=0 skipped_all_nan=0")
         except Exception as exc:
             skipped[str(situation_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"hawkeye situation {situation_id}: skipped={_skip_reason_label(skipped[str(situation_id)])}")
+    flush_pending_window()
     write_runtime_dataset_metadata(
         "hawkeye",
         cache_dir,
@@ -2142,11 +2212,13 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
             "resolved_time_norms": resolved_time_norms,
         },
         skipped=skipped,
+        compute_session=compute_session,
     )
     return {"dataset": "hawkeye", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
 
-def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
+@runtime_compute_runner("skillcorner")
+def run_runtime_skillcorner(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
     cache_dir = pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
     stats = empty_runtime_stats(cache_dir)
     skipped: dict[str, Any] = {}
@@ -2191,6 +2263,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                     stats=stats,
                     skipped=skipped,
                     progress_desc=progress_desc,
+                    compute_session=compute_session,
                 )
                 pending_rows = 0
                 pending_event_ids = []
@@ -2268,7 +2341,8 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                 transaction.failed = True
             if transaction is not None:
                 transaction.selection_report = frame_selections.get(str(match_id), {})
-            match_cache.finish(transaction, args)
+            with compute_session.publication() if compute_session is not None else nullcontext():
+                match_cache.finish(transaction, args)
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"skillcorner match {match_id}: skipped={_skip_reason_label(skipped[str(match_id)])}")
@@ -2284,6 +2358,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                        "state_contract": STATE_CONTRACT if args.pc_xpass else None,
                        "state_partitions": state_partitions, "frame_selections": frame_selections},
         skipped={"discovery": skipped_discovery, "processing": skipped},
+        compute_session=compute_session,
     )
     return {"dataset": "skillcorner", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 
