@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -81,7 +82,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more match ids.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--bundle-id")
-    parser.add_argument("--feature-run-id", help="Runtime feature run used to load graphs/resolved actions.")
+    parser.add_argument(
+        "--feature-run-id",
+        help="Runtime feature run used to load graphs/resolved actions. Defaults to the physical xPass cache's "
+        "feature run when physical xPass and caching are enabled (missing/incompatible runs fail), otherwise "
+        "the newest compatible model/bundle source run. Explicit selection retains strict cache checks.",
+    )
     parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES, help="Runtime resolved-action mode.")
     parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--run-id")
@@ -149,6 +155,71 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
+
+
+def resolve_component_physical_cache_dir(args: argparse.Namespace) -> str:
+    override = getattr(args, "physical_cache_dir", None)
+    if override:
+        return str(override)
+    if not bool(getattr(args, "pc_xpass", False)):
+        return str(get_runtime_physical_xpass_dir("sportec"))
+    try:
+        return str(pc_versions.cache_dir("sportec", args))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        cache_id = getattr(args, "pc_xpass_id", None)
+        cache_root = getattr(args, "_pc_version_root", None) or pc_versions.config.PC_XPASS_DIR
+        raise ValueError(
+            f"Cannot resolve Sportec physical xPass cache (ID: {cache_id or 'latest'}; directory: '{cache_root}'): "
+            f"{summarize_exception(exc)}. Select a compatible cache or specify --feature-run-id explicitly; "
+            "explicit feature selection remains subject to strict cache provenance checks."
+        ) from exc
+
+
+def resolve_component_feature_run_context(
+    args: argparse.Namespace,
+    shared_context: dict,
+    bundle: dict | None,
+    graph_schema: dict,
+    physical_cache_dir: str,
+    pass_success_args: dict,
+) -> dict:
+    """Select the cache's required feature run without changing shared resolver defaults."""
+    feature_run_id = getattr(args, "feature_run_id", None)
+    use_cache_feature_run = (
+        not feature_run_id
+        and not bool(getattr(args, "no_physical_cache", False))
+        and (
+            bool(getattr(args, "use_physical_xpass", False))
+            or model_uses_physical_xpass(pass_success_args)
+            or inference_uses_physical_xpass(pass_success_args)
+        )
+    )
+    try:
+        if use_cache_feature_run:
+            metadata = pc_versions.read_metadata(physical_cache_dir)
+            source_inputs = metadata.get("source_inputs") if isinstance(metadata, dict) else None
+            feature_run_id = source_inputs.get("feature_run_id") if isinstance(source_inputs, dict) else None
+            if not isinstance(feature_run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", feature_run_id):
+                raise ValueError(f"Missing or invalid source_inputs.feature_run_id: {feature_run_id!r}")
+        resolved = resolve_runtime_feature_run_context(
+            feature_run_id,
+            shared_context,
+            bundle,
+            getattr(args, "intended_receiver_mode", None),
+            graph_schema,
+            context="Selected component feature artifacts",
+        )
+    except (OSError, ValueError, TypeError) as exc:
+        if not use_cache_feature_run:
+            raise
+        raise ValueError(
+            f"Cannot select the feature run {feature_run_id!r} from physical xPass cache '{physical_cache_dir}': "
+            f"{summarize_exception(exc)}. Select a compatible cache or specify --feature-run-id explicitly; "
+            "explicit feature selection remains subject to strict cache provenance checks."
+        ) from exc
+    if use_cache_feature_run:
+        resolved["selection"] = "physical_xpass_cache"
+    return resolved
 
 
 def count_valid_graphs(graphs: list[object]) -> int:
@@ -652,15 +723,22 @@ def main() -> None:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
     configure_auxiliary_models(args, model_specs, device)
     graph_schema = validate_model_graph_schemas(model_specs)
-    runtime_feature_context = resolve_runtime_feature_run_context(
-        getattr(args, "feature_run_id", None),
+    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
+    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
+    physical_cache_dir = resolve_component_physical_cache_dir(args)
+    pass_success_model = model_specs.get("pass_success")
+    pass_success_args = getattr(pass_success_model, "args", None)
+    pass_success_has_args = isinstance(pass_success_args, dict)
+    runtime_feature_context = resolve_component_feature_run_context(
+        args,
         shared_context,
         bundle,
-        getattr(args, "intended_receiver_mode", None),
         graph_schema,
-        context="Selected component feature artifacts",
+        physical_cache_dir,
+        pass_success_args if pass_success_has_args else {},
     )
     feature_run_id = str(runtime_feature_context["feature_run_id"])
+    print(f"Runtime feature run: {feature_run_id} (selection: {runtime_feature_context.get('selection')})")
     intended_receiver_mode = str(
         runtime_feature_context.get("intended_receiver_mode")
         or shared_context.get("intended_receiver_mode")
@@ -677,19 +755,11 @@ def main() -> None:
     shared_context["return_type"] = return_type
     shared_context["runtime_return_type"] = return_type
     shared_context["runtime_feature_run_selection"] = runtime_feature_context.get("selection")
-    no_physical_cache = bool(getattr(args, "no_physical_cache", False))
-    refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
-    )
     from inference import configure_lane_survival_runtime_cache
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("sportec", args, model_specs))
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
     physical_worker_thread_limit = int(getattr(args, "physical_worker_thread_limit", 1))
     physical_batch_size = int(getattr(args, "physical_batch_size", 16))
-    pass_success_model = model_specs.get("pass_success")
-    pass_success_args = getattr(pass_success_model, "args", None)
-    pass_success_has_args = isinstance(pass_success_args, dict)
     if pass_success_has_args and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_args["inference_use_physical_xpass"] = True
         pass_success_args["pc_xpass"] = bool(getattr(args, "pc_xpass", False))

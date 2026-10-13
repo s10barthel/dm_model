@@ -230,7 +230,7 @@ The current pipeline now follows an explicit-artifact contract:
 - Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
 - `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
 - Training decides whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
-- `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied.
+- `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied. Component exports with physical xPass and caching enabled instead select the cache's feature run and fail if it is unavailable or incompatible.
 - Visualization scripts write versioned run folders with `metadata.json`; component-based visualizers record the selected `component_run_id` or explicit component directory, and direct model-based visualizers record the model ids used.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
 
@@ -646,7 +646,7 @@ python scripts/run_relevant_models.py --split test --action-intent-model-id acti
 
 Inputs:
 
-- feature artifacts from the selected runtime feature run; compatible mixed-source checkpoints are allowed, and the runtime feature run is chosen automatically from the selected source runs unless `--feature-run-id` is supplied
+- feature artifacts from the selected runtime feature run; compatible mixed-source checkpoints are allowed. With physical xPass and caching enabled, the default is the selected cache's feature run; otherwise selection uses compatible model/bundle source runs. `--feature-run-id` overrides automatic selection.
 - checkpoint runs under `saved/<task>/<model_run_id>/...`
 - `data/event_synced/<match_id>.csv` indirectly via the generated feature artifacts and resolved-action tables
 
@@ -2013,6 +2013,23 @@ retain their known observations and leave unknown boundaries missing. This does
 not change training carry definitions, segments, eligibility, or labels. Feature
 runs remain required.
 
+An explicit `--feature-run-id` takes precedence. Otherwise, when the pass-success
+checkpoint requires physical xPass or `--use-physical-xpass` is supplied, and
+physical caching is enabled, component inference uses `source_inputs.feature_run_id`
+from the selected Sportec cache's `metadata.json`. Use a cache directory override
+or a pc-xPass cache ID (which defaults to latest); combining an ID and directory
+override remains invalid. The cache's
+feature run must pass the selected models' graph and resolved-action validation;
+missing metadata, unavailable features, or incompatibility stop inference without
+falling back to another feature run. Select a compatible cache or supply an
+explicit feature run to resolve selection failures. Strict provenance and frame
+coverage checks still apply to every selected cache, including with an explicit
+feature run. Other carry, split, and optional-model checks also remain in effect.
+Without physical xPass, or with `--no-physical-cache`, automatic selection retains
+the newest compatible model/bundle source run, searching other runs only if none
+of those qualify. The chosen ID and selection source are printed before inference;
+cache-based selection is recorded as `runtime_feature_run_selection: "physical_xpass_cache"`.
+
 - `--scope {actions,frames}`: select exact spell endpoints and preserved canonical observations (default: `actions`), or add strided states in supported intervals.
 - `--frames N`: positive integer frame-ID stride, valid only with `--scope frames`; default 1.
 
@@ -2038,7 +2055,7 @@ for the coverage audit and commands to create the required fresh cache.
 - `--season {22_23,23_24,24_25}`: restrict Sportec export to selected seasons; repeat to select multiple seasons. Intersects with `--match-id` and `--split`; use `--season 24_25` for the full eligible season (the default split is `all`). Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Default: no season filter.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
-- `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
+- `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: the selected physical xPass cache's feature run when physical xPass and caching are enabled; missing or incompatible cache feature runs fail. Otherwise, use the newest compatible source feature run from the selected models or bundle. Explicit selection retains strict cache checks.
 - `--run-id <component_run_id>`: pin the created component export run id. Default: auto-generate a new component run id.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
