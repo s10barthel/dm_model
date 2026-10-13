@@ -109,3 +109,16 @@ def selection_prediction_identities(graphs, layout, targets, predictions):
     if any(row is None for row in rows):
         raise ValueError("Missing graph in semantic prediction export.")
     return rows
+
+
+def observed_receiver_identities(graphs, labels):
+    ids = getattr(graphs, "node_ids", None)
+    if ids is None or len(ids) != graphs.num_graphs:
+        raise ValueError("Observed receiver export requires semantic node IDs for every graph.")
+    targets = labels[:, config.LABEL_INDEX["intent_index"]].detach().cpu().long().tolist()
+    result = []
+    for node_ids, index in zip(ids, targets):
+        if not 0 <= index < len(node_ids):
+            raise ValueError("Observed receiver identity is outside its source graph.")
+        result.append(str(node_ids[index]))
+    return result

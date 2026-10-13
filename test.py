@@ -25,6 +25,8 @@ from models.inference_masks import (
     resolve_inference_mask_configurations,
 )
 from models.prediction_identity import ensure_dataset_node_identities
+from models.evaluation_context import (add_evaluation_arguments, evaluation_selection, check_heldout,
+                                       diagnostic_name)
 from models.utils import (
     calc_binary_metrics,
     calc_binary_diagnostic_rows,
@@ -214,6 +216,8 @@ def resolve_goal_next10_diagnostic_context(
 ) -> tuple[str | None, str | None]:
     if not requires_goal_next10_diagnostics(getattr(model_args, "task", None)):
         return None, None
+    if getattr(cli_args, "diagnostic_return_type", None) is not None:
+        return cli_args.diagnostic_feature_run_id or getattr(model_args, "feature_run_id", None), None
 
     mode = getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE
     if mode == "unknown":
@@ -524,6 +528,10 @@ def write_outcome_evaluation_artifacts(
     predictions = np.asarray(outcome_evaluation["prediction"], dtype=float).reshape(-1)
     targets = np.asarray(outcome_evaluation["target"], dtype=float).reshape(-1)
     diagnostics = np.asarray(outcome_evaluation["diagnostic"], dtype=float).reshape(-1)
+    diagnostic_return = outcome_evaluation.get("diagnostic_return_type", "next_10")
+    diagnostic_target = diagnostic_name(diagnostic_return)
+    if not np.isfinite(diagnostics).all() or not np.isin(diagnostics, [0, 1]).all():
+        raise ValueError("Common goal diagnostic targets must be finite binary values.")
     branches = np.asarray(outcome_evaluation["execution_branch"], dtype=int).reshape(-1)
     if not (len(predictions) == len(targets) == len(diagnostics) == len(branches)):
         raise ValueError("Outcome evaluation arrays must have identical lengths.")
@@ -532,7 +540,7 @@ def write_outcome_evaluation_artifacts(
     bin_frames: list[pd.DataFrame] = []
     targets_by_name = {
         "xt_training_target": targets,
-        "goal_next10_diagnostic": diagnostics,
+        diagnostic_target: diagnostics,
     }
     for stratum, mask in _outcome_strata(branches):
         stratum_predictions = predictions[mask]
@@ -544,7 +552,7 @@ def write_outcome_evaluation_artifacts(
                 "evaluation_target": evaluation_target,
                 "stratum": stratum,
                 "sample_count": int(len(stratum_predictions)),
-                "positive_count": int(np.sum(stratum_observed > 0)) if evaluation_target == "goal_next10_diagnostic" else np.nan,
+                "positive_count": int(np.sum(stratum_observed > 0)) if evaluation_target == diagnostic_target else np.nan,
             }
             if len(stratum_predictions):
                 if evaluation_target == "xt_training_target":
@@ -585,10 +593,10 @@ def write_outcome_evaluation_artifacts(
     )
     _save_binned_relationship_plot(
         binned,
-        evaluation_target="goal_next10_diagnostic",
-        title=f"External validity: next-10-action goal association: {model_id}",
-        y_label="Mean next-10-action goal indicator",
-        output_path=output_dir / "goal_next10_association.png",
+        evaluation_target=diagnostic_target,
+        title=f"External validity: goal {diagnostic_return} association: {model_id}",
+        y_label=f"Mean goal {diagnostic_return} indicator",
+        output_path=output_dir / ("goal_next10_association.png" if diagnostic_return == "next_10" else f"goal_{diagnostic_return}_association.png"),
         show_identity=False,
     )
     return output_dir, metrics
@@ -844,6 +852,7 @@ def write_model_evaluation_artifacts(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     add_pass_height_argument(parser)
+    add_evaluation_arguments(parser)
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
@@ -893,6 +902,13 @@ if __name__ == "__main__":
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    training_evaluation_settings = {key: getattr(model_args, key, None) for key in
+                                    ("intended_receiver_mode", "min_pass_dur", "return_type")}
+    if args.intended_receiver_mode is not None:
+        model_args.intended_receiver_mode = args.intended_receiver_mode
+    if args.min_pass_duration is not None:
+        model_args.min_pass_dur = args.min_pass_duration
+    model_args.diagnostic_return_type = args.diagnostic_return_type or "next_10"
     model_args.pass_height_threshold, height_context = evaluation_height(model_args, args.pass_height_threshold)
     height_export = height_export_context(height_context)
     if args.pass_height_threshold is not None:
@@ -945,6 +961,9 @@ if __name__ == "__main__":
         feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/features/action_graphs")
         label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
         feature_root = Path(feature_dir).parent
+    if args.intended_receiver_mode is not None:
+        label_dir = str(get_action_label_dir(model_args.return_type, args.intended_receiver_mode,
+            root=feature_root, use_carries=bool(getattr(model_args, "use_carries", False))))
     diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
     evaluated_task = str(getattr(model_args, "task", ""))
     pass_height_diagnostics_required = bool(
@@ -990,6 +1009,19 @@ if __name__ == "__main__":
     evaluation_manifest, split_source = resolve_evaluation_split(args, checkpoint_record, resolved_feature_run_id)
     checkpoint_selector = split_selector(evaluation_manifest)
     test_match_ids = np.asarray(evaluation_manifest["test"])
+    selected_population = evaluation_selection(args)
+    if selected_population is not None:
+        test_match_ids = np.asarray(selected_population)
+    exclusion_checks = [check_heldout(checkpoint_record, test_match_ids)]
+    for auxiliary in auxiliary_models.values():
+        auxiliary_id = auxiliary.args.get("model_id")
+        if auxiliary_id is None:
+            auxiliary_id = next((getattr(args, name, None) for name in (
+                "xpass_pass_height_model_id", "xpass_pass_intent_model_id")
+                if getattr(args, name, None) and getattr(args, name).split("/", 1)[0] == auxiliary.args.get("task")), None)
+        if not auxiliary_id:
+            raise ValueError("Cannot verify held-out membership of a participating auxiliary checkpoint.")
+        exclusion_checks.append(check_heldout(utils.get_model_record(auxiliary_id), test_match_ids))
     print(f"Using split {evaluation_manifest['manifest_id']} ({split_source}): "
           f"{len(test_match_ids)} requested test matches.")
 
@@ -1001,6 +1033,12 @@ if __name__ == "__main__":
         physical_cache_dir=physical_cache_dir,
         lane_survival_cache_dir=lane_survival_cache_dir,
     )
+    if evaluated_task in {"outcome_scoring", "outcome_conceding"} and args.diagnostic_return_type is not None:
+        diagnostic_root = resolve_feature_root(args.diagnostic_feature_run_id) if args.diagnostic_feature_run_id else feature_root
+        dataset_args["evaluation_diagnostic_label_dir"] = str(get_action_label_dir(
+            model_args.diagnostic_return_type, getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE,
+            root=diagnostic_root, use_carries=bool(getattr(model_args, "use_carries", False))))
+        dataset_args["require_goal_next10_diagnostics"] = False
     if weighted_pc_xpass_cache_dir is not None:
         dataset_args["pass_distance_cache_dir"] = weighted_pc_xpass_cache_dir
     if auxiliary_models:
@@ -1033,10 +1071,12 @@ if __name__ == "__main__":
         **dataset_args,
     )
     print_skipped_matches("test", test_dataset)
+    if test_dataset.skipped_matches:
+        raise ValueError(f"Required evaluation artifacts could not be loaded: {test_dataset.skipped_matches}")
     if len(test_dataset) == 0:
         raise ValueError("No usable test samples remained after loading graph and label artifacts.")
     validate_test_dataset_dimensions(test_dataset, model_args)
-    if args.comparison_rows and model_args.gnn_task == "node_selection":
+    if args.comparison_rows and model_args.gnn_task in {"node_selection", "node_binary"}:
         ensure_dataset_node_identities(test_dataset, feature_root, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
@@ -1083,6 +1123,8 @@ if __name__ == "__main__":
         output_path.mkdir(parents=True, exist_ok=True)
         for row in learning_rows:
             row.update(height_export)
+            row.update(diagnostic_return_type=model_args.diagnostic_return_type,
+                       evaluation_intended_receiver_mode=getattr(model_args, "intended_receiver_mode", None))
         pd.DataFrame(learning_rows).to_csv(output_path / "learning_curve_predictions.csv", index=False)
         if args.comparison_rows and collect_outcome_evaluation:
             outcome_evaluation = comparison_diagnostics["outcome"]
@@ -1203,4 +1245,15 @@ if __name__ == "__main__":
             observed_pass_height_threshold_meters=observed_pass_height_threshold_meters,
             pass_height_diagnostic_ancestry_validated=bool(pass_height_diagnostic_lineage),
         )
+    if args.evaluation_output_dir:
+        metadata_path = Path(args.evaluation_output_dir) / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["evaluation_context"] = {"training_settings": training_evaluation_settings,
+            "intended_receiver_mode": getattr(model_args, "intended_receiver_mode", None),
+            "diagnostic_target_family": "goal", "diagnostic_return_type": model_args.diagnostic_return_type,
+            "min_pass_duration": getattr(model_args, "min_pass_dur", 0),
+            "requested_match_ids": test_match_ids.tolist(), "seasons": args.season,
+            "season_half": args.season_half, "exclusion_checks": exclusion_checks,
+            "artifact_coverage": test_split_provenance}
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("Test:\t" + get_losses_str(test_metrics))

@@ -21,6 +21,8 @@ def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
         prediction = data["prediction_id"].astype(str).to_numpy() if "prediction_id" in data else data["prediction"].to_numpy()
         target = data["target_id"].astype(str).to_numpy() if "target_id" in data else data["target"].to_numpy()
         probability = np.clip(data["target_probability"].to_numpy(dtype=float), 1e-12, 1)
+        if not np.isfinite(probability).all() or not np.isfinite(data["reciprocal_rank"].to_numpy(dtype=float)).all():
+            raise ValueError("Comparison intent probabilities and ranks must be finite.")
         return {
             "accuracy": float(np.mean(prediction == target)),
             "mrr": float(data["reciprocal_rank"].mean()),
@@ -30,6 +32,8 @@ def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
     target = data["target"].to_numpy(dtype=float)
     if not np.isfinite(prediction).all() or not np.isfinite(target).all():
         raise ValueError("Comparison predictions and targets must be finite.")
+    if not np.isin(target, [0, 1]).all() or np.any((prediction < 0) | (prediction > 1)):
+        raise ValueError("Binary comparison requires binary targets and predictions in [0, 1].")
     result = {
         "roc_auc": float(roc_auc_score(target, prediction)) if np.unique(target).size == 2 else math.nan,
         "pr_auc": float(average_precision_score(target, prediction)) if np.any(target > 0) else math.nan,
@@ -54,6 +58,8 @@ def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
         result["f1"] = float(2 * tp / (2 * tp + fp + fn)) if 2 * tp + fp + fn else 0.0
     if task in OUTCOME_TASKS:
         soft = data["soft_target"].to_numpy(dtype=float)
+        if not np.isfinite(soft).all():
+            raise ValueError("Native outcome targets must be finite.")
         clipped = np.clip(prediction, 1e-12, 1 - 1e-12)
         result.update({
             "xt_soft_bce": float(np.mean(-soft * np.log(clipped) - (1 - soft) * np.log1p(-clipped))),

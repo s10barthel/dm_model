@@ -119,6 +119,7 @@ def build_action_dataset_kwargs(
         ),
         "train": bool(train),
         "diagnostic_label_dir": diagnostic_label_dir,
+        "evaluation_diagnostic_label_dir": None,
         "pass_height_diagnostic_label_dir": pass_height_diagnostic_label_dir,
         "require_goal_next10_diagnostics": require_diagnostics,
         "use_physical_xpass": model_uses_physical_xpass(args),

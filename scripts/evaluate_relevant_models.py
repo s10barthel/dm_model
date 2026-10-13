@@ -16,6 +16,8 @@ if str(ROOT) not in sys.path:
 
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from scripts import learning_curve, model_comparison
+from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument
+from models.evaluation_context import add_evaluation_arguments, evaluation_selection, check_heldout
 from models.utils import load_bundle_record
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
 from models.inference_masks import (
@@ -73,6 +75,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
+    add_evaluation_arguments(parser)
+    add_warning_argument(parser)
     add_outcome_bootstrap_arguments(parser)
     parser.add_argument("--bundle-id", default=None)
     parser.add_argument("--compare", action="store_true", help="Compare at least two checkpoints of one task; masks compare within each checkpoint instead.")
@@ -202,6 +206,8 @@ def task_uses_diagnostic_feature_run(args: argparse.Namespace, task: str) -> boo
 
 def validate_selected_task_options(args: argparse.Namespace, requested_tasks: list[str]) -> None:
     selected = set(requested_tasks)
+    if getattr(args, "diagnostic_return_type", None) is not None and not selected.intersection({"outcome_scoring", "outcome_conceding"}):
+        raise ValueError("--diagnostic-return-type requires a selected outcome model.")
     pass_success_uses_diagnostics = pass_success_uses_diagnostic_labels(args, selected)
     if (args.evaluate_xpass or args.evaluate_combined_success or args.weighted_pass_success_metrics) and (
         "pass_success" not in selected
@@ -224,6 +230,12 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    for name in ("intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season_half"):
+        value = getattr(args, name, None)
+        if value is not None:
+            command.extend(["--" + name.replace("_", "-"), str(value)])
+    for season in getattr(args, "season", None) or []:
+        command.extend(["--season", season])
     if getattr(args, "pass_height_threshold", None) is not None:
         command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
     if task in {"outcome_scoring", "outcome_conceding"}:
@@ -479,13 +491,15 @@ def _write_manifest(path: Path, report: dict) -> None:
     path.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
 
 
-def main() -> None:
-    args = parse_args()
+def _main(args, policy) -> None:
     if args.list_inference_masks:
         print(json.dumps(inference_mask_catalog(), indent=2))
         return
     configurations = resolve_inference_mask_configurations(args)
     if args.learning_curve:
+        if any(getattr(args, name, None) is not None for name in (
+                "intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season", "season_half")):
+            raise ValueError("Evaluation overrides cannot be combined with --learning-curve.")
         run_learning_curve(args)
         return
     if args.learning_curve_model_id:
@@ -501,8 +515,24 @@ def main() -> None:
         subjects = entries
         if len(subjects) < 2 or len({entry["task"] for entry in subjects}) != 1:
             raise ValueError("--compare requires at least two distinct checkpoints of the same task.")
-        model_comparison.validate_target_definitions(subjects)
         entries = subjects
+    selected_matches = evaluation_selection(args)
+    exclusion_checks = []
+    for entry in entries:
+        population = selected_matches if selected_matches is not None else entry["test_match_ids"]
+        if population is None:
+            raise ValueError(f"No verified held-out population for {entry['model_id']}.")
+        exclusion_checks.append(check_heldout(entry["checkpoint_record"], population))
+        entry["test_match_ids"] = list(population)
+        if args.intended_receiver_mode is not None:
+            entry["target_definitions"]["intended_receiver_mode"] = args.intended_receiver_mode
+    auxiliary_ids = [getattr(args, "xpass_" + role + "_model_id", None) for role in ("pass_height", "pass_intent")]
+    for model_id in filter(None, auxiliary_ids):
+        auxiliary = model_comparison.checkpoint(model_id)
+        for entry in entries:
+            exclusion_checks.append(check_heldout(auxiliary["checkpoint_record"], entry["test_match_ids"]))
+    if checkpoint_mode:
+        model_comparison.add_definition_warnings(policy, entries)
     participating_tasks = {entry["task"] for entry in entries}
     participating_tasks.update(validate_auxiliary_selectors(args))
     for configuration in configurations:
@@ -547,9 +577,16 @@ def main() -> None:
         "comparison_interval_method": "paired_match_percentile",
         "comparison_confidence_level": 0.95,
         "comparison_interval_scope": "pointwise",
+        "evaluation_context": {"intended_receiver_mode": args.intended_receiver_mode,
+            "diagnostic_target_family": "goal", "diagnostic_return_type": args.diagnostic_return_type or "next_10",
+            "min_pass_duration": args.min_pass_duration, "seasons": args.season,
+            "season_half": args.season_half, "requested_match_ids": selected_matches,
+            "exclusion_checks": exclusion_checks},
     }
-    report = {**wrapper_context, "entries": [], "comparisons": [], "skipped_configurations": []}
+    report = {**wrapper_context, **policy.metadata(), "entries": [], "comparisons": [], "skipped_configurations": []}
+    args._comparison_manifest_path = manifest_path
     _write_manifest(manifest_path, report)
+    policy.confirm()
     print(f"Evaluation artifacts will be saved below {base_dir}", flush=True)
     compare_records = []
     for entry in entries:
@@ -597,6 +634,7 @@ def main() -> None:
             comparison = model_comparison.write_report(
                 records, model_dir, resamples=args.comparison_bootstrap_resamples,
                 seed=args.comparison_bootstrap_seed, threshold=_comparison_threshold(args, task),
+                warning_policy=policy,
             )
             report["comparisons"].append({"model_id": model_id, "output_dir": str(model_dir),
                                           "warnings": comparison["warnings"], "example_count": comparison["example_count"]})
@@ -606,6 +644,7 @@ def main() -> None:
         comparison = model_comparison.write_report(
             compare_records, output_root, resamples=args.comparison_bootstrap_resamples,
             seed=args.comparison_bootstrap_seed, threshold=_comparison_threshold(args, entries[0]["task"]),
+            warning_policy=policy,
         )
         report["comparisons"].append({"task": entries[0]["task"], "output_dir": str(output_root),
                                       "warnings": comparison["warnings"], "example_count": comparison["example_count"]})
@@ -613,6 +652,20 @@ def main() -> None:
     for skipped in report["skipped_configurations"]:
         print(f"Skipped {skipped['model_id']} {skipped['configuration_id']}: {skipped['reason']}", flush=True)
     print(f"Evaluation manifest saved to {manifest_path}", flush=True)
+
+
+def main() -> None:
+    args = parse_args()
+    policy = ComparisonWarnings(getattr(args, "accept_comparison_warnings", False))
+    try:
+        _main(args, policy)
+    except Exception as exc:
+        path = getattr(args, "_comparison_manifest_path", None)
+        if path is not None:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            report.update(policy.metadata(), status="cancelled" if isinstance(exc, ComparisonCancelled) else "failed", error=str(exc))
+            _write_manifest(path, report)
+        raise
 
 
 if __name__ == "__main__":

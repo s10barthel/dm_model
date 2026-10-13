@@ -17,7 +17,7 @@ def checkpoint(model_id, *, expected_task=None):
             "train_match_ids": ["train1", "train2"], "test_match_ids": ["a", "b"],
             "target_definitions": {}, "split_manifest_id": "manifest",
             "checkpoint_record": {"args": {"task": task, "node_in_dim": 19, "edge_in_dim": 2},
-                                  "metadata": {}, "is_complete": True}}
+                                  "model_id": model_id, "metadata": {"train_match_ids": ["train1", "train2"], "validation_match_ids": ["valid"]}, "is_complete": True}}
 
 
 def binary_frame(predictions=(.2, .8, .2, .8)):
@@ -42,7 +42,7 @@ class ComparisonEngineTests(unittest.TestCase):
             model_comparison.compare("pass_success", records[:2], [frame.iloc[:2] for frame in frames[:2]], resamples=1, seed=2)
 
     def test_row_target_and_duplicate_rejections(self):
-        variants = [binary_frame().iloc[:3], binary_frame().assign(target=[1, 1, 0, 1]),
+        variants = [binary_frame().iloc[:3],
                     pd.concat([binary_frame(), binary_frame().iloc[:1]])]
         for bad in variants:
             with self.subTest(bad=bad), tempfile.TemporaryDirectory() as folder:
@@ -83,9 +83,11 @@ class ComparisonEngineTests(unittest.TestCase):
         records[0]["checkpoint_record"]["args"].update(seed=1, model="gat", feature_run_id="one")
         records[1]["checkpoint_record"]["args"].update(seed=2, model="sage", feature_run_id="two")
         model_comparison.validate_target_definitions(records)
-        records[1]["target_definitions"] = {"target_family": "different"}
-        with self.assertRaisesRegex(ValueError, "Target definitions"):
-            model_comparison.validate_target_definitions(records)
+        for record in records:
+            record["task"] = "outcome_scoring"
+        records[0]["target_definitions"] = {"target_family": "goal"}
+        records[1]["target_definitions"] = {"target_family": "xt"}
+        self.assertTrue(model_comparison.validate_target_definitions(records))
 
     def test_evaluation_height_override_allows_different_training_cutoffs(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -122,7 +124,7 @@ class EvaluationWrapperTests(unittest.TestCase):
             if "--inference-mask" in command:
                 frame["prediction"] = [.3, .7, .3, .7]
             frame.to_csv(output / "learning_curve_predictions.csv", index=False)
-        args = wrapper.parse_args([*argv, "--evaluation-output-dir", str(output_root), "--comparison-bootstrap-resamples", "0"])
+        args = wrapper.parse_args(["--accept-comparison-warnings", *argv, "--evaluation-output-dir", str(output_root), "--comparison-bootstrap-resamples", "0"])
         with patch.object(wrapper, "parse_args", return_value=args), \
              patch.object(model_comparison, "checkpoint", side_effect=checkpoint), \
              patch.object(wrapper.subprocess, "run", side_effect=fake_run):

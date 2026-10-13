@@ -15,6 +15,8 @@ import pandas as pd
 from models.utils import get_model_record, parse_model_id
 from project_config import load_recorded_split_manifest
 from scripts.comparison_utils import INTENT_TASKS, paired_bootstrap
+from scripts.comparison_warnings import ComparisonWarnings, metadata_differences
+from models.evaluation_context import check_heldout, recorded_manifest_id
 
 
 TARGET_DEFINITION_KEYS = ("target_family", "return_type", "intended_receiver_mode", "label_source",
@@ -39,7 +41,7 @@ def checkpoint(model_id: str, *, expected_task: str | None = None) -> dict:
     train_ids = [str(value) for value in train_ids]
     if len(train_ids) != len(set(train_ids)):
         raise ValueError(f"Checkpoint {model_id!r} has duplicate recorded training match IDs.")
-    manifest_id = record.get("split_manifest_id")
+    manifest_id = recorded_manifest_id(record)
     test_ids = None
     if manifest_id:
         manifest = load_recorded_split_manifest(manifest_id)
@@ -62,13 +64,51 @@ def checkpoint(model_id: str, *, expected_task: str | None = None) -> dict:
     }
 
 
-def validate_target_definitions(records: list[dict]) -> None:
+def validate_target_definitions(records: list[dict]) -> list[str]:
     if not records or len({record["task"] for record in records}) != 1:
         raise ValueError("Checkpoint comparisons require models of the same task.")
-    reference = records[0].get("target_definitions")
-    for record in records[1:]:
-        if record.get("target_definitions") != reference:
-            raise ValueError(f"Target definitions differ for {record['model_id']}.")
+    definitions = [{**(record.get("target_definitions") or {}), "model_id": record["model_id"]} for record in records]
+    task = records[0]["task"]
+    keys = ("target_family", "return_type", "intended_receiver_mode", "label_source") if task.startswith("outcome_") else (
+        "intended_receiver_mode", "label_source", "pass_height_definition")
+    messages = metadata_differences(definitions, keys, prefix="Evaluation reference ")
+    if task.startswith("outcome_"):
+        messages = [message + " Native-target metrics use different references; binary goal metrics retain the common diagnostic definition."
+                    if any(f"{key} differs" in message for key in ("target_family", "return_type", "label_source")) else message
+                    for message in messages]
+    return messages
+
+
+def definition_warning_key(message, task):
+    if "intended_receiver_mode differs" in message:
+        return "statistical:receiver_reference"
+    if "pass_height_definition differs" in message:
+        return "statistical:height_reference"
+    if task.startswith("outcome_"):
+        return "statistical:native_reference"
+    return "statistical:label_reference"
+
+
+def add_definition_warnings(policy, records):
+    for message in validate_target_definitions(records):
+        policy.add(message, key=definition_warning_key(message, records[0]["task"]))
+
+
+def reference_qualification(task, metric, records, frames):
+    native = task in {"outcome_scoring", "outcome_conceding"} and metric.startswith("xt_")
+    fields = ["soft_target", "execution_branch", "receiver_id"] if native else [
+        "target_id" if task in INTENT_TASKS else "target", "execution_branch", "receiver_id",
+        "diagnostic_return_type", "evaluation_pass_height_threshold_meters"]
+    for field in fields:
+        if any(field in frame for frame in frames):
+            if any(field not in frame for frame in frames) or any(not frame[field].equals(frames[0][field]) for frame in frames[1:]):
+                return "different_references"
+    keys = ("target_family", "return_type", "label_source") if native else (
+        ("label_source", "pass_height_definition") if task == "pass_height" else (() if task.startswith("outcome_") else ("label_source",)))
+    definitions = [record.get("target_definitions") or {} for record in records]
+    if any(any(definition.get(key) != definitions[0].get(key) for definition in definitions[1:]) for key in keys):
+        return "different_references"
+    return "common_references"
 
 
 def _candidate_set(value: str) -> frozenset[str]:
@@ -106,15 +146,31 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
             raise ValueError(f"Predictions outside the test manifest in {path}.")
         if set(frame["match_id"]).intersection(record.get("train_match_ids") or []):
             raise ValueError(f"Predictions include recorded training matches in {path}.")
+        if record.get("checkpoint_record", {}).get("model_id"):
+            check_heldout(record["checkpoint_record"], frame["match_id"].unique())
         target_name = "target_id" if intent else "target"
         if intent and (frame["target_id"].eq("").any() or frame["prediction_id"].eq("").any()):
             raise ValueError(f"Missing semantic intent identities in {path}.")
-        identity = frame[["match_id", "source_index", target_name] +
-                         [name for name in IDENTITY_COLUMNS if name in frame]].copy()
+        identity = frame[["match_id", "source_index"]].copy()
         if reference is None:
             reference = identity
         elif not identity.equals(reference):
-            raise ValueError(f"Evaluated examples or targets differ for {record['model_id']} ({record.get('configuration_id')}).")
+            expected = set(map(tuple, reference.to_numpy()))
+            actual = set(map(tuple, identity.to_numpy()))
+            raise ValueError(f"Evaluated action populations differ for {record['model_id']}: "
+                             f"reference={len(expected)}, variant={len(actual)}, missing={len(expected-actual)}, "
+                             f"extra={len(actual-expected)}; examples={list(expected ^ actual)[:5]}. No intersection is performed.")
+        if frames:
+            for name in (target_name, *IDENTITY_COLUMNS, "receiver_id", "diagnostic_return_type"):
+                if name in frame or name in frames[0]:
+                    if name not in frame or name not in frames[0]:
+                        different = pd.Series(True, index=frame.index)
+                    else:
+                        different = frame[name] != frames[0][name]
+                    if different.any():
+                        messages.append({"kind": "evaluation_reference_mismatch", "column": name,
+                                         "model_id": record["model_id"], "affected_row_count": int(different.sum()),
+                                         "examples": frame.loc[different, ["match_id", "source_index"]].head(5).to_dict("records")})
         if intent:
             candidates = frame["candidate_ids"].map(_candidate_set)
             if reference_candidates is None:
@@ -185,26 +241,41 @@ def save_plot(summary: pd.DataFrame, output_path: Path, task: str) -> None:
 
 
 def write_report(records: list[dict], output_dir: Path, *, resamples: int, seed: int,
-                 threshold: float | None = None) -> dict:
+                 threshold: float | None = None, warning_policy=None) -> dict:
     if len(records) < 2:
         raise ValueError("A comparison report requires at least two configurations or checkpoints.")
-    validate_target_definitions(records)
+    policy = warning_policy or ComparisonWarnings()
+    add_definition_warnings(policy, records)
+    policy.confirm()
     output_dir.mkdir(parents=True, exist_ok=True)
     frames, messages = load_aligned_predictions(records)
+    for message in messages:
+        column = message.get("column")
+        key = {"receiver_id": "statistical:receiver_reference", "target_id": "statistical:receiver_reference",
+               "soft_target": "statistical:native_reference", "evaluation_pass_height_threshold_meters": "statistical:height_reference",
+               "pass_height_label_mode": "statistical:height_reference"}.get(column)
+        if column == "target" and records[0]["task"] == "pass_height":
+            key = "statistical:height_reference"
+        policy.add(f"{message['kind']}: {message}. Metrics and paired differences use each variant's reference.", key=key)
+    policy.confirm()
     task = records[0]["task"]
     summary, differences = compare(task, records, frames, resamples=resamples, seed=seed, threshold=threshold)
+    for table in (summary, differences):
+        table["reference_qualification"] = table["metric"].map(
+            lambda metric: reference_qualification(task, metric, records, frames))
     summary.to_csv(output_dir / "comparison_metrics.csv", index=False)
     differences.to_csv(output_dir / "comparison_differences.csv", index=False)
     identity_names = [name for name in ("match_id", "source_index", "target", "target_id", *IDENTITY_COLUMNS)
                       if name in frames[0]]
     aligned = frames[0][identity_names].copy()
     for index, frame in enumerate(frames):
-        for name in ("prediction", "prediction_id", "target_probability", "reciprocal_rank", "candidate_ids"):
+        for name in ("target", "target_id", *IDENTITY_COLUMNS, "receiver_id", "diagnostic_return_type",
+                     "prediction", "prediction_id", "target_probability", "reciprocal_rank", "candidate_ids"):
             if name in frame:
                 aligned[f"{name}_{index}"] = frame[name].to_numpy()
     aligned.to_csv(output_dir / "aligned_predictions.csv", index=False)
     save_plot(summary, output_dir / "comparison.png", task)
-    report = {"task": task, "variants": records, "warnings": messages,
+    report = {"task": task, "variants": records, **policy.metadata(), "reference_differences": messages,
               "example_count": len(frames[0]), "contributing_match_ids": sorted(frames[0].match_id.unique().tolist()),
               "bootstrap_resamples": resamples, "bootstrap_seed": seed, "confidence_level": 0.95,
               "interval_method": "paired_match_percentile", "interval_scope": "pointwise",

@@ -88,7 +88,8 @@ def test_physical_selection_and_conflict(metadata, monkeypatch, tmp_path):
 def test_inference_split_intersection(metadata, monkeypatch, tmp_path):
     from scripts import run_relevant_models as inference
     monkeypatch.setattr(inference, "load_base_splits", lambda *a, **kw: (np.array(["DFL-MAT-a", "DFL-MAT-c"]), np.array(["DFL-MAT-b"])))
-    assert inference.parse_args(["--season", "24_25"]).split == "test"
+    assert inference.parse_args(["--season", "24_25"]).split == "all"
+    assert inference.parse_args(["--season", "24_25", "--split", "test"]).split == "test"
     assert inference.resolve_match_ids("all", None, tmp_path, requested_seasons=["24_25"]) == ["DFL-MAT-c"]
     with pytest.raises(ValueError, match="No Sportec matches"):
         inference.resolve_match_ids("test", None, tmp_path, requested_seasons=["24_25"])

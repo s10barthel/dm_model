@@ -11,6 +11,7 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from models.utils import calc_binary_calibration_metrics, calc_continuous_target_metrics
+from models.evaluation_context import diagnostic_name
 
 
 CONTINUOUS = ("mae", "rmse", "pearson_r", "spearman_rho", "mean_prediction_minus_target",
@@ -34,9 +35,11 @@ def add_outcome_bootstrap_arguments(parser):
     parser.add_argument("--outcome-bootstrap-seed", type=nonnegative_integer, default=42)
 
 
-def selected_metrics(prediction, target, diagnostic):
+def selected_metrics(prediction, target, diagnostic, diagnostic_target="goal_next10_diagnostic"):
     continuous = calc_continuous_target_metrics(target, prediction, include_soft_bce=False)
-    binary_y = (diagnostic > 0).astype(int)
+    if not np.isfinite(diagnostic).all() or not np.isin(diagnostic, [0, 1]).all():
+        raise ValueError("Common goal diagnostic targets must be finite binary values.")
+    binary_y = diagnostic.astype(int)
     binary = {
         "roc_auc": roc_auc_score(binary_y, prediction) if np.unique(binary_y).size == 2 else np.nan,
         "brier": brier_score_loss(binary_y, prediction),
@@ -50,7 +53,7 @@ def selected_metrics(prediction, target, diagnostic):
     binary.update(calibration)
     return {
         "xt_training_target": {key: continuous[key] for key in CONTINUOUS},
-        "goal_next10_diagnostic": binary,
+        diagnostic_target: binary,
     }
 
 
@@ -79,8 +82,10 @@ def outcome_bootstrap(evaluation, *, model_id, task, resamples=2000, seed=42):
     groups = [np.flatnonzero(ids == match_id) for match_id in match_ids]
     metadata.update(match_ids=match_ids, match_count=len(groups))
     prediction, target, diagnostic = (arrays[key].astype(float) for key in ("prediction", "target", "diagnostic"))
-    point = selected_metrics(prediction, target, diagnostic)
-    values = {(target_name, metric): [] for target_name, metrics in TARGET_METRICS.items() for metric in metrics}
+    diagnostic_target = diagnostic_name(evaluation.get("diagnostic_return_type", "next_10"))
+    metadata["diagnostic_target"] = diagnostic_target
+    point = selected_metrics(prediction, target, diagnostic, diagnostic_target)
+    values = {(target_name, metric): [] for target_name, metrics in point.items() for metric in metrics}
     rng = np.random.default_rng(seed)
     started = time.perf_counter()
     last_report = started
@@ -88,7 +93,7 @@ def outcome_bootstrap(evaluation, *, model_id, task, resamples=2000, seed=42):
         for repeat in range(resamples):
             chosen = rng.integers(0, len(groups), size=len(groups))
             indices = np.concatenate([groups[index] for index in chosen])
-            metrics = selected_metrics(prediction[indices], target[indices], diagnostic[indices])
+            metrics = selected_metrics(prediction[indices], target[indices], diagnostic[indices], diagnostic_target)
             for key, estimates in values.items():
                 value = metrics[key[0]][key[1]]
                 if np.isfinite(value):

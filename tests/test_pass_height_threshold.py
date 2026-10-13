@@ -132,6 +132,7 @@ def test_train_and_evaluate_two_thresholds_one_feature_source(height_artifacts, 
     from pathlib import Path
     import project_config as pc
     import models.utils as utils
+    import models.evaluation_context as evaluation_context
 
     features, labels = height_artifacts["feature_dir"], height_artifacts["label_dir"]
     for match in ["m0", "m1", "m2", "m3", "m4", "heldout"]:
@@ -143,6 +144,7 @@ def test_train_and_evaluate_two_thresholds_one_feature_source(height_artifacts, 
     monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: None)
     monkeypatch.setattr(pc, "resolve_feature_root", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(pc, "resolve_artifact_split", lambda *a, **kw: (manifest, "fixture"))
+    monkeypatch.setattr(evaluation_context, "load_recorded_split_manifest", lambda *a, **kw: manifest)
     monkeypatch.setattr(pc, "get_model_run_root", lambda task, run_id: tmp_path / "saved" / task / run_id)
     monkeypatch.setattr(utils, "get_model_path", lambda model_id: tmp_path / "saved" / model_id)
     monkeypatch.setattr(pc, "EVALUATION_RUNS_DIR", tmp_path / "evaluations")
@@ -152,7 +154,8 @@ def test_train_and_evaluate_two_thresholds_one_feature_source(height_artifacts, 
             "--start_lr", "0.002", "--min_lr", "0.00001", "--batch_size", "4",
             "--dataset-loading", "disk", "--dataset-cache-dir", str(tmp_path / "cache"),
             "--node_emb_dim", "8", "--graph_emb_dim", "8", "--gnn_heads", "2",
-            "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping", "--no-goal-nodes"]
+            "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping", "--no-goal-nodes",
+            "--no-position-direction-edge-features", "--no-relative-velocity-edge-features", "--no-separation-rate-edge-features"]
     cache_ids = []
     for cutoff in (1, 2):
         run_id = f"height_{cutoff}"

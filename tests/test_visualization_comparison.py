@@ -24,10 +24,10 @@ from scripts.visualization_comparison import (
 
 @pytest.mark.parametrize("script,required", [(hv, []), (sv, ["--match-id", "m", "--index", "1"]), (bv, [])])
 def test_saved_cli(script, required):
-    single = script.parse_args([*required, "--component-run-id", "a"])
+    single = script.parse_args(["--accept-comparison-warnings", *required, "--component-run-id", "a"])
     assert single.component_run_id == "a"
     assert single.visualization_comparison is None
-    compared = script.parse_args([*required, "--compare", "--component-run-id", "a", "--component-run-id", "b"])
+    compared = script.parse_args(["--accept-comparison-warnings", *required, "--compare", "--component-run-id", "a", "--component-run-id", "b"])
     assert compared.component_run_id == ["a", "b"]
     assert compared.visualization_comparison == "components"
     for extra in (["--compare"], ["--compare", "--component-run-id", "a"],
@@ -36,20 +36,20 @@ def test_saved_cli(script, required):
                   ["--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-dir", "root"],
                   ["--inference-mask", "accel"], ["--inference-mask-1", "accel"], ["--comparison"]):
         with pytest.raises(SystemExit):
-            script.parse_args([*required, *extra])
+            script.parse_args(["--accept-comparison-warnings", *required, *extra])
     if script is not bv:
         with pytest.raises(SystemExit):
-            script.parse_args([*required, "--compare", "--component-run-id", "a", "--component-run-id", "b", "--output", "gif"])
+            script.parse_args(["--accept-comparison-warnings", *required, "--compare", "--component-run-id", "a", "--component-run-id", "b", "--output", "gif"])
 
 
 @pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
 def test_inference_cli(script, required):
     ids = ["--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b"]
-    args = script.parse_args([*required, "--compare", *ids, "--inference-mask", "accel"])
+    args = script.parse_args(["--accept-comparison-warnings", *required, "--compare", *ids, "--inference-mask", "accel"])
     assert args.visualization_comparison == "checkpoints"
-    args = script.parse_args([*required, "--inference-mask", "accel"])
+    args = script.parse_args(["--accept-comparison-warnings", *required, "--inference-mask", "accel"])
     assert args.visualization_comparison is None
-    args = script.parse_args([*required, "--inference-mask-9", "accel", "--inference-mask-2", "goal-features"])
+    args = script.parse_args(["--accept-comparison-warnings", *required, "--inference-mask-9", "accel", "--inference-mask-2", "goal-features"])
     assert args.visualization_comparison == "masks"
     for extra in (["--compare"], ["--compare", "--pass-success-model-id", "pass_success/a"], ids,
                   ["--compare", *ids, "--pass-success-model-id", "pass_success/a"],
@@ -60,10 +60,10 @@ def test_inference_cli(script, required):
                   ["--inference-mask-1", "accel", "--inference-mask-1", "goal-features"],
                   ["--inference-mask-0", "accel"], ["--inference-mask-1"], ["--comparison"]):
         with pytest.raises(SystemExit):
-            script.parse_args([*required, *extra])
+            script.parse_args(["--accept-comparison-warnings", *required, *extra])
     if script is dv:
         with pytest.raises(SystemExit):
-            script.parse_args(["--inference-mask-1", "accel", "--output", "mp4"])
+            script.parse_args(["--accept-comparison-warnings", "--inference-mask-1", "accel", "--output", "mp4"])
 
 
 def test_alignment_candidates_and_strict_rows():
@@ -81,8 +81,7 @@ def test_alignment_candidates_and_strict_rows():
         align_rows([pd.Series([1, 2], index=["a", "a"])], ["a"], [], "scene")
     with pytest.raises(ValueError, match="Missing selected frame"):
         require_row(pd.DataFrame({"a": [1]}, index=[1]), 2, "pass_intent")
-    with pytest.raises(ValueError, match="incompatible"):
-        validate_metadata_definitions([{"return_type": "next_5"}, {"return_type": "next_10"}])
+    assert validate_metadata_definitions([{"return_type": "next_5"}, {"return_type": "next_10"}])
 
 
 def test_compositor_grid_and_benchmark_order():
@@ -103,13 +102,12 @@ def test_compositor_grid_and_benchmark_order():
     benchmark = compose_panels(tiles[:4], ["a", "b", "a", "b"], "Modification 1", columns=2,
                                row_labels=["Game state 1", "Game state 2"])
     assert benchmark.width > image.width
-    with pytest.raises(ValueError, match="identical dimensions"):
-        compose_panels([tiles[0], Image.new("RGB", (90, 70))], ["a", "b"], "Title")
+    assert compose_panels([tiles[0], Image.new("RGB", (90, 70))], ["a", "b"], "Title").width >= 200
 
 
 def test_export_precision_availability_and_identity(tmp_path):
     variants = [Variant("run/a", "run/a"), Variant("run/b", "run/b")]
-    report = ComparisonExport(tmp_path, variants, SimpleNamespace(), "components")
+    report = ComparisonExport(tmp_path, variants, SimpleNamespace(accept_comparison_warnings=True), "components")
     value = 0.12345678912345678
     with pytest.warns(UserWarning):
         report.record("match/action", 3, "pass_intent", [pd.Series({"home_1": value}), pd.Series({"home_2": 0.0})])
@@ -199,7 +197,7 @@ def inference_fixture(monkeypatch):
 def test_hawkeye_numbered_masks_synthetic_end_to_end(tmp_path, monkeypatch, inference_fixture):
     subject, models, calls, build = inference_fixture
     original = subject.tracking.copy(deep=True)
-    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success",
+    args = dv.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
         "--inference-mask-2", "pos-node-features", "--inference-mask-1", "accel",
         "--output-dir", str(tmp_path), "--run-id", "comparison"])
     monkeypatch.setattr(dv, "parse_args", lambda: args)
@@ -221,7 +219,7 @@ def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatc
     subject, models, calls, build = inference_fixture
     bundle = {"model_ids": {task: f"{task}/support" for task in ("pass_success", "outcome_scoring", "outcome_conceding")}}
     monkeypatch.setattr(inference_compare, "load_bundle_record", lambda identifier: bundle)
-    args = dv.parse_args(["--compare", "--bundle-id", "fixed", "--pass-success-model-id", "pass_success/a",
+    args = dv.parse_args(["--accept-comparison-warnings", "--compare", "--bundle-id", "fixed", "--pass-success-model-id", "pass_success/a",
         "--pass-success-model-id", "pass_success/b", "--only-pass-score", "--inference-mask", "pass_success:accel",
         "--output-dir", str(tmp_path), "--run-id", "checkpoints"])
     monkeypatch.setattr(dv, "parse_args", lambda: args)
@@ -308,11 +306,11 @@ def saved_fixture(monkeypatch):
 
 def test_saved_hawkeye_synthetic_end_to_end(tmp_path, monkeypatch, saved_fixture):
     subject, build = saved_fixture
-    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+    args = hv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
                           "--output-dir", str(tmp_path), "--run-id", "saved"])
     monkeypatch.setattr(hv, "parse_args", lambda: args)
     hv.main()
-    assert build.call_count == 1
+    assert build.call_count == 2
     root = tmp_path / "saved"
     assert (root / "s/pass_intent_0.png").exists()
     table = pd.read_csv(root / "aligned_predictions.csv")
@@ -338,12 +336,16 @@ def test_saved_comparison_fails_without_silent_cohort_changes(tmp_path, monkeypa
                 metadata["processed_situation_ids"] = ["other"]
         return raw, metadata
     monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
-    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+    args = hv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
                           "--output-dir", str(tmp_path), "--run-id", "failed"])
     monkeypatch.setattr(hv, "parse_args", lambda: args)
-    with pytest.raises(ValueError):
+    if problem == "different_scene":
+        with pytest.raises((ValueError, KeyError)):
+            hv.main()
+        assert not list(tmp_path.rglob("*.png"))
+    else:
         hv.main()
-    assert not list(tmp_path.rglob("*.png"))
+        assert list(tmp_path.rglob("*.png"))
 
 
 def test_real_snapshot_na_and_identical_canvas(monkeypatch):
@@ -374,14 +376,15 @@ def test_location_identity_uses_time_and_geometry_not_row_id():
 
 def test_incomplete_checkpoint_and_invalid_scope_fail_before_inference(tmp_path, monkeypatch, inference_fixture):
     _, _, calls, build = inference_fixture
-    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success",
+    args = dv.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
                           "--inference-mask-1", "pass_intent:accel", "--output-dir", str(tmp_path)])
     with pytest.raises(ValueError, match="no participating"):
         inference_compare.run_comparison(args, dv)
     assert not calls and not build.call_count
     monkeypatch.setattr(inference_compare, "get_model_record", lambda identifier: {**_record(identifier), "is_complete": False})
-    with pytest.raises(ValueError, match="incomplete"):
-        inference_compare.run_comparison(args, dv)
+    args = dv.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
+                          "--inference-mask-1", "accel", "--output-dir", str(tmp_path)])
+    inference_compare.run_comparison(args, dv)
 
 
 @pytest.mark.parametrize("mode", ["checkpoints", "masks"])
@@ -397,7 +400,7 @@ def test_sportec_inference_end_to_end(tmp_path, monkeypatch, inference_fixture, 
     monkeypatch.setattr(av, "configure_lane_survival_runtime_cache", lambda *a: None)
     flags = ["--compare", "--pass-success-model-id", "pass_success/b", "--inference-mask", "accel"] if mode == "checkpoints" else [
         "--inference-mask-1", "accel", "--inference-mask-2", "pos-node-features"]
-    args = av.parse_args(["--match-id", "match", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
+    args = av.parse_args(["--accept-comparison-warnings", "--match-id", "match", "--pass-success-model-id", "pass_success/a", "--only-pass-success",
                           "--output-dir", str(tmp_path), "--run-id", mode, *flags])
     monkeypatch.setattr(av, "parse_args", lambda: args)
     av.main()
@@ -424,11 +427,11 @@ def test_skillcorner_saved_comparison_preserves_shot_export(tmp_path, monkeypatc
     monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
     build = Mock(return_value=(subject, None))
     monkeypatch.setattr(sv, "build_skillcorner_possession", build)
-    args = sv.parse_args(["--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
+    args = sv.parse_args(["--accept-comparison-warnings", "--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
                           "--component-run-id", "b", "--only-action-intent", "--output-dir", str(tmp_path), "--run-id", "sc"])
     monkeypatch.setattr(sv, "parse_args", lambda: args)
     sv.main()
-    assert build.call_count == 1
+    assert build.call_count == 2
     assert (tmp_path / "sc/m/1/action_intent_first.png").exists()
     assert (tmp_path / "sc/m/1/action_intent_last.png").exists()
     table = pd.read_csv(tmp_path / "sc/aligned_predictions.csv")
@@ -452,11 +455,11 @@ def test_benchmark_saved_comparison_real_states(tmp_path, monkeypatch):
     monkeypatch.setattr(bv, "load_benchmark_modification_data", lambda *a: {"game_state_1": source, "game_state_2": source, "higher_state_id": 2})
     build = Mock(wraps=build_benchmark_state)
     monkeypatch.setattr(bv, "build_benchmark_state", build)
-    args = bv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-run-id", "c",
+    args = bv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-run-id", "c",
                           "--only-pass-intent", "--output-dir", str(tmp_path), "--run-id", "benchmark"])
     monkeypatch.setattr(bv, "parse_args", lambda: args)
     bv.main()
-    assert build.call_count == 2
+    assert build.call_count == 6
     image = Image.open(tmp_path / "benchmark/modification_1/pass_intent.png")
     assert image.width > image.height
     table = pd.read_csv(tmp_path / "benchmark/aligned_predictions.csv")
@@ -514,7 +517,7 @@ def test_physical_table_stays_identical_across_masks(tmp_path, monkeypatch, infe
     original = table.copy(deep=True)
     physical = Mock(return_value=table)
     monkeypatch.setattr(dv, "load_runtime_physical_xpass_visualization_table", physical)
-    args = dv.parse_args(["--pass-success-model-id", "pass_success/a", "--only-pass-success", "--show-physical-xpass",
+    args = dv.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a", "--only-pass-success", "--show-physical-xpass",
         "--inference-mask-1", "pos-node-features", "--output-dir", str(tmp_path), "--run-id", "physical"])
     monkeypatch.setattr(dv, "parse_args", lambda: args)
     dv.main()
@@ -535,7 +538,7 @@ def test_checkpoint_selection_allows_training_size_architecture_and_feature_diff
                               pos_node_features_aware=identifier.endswith("/a"))
         return result
     monkeypatch.setattr(inference_compare, "get_model_record", record)
-    args = dv.parse_args(["--compare", "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
+    args = dv.parse_args(["--accept-comparison-warnings", "--compare", "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
                           "--only-pass-success"])
     variants, _, _, _, _ = inference_compare.resolve_variants(args, dv, False)
     assert [item.identifier for item in variants] == ["pass_success/a", "pass_success/b"]
@@ -547,12 +550,12 @@ def test_skillcorner_rejects_raw_selected_rows(tmp_path, monkeypatch, problem):
     subject.event_index, subject.fps = 1, 25
     raw = pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0.1, 0.1]})
     broken = pd.concat([raw, raw.iloc[:1]]) if problem == "duplicate" else raw.iloc[:1]
-    args = sv.parse_args(["--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
+    args = sv.parse_args(["--accept-comparison-warnings", "--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
                           "--component-run-id", "b", "--only-pass-intent"])
     monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
     monkeypatch.setattr(sv, "build_skillcorner_possession", lambda *a: (subject, None))
-    with pytest.raises(ValueError):
-        list(saved_compare.skillcorner_groups(args, sv, [{"pass_intent": raw}, {"pass_intent": broken}], [{}, {}], ["pass_intent"]))
+    groups = list(saved_compare.skillcorner_groups(args, sv, [{"pass_intent": raw}, {"pass_intent": broken}], [{}, {}], ["pass_intent"]))
+    assert groups
 
 
 def test_hawkeye_location_comparison_matches_different_selection_row_ids(tmp_path, monkeypatch, saved_fixture):
@@ -566,7 +569,7 @@ def test_hawkeye_location_comparison_matches_different_selection_row_ids(tmp_pat
     monkeypatch.setattr(hv, "get_hawkeye_loc_component_run_root", lambda identifier: Path(identifier))
     monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
     monkeypatch.setattr(hv, "apply_hawkeye_possessor_offset", lambda tracking, **kw: (tracking, {}))
-    args = hv.parse_args(["--mode", "loc", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+    args = hv.parse_args(["--accept-comparison-warnings", "--mode", "loc", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
                           "--output-dir", str(tmp_path), "--run-id", "loc"])
     monkeypatch.setattr(hv, "parse_args", lambda: args)
     hv.main()
@@ -582,7 +585,7 @@ def test_candidate_membership_warning_is_exported_in_saved_comparison(tmp_path, 
             raw = raw.iloc[1:].copy()
         return raw, {"status": "completed"}
     monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
-    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+    args = hv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
                           "--output-dir", str(tmp_path), "--run-id", "candidates"])
     monkeypatch.setattr(hv, "parse_args", lambda: args)
     with pytest.warns(UserWarning, match="membership"):

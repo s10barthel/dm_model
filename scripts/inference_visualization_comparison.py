@@ -9,12 +9,13 @@ from models.inference_masks import configure_inference_masks, flatten_mask_value
 from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
 from models.edge_schema import generation_kwargs
 from models.utils import (
-    aggregate_graph_schemas, get_model_record, load_bundle_record, load_model,
+    get_model_record, load_bundle_record, load_model,
     validate_model_record_consistency, validate_model_graph_schemas,
 )
 from scripts.visualization_comparison import (
-    MODEL_TASKS, ComparisonExport, Variant, compose_panels, require_row, scene_title, selection_list,
+    MODEL_TASKS, ComparisonExport, Variant, selection_list,
     validate_metadata_definitions,
+    render_independent_groups,
 )
 
 
@@ -55,8 +56,8 @@ def resolve_variants(args, mod, sportec):
                 raise ValueError(f"Checkpoint {model_id!r} does not match task {task!r}.")
             if model_id not in records:
                 record = get_model_record(model_id)
-                if record.get("task") != task or not record.get("is_complete"):
-                    raise ValueError(f"Checkpoint {model_id!r} is incomplete or has a different task.")
+                if record.get("task") != task:
+                    raise ValueError(f"Checkpoint {model_id!r} has a different task.")
                 if task == "pass_height" and not record.get("pass_height_definition"):
                     from models.pass_height import model_definition
                     record["pass_height_definition"] = model_definition(record.get("args", {}), record.get("metadata"))
@@ -71,23 +72,22 @@ def resolve_variants(args, mod, sportec):
             pipeline_records[task] = records[model_id]
             pipeline_models["intended_recipient" if task == "success_intent" else task] = models[model_id]
         context = validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
-            require_intended_receiver_mode=False, require_return_type=False, require_target_family=True)
+            require_intended_receiver_mode=False, require_return_type=False, require_target_family=False)
         contexts.append(context)
         auxiliaries = configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
         for role, auxiliary in auxiliaries.items():
             models[f"auxiliary:{identifier}:{role}"] = auxiliary
-        variants.append(Variant(identifier, label, {"model_ids": ids, "models": pipeline_records}, masks, pipeline_models))
-    if varied:
-        validate_metadata_definitions([records[identifier] for identifier in explicit[varied]])
-    validate_metadata_definitions(contexts)
-    shared = dict(contexts[0])
+        variant_schema = validate_model_graph_schemas(pipeline_models)
+        variants.append(Variant(identifier, label, {"model_ids": ids, "models": pipeline_records,
+            "source_context": context, "graph_schema": variant_schema}, masks, pipeline_models))
+    shared = {key: value if all(item.get(key) == value for item in contexts) else None
+              for key, value in contexts[0].items()}
     shared["source_feature_run_ids"] = {identifier: record.get("feature_run_id") for identifier, record in records.items()}
     if bundle:
         shared["bundle_feature_run_id"] = bundle.get("feature_run_id")
         for key in ("feature_run_id", "intended_receiver_mode", "return_type", "target_family"):
             shared[key] = shared.get(key) or bundle.get(key)
-    schema = aggregate_graph_schemas({identifier: validate_model_graph_schemas({identifier: model})
-                                     for identifier, model in models.items()})
+    schema = variants[0].provenance["graph_schema"]
     return variants, selection, shared, bundle, schema
 
 
@@ -228,26 +228,19 @@ def run_comparison(args, mod):
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id)
     try:
-        groups = sportec_groups(args, mod, variants, selection, shared, bundle, schema, device) if sportec else hawkeye_groups(
-            args, mod, variants, selection, schema, device)
-        for scene in groups:
-            report.scenes.append({"scene_id": scene["scene"], "frame_id": scene["frame"], **scene["geometry"]})
-            # Include learned source components even when only a derived component is rendered.
-            components = list(dict.fromkeys([*names, *(key for table in scene["tables"] for key in table)]))
-            for component in components:
-                rows = [require_row(table.get(component), scene["frame"], component) for table in scene["tables"]]
-                rows = report.record(scene["scene"], scene["frame"], component, rows)
-                if component not in names:
-                    continue
-                images = [scene["render"](component, row) for row in rows]
-                common_mask = flatten_mask_values(args.inference_mask)
-                image = compose_panels(images, [variant.label for variant in variants],
-                    scene_title(scene, component),
-                    subtitle="Masked: " + ", ".join(common_mask) if common_mask else None)
-                path = root / scene["folder"] / f"{component}{scene['suffix']}.png"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                image.save(path)
-                report.outputs.append(str(path.resolve()))
+        validate_metadata_definitions([variant.provenance for variant in variants], report.policy, tasks=required_tasks(selection))
+        report.policy.confirm()
+        same_schema = all(variant.provenance["graph_schema"] == schema for variant in variants)
+        same_context = all(variant.provenance["source_context"] == variants[0].provenance["source_context"] for variant in variants)
+        if same_schema and (not sportec or same_context):
+            groups = list(sportec_groups(args, mod, variants, selection, variants[0].provenance["source_context"], bundle, schema, device)
+                          if sportec else hawkeye_groups(args, mod, variants, selection, schema, device))
+            variant_groups = [[{**scene, "tables": [scene["tables"][index]]} for scene in groups] for index in range(len(variants))]
+        else:
+            variant_groups = [sportec_groups(args, mod, [variant], selection, variant.provenance["source_context"], bundle,
+                              variant.provenance["graph_schema"], device) if sportec else hawkeye_groups(
+                              args, mod, [variant], selection, variant.provenance["graph_schema"], device) for variant in variants]
+        render_independent_groups(report, variant_groups, names)
         report.finish()
     except Exception as exc:
         report.failed(exc)
@@ -257,3 +250,7 @@ def run_comparison(args, mod):
         for variant in variants:
             configure_inference_masks(variant.models, [])
     print(f"Saved {dataset} comparison visualizations and prediction tables to {root}")
+
+
+def required_tasks(selection):
+    return ["success_intent" if task == "intended_recipient" else task for task in selection.required_component_groups]

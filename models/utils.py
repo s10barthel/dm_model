@@ -1844,6 +1844,17 @@ def run_epoch(
         metrics["count"] += batch_graphs.num_graphs
         outcome_scoring, outcome_conceding = get_outcome_targets(batch_labels := batch_labels.to(device), args)
         diagnostic_scoring, diagnostic_conceding = get_outcome_diagnostic_targets(batch_labels)
+        if not train and args.task in {"outcome_scoring", "outcome_conceding"}:
+            if hasattr(batch_graphs, "evaluation_goal_diagnostic"):
+                diagnostic_values = batch_graphs.evaluation_goal_diagnostic.reshape(-1, 2)
+                diagnostic_scoring, diagnostic_conceding = diagnostic_values[:, 0], diagnostic_values[:, 1]
+            for values in (diagnostic_scoring, diagnostic_conceding):
+                if not bool((torch.isfinite(values) & ((values == 0) | (values == 1))).all()):
+                    raise ValueError("Common goal diagnostic targets must be finite binary values.")
+        receiver_ids = None
+        if return_semantic_prediction_rows and args.gnn_task == "node_binary":
+            from models.prediction_identity import observed_receiver_identities
+            receiver_ids = observed_receiver_identities(batch_graphs, batch_labels)
         from pc_xpass_auxiliary import observed_auxiliary_predictions
         auxiliary_values = observed_auxiliary_predictions(batch_graphs, batch_labels, auxiliary_models, device) if auxiliary_models else {}
         observed_v5_pass_intent = auxiliary_values.get("pass_intent", batch_graphs.x.new_empty((0,)))
@@ -2073,6 +2084,7 @@ def run_epoch(
                             "match_id": str(batch_graphs.evaluation_match_id[gi]),
                             "source_index": int(batch_graphs.evaluation_source_row[gi]),
                             "target": float(observed), "prediction": float(prediction),
+                            **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),
                         })
 
             elif args.task in ["outcome_scoring", "outcome_conceding"]:
@@ -2101,6 +2113,7 @@ def run_epoch(
                             "source_index": int(batch_graphs.evaluation_source_row[gi]),
                             "target": float(observed), "prediction": float(prediction),
                             "soft_target": float(soft_target), "execution_branch": int(branch),
+                            **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),
                         })
                 if return_outcome_evaluation:
                     match_ids = getattr(batch_graphs, "evaluation_match_id", None)
@@ -2247,6 +2260,7 @@ def run_epoch(
             "target": np.concatenate(outcome_targets),
             "diagnostic": np.concatenate(outcome_diagnostics),
             "execution_branch": np.concatenate(outcome_execution_branches),
+            "diagnostic_return_type": getattr(args, "diagnostic_return_type", None) or "next_10",
         }
         if outcome_match_ids:
             outcome_evaluation["match_id"] = np.concatenate(outcome_match_ids)

@@ -1839,8 +1839,17 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 
 ### `scripts/evaluate_relevant_models.py`
 
+Evaluation-only overrides leave checkpoint training provenance unchanged:
+
+- `--intended-receiver-mode original|angle_only|model` selects a common receiver reference; omission retains each checkpoint's resolution.
+- `--diagnostic-return-type next_3` changes the common binary goal diagnostic (default `next_10`). Supported definitions are `next_<N>` and undiscounted `disc_1` equivalents, optionally `_skip1`; continuous diagnostics are rejected. Native continuous-target metrics remain available.
+- `--min-pass-duration SECONDS` applies a common finite, nonnegative pass-duration filter. Zero removes the minimum; omission retains checkpoint settings. Carry inclusion remains checkpoint-defined.
+- `--season 24_25 --season-half second` explicitly selects matchdays 18?34. Omit the half for the full season; `first` selects 1?17. Seasons can be repeated. Requested matches are never silently intersected with existing test lists. Training/validation overlap, unknown exclusion provenance, and unavailable required artifacts fail, including for participating learned auxiliaries.
+
+Statistical and visualization comparisons explain material limitations and ask for explicit `yes` or `no`; empty answers do not accept warnings. `--accept-comparison-warnings` accepts them for unattended execution. Warnings and acceptance are saved in run metadata. This option never bypasses statistical action-alignment or held-out exclusion errors. New evaluation overrides cannot be combined with learning-curve mode.
+
 - Task-specific model selectors are repeatable. Without `--compare` or masks, every specified checkpoint is evaluated independently, including several checkpoints of one task and different tasks sharing a run identifier. Explicit selections replace the corresponding task's bundle entry.
-- `--compare`: compare at least two completed checkpoints of one task. Use repeatable task-specific selectors; there is no generic `--model-id`. Feature configurations, architectures, seeds, and training sizes may differ. Comparison requires identical evaluated rows and targets. Different intent candidate membership produces a warning; candidate ordering is aligned by identity.
+- `--compare`: compare at least two completed checkpoints of one task. Use repeatable task-specific selectors; there is no generic `--model-id`. Feature configurations, architectures, seeds, and training sizes may differ. Comparison requires identical evaluated action identities. Different targets, receiver resolution, and intent candidate membership produce warnings requiring explicit acceptance; target differences are qualified per metric. Training and validation overlap remains an error.
 - `--inference-mask <name> [<name> ...]`: automatically compare the selected checkpoint without masks against one combined masked configuration. Repeating this argument adds names to that same configuration.
 - `--inference-mask-1 <name> ...`, `--inference-mask-2 <name> ...`: define independent configurations, compared with unmasked inference separately for each selected checkpoint. Numbered identifiers must be positive and unique; do not mix numbered and unnumbered forms. Multiple tasks/checkpoints are allowed, but masked evaluation never compares different checkpoint runs. Masks take precedence over an additional `--compare` flag.
 - `--comparison-bootstrap-resamples <N>` and `--comparison-bootstrap-seed <N>`: comparison whole-match bootstrap settings. Defaults: 2000 and 42. Zero resamples disables intervals; otherwise at least two contributing matches are required. Reports include all within-group pairwise differences and pointwise 95% intervals.
@@ -1973,24 +1982,21 @@ columns in selection order, wrapping onto new rows; odd counts leave the final s
 keeps game states 1 and 2 as rows, with all compared runs arranged horizontally as columns.
 The full-image title contains the scene identifier, time where available, and component. Panel
 titles identify component-run IDs, qualified model IDs, or `Unmasked` / `mask-<n>: <inputs>`.
-Common unnumbered masks appear in a shared subtitle. Long labels wrap without changing pitch sizes.
-Team colors, positions, motion, highlights, and overlays stay fixed; only numeric predictions vary.
-No prediction-based coloring or difference panels are added.
+Common unnumbered masks appear in the panel labels. Long labels wrap without changing pitch sizes.
+Each variant renders with its own runtime context and geometry, as in standalone visualization.
+Different receiver modes, target definitions, schemas, geometry, and scene membership produce
+warnings rather than compatibility errors. Different image sizes are padded without distortion.
+The union of independently selected scenes is displayed, with unavailable panels where needed.
+Candidate ordering is aligned by semantic identity when possible, and missing values remain `N/A`.
+Ambiguous numerical exports do not prevent images: native predictions are retained instead.
+Standalone input/rendering failures still fail the affected variant.
 
-Comparisons require matching selected scenes/frames and compatible component definitions.
-Hawkeye location/freeze entries match by original action, resolved time, and effective geometry,
-not selection-row numbers. Missing selected frames/components, duplicate prediction keys, or
-incompatible geometry fail. Candidate ordering is aligned by semantic identity; differing candidate
-membership produces console and metadata warnings and unavailable predictions appear as `N/A`.
-No cohorts are silently intersected, no missing predictions become zero, and probabilities are not
-renormalized. Explicitly unselected data may differ.
-
-Each comparison run retains scene/component PNG paths and exports `aligned_predictions.csv`,
+Each comparison run retains scene/component PNG paths and, where semantic alignment is possible, exports `aligned_predictions.csv`,
 separate `variants/variant_<hash>/predictions.parquet` files, and `metadata.json`. CSV columns use
 `prediction:<variant-id>`; tables retain full precision and candidates not displayed on the pitch.
 Metadata records source runs/checkpoints, fixed dependencies, requested/resolved masks, effectiveness,
 selected frames, geometry context, warnings, and artifact paths. No difference columns or statistical
-comparison metrics are produced. Failed comparisons record a failed status.
+comparison metrics are produced. Failed comparisons record a failed status; declined warnings record a cancelled status.
 
 Inference masks measure reliance on learned inputs, not performance after retraining without those
 features, and may create unfamiliar inputs. Physical inputs remain unchanged; masked pass-intent

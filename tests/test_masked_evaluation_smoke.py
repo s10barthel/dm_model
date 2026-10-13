@@ -41,7 +41,8 @@ def samples():
         x[:, 8] += i
         graph = Data(x=x, edge_index=torch.tensor([[0, 1, 2], [1, 2, 0]]),
                      edge_attr=torch.ones(3, 2), inference_possessor_mask=x[:, 13] == 1,
-                     evaluation_match_id="a" if i < 2 else "b", evaluation_source_row=i % 2)
+                     evaluation_match_id="a" if i < 2 else "b", evaluation_source_row=i % 2,
+                     node_ids=["home_1", "home_2", "away_3"])
         label = torch.zeros(len(config.LABEL_COLUMNS))
         for field, value in {"action_index": i, "intent_index": 1, "is_pass": 1,
                              "success": i % 2, "pass_high": i % 2, "pass_max_ball_z": 1 + i,
@@ -62,7 +63,7 @@ def test_wrapper_mask_reports_use_real_predictions_and_preserve_summary_variants
     def checkpoint(model_id, expected_task=None):
         return {"model_id": model_id, "task": "pass_success", "train_matches": 1,
                 "train_match_ids": ["train"], "test_match_ids": ["a", "b"], "target_definitions": {},
-                "checkpoint_record": {"args": args, "metadata": {}, "is_complete": True}}
+                "checkpoint_record": {"args": args, "metadata": {"train_match_ids": ["train"], "validation_match_ids": []}, "is_complete": True}}
     monkeypatch.setattr(model_comparison, "checkpoint", checkpoint)
     commands = []
     def evaluate_command(command, **kwargs):

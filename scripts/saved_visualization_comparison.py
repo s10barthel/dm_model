@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import copy
 import numpy as np
 import pandas as pd
 
 from models.inference_masks import flatten_mask_values
 from scripts.visualization_comparison import (
-    ComparisonExport, Variant, complete_component, compose_panels, derive_components,
-    require_row, require_same_selection, scene_title, selection_list, source_components,
-    validate_metadata_definitions,
+    ComparisonExport, Variant, derive_components,
+    require_row, require_same_selection, selection_list, source_components,
+    validate_metadata_definitions, render_independent_groups,
 )
 
 
@@ -156,7 +157,8 @@ def hawkeye_groups(args, mod, exports, metadata, names):
                 for column in ("original_action_id", "PositionX", "PositionY", "resolved_time_norm"):
                     if rows[column].nunique(dropna=False) != 1:
                         raise ValueError(f"Inconsistent Hawkeye location geometry in {column}.")
-            table = strict_long_tables(rows, subject, source_components(names), "hawkeye", frames)
+            table = mod.build_hawkeye_component_tables(rows, subject)
+            table = {name: table[name].reindex(frames) for name in source_components(names)}
             selected_raw.append(rows.loc[rows.abs_time.isin(subject.frame_meta.loc[frames, "abs_time"])])
             if "physical_xpass" in names:
                 if location_rows is not None and not args.physical_cache_dir and not getattr(args, "pc_xpass_id", None):
@@ -165,7 +167,6 @@ def hawkeye_groups(args, mod, exports, metadata, names):
                     dataset="hawkeye_loc" if location_rows is not None else "hawkeye",
                     cache_match=str(location_rows[index]["loc_situation_id"]) if location_rows is not None else None)
             tables.append(derive_components(table, names))
-        validate_hawkeye_geometry(selected_raw)
         overlay_kwargs = _overlays(args, mod, scene_tracking, subject, overlay_data)
         scene_id = identifier if location_rows is None else f"{identifier}@{key[1]:.17g},{key[2]:.17g},{key[3]:.17g}"
         folder = identifier if location_rows is None else f"{identifier}_{int(location_rows[0]['selection_row_id'])}"
@@ -175,7 +176,8 @@ def hawkeye_groups(args, mod, exports, metadata, names):
             yield [{"scene": scene_id, "frame": frame, "tables": tables,
                     "folder": folder, "suffix": "" if location_rows is not None else "_" + selected["label"],
                     "selection_denominators": overlay_kwargs["selection_denominators"] if args.selections else None,
-                    "title": f"{identifier} | {time:.3f}", "geometry": {"location_key": key, "selected_frame": selected},
+                    "title": f"{identifier} | {time:.3f}", "geometry": {"location_key": key, "selected_frame": selected,
+                        "freeze_ballreceipt": True if location_rows is not None else bool(metadata[0].get("freeze_ballreceipt", True))},
                     "render": lambda component, row, subject=subject, frame=frame, overlays=overlay_kwargs:
                         mod.render_frame_image(subject, frame, component, row, show_trajectories=args.show_trajectories,
                                                comparison=True, **overlays)}]
@@ -199,18 +201,8 @@ def benchmark_groups(args, mod, exports, metadata, names):
             tables = []
             for raw in exports:
                 rows = raw.loc[raw.modification.eq(modification) & raw.game_state.eq(state_id)]
-                # The exported original state must agree with the common scene, not only its numeric ID.
-                state_data = data[f"game_state_{state_id}"]
-                geometry_columns = [column for column in ("team", "player", "pos_x", "pos_y", "pos_z",
-                                    "smooth_x_speed", "smooth_y_speed", "event_player") if column in rows and column in state_data]
-                if geometry_columns:
-                    original = state_data[geometry_columns].drop_duplicates().sort_values(geometry_columns).reset_index(drop=True)
-                    exported = rows.loc[rows.team.notna(), geometry_columns].drop_duplicates().sort_values(geometry_columns).reset_index(drop=True)
-                    try:
-                        pd.testing.assert_frame_equal(original, exported, check_dtype=False, check_exact=False, rtol=1e-10, atol=1e-10)
-                    except AssertionError as exc:
-                        raise ValueError("Benchmark component run geometry differs from the selected state.") from exc
-                table = strict_long_tables(rows, subject, source_components(names), "benchmark", [frame])
+                table = mod.build_benchmark_component_tables(rows, subject)
+                table = {name: table[name].reindex([frame]) for name in source_components(names)}
                 if "physical_xpass" in names:
                     table["physical_xpass"] = _physical(args, mod, subject, [frame], dataset="benchmark")
                 tables.append(derive_components(table, names))
@@ -236,11 +228,13 @@ def skillcorner_groups(args, mod, exports, metadata, names):
             for component in source_components(names):
                 raw = raw_tables.get(component)
                 if raw is None or raw.empty:
-                    raise ValueError(f"Missing SkillCorner component {component}.")
+                    raw = pd.DataFrame(columns=["index", "frame"])
                 rows = raw.loc[raw["index"].eq(index) & raw.frame.isin(frames)].copy()
                 if rows.duplicated(["index", "frame"]).any():
-                    raise ValueError(f"Duplicate SkillCorner prediction keys for {component}.")
-                rows = rows.set_index("frame")
+                    policy = getattr(args, "_comparison_policy", None)
+                    if policy is not None:
+                        policy.add(f"Duplicate SkillCorner prediction keys for {component}; standalone normalization keeps the last row. Native source rows are retained.")
+                rows = rows.sort_values("frame").drop_duplicates(["index", "frame"], keep="last").set_index("frame")
                 if component not in scope_reference:
                     scope_reference[component] = rows
                 else:
@@ -255,10 +249,8 @@ def skillcorner_groups(args, mod, exports, metadata, names):
                             raise ValueError(f"Incompatible SkillCorner frame scope for {component}.") from exc
                 predictions = {}
                 for frame in frames:
-                    if frame not in rows.index:
-                        raise ValueError(f"Missing selected SkillCorner frame {frame} for {component}.")
-                    predictions[frame] = mod.build_visualization_probs(rows.loc[frame])
-                    if component == "action_intent" and pd.notna(rows.loc[frame].get("shot")):
+                    predictions[frame] = mod.build_visualization_probs(rows.loc[frame] if frame in rows.index else None)
+                    if component == "action_intent" and frame in rows.index and pd.notna(rows.loc[frame].get("shot")):
                         predictions[frame]["home_goal"] = float(rows.loc[frame, "shot"])
                 table[component] = pd.DataFrame.from_dict(predictions, orient="index")
             if "physical_xpass" in names:
@@ -282,15 +274,22 @@ def run_comparison(args, mod):
         if kind == "hawkeye":
             getter = mod.get_hawkeye_loc_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_component_run_root
             folder = getter(identifier)
-            raw, info = mod.load_hawkeye_component_run(folder)
+            try:
+                raw, info = mod.load_hawkeye_component_run(folder)
+            except FileNotFoundError:
+                alternate = mod.get_hawkeye_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_loc_component_run_root
+                alternate_folder = alternate(identifier)
+                if not alternate_folder.exists():
+                    raise
+                folder = alternate_folder
+                raw, info = mod.load_hawkeye_component_run(folder)
         elif kind == "benchmark":
             folder = mod.get_benchmark_component_run_root(identifier)
             raw, info = mod.load_benchmark_component_run(folder)
         else:
             folder = mod.get_skillcorner_component_run_root(identifier)
-            info = mod.load_run_metadata(folder, required=True)
+            info = mod.load_run_metadata(folder, required=False) or {}
             raw = mod.load_skillcorner_component_tables(folder, args.match_id)
-        complete_component(info, identifier)
         recorded_masks = info.get("inference_masks") or {}
         requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
         variants.append(Variant(identifier, identifier,
@@ -298,9 +297,6 @@ def run_comparison(args, mod):
              "inference_masks": recorded_masks}, requested_masks))
         exports.append(raw)
         metadata.append(info)
-    validate_metadata_definitions([
-        {**item, "freeze_ballreceipt": bool(item.get("freeze_ballreceipt", True))} if kind == "hawkeye" else item
-        for item in metadata])
     names = mod.resolve_component_selection(args).rendered_components
     if args.show_physical_xpass:
         names = [*names, "physical_xpass"]
@@ -309,25 +305,40 @@ def run_comparison(args, mod):
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name)
     adapters = {"hawkeye": hawkeye_groups, "benchmark": benchmark_groups, "skillcorner": skillcorner_groups}
     try:
-        for group in adapters[kind](args, mod, exports, metadata, names):
-            report.scenes.extend({"scene_id": scene["scene"], "frame_id": scene["frame"], **scene["geometry"]} for scene in group)
-            for component in list(dict.fromkeys([*names, *source_components(names)])):
-                images, labels = [], []
-                for scene in group:
-                    rows = [require_row(table.get(component), scene["frame"], component) for table in scene["tables"]]
-                    rows = report.record(scene["scene"], scene["frame"], component, rows)
-                    if component in names:
-                        images.extend(scene["render"](component, row) for row in rows)
-                        labels.extend(entry.label for entry in variants)
-                if component not in names:
-                    continue
-                image = compose_panels(images, labels, scene_title(group[0], component),
-                    columns=len(variants) if kind == "benchmark" else 2,
-                    row_labels=["Game state 1", "Game state 2"] if kind == "benchmark" else None)
-                path = root / group[0]["folder"] / f"{component}{group[0]['suffix']}.png"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                image.save(path)
-                report.outputs.append(str(path.resolve()))
+        selection = mod.resolve_component_selection(args)
+        tasks = ["success_intent" if name == "intended_recipient" else name for name in selection.required_component_groups]
+        validate_metadata_definitions(metadata, report.policy, tasks=tasks)
+        for index, raw in enumerate(exports):
+            if isinstance(raw, pd.DataFrame):
+                keys = [name for name in ("id", "abs_time", "team", "uefa_player_id", "selection_row_id", "modification", "game_state", "player") if name in raw]
+                if keys and raw.duplicated(keys).any():
+                    report.policy.add(f"Duplicate native prediction keys in {variants[index].label}; standalone normalization is used for images and raw rows are retained.")
+                    report.export_aligned = False
+                folder = report.root / "variants" / ("source_" + str(index))
+                folder.mkdir(parents=True, exist_ok=True)
+                try:
+                    raw.to_parquet(folder / "source_predictions.parquet", index=False)
+                except (ValueError, TypeError, OSError) as exc:
+                    report.policy.add(f"Native source export unavailable for {variants[index].label}: {exc}; visualization continues.")
+            elif isinstance(raw, dict):
+                folder = report.root / "variants" / ("source_" + str(index))
+                folder.mkdir(parents=True, exist_ok=True)
+                for component in source_components(names):
+                    frame = raw.get(component)
+                    if frame is not None:
+                        try:
+                            frame.to_parquet(folder / (component + ".parquet"), index=False)
+                        except (ValueError, TypeError, OSError) as exc:
+                            report.policy.add(f"Native {component} export unavailable for {variants[index].label}: {exc}; visualization continues.")
+        report.policy.confirm()
+        variant_groups = []
+        for raw, info in zip(exports, metadata):
+            variant_args = copy(args)
+            variant_args._comparison_policy = report.policy
+            if kind == "hawkeye" and info.get("inference_mode") in {"loc", "freeze", "standard"}:
+                variant_args.mode = info["inference_mode"]
+            variant_groups.append(adapters[kind](variant_args, mod, [raw], [info], names))
+        render_independent_groups(report, variant_groups, names, benchmark=kind == "benchmark")
         report.finish()
     except Exception as exc:
         report.failed(exc)

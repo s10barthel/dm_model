@@ -99,3 +99,5 @@ _vendor/defcon/saved
 !tests/test_pc_xpass_scheduling.py
 
 !tests/test_extension_failures.py
+
+!tests/test_comparison_overrides.py

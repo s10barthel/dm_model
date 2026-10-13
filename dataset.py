@@ -268,6 +268,7 @@ class ActionDataset(Dataset):
         mask_possessor_relative_speed_edge_features=False,
         train=True,
         diagnostic_label_dir=None,
+        evaluation_diagnostic_label_dir=None,
         pass_height_diagnostic_label_dir=None,
         require_goal_next10_diagnostics=None,
         use_physical_xpass=False,
@@ -361,6 +362,7 @@ class ActionDataset(Dataset):
         feature_match_ids: list[str] = []
         feature_source_indices: list[int] = []
         label_tensors: list[torch.Tensor] = []
+        evaluation_diagnostics = []
 
         for match_id in tqdm(self.requested_match_ids):
             feature_path = feature_root / f"{match_id}.pt"
@@ -439,6 +441,14 @@ class ActionDataset(Dataset):
             if pass_height_threshold is not None:
                 match_labels = relabel_height(match_labels, pass_height_threshold)
 
+            if evaluation_diagnostic_label_dir is not None:
+                diagnostic_path = Path(evaluation_diagnostic_label_dir) / f"{match_id}.pt"
+                diagnostic_labels = torch.load(diagnostic_path, weights_only=False)
+                _validate_diagnostic_labels(match_id, match_labels, diagnostic_labels)
+                values = diagnostic_labels[:, [LABEL_INDEX["scores"], LABEL_INDEX["concedes"]]]
+                if not bool((torch.isfinite(values) & ((values == 0) | (values == 1))).all()):
+                    raise ValueError(f"Evaluation goal diagnostic for {match_id} must contain binary values.")
+                evaluation_diagnostics.extend(values)
             features.extend(match_features)
             feature_match_ids.extend([match_id] * len(match_features))
             feature_source_indices.extend(range(len(match_features)))
@@ -810,6 +820,8 @@ class ActionDataset(Dataset):
             # Avoid "index" in the graph attribute name: PyG offsets index-like
             # attributes while batching, but this value is an immutable source row.
             graph.evaluation_source_row = int(feature_source_indices[int(i)])
+            if evaluation_diagnostic_label_dir is not None:
+                graph.evaluation_goal_diagnostic = evaluation_diagnostics[int(i)].clone()
             self.features.append(graph)
             self.labels.append(graph_labels)
 

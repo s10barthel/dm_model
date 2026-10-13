@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from models.inference_masks import flatten_mask_values, resolve_inference_mask_configurations
 from project_config import write_run_metadata
+from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument, metadata_differences
 
 MODEL_TASKS = ("action_intent", "pass_intent", "success_intent", "pass_success", "pass_height",
                "outcome_scoring", "outcome_conceding")
@@ -32,6 +33,7 @@ def selection_list(value):
 
 
 def add_compare_argument(parser):
+    add_warning_argument(parser)
     parser.add_argument("--compare", action="store_true",
                         help="Compare multiple selected IDs in PNG panels and export aligned prediction tables.")
     parser.epilog = "Comparisons export PNG panels and aligned prediction tables; existing single-result output is preserved."
@@ -94,23 +96,20 @@ class Variant:
     models: dict = field(default_factory=dict)
 
 
-def validate_metadata_definitions(metadata):
-    """Check component meaning, without comparing training architectures/provenance."""
+def validate_metadata_definitions(metadata, policy=None, tasks=None):
+    """Describe differences; independent visualization never requires equality."""
     keys = ("target_family", "return_type", "intended_receiver_mode", "use_carries", "freeze_ballreceipt",
-            "inference_mode", "pass_height_definition", "label_source", "soft_target")
-    for key in keys:
-        values = [item.get(key, (item.get("metadata") or {}).get(key, (item.get("args") or {}).get(key))) for item in metadata]
-        if key == "pass_height_definition":
-            values = [{name: value for name, value in item.items() if name != "resolution_source"}
-                      if isinstance(item, dict) else item for item in values]
-        known = [value for value in values if value is not None]
-        if known and any(value != known[0] for value in known[1:]):
-            raise ValueError(f"Component runs have incompatible {key} settings.")
+            "inference_mode", "pass_height_definition", "label_source", "soft_target", "graph_schema")
+    messages = metadata_differences(metadata, keys, prefix="Visualization ")
     models = [item.get("model_records") or item.get("models", {}) for item in metadata]
-    for task in MODEL_TASKS:
+    for task in tasks or MODEL_TASKS:
         records = [item[task] for item in models if isinstance(item, dict) and isinstance(item.get(task), dict)]
         if records:
-            validate_metadata_definitions(records)
+            messages.extend(validate_metadata_definitions(records))
+    if policy is not None:
+        for message in messages:
+            policy.add(message)
+    return messages
 
 
 def require_same_selection(selections, description):
@@ -176,9 +175,7 @@ def compose_panels(images, labels, title, *, columns=2, row_labels=None, subtitl
     """Fixed-size tiles, common header, and equal wrapped-title space."""
     if not images or len(images) != len(labels):
         raise ValueError("Expected one image and label per comparison panel.")
-    width, height = images[0].size
-    if any(item.size != (width, height) for item in images):
-        raise ValueError("Comparison pitches must have identical dimensions.")
+    width, height = max(item.width for item in images), max(item.height for item in images)
     columns = min(columns, len(images))
     rows = math.ceil(len(images) / columns)
     font = _font(max(14, width // 65))
@@ -199,7 +196,7 @@ def compose_panels(images, labels, title, *, columns=2, row_labels=None, subtitl
         x = row_gutter + column * (width + gutter)
         y = header_height + row * (height + label_height)
         draw.multiline_text((x + width / 2, y + 5), label, font=font, fill="black", anchor="ma", align="center", spacing=8)
-        canvas.paste(tile.convert("RGB"), (x, y + label_height))
+        canvas.paste(tile.convert("RGB"), (x + (width-tile.width)//2, y + label_height + (height-tile.height)//2))
     if row_labels:
         for row, label in enumerate(row_labels):
             draw.multiline_text((10, header_height + row * (height + label_height) + label_height + height / 2),
@@ -221,6 +218,8 @@ class ComparisonExport:
         self.variants = variants
         self.rows = [[] for _ in variants]
         self.warnings = []
+        self.policy = ComparisonWarnings(getattr(args, "accept_comparison_warnings", False))
+        self.export_aligned = True
         self.scenes = []
         self.outputs = []
         self.recorded = set()
@@ -236,8 +235,28 @@ class ComparisonExport:
     def record(self, scene, frame_id, component, rows):
         if len(rows) != len(self.variants):
             raise ValueError("Every comparison variant must contribute a prediction row.")
-        aligned = align_rows(rows, [entry.label for entry in self.variants], self.warnings,
-                             f"{scene}, frame {frame_id}, {component}")
+        native = [row if row is not None else pd.Series(dtype=float) for row in rows]
+        try:
+            available = [row for row in native if not row.empty]
+            candidates = sorted({str(candidate) for row in available for candidate in row.index})
+            if any(not row.index.is_unique or row.index.hasnans or
+                   not row.index.astype(str).is_unique for row in available):
+                raise ValueError("ambiguous semantic candidate keys")
+            if any(not np.isfinite(pd.to_numeric(row.dropna(), errors="raise")).all() for row in available):
+                raise ValueError("non-finite prediction values")
+            aligned = [row.rename(index=str).reindex(candidates) for row in native]
+            memberships = [set(row.dropna().index.astype(str)) for row in native]
+            if memberships and any(items != memberships[0] for items in memberships[1:]):
+                message = f"Candidate membership differs for {scene}, frame {frame_id}, {component}: " + ", ".join(
+                    f"{variant.label}={len(items)}" for variant, items in zip(self.variants, memberships))
+                if message not in self.warnings:
+                    self.warnings.append(message)
+                    warnings.warn(message, UserWarning, stacklevel=2)
+                    self.policy.add(message)
+        except (TypeError, ValueError) as exc:
+            self.export_aligned = False
+            self.policy.add(f"Aligned prediction export unavailable for {scene}/{component}: {exc}. Native predictions and images are retained.")
+            aligned = native
         key = (str(scene), int(frame_id), component)
         if key in self.recorded:
             return aligned
@@ -254,28 +273,155 @@ class ComparisonExport:
         keys = ["scene_id", "frame_id", "component", "candidate_id"]
         for index, (variant, rows) in enumerate(zip(self.variants, self.rows)):
             frame = pd.DataFrame(rows)
-            if frame.empty or frame.duplicated(keys).any():
-                raise ValueError(f"Empty or duplicate exported prediction identities for {variant.label}.")
+            if frame.empty:
+                frame = pd.DataFrame(columns=[*keys, "value", "available"])
+            if frame.duplicated(keys).any():
+                self.export_aligned = False
+                self.policy.add(f"Aligned export unavailable: duplicate prediction identities for {variant.label}. Native rows are retained.")
             folder = "variant_" + hashlib.sha256(variant.identifier.encode()).hexdigest()[:12]
             path = self.root / "variants" / folder / "predictions.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
-            frame.to_parquet(path, index=False)
-            values = frame.set_index(keys)["value"].rename("prediction:" + variant.identifier)
-            aligned = values.to_frame() if aligned is None else aligned.join(values, how="outer", validate="one_to_one")
+            try:
+                frame.to_parquet(path, index=False)
+            except (ValueError, TypeError, OSError) as exc:
+                path = path.with_suffix(".csv")
+                frame.to_csv(path, index=False)
+                self.policy.add(f"Parquet export unavailable for {variant.label}: {exc}; native CSV retained.")
+            if self.export_aligned:
+                values = frame.set_index(keys)["value"].rename("prediction:" + variant.identifier)
+                aligned = values.to_frame() if aligned is None else aligned.join(values, how="outer", validate="one_to_one")
             self.metadata["variants"][index]["predictions"] = str(path.resolve())
         path = self.root / "aligned_predictions.csv"
-        aligned.reset_index().to_csv(path, index=False, float_format="%.17g", na_rep="N/A")
-        self.metadata.update(status="completed", aligned_predictions=str(path.resolve()))
+        if self.export_aligned and aligned is not None:
+            aligned.reset_index().to_csv(path, index=False, float_format="%.17g", na_rep="N/A")
+            self.metadata["aligned_predictions"] = str(path.resolve())
+        self.policy.confirm()
+        self.metadata.update(self.policy.metadata(), status="completed", aligned_export_available=self.export_aligned)
         write_run_metadata(self.root, self.metadata)
 
     def failed(self, exc):
-        self.metadata.update(status="failed", error=f"{type(exc).__name__}: {exc}")
+        self.metadata.update(self.policy.metadata(), status="cancelled" if isinstance(exc, ComparisonCancelled) else "failed", error=f"{type(exc).__name__}: {exc}")
         write_run_metadata(self.root, self.metadata)
 
 
 def complete_component(metadata, identifier):
     if metadata.get("status") != "completed":
         raise ValueError(f"Component run {identifier!r} is not completed.")
+
+
+def variant_description(variant):
+    records = variant.provenance.get("models") or {}
+    context = variant.provenance.get("source_context") or variant.provenance.get("metadata") or {}
+    descriptions = []
+    modes = list(dict.fromkeys(str(record["intended_receiver_mode"]) for record in records.values()
+                              if record.get("intended_receiver_mode")))
+    if not modes and context.get("intended_receiver_mode"):
+        modes = [str(context["intended_receiver_mode"])]
+    if modes:
+        descriptions.append("Receiver mode: " + "/".join(modes))
+    for task, record in records.items():
+        if task.startswith("outcome_"):
+            descriptions.append(f"{task}: {record.get('target_family', 'unknown')} / {record.get('return_type', 'unknown')}")
+        if task == "pass_height" and record.get("pass_height_definition"):
+            descriptions.append(f"Height target: >= {record['pass_height_definition'].get('threshold_meters')} m")
+    runtime_mode = (variant.provenance.get("runtime_feature_context") or {}).get("intended_receiver_mode")
+    if runtime_mode:
+        descriptions.append("Runtime receiver: " + str(runtime_mode))
+    if context.get("use_carries") is not None:
+        descriptions.append("Carries: " + ("included" if context["use_carries"] else "excluded"))
+    if context.get("inference_mode"):
+        descriptions.append("Scene mode: " + str(context["inference_mode"]))
+    if variant.masks:
+        descriptions.append("Masked: " + ", ".join(variant.masks))
+    return variant.label + ("\n" + " | ".join(descriptions) if descriptions else "")
+
+
+def geometry_description(scene):
+    geometry = scene.get("geometry", {})
+    parts = []
+    if "freeze_ballreceipt" in geometry:
+        parts.append("Freeze at receipt: " + ("yes" if geometry["freeze_ballreceipt"] else "no"))
+    key = geometry.get("location_key")
+    if isinstance(key, (tuple, list)) and len(key) >= 4:
+        parts.append(f"Time norm: {key[1]:g} | Offset: ({key[2]:g}, {key[3]:g})")
+    for name in ("frame_role", "original_start_frame", "original_end_frame", "attacking_side"):
+        if name in geometry:
+            parts.append(f"{name}: {geometry[name]}")
+    return " | ".join(parts)
+
+
+def render_independent_groups(report, variant_groups, names, *, benchmark=False):
+    """Compose standalone scenes; missing correspondence never vetoes images."""
+    import matplotlib
+    matplotlib.use("Agg")
+    maps = []
+    buckets = {}
+    key_buckets = {}
+    for index, groups in enumerate(variant_groups):
+        scenes = {}
+        for group in groups:
+            for scene in group if isinstance(group, list) else [group]:
+                key = (str(scene["scene"]), int(scene["frame"]))
+                if key in scenes:
+                    report.policy.add(f"Ambiguous scene identity {key} for {report.variants[index].label}; displayed separately.")
+                    key = (key[0] + f"/variant_{index}_scene_{len(scenes)}", key[1])
+                    report.export_aligned = False
+                scenes[key] = scene
+                report.scenes.append({"variant_id": report.variants[index].identifier,
+                                      "scene_id": key[0], "frame_id": key[1], **scene.get("geometry", {})})
+                bucket = key_buckets.setdefault(key, (scene["folder"], scene["suffix"]))
+                if key not in buckets.setdefault(bucket, []):
+                    buckets[bucket].append(key)
+        maps.append(scenes)
+    if any(set(items) != set(maps[0]) for items in maps[1:]):
+        report.policy.add("Scene/frame membership differs. The union is displayed with unavailable panels; no correspondence is invented.")
+    prepared = []
+    for (folder, suffix), keys in buckets.items():
+        for component in dict.fromkeys([*names, *(name for key in keys for scenes in maps
+                                                if key in scenes for name in scenes[key]["tables"][0])]):
+            images, labels = [], []
+            reference_scene = None
+            for key in keys:
+                rows = []
+                scene_geometries = []
+                for index, scenes in enumerate(maps):
+                    scene = scenes.get(key)
+                    reference_scene = reference_scene or scene
+                    if scene is None or component not in scene["tables"][0]:
+                        rows.append(None)
+                        if component in names:
+                            images.append(None)
+                            labels.append(variant_description(report.variants[index]) + "\nUnavailable for this scene/frame")
+                        continue
+                    table = scene["tables"][0][component]
+                    row = table.loc[scene["frame"]]
+                    rows.append(row)
+                    scene_geometries.append(repr(scene.get("geometry", {})))
+                    if component in names:
+                        images.append(scene["render"](component, row))
+                        labels.append(variant_description(report.variants[index]) + "\n" + scene["title"] +
+                                      "\n" + geometry_description(scene))
+                if len(set(scene_geometries)) > 1:
+                    report.policy.add(f"Scene geometry/settings differ for {key}; each panel uses its own scene.")
+                report.record(key[0], key[1], component, rows)
+            if component not in names:
+                continue
+            size = next((item.size for item in images if item is not None), (800, 500))
+            for index, item in enumerate(images):
+                if item is None:
+                    item = Image.new("RGB", size, "#eeeeee")
+                    ImageDraw.Draw(item).text((30, 30), "Unavailable for this scene/frame", fill="black", font=_font(20))
+                    images[index] = item
+            prepared.append((folder, suffix, component, images, labels, reference_scene, len(keys)))
+    report.policy.confirm()
+    for folder, suffix, component, images, labels, scene, count in prepared:
+        row_labels = ["Game state 1", "Game state 2"] if benchmark and count == 2 else None
+        image = compose_panels(images, labels, scene_title(scene, component),
+                               columns=len(report.variants) if benchmark else 2, row_labels=row_labels)
+        path = report.root / folder / f"{component}{suffix}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path)
+        report.outputs.append(str(path.resolve()))
 
 
 def source_components(names):
