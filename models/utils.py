@@ -933,16 +933,32 @@ def resolve_model_selection(
 
 
 def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
+    """Describe the complete checkpoint input, including runtime-added columns."""
     if model is None or not hasattr(model, "args"):
         return None
     return {"node_in_dim": int(model.args.get("node_in_dim", 0)),
             **schema_for_names(edge_names(model.args), explicit=model.args.get("edge_feature_names") is not None)}
 
 
+def get_model_feature_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
+    """Describe inputs required from stored graphs, before runtime augmentation."""
+    schema = get_model_graph_schema(model)
+    if schema is None:
+        return None
+    task = model.args.get("task")
+    gnn_task = model.args.get("gnn_task")
+    if gnn_task is None and task in config.TASK_CONFIG.index:
+        gnn_task = config.TASK_CONFIG.at[task, "gnn_task"]
+    lane_survival = bool(model.args.get("lane_survival", False)) and str(gnn_task).startswith("node")
+    schema["node_in_dim"] -= int(lane_survival) + int(task == "failure_receiver")
+    return schema
+
+
 def validate_model_graph_schemas(models: dict[str, GNN | None]) -> dict[str, int | bool]:
+    """Aggregate stored-feature requirements, not augmented checkpoint widths."""
     schemas = {
         name: schema
-        for name, schema in ((name, get_model_graph_schema(model)) for name, model in models.items())
+        for name, schema in ((name, get_model_feature_graph_schema(model)) for name, model in models.items())
         if schema is not None
     }
     if not schemas:
