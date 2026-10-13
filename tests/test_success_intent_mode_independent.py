@@ -128,6 +128,29 @@ class SuccessIntentModeIndependentTests(unittest.TestCase):
         )
         self.assertTrue(args.pass_success_ipw)
 
+    def test_sparsify_cli_defaults_and_choices(self) -> None:
+        with (
+            patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
+            patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original"]),
+            patch.object(train_wrapper, "infer_feature_run_return_types", return_value=["disc_0.9"]),
+        ):
+            for flags, expected in (([], "none"), (["--sparsify", "none"], "none"),
+                                    (["--sparsify", "delaunay"], "delaunay")):
+                with self.subTest(flags=flags):
+                    args = train_wrapper.parse_args(
+                        ["--feature-run-id", "feature_run", "--only-success-intent", *flags]
+                    )
+                    self.assertEqual(args.sparsify, expected)
+        for value in ("distance", "unknown"):
+            with self.subTest(invalid=value), self.assertRaises(SystemExit):
+                train_wrapper.parse_args(["--sparsify", value])
+
+    def test_sparsify_cannot_override_resume_or_source_refit(self) -> None:
+        for selector in ("--resume-id", "--refit-source-model-id"):
+            for value in ("none", "delaunay"):
+                with self.subTest(selector=selector, value=value), self.assertRaises(SystemExit):
+                    train_wrapper.parse_args([selector, "pass_intent/source", "--sparsify", value])
+
     def test_parse_args_disables_pass_success_ipw(self) -> None:
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),

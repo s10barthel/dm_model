@@ -857,6 +857,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--start_lr", type=float, default=None, help="Override starting LR for all selected models.")
     parser.add_argument("--min_lr", type=float, default=None, help="Override minimum LR for all selected models.")
     parser.add_argument("--resume-id", default=None, help="Resume one model with its saved training settings.")
+    parser.add_argument(
+        "--sparsify", choices=["none", "delaunay"], default="none",
+        help="Graph connectivity for every selected task: all pairwise edges (none, default) or Delaunay neighbours.",
+    )
     parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
                         help="Minimum pass duration in seconds for every selected component (default: 0.5).")
     add_split_arguments(parser)
@@ -1985,6 +1989,7 @@ def build_training_commands(
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
     for index, command in enumerate(commands):
+        command = _replace_cli_value(command, "--sparsify", getattr(args, "sparsify", "none"))
         architecture = resolve_architecture(vars(args))
         command = _replace_cli_value(command, "--gnn-architecture" if architecture not in ("gcn", "gin") else "--model", architecture)
         command = _replace_cli_value(command, "--n_epochs", getattr(args, "max_epochs", 100))

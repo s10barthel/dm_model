@@ -1106,7 +1106,7 @@ input dimensions and zero the specified learned inputs.
 | `--goal-nodes-aware` / `--no-goal-nodes` | Retain/remove goal nodes and incident edges, independently of explicit goal geometry and prediction eligibility | On for new goal-context tasks | Same |
 | `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` | Select stored velocity-angle edge columns; `no-poss` zeros them on both incoming and outgoing possessor edges | Off | Off |
 | `--relative-speed-edge-features` / `--relative-speed-edge-features-no-poss` / `--no-relative-speed-edge-features` | Select stored relative-speed edge input; `no-poss` zeros it on both incoming and outgoing possessor edges. Requires velocity-angle edges | Off | Off |
-| `--sparsify {none,distance,delaunay}` | Remove edges according to the selected rule below | No filtering (unset) | Explicitly `none`; no wrapper switch |
+| `--sparsify {none,distance,delaunay}` (direct); `--sparsify {none,delaunay}` (wrapper) | Remove edges according to the selected rule below | No filtering (unset) | `none`; optional `delaunay` applies to every selected task |
 | `--max_edge_dist <metres>` | Threshold for distance sparsification only; setting a threshold does not enable filtering | 10 m | 10 m, inactive |
 | `--filter_blockers` | Remove nodes and incident edges using the x-position/team rule below | Off | Off; no wrapper switch |
 | Task suffix `_oppo_agn` | Remove opposing-team nodes and incident edges automatically | Only for those tasks | Those tasks are not selected by the wrapper |
@@ -1120,6 +1120,21 @@ requested. Node velocity masks do not disable stored velocity-related edge
 features. Disabling raw x/y does not disable independently controlled spatial
 features or physical calculations. Masks do not restore values removed by
 broader masks, and `xy_only` cannot be combined with disabled positional inputs.
+
+The training wrapper accepts `--sparsify {none,delaunay}` and defaults to `none`.
+For example, train all selected components with Delaunay connectivity using:
+
+```powershell
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode original --sparsify delaunay
+```
+
+Omit `--sparsify` or pass `--sparsify none` for all pairwise edges after other
+node filtering. Existing graph artifacts remain reusable. Saved arguments,
+feature signatures, and prepared-cache identities record the mode. Resume and
+source refit inherit saved settings and reject explicit `--sparsify` overrides;
+automatic final refits inherit their validation source's selection. This option
+is available on the training wrapper and direct `train.py`, not `scripts/main.py`.
+Distance filtering remains a direct-training option.
 
 Distance sparsification retains an edge when its raw distance is **at most**
 `max_edge_dist`, **or either endpoint is the possessor**, regardless of distance.
@@ -1723,6 +1738,8 @@ Dataset/run statistics include a separate `scheduling` record: preparation betwe
 - `--next-action-conditions-on` / `--next-action-conditions-off`: keep or disable the pass/cross next-action consistency filter. Default: on. Derived runs must match the base run's setting.
 
 ### `scripts/train_relevant_models.py`
+
+- `--sparsify {none,delaunay}`: connectivity for every selected training task. Default: `none` (all pairwise edges after node filtering). Resume and source refit use saved settings and reject this override.
 
 When split flags are omitted, training infers the selector from feature-run metadata, recovering it from the recorded immutable manifest if needed. Explicit selectors are assertions and must match, including count versus percentage mode. Inconsistent modern provenance or a changed match-universe identity fails. Only runs with no split provenance assume the historical 50% split. The resolved selector, match counts, and source are printed and forwarded to training commands.
 

@@ -269,3 +269,21 @@ def test_actual_cli_rejects_epoch_alias_conflict_and_resume_controls(synthetic_t
     # Parsing forbids training overrides before it attempts to open a checkpoint.
     with pytest.raises(SystemExit):
         run("missing", ["--lr-reduction-factor", ".25"], resume=True)
+
+
+@pytest.mark.parametrize("mode", [None, "none", "delaunay"])
+@pytest.mark.parametrize("use_carries", [False, True])
+def test_wrapper_forwards_sparsify_to_every_task(mode, use_carries):
+    from scripts import train_relevant_models as wrapper
+    from test_success_intent_mode_independent import make_training_args
+    args = make_training_args("feature_run", pass_success_ipw=False, use_carries=use_carries)
+    args.enabled_tasks.update(pass_height=True, failure_receiver=True)
+    if mode is not None:
+        args.sparsify = mode
+    with patch.object(wrapper, "resolve_feature_run_id", return_value="feature_run"), \
+         patch.object(wrapper, "resolve_feature_root", return_value=Path("fixture_features")):
+        commands = wrapper.build_training_commands(args)[0]
+    assert {wrapper.get_cli_value(command, "--task") for command in commands} == set(args.enabled_tasks)
+    for command in commands:
+        assert command.count("--sparsify") == 1
+        assert wrapper.get_cli_value(command, "--sparsify") == (mode or "none")

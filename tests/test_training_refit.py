@@ -158,6 +158,21 @@ def test_history_validation_and_replay_preserve_adam_state():
 
 def test_actual_refit_rates_fresh_state_full_pool_and_resume(synthetic_training, monkeypatch):
     run, observations, epoch, utils, root = synthetic_training
+    # Delaunay needs a non-collinear, fully connected source graph.
+    from datatools import config
+    from torch_geometric.data import Data
+    from scripts.generate_relevant_features import append_interactions_to_graph
+    for path in (root / "features").glob("*.pt"):
+        source_graph = torch.load(path, weights_only=False)[0]
+        x = source_graph.x.clone()
+        x[:, config.NODE_FEATURE_Y] = torch.tensor([34., 35., 33., 36., 32.])
+        edges = torch.cartesian_prod(torch.arange(len(x)), torch.arange(len(x))).t()
+        xy = x[:, config.NODE_FEATURE_X:config.NODE_FEATURE_Y + 1]
+        distances = torch.cdist(xy, xy)[edges[0], edges[1]]
+        teams = x[:, config.NODE_FEATURE_IS_TEAMMATE]
+        teammates = (teams[edges[0]] == teams[edges[1]]).float()
+        graph = Data(x=x, edge_index=edges, edge_attr=torch.stack([distances, teammates], dim=1))
+        torch.save([append_interactions_to_graph(graph)], path)
     initial_weights = []
     def validation(args, model, *a, **kw):
         if kw["train"] and args._epoch == 1:
@@ -167,7 +182,7 @@ def test_actual_refit_rates_fresh_state_full_pool_and_resume(synthetic_training,
             result = {"ce_loss": .5 if args._epoch >= 6 else 1.0}
         return result
     monkeypatch.setattr(utils, "run_epoch", validation)
-    source = run("source", ["--max-epochs", "8", "--no-early-stopping", "--early-stopping-min-epochs", "30"])
+    source = run("source", ["--sparsify", "delaunay", "--max-epochs", "8", "--no-early-stopping", "--early-stopping-min-epochs", "30"])
     assert source["metadata"]["best_epoch"] == 6
     source_dir = root / "saved/pass_intent/source"
     settings = json.loads((source_dir / "args.json").read_text())
@@ -176,6 +191,7 @@ def test_actual_refit_rates_fresh_state_full_pool_and_resume(synthetic_training,
     monkeypatch.setattr(refit, "load_feature_run_metadata", lambda *a, **k: {})
     monkeypatch.setattr(refit, "resolve_artifact_split", lambda *a, **k: (settings["split_manifest"], "fixture"))
     payload = refit.prepare_refit("pass_intent/source", "refit", saved_root=root / "saved")
+    assert payload["args"]["sparsify"] == "delaunay"
     config_path = root / "recipe.json"
     config_path.write_text(json.dumps(payload))
     entry = Path(__file__).resolve().parents[1] / "train.py"
@@ -188,6 +204,7 @@ def test_actual_refit_rates_fresh_state_full_pool_and_resume(synthetic_training,
     observations.clear()
     execute(["--refit-config", str(config_path)])
     completed = load_checkpoint(root / "saved/pass_intent/refit/final_refit" / CHECKPOINT_NAME)
+    assert completed["args"]["sparsify"] == "delaunay"
     assert observations == [(i, .002 if i < 5 else .001) for i in range(1, 7)]
     assert completed["metadata"]["train_match_count"] == 5 and completed["metadata"]["validation_match_count"] == 0
     assert completed["metadata"]["last_epoch"] == 6 and not completed["metadata"]["stopped_early"]
@@ -212,6 +229,7 @@ def test_actual_refit_rates_fresh_state_full_pool_and_resume(synthetic_training,
     monkeypatch.setattr(utils, "run_epoch", validation)
     execute(["--resume-checkpoint", str(checkpoint_path)])
     resumed = load_checkpoint(checkpoint_path)
+    assert resumed["args"]["sparsify"] == "delaunay"
     assert resumed["metadata"]["learning_rate_history"] == completed["metadata"]["learning_rate_history"]
     for name in completed["model"]:
         torch.testing.assert_close(completed["model"][name], resumed["model"][name], atol=0, rtol=0)
