@@ -3,7 +3,8 @@
 PC-xPass generation uses one lazy, reusable compute session per dataset. Sportec
 and SkillCorner keep match publication atomic; Hawkeye combines situations into
 compute windows while retaining complete situation outputs; Benchmark retains
-its modification/state outputs. Preparation and computation remain sequential.
+its modification/state outputs. Preparation and computation are sequential by
+default; Sportec supports opt-in bounded preparation overlap.
 
 ## Controls and compatibility
 
@@ -34,6 +35,112 @@ is reused for tails; empty, dry-run, cache-hit-only, and single-worker workloads
 create no pool. Failures settle outstanding work before serial recovery or
 transaction cleanup. Scheduling settings are excluded from numerical fingerprints.
 This scheduler needs no new cache format or rebuild of already compatible caches.
+
+## Sportec preparation overlap
+
+Add `--sportec-runtime-prefetch` to PC-xPass generation to run one ordered
+preparation thread alongside the existing numerical pool. Default: off. The
+thread exclusively owns match loading, reconstruction, and graph preparation.
+The main thread owns source registration, cache reads/writes, result handling,
+transactions, and publication. Workers use the spawn process context when
+prefetch is enabled. Dry runs and single-worker execution stay sequential.
+
+The producer needs permission **before constructing** the next window. There is
+at most one window ahead, including construction in progress, alongside the
+current consumer window. Complete period/possessor groups remain intact, so one
+oversized group can exceed the row target. This is not a byte limit: tracking,
+the reconstruction plan, and accumulated match outputs are separate allocations.
+The outstanding numerical row cap and physical task size still apply.
+
+Graphs and descriptors transfer to the consumer without later producer mutation.
+Reports and manifests arrive after preparation finishes. A match is published
+only after the preparation thread has joined, before the next match is loaded.
+On a batch failure, the numerical session settles outstanding tasks and the
+producer joins before serial recovery. Already prepared work is retained, and
+remaining preparation resumes sequentially for that match. Cancellation waits
+for the in-progress preparation window to finish; it cannot forcibly interrupt
+a graph-building operation. Failed matches retain their previous published cache.
+
+`scheduling.preparation` records each match's preparation work, initial/total
+consumer wait, producer backpressure, preparation/compute interval intersection,
+and maximum prepared window rows. Existing `preparation_seconds` window fields
+remain gaps before consumption; they are not producer work when overlap is on.
+Do not add overlapping work durations to derive elapsed time. Other datasets'
+preparation is unchanged. Prefetch and row-window options do not affect numerical
+fingerprints or require a fresh compatible cache.
+
+Run the isolated, fully warmed comparison with:
+
+```powershell
+.venv/Scripts/python.exe scripts/measure_sportec_runtime.py --budget-seconds 900
+```
+
+The diagnostic uses Sportec match `DFL-MAT-J03WEL` and feature run
+`feature_20260910T110759_053479_8b508137` by default; override them with
+`--match-id` and `--feature-run-id`. It requires psutil for memory sampling.
+Three cases use actual generation and match publication: sequential 256,
+sequential 512, then prefetch at the better window (256 within a 5% difference).
+Every case has a fresh temporary cache and eight fully warmed workers with
+16-state tasks. Output comparisons include exact values, dtypes, NaNs, identities,
+lane rows, manifests, associations, selection reports, and coverage. Progress
+goes to stdout and incremental `results.json` under `tmp/pc_prefetch_<timestamp>`.
+Production cache versions and latest pointers remain untouched. The budget
+includes imports, warm-up, verification, and shutdown; incomplete cases are
+reported explicitly.
+
+## Fully warmed preparation comparison (alternative baseline)
+
+The final comparison used completed feature run
+`feature_20260827T004621_803230_f03ded3f` and available match `DFL-MAT-J03YDU`.
+The originally requested feature run was being extended and did not pass its
+usability guard; the completed alternative lacks the original test match.
+These absolute times are therefore a different baseline from the probes below.
+
+All three cases ran actual generation with fresh temporary caches and eight
+fully warmed workers, 16-state tasks, and one thread per worker. They published
+identical 2,100 physical states and 231,000 lane rows, with exact equality of
+values, NaNs, dtypes, identities, manifests, associations, selection reports,
+and coverage. There were no retries or pool discards. Existing caches and
+production latest pointers remained untouched.
+
+| Case | Full runner time | Reduction from sequential 256 |
+| --- | ---: | ---: |
+| Sequential 256 | 208.31 s | Reference |
+| Sequential 512 | 203.57 s | 2.28% |
+| Prefetch 256 | 182.52 s | 12.38% |
+
+The 512 setting improved worker-slot occupancy from 84.8% to 93.0% and reduced
+numerical dispatch from 106.87 s to 100.22 s. Its whole-run improvement stayed
+below the agreed 5% threshold, so the prefetch test retained 256.
+
+Prefetch overlapped 44.19 s of preparation with numerical dispatch. Consumer
+waiting after the initial window totaled only 0.035 s. Numerical dispatch stayed
+near 107 s, while preparation wall time increased from 67.65 s to 93.60 s and
+cache scans increased from 8.44 s to 33.45 s. Concurrent parent work therefore
+reduced the benefit relative to the theoretical ceiling; the timings do not
+isolate the cause of this contention. Overlapping phase durations must not be
+summed as sequential costs.
+
+The one-ahead-window bound held; the largest prepared window was 364 states at
+the soft 256 target. Sampled parent/worker-total peak RSS was 6.92, 7.12, and
+7.29 GiB respectively. The harness retained verification tables between cases,
+so RSS differences cannot be attributed entirely to the scheduling changes.
+
+**Provisional recommendation: keep 256 and add `--sportec-runtime-prefetch`** for
+comparable Sportec generation. Defaults remain unchanged. This is one comparison
+per case on one match; confirm behavior during the next normal multi-match run
+before extrapolating. Other datasets remain untuned.
+
+The completed comparison, including warm-ups and verification, took 688.10 s;
+including guarded preflights, the measurement total was about 712.56 s, within
+the 900-second budget. No repeats were launched. Raw results, derived metrics,
+and the detailed report are under `tmp/pc_prefetch_20261013T180229`.
+
+Reproduce this baseline with:
+
+```powershell
+.venv/Scripts/python.exe scripts/measure_sportec_runtime.py --budget-seconds 900 --feature-run-id feature_20260827T004621_803230_f03ded3f --match-id DFL-MAT-J03YDU
+```
 
 ## Measurements on 2026-10-13
 

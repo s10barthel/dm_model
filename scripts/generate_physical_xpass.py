@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import sys
 import warnings
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from runtime_preparation import RuntimePreparation
 from models.edge_schema import generation_kwargs
 
 import reachability as reach
@@ -165,6 +167,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
     parser.add_argument("--limit", type=int, default=None, help="Legacy/Sportec pass-action compute limit.")
     parser.add_argument("--sportec-runtime-match-window", type=int, default=4, help="Legacy physical-xPass only: matches per compute window.")
+    parser.add_argument("--sportec-runtime-prefetch", action="store_true",
+                        help="PC-xPass only: prepare at most one Sportec window ahead in a thread. Default: off.")
     for dataset in ("sportec", "hawkeye"):
         parser.add_argument(
             f"--{dataset}-runtime-row-window", type=int, default=None,
@@ -526,6 +530,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if value is not None and int(value) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
     explicit_options = {token.split("=", 1)[0] for token in (sys.argv[1:] if argv is None else argv)}
+    if args.sportec_runtime_prefetch and not args.pc_xpass:
+        parser.error("--sportec-runtime-prefetch requires --pc-xpass.")
     if args.pc_xpass and "--sportec-runtime-match-window" in explicit_options:
         parser.error("--sportec-runtime-match-window is legacy physical-xPass only; use --sportec-runtime-row-window.")
     for dataset in ("sportec", "hawkeye"):
@@ -1368,12 +1374,19 @@ def runtime_compute_runner(dataset: str):
                 num_workers=resolve_num_workers(args.num_workers, max_auto_workers=int(args.max_auto_workers)),
                 worker_thread_limit=int(args.worker_thread_limit),
                 row_window=resolve_runtime_row_window(args, f"{dataset}_runtime_row_window"),
+                **({"process_start_method": "spawn"} if dataset == "sportec" and sportec_prefetch_enabled(args) else {}),
             ) as session:
                 result = runner(args, compute_session=session)
             result["stats"]["scheduling"] = session.summary()
             return result
         return run
     return decorate
+
+
+def sportec_prefetch_enabled(args):
+    return (bool(getattr(args, "sportec_runtime_prefetch", False)) and bool(getattr(args, "pc_xpass", False))
+            and not bool(getattr(args, "dry_run", False))
+            and resolve_num_workers(args.num_workers, max_auto_workers=int(args.max_auto_workers)) > 1)
 
 
 def runtime_items_row_count(items: list[dict[str, Any]]) -> int:
@@ -1414,6 +1427,7 @@ def flush_runtime_buffer(
     progress_desc: str,
     reuse_cache_dir: Path | None = None,
     compute_session: RuntimeComputeSession | None = None,
+    before_retry=None,
 ) -> int:
     if not buffer:
         return 0
@@ -1442,6 +1456,8 @@ def flush_runtime_buffer(
         )
         tqdm.write(f"{progress_desc}: batch retry per unit after {type(batch_exc).__name__}: {batch_exc}")
 
+    if before_retry is not None:
+        before_retry()
     with compute_session.recovery() if compute_session is not None else nullcontext():
         serial_args = argparse.Namespace(**vars(args))
         serial_args.num_workers = 1
@@ -1801,10 +1817,40 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
     print(f"Wrote legacy Sportec physical xPass sidecars at {output_root}: {total_computed} computed, {total_reused} reused.")
 
 
-@runtime_compute_runner("sportec")
-def run_runtime_sportec_possessions(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
+def prepare_sportec_windows(args, match_id, feature_root, return_type, intended_receiver_mode):
+    """Preparation owns match data; yielded windows have no mutable report aliases."""
     from scripts.run_relevant_models import load_match
 
+    match = load_match(str(match_id), intended_receiver_mode=intended_receiver_mode,
+                       return_type=return_type, feature_root=feature_root, load_endpoint_graphs=False)
+    pending, sources, pending_rows = [], [], 0
+    row_window = resolve_runtime_row_window(args, "sportec_runtime_row_window")
+    for state, _report in build_sportec_possessions(
+        match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
+        add_v_edge_features=runtime_add_v_edge_features_from_args(args),
+        add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+        **generation_kwargs(runtime_graph_schema_from_args(args)),
+    ):
+        sources.append((state.pc_cache_match_id, copy.deepcopy(state.pc_state_descriptor)))
+        unit = make_runtime_buffer_unit(
+            display_key=f"sportec {match_id}:spell:{state.event_index}",
+            skip_keys=[f"{match_id}:spell:{state.event_index}"],
+            items=runtime_cache_items_from_graphs(state.pc_cache_match_id, state.graph_features_0, state.labels,
+                frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION, state_frame_ids=state.actions.index.tolist()),
+        )
+        if unit is not None:
+            pending.append(unit)
+            pending_rows += int(unit["row_count"])
+        if pending_rows >= row_window:
+            yield dict(units=pending, sources=sources, row_count=pending_rows)
+            pending, sources, pending_rows = [], [], 0
+    if pending or sources:
+        yield dict(units=pending, sources=sources, row_count=pending_rows)
+    yield dict(report=copy.deepcopy(match.possession_report), manifest=copy.deepcopy(match.sportec_state_plan.manifest()))
+
+
+@runtime_compute_runner("sportec")
+def run_runtime_sportec_possessions(args: argparse.Namespace, *, compute_session: RuntimeComputeSession | None = None) -> dict[str, Any]:
     if args.reuse_cache_dir:
         raise ValueError("--reuse-cache-dir is not supported for pc-xPass; reuse a compatible --pc-xpass-id instead.")
     feature_run_id = resolve_feature_run_id(getattr(args, "sportec_feature_run_id", None), required=True, allow_latest=True)
@@ -1814,48 +1860,44 @@ def run_runtime_sportec_possessions(args: argparse.Namespace, *, compute_session
     stats = empty_runtime_stats(cache_dir)
     skipped, reports, partitions = {}, {}, {}
     selected = resolve_match_ids(args, get_action_graph_dir(feature_root))
+    prefetch = sportec_prefetch_enabled(args)
+    if prefetch and compute_session is not None:
+        compute_session.require_spawn_context()
     for match_id in tqdm(selected, desc="sportec possession pc-xPass", unit="matches"):
-        transaction = None
+        transaction = prepared = None
+        first_window = len(compute_session.windows) if compute_session is not None else 0
         try:
             transaction = match_cache.begin(args, cache_dir, match_id)
-            match = load_match(str(match_id), intended_receiver_mode=intended_receiver_mode,
-                               return_type=return_type, feature_root=feature_root, load_endpoint_graphs=False)
-            pending = []
-            pending_rows = 0
-            for state, report in build_sportec_possessions(
-                match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
-                add_v_edge_features=runtime_add_v_edge_features_from_args(args),
-                add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
-                **generation_kwargs(runtime_graph_schema_from_args(args)),
-            ):
-                pc_resume.record_source(args, "sportec", state.pc_cache_match_id, state.pc_state_descriptor)
-                reports[str(match_id)] = report
-                partitions[state.pc_cache_match_id] = state.pc_state_descriptor
-                unit = make_runtime_buffer_unit(
-                    display_key=f"sportec {match_id}:spell:{state.event_index}",
-                    skip_keys=[f"{match_id}:spell:{state.event_index}"],
-                    items=runtime_cache_items_from_graphs(state.pc_cache_match_id, state.graph_features_0, state.labels,
-                        frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION, state_frame_ids=state.actions.index.tolist()),
-                )
-                if unit is not None:
-                    pending.append(unit)
-                    pending_rows += int(unit["row_count"])
-                if pending_rows >= resolve_runtime_row_window(args, "sportec_runtime_row_window"):
-                    flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
-                                         progress_desc=f"sportec {match_id}", compute_session=compute_session)
-                    pending_rows = 0
-            flush_runtime_buffer(pending, cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
-                                 progress_desc=f"sportec {match_id}", compute_session=compute_session)
-            reports[str(match_id)] = match.possession_report
-            transaction.set_provenance(match.possession_report)
-            transaction.set_manifest(match.sportec_state_plan.manifest())
-            transaction.selection_report = match.possession_report
+            prepared = RuntimePreparation(prepare_sportec_windows(
+                args, match_id, feature_root, return_type, intended_receiver_mode), enabled=prefetch)
+            final = None
+            with prepared:
+                for window in prepared:
+                    if "report" in window:
+                        final = window
+                        continue
+                    for key, descriptor in window["sources"]:
+                        pc_resume.record_source(args, "sportec", key, descriptor)
+                        partitions[key] = descriptor
+                    flush_runtime_buffer(window["units"], cache_dir=cache_dir, args=args, stats=stats, skipped=skipped,
+                                         progress_desc=f"sportec {match_id}", compute_session=compute_session,
+                                         before_retry=prepared.stop_prefetch)
+            if final is None:
+                raise RuntimeError("Sportec preparation ended without its final manifest")
+            reports[str(match_id)] = final["report"]
+            transaction.set_provenance(final["report"])
+            transaction.set_manifest(final["manifest"])
+            transaction.selection_report = final["report"]
             with compute_session.publication() if compute_session is not None else nullcontext():
                 match_cache.finish(transaction, args)
         except Exception as exc:
             skipped[str(match_id)] = f"{type(exc).__name__}: {exc}"
             tqdm.write(f"sportec {match_id}: {skipped[str(match_id)]}")
         finally:
+            if prepared is not None and compute_session is not None:
+                intervals = [(w["compute_started_at"], w["compute_finished_at"])
+                             for w in compute_session.windows[first_window:] if "compute_started_at" in w]
+                compute_session.preparation_reports.append(dict(match_id=str(match_id), **prepared.summary(intervals)))
             match_cache.end(transaction)
     write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
         source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,

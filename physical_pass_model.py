@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import multiprocessing
 import json
 import os
 import re
@@ -5483,12 +5484,15 @@ def _timed_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, Any]:
 class RuntimeComputeSession:
     """Parent-owned, lazy worker pool; scheduling metadata never enters physical rows."""
 
-    def __init__(self, *, num_workers: int, worker_thread_limit: int, row_window: int):
+    def __init__(self, *, num_workers: int, worker_thread_limit: int, row_window: int,
+                 process_start_method: str | None = None):
         if min(num_workers, worker_thread_limit, row_window) < 1:
             raise ValueError("Runtime workers, thread limit, and row window must be positive")
         self.num_workers = int(num_workers)
         self.worker_thread_limit = int(worker_thread_limit)
         self.row_window = int(row_window)
+        self.process_context = multiprocessing.get_context(process_start_method) if process_start_method else None
+        self.preparation_reports = []
         self._executor = None
         self._closed = False
         self._started = self._idle_since = time.perf_counter()
@@ -5509,6 +5513,12 @@ class RuntimeComputeSession:
 
     def __exit__(self, *exc):
         self.close()
+
+    def require_spawn_context(self):
+        context = self.process_context or multiprocessing.get_context()
+        if self._executor is not None and context.get_start_method() != "spawn":
+            raise ValueError("Sportec prefetch requires a spawn process pool")
+        self.process_context = multiprocessing.get_context("spawn")
 
     def _shutdown(self, *, discard=False):
         executor, self._executor = self._executor, None
@@ -5554,7 +5564,7 @@ class RuntimeComputeSession:
         if self._window is not None:
             raise RuntimeError("Overlapping runtime compute windows are unsupported")
         started = time.perf_counter()
-        record = dict(input_states=int(input_states),
+        record = dict(input_states=int(input_states), started_at=started,
                       preparation_seconds=max(0.0, started - self._idle_since - self._parent_since_idle),
                       initial=not self.windows, status="complete")
         self._window = record
@@ -5565,6 +5575,7 @@ class RuntimeComputeSession:
             raise
         finally:
             record["elapsed_seconds"] = time.perf_counter() - started
+            record["finished_at"] = time.perf_counter()
             self.windows.append(record)
             self._window = None
             self._idle_since = time.perf_counter()
@@ -5579,6 +5590,7 @@ class RuntimeComputeSession:
                     elapsed_seconds=(self._finished or time.perf_counter()) - self._started,
                     initial_preparation_seconds=sum(w["preparation_seconds"] for w in self.windows if w.get("initial")),
                     between_window_preparation_seconds=sum(w["preparation_seconds"] for w in self.windows if not w.get("initial")),
+                    preparation=list(self.preparation_reports),
                     windows=list(self.windows))
 
     def compute(self, misses, task_template, on_result):
@@ -5602,7 +5614,8 @@ class RuntimeComputeSession:
                 if self._executor is None:
                     self._executor = ProcessPoolExecutor(
                         max_workers=self.num_workers, initializer=configure_physical_worker_thread_limit,
-                        initargs=(self.worker_thread_limit,))
+                        initargs=(self.worker_thread_limit,),
+                        **({"mp_context": self.process_context} if self.process_context is not None else {}))
                     self.pool_creations += 1
                 while next_chunk is not None or pending:
                     while next_chunk is not None and outstanding + len(next_chunk) <= self.row_window:
@@ -5646,7 +5659,8 @@ class RuntimeComputeSession:
             tail = max((t["started"] for t in timings), default=started)
             capacity = self.num_workers if parallel else 1
             tail_busy = sum(max(0.0, t["finished"] - max(tail, t["started"])) for t in timings)
-            record.update(compute_dispatch_seconds=elapsed, parent_result_seconds=parent_seconds,
+            record.update(compute_dispatch_seconds=elapsed, compute_started_at=started,
+                          compute_finished_at=time.perf_counter(), parent_result_seconds=parent_seconds,
                           parallel=parallel, cold_pool=bool(cold_pool), tasks=len(sizes),
                           worker_processes_used=len({t["pid"] for t in timings}),
                           task_sizes={str(size): sizes.count(size) for size in sorted(set(sizes))},

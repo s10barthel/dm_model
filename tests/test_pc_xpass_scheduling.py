@@ -3,6 +3,7 @@ from concurrent.futures import Future
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from threading import Event, current_thread, main_thread
 
 import pandas as pd
 import pytest
@@ -12,6 +13,7 @@ import physical_pass_model as physics
 import pc_xpass_versions as versions
 from scripts import generate_physical_xpass as generate
 from test_physical_xpass import make_graph, make_label
+from runtime_preparation import RuntimePreparation, interval_overlap
 
 
 @pytest.fixture
@@ -221,11 +223,15 @@ def test_pc_only_row_window_validation_and_cache_settings(dataset):
 
 @pytest.mark.parametrize('dataset', ['sportec', 'skillcorner', 'benchmark', 'hawkeye'])
 def test_runner_session_ownership_is_shared_and_never_serialized(dataset):
-    args = generate.parse_args(['--pc-xpass', '--num-workers', '2'])
+    args = generate.parse_args(['--pc-xpass', '--num-workers', '2', '--sportec-runtime-prefetch'])
     received = []
     @generate.runtime_compute_runner(dataset)
     def runner(args, *, compute_session):
         received.append(compute_session)
+        if dataset == 'sportec':
+            assert compute_session.process_context.get_start_method() == 'spawn'
+        else:
+            assert compute_session.process_context is None
         assert all(not isinstance(value, physics.RuntimeComputeSession) for value in vars(args).values())
         return {'stats': {}}
     result = runner(args)
@@ -343,3 +349,196 @@ def test_single_worker_never_creates_pool_and_empty_inputs_are_lazy(tmp_path, co
         assert generate.prewarm_runtime_items([], cache_dir=tmp_path, args=args, compute_session=compute) is None
         assert not compute.windows
     assert not controlled_pool
+
+
+def test_preparation_permission_bounds_ready_and_in_progress_windows():
+    second_started, allow_second, second_ready, third_started = Event(), Event(), Event(), Event()
+    def prepare():
+        yield {'row_count': 3, 'index': 0}
+        second_started.set()
+        assert allow_second.wait(5)
+        second_ready.set()
+        yield {'row_count': 100, 'index': 1}  # Oversized groups stay whole.
+        third_started.set()
+        yield {'row_count': 1, 'index': 2}
+    with RuntimePreparation(prepare(), enabled=True) as prepared:
+        try:
+            assert next(prepared)['index'] == 0
+            assert second_started.wait(5)
+            assert not third_started.is_set()
+            allow_second.set()
+            assert second_ready.wait(5)
+            # Wait until the slot is published; the producer must then wait for permission.
+            with prepared._condition:
+                assert prepared._condition.wait_for(lambda: prepared._slot is not None, timeout=5)
+            assert not third_started.is_set()
+            assert next(prepared)['index'] == 1
+            assert [row['index'] for row in prepared] == [2]
+        finally:
+            allow_second.set()
+    assert prepared._thread is None
+    assert prepared.summary()['peak_prepared_window_rows'] == 100
+    assert prepared.summary()['peak_ahead_windows'] == 1
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_preparation_empty_and_ordered_error_delivery(enabled):
+    with RuntimePreparation(iter([]), enabled=enabled) as prepared:
+        assert list(prepared) == []
+    def prepare():
+        yield {'row_count': 1, 'index': 0}
+        raise ValueError('preparation failed')
+    with RuntimePreparation(prepare(), enabled=enabled) as prepared:
+        assert next(prepared)['index'] == 0
+        with pytest.raises(ValueError, match='preparation failed'):
+            next(prepared)
+    assert prepared._thread is None
+
+
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_preparation_cleanup_and_recovery_preserve_ready_work(interrupt):
+    ready, finalized = Event(), Event()
+    threads = []
+    def prepare():
+        try:
+            for i in range(4):
+                threads.append(current_thread())
+                if i == 1:
+                    ready.set()
+                yield {'row_count': 1, 'index': i}
+        finally:
+            finalized.set()
+    prepared = RuntimePreparation(prepare(), enabled=True)
+    try:
+        with prepared:
+            assert next(prepared)['index'] == 0
+            assert ready.wait(5)
+            if interrupt:
+                raise KeyboardInterrupt()
+            prepared.stop_prefetch()
+            assert [row['index'] for row in prepared] == [1, 2, 3]
+            assert threads[2:] == [main_thread(), main_thread()]
+    except KeyboardInterrupt:
+        assert interrupt
+    assert prepared._thread is None and finalized.is_set()
+
+
+def test_prefetch_cli_and_spawn_context_are_scheduling_only(controlled_pool, monkeypatch):
+    with pytest.raises(SystemExit):
+        generate.parse_args(['--sportec-runtime-prefetch'])
+    plain = generate.parse_args(['--pc-xpass', '--num-workers', '2'])
+    selected = generate.parse_args(['--pc-xpass', '--num-workers', '2', '--sportec-runtime-prefetch'])
+    assert versions.settings(plain) == versions.settings(selected)
+    assert not generate.sportec_prefetch_enabled(plain)
+    assert generate.sportec_prefetch_enabled(selected)
+    selected.dry_run = True
+    assert not generate.sportec_prefetch_enabled(selected)
+    selected.dry_run, selected.num_workers = False, 1
+    assert not generate.sportec_prefetch_enabled(selected)
+    monkeypatch.setattr(physics, '_compute_runtime_physical_xpass_chunk', lambda task: {'rows': task['misses']})
+    with session() as compute:
+        compute.require_spawn_context()
+        assert not controlled_pool
+        compute.compute([{}] * 4, {'physical_batch_size': 2}, lambda result: None)
+        assert controlled_pool[0].kwargs['mp_context'].get_start_method() == 'spawn'
+
+
+def test_preparation_overlap_is_intersection_not_phase_sum():
+    assert interval_overlap([(0, 3), (5, 8)], [(2, 6), (7, 9)]) == 3
+
+
+@pytest.mark.parametrize('fail_once', [False, True])
+def test_sportec_prefetch_exact_checkpoint_resume_and_parent_ownership(tmp_path, controlled_pool, monkeypatch, fail_once):
+    import scripts.run_relevant_models as inference_runner
+    cache = generate.match_cache
+    monkeypatch.setattr(generate, 'resolve_feature_run_id', lambda *a, **k: 'features')
+    monkeypatch.setattr(generate, 'resolve_feature_root', lambda *a: tmp_path)
+    monkeypatch.setattr(generate, 'resolve_reference_label_context', lambda *a: (tmp_path, 'return', 'angle_only'))
+    monkeypatch.setattr(generate, 'resolve_match_ids', lambda *a: ['m1', 'm2'])
+    monkeypatch.setattr(generate, 'write_runtime_dataset_metadata', lambda *a, **k: None)
+    roots, producer_threads, commits = [], [], []
+    def register(args, dataset, key, descriptor):
+        assert current_thread() is main_thread()
+        assert descriptor['possessor_id'] == 'home_1'
+        cache.active(roots[-1]).register(key, descriptor)
+    monkeypatch.setattr(generate.pc_resume, 'record_source', register)
+    original_finish = cache.finish
+    def finish(tx, args):
+        assert current_thread() is main_thread()
+        assert not any(t.is_alive() for t in producer_threads if t is not main_thread())
+        original_finish(tx, args)
+        commits.append(tx.match_id)
+    monkeypatch.setattr(cache, 'finish', finish)
+    def load(key, **kw):
+        if key == 'm2':
+            assert commits[-1] == 'm1'  # No preparation across publication boundaries.
+        producer_threads.append(current_thread())
+        assert cache.active(roots[-1]) is (None if current_thread() is not main_thread() else cache._ACTIVE.get())
+        return SimpleNamespace(key=key, possession_report={'selected_states': 0},
+            sportec_state_plan=SimpleNamespace(manifest=lambda: {'spells': [], 'actions': [], 'observations': []}))
+    monkeypatch.setattr(inference_runner, 'load_match', load)
+    def build(match, key, *a, **kw):
+        for i in range(3):
+            frame_ids = list(range(i * 10, i * 10 + 3))
+            descriptor = dict(match_id=key, possession_id=i + 1, period_id=1, possessor_id='home_1')
+            match.possession_report['selected_states'] += 3
+            yield SimpleNamespace(pc_cache_match_id=f'{key}_{i}', event_index=i + 1,
+                pc_state_descriptor=descriptor, graph_features_0=[make_graph() for _ in frame_ids],
+                labels=torch.stack([make_label(action_index=f) for f in frame_ids]),
+                actions=pd.DataFrame(index=frame_ids)), match.possession_report
+            descriptor['possessor_id'] = 'mutated_after_handoff'
+    monkeypatch.setattr(generate, 'build_sportec_possessions', build)
+    original_compute = physics._compute_runtime_physical_xpass_chunk
+    failed = False
+    def compute(task):
+        nonlocal failed
+        if fail_once and not failed and len(roots) == 2:
+            failed = True
+            raise RuntimeError('recoverable numerical failure')
+        return original_compute(task)
+    monkeypatch.setattr(physics, '_compute_runtime_physical_xpass_chunk', compute)
+    args = generate.parse_args(['--pc-xpass', '--num-workers', '2', '--physical-batch-size', '2',
+        '--sportec-runtime-row-window', '4', '--min-speed', '3', '--max-speed', '3',
+        '--angle-step', '90', '--radial-gridsize', '10', '--export-lane-control'])
+    results = []
+    for name, enabled in [('sequential', False), ('prefetch', True), ('prefetch', True)]:
+        root = tmp_path / name / 'sportec'
+        roots.append(root)
+        monkeypatch.setattr(versions, 'cache_dir', lambda *a, root=root: root)
+        args.sportec_runtime_prefetch = enabled
+        result = generate.run_runtime_sportec_possessions(args)
+        assert not result['skipped']
+        results.append(result)
+    assert results[-1]['stats']['cache_misses'] == 0
+    assert results[-1]['stats']['scheduling']['pool_creations'] == 0
+    assert all(not t.is_alive() for t in producer_threads if t is not main_thread())
+    assert any(t is not main_thread() for t in producer_threads)
+    assert_cache_equal(roots[0], roots[1])
+    for key in ('m1', 'm2'):
+        left, _, a = cache.load_match(roots[0], key, include_lane=True)
+        right, _, b = cache.load_match(roots[1], key, include_lane=True)
+        assert a['status'] == b['status'] == 'completed'
+        assert {k: a[k] for k in ('manifest', 'descriptors', 'selection_report', 'coverage')} == {
+            k: b[k] for k in ('manifest', 'descriptors', 'selection_report', 'coverage')}
+        for kind in left:
+            pd.testing.assert_frame_equal(left[kind], right[kind], check_exact=True)
+    if fail_once:
+        assert results[1]['stats']['serial_retry_recovered'] > 0
+    else:
+        previous = {str(path.relative_to(roots[-1])): path.read_bytes()
+                    for path in roots[-1].rglob('*') if path.is_file()}
+        for error in (ValueError, KeyboardInterrupt):
+            def fail_preparation(*a, **kw):
+                iterator = build(*a, **kw)
+                yield next(iterator)
+                raise error('preparation interrupted')
+            monkeypatch.setattr(generate, 'build_sportec_possessions', fail_preparation)
+            if error is KeyboardInterrupt:
+                with pytest.raises(KeyboardInterrupt):
+                    generate.run_runtime_sportec_possessions(args)
+            else:
+                assert set(generate.run_runtime_sportec_possessions(args)['skipped']) == {'m1', 'm2'}
+            assert cache.active(roots[-1]) is None
+            assert all(not t.is_alive() for t in producer_threads if t is not main_thread())
+            assert previous == {str(path.relative_to(roots[-1])): path.read_bytes()
+                                for path in roots[-1].rglob('*') if path.is_file()}
