@@ -1,6 +1,6 @@
 # Sportec inference output
 
-Directory: `data/component_runs/sportec/component_20261013T231541_325935_ee56e2b2/`
+Directory: `data/component_runs/sportec/component_20261014T001732_245661_c1de161b/`
 
 This completed run contains component predictions for match `DFL-MAT-J040A0`.
 It uses `sportec_possession_states_v3`, with `scope=frames`, `frames=5`: exact
@@ -14,6 +14,7 @@ Each component has 6,815 physical-state rows.
 | `DFL-MAT-J040A0/action_intent.parquet` | Action-option probabilities, including player options and goal nodes for shooting; 43 columns. |
 | `DFL-MAT-J040A0/pass_intent.parquet` | Receiver-selection probabilities conditional on passing; 41 columns. |
 | `DFL-MAT-J040A0/pass_success.parquet` | Completion estimates for candidate receivers; 41 columns. The possessor column represents the self/carry option. |
+| `DFL-MAT-J040A0/pass_height.parquet` | Probability that a pass to each candidate player reaches a maximum ball height of at least 2.0 m; 41 columns (11 identifiers/context fields and 30 player columns). |
 | `DFL-MAT-J040A0/outcome_scoring_success.parquet` | Predicted attacking outcome value conditional on a successful option; 41 columns. |
 | `DFL-MAT-J040A0/outcome_scoring_failure.parquet` | Predicted attacking outcome value conditional on a failed option; 41 columns. |
 | `DFL-MAT-J040A0/outcome_conceding_success.parquet` | Predicted conceding outcome value conditional on a successful option; 41 columns. |
@@ -47,6 +48,26 @@ it is not the actual match ID. To join the physical cache, match
 Null/NaN cells represent missing or inapplicable options, including opponents and
 players absent from that state. Retain them as missing.
 
+## Pass-height predictions
+
+`pass_height.parquet` contains independent sigmoid probabilities in `[0, 1]` for
+each state/player pair. They do not sum to one across players. A value of `0.9`
+means an estimated 90% probability that the candidate pass's maximum ball height
+is **at least 2.0 m**; the value is a probability, rather than a height in metres.
+The target is `pass_max_ball_z >= 2.0`, with the inclusive boundary recorded in
+`metadata.json` under `pass_height_probability_definition`.
+
+The exported checkpoint is
+`pass_height/pass_height_20260703T120403_205360_c72e946d`, also selected as this run's
+height auxiliary for v5 pass-success blending. Height uses the same state keys and
+player-column naming as the other components; exclude the possessor's self option
+when interpreting candidate passes. Missing cells remain null/NaN.
+
+The `pass_score` formula below uses the exported `pass_success`, which already
+includes the configured height-dependent blending. No extra multiplication by
+`pass_height` is needed. See [pass-height cutoffs](pass_height_thresholds.md) for
+details on the height event and its provenance.
+
 ## Computing `pass_score`
 
 For each state and candidate receiver, compute the expected net outcome from the
@@ -66,7 +87,7 @@ import pandas as pd
 
 match_dir = Path(
     "data/component_runs/sportec/"
-    "component_20261013T231541_325935_ee56e2b2/DFL-MAT-J040A0"
+    "component_20261014T001732_245661_c1de161b/DFL-MAT-J040A0"
 )
 keys = ["stats_perform_match_id", "state_id"]
 

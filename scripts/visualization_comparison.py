@@ -471,4 +471,11 @@ def cached_prediction(cache, predict, scene, model, **kwargs):
            bool(kwargs.get("post_action")), source_signature)
     if key not in cache:
         cache[key] = predict(scene, model, **kwargs)
+    elif kwargs.get("precomputed_auxiliaries") is not None:
+        from pc_xpass_auxiliary import record_component_prediction
+        record_component_prediction(
+            kwargs["precomputed_auxiliaries"], scene, model, cache[key][0], kwargs.get("device", "cuda"),
+            post_action=kwargs.get("post_action", False), graph_override=kwargs.get("graph_override"),
+            label_override=kwargs.get("label_override"),
+        )
     return tuple(value.copy(deep=True) if isinstance(value, pd.DataFrame) else value for value in cache[key])

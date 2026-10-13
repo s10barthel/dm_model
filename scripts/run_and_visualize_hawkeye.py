@@ -295,6 +295,7 @@ def render_frame_image(
 def collect_situation_components(situation, model_specs, device, inference_frame_ids,
                                  rendered_components, prediction_cache=None):
     components: dict[str, pd.DataFrame] = {}
+    precomputed_auxiliaries = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
         if "action_intent" in model_specs:
             components["action_intent"], _ = cached_prediction(
@@ -313,6 +314,17 @@ def collect_situation_components(situation, model_specs, device, inference_frame
                 device=device,
                 post_action=False,
                 event_indices=inference_frame_ids,
+                precomputed_auxiliaries=precomputed_auxiliaries,
+            )
+        if "pass_height" in model_specs:
+            components["pass_height"], _ = cached_prediction(
+                prediction_cache, inference_gnn,
+                situation,
+                model_specs["pass_height"],
+                device=device,
+                post_action=False,
+                event_indices=inference_frame_ids,
+                precomputed_auxiliaries=precomputed_auxiliaries,
             )
         if "pass_success" in model_specs:
             components["pass_success"], _ = cached_prediction(
@@ -323,15 +335,7 @@ def collect_situation_components(situation, model_specs, device, inference_frame
                 post_action=False,
                 event_indices=inference_frame_ids,
                 pass_intent_probs=components.get("pass_intent"),
-            )
-        if "pass_height" in model_specs:
-            components["pass_height"], _ = cached_prediction(
-                prediction_cache, inference_gnn,
-                situation,
-                model_specs["pass_height"],
-                device=device,
-                post_action=False,
-                event_indices=inference_frame_ids,
+                precomputed_auxiliaries=precomputed_auxiliaries,
             )
         if "outcome_scoring" in model_specs:
             scoring_failure, scoring_success = cached_prediction(

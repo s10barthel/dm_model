@@ -243,13 +243,16 @@ def epv_physical_xpass_metadata(
 
 
 def infer_match_epv(match, model_specs: dict[str, object], device: str) -> pd.DataFrame:
-    pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False)
+    precomputed_auxiliaries = {}
+    pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False,
+                                   precomputed_auxiliaries=precomputed_auxiliaries)
     pass_success, _ = inference_gnn(
         match,
         model_specs["pass_success"],
         device=device,
         post_action=False,
         pass_intent_probs=pass_intent,
+        precomputed_auxiliaries=precomputed_auxiliaries,
     )
     scoring_failure, scoring_success = inference_gnn(
         match,

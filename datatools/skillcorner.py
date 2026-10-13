@@ -691,8 +691,15 @@ def infer_skillcorner_components(
         return components
 
     state_inputs = {"graph_override": possession.graph_features_0, "label_override": possession.labels}
+    precomputed_auxiliaries = {}
     action_intent, _ = inference_gnn(possession, model_specs["action_intent"], device=device, post_action=False, **state_inputs)
-    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False, **state_inputs)
+    pass_intent, _ = inference_gnn(possession, model_specs["pass_intent"], device=device, post_action=False,
+                                   precomputed_auxiliaries=precomputed_auxiliaries, **state_inputs)
+    if "pass_height" in model_specs:
+        pass_height, _ = inference_gnn(possession, model_specs["pass_height"], device=device, post_action=False,
+                                       precomputed_auxiliaries=precomputed_auxiliaries, **state_inputs)
+    else:
+        pass_height = pd.DataFrame()
     try:
         pass_success, _ = inference_gnn(
             possession,
@@ -701,13 +708,10 @@ def infer_skillcorner_components(
             post_action=False,
             **state_inputs,
             pass_intent_probs=pass_intent,
+            precomputed_auxiliaries=precomputed_auxiliaries,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
-    if "pass_height" in model_specs:
-        pass_height, _ = inference_gnn(possession, model_specs["pass_height"], device=device, post_action=False, **state_inputs)
-    else:
-        pass_height = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         possession,
         model_specs["outcome_scoring"],

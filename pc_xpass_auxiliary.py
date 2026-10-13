@@ -3,6 +3,71 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
+from typing import Any
+
+
+def _prediction_settings(model):
+    from models.inference_masks import inference_mask_metadata
+    return json.dumps([model.args, inference_mask_metadata(model)], sort_keys=True, default=str)
+
+
+@dataclass(frozen=True)
+class AuxiliaryPredictionRecord:
+    """A successful component prediction on shared, immutable collector inputs."""
+
+    task: str
+    model_id: str
+    probabilities: Any
+    match: Any
+    graphs: Any
+    labels: Any
+    feature_action_indices: tuple[int, ...] | None
+    post_action: bool
+    device: str
+    settings: str
+
+
+def record_component_prediction(records, match, model, probabilities, device, *,
+                                post_action=False, graph_override=None, label_override=None,
+                                feature_action_indices=None):
+    """Record validated output; collectors keep these source inputs immutable until reuse."""
+    if records is None or model.args.get("task") not in {"pass_intent", "pass_height"}:
+        return
+    model_id = model.args.get("model_id")
+    if not model_id:
+        return
+    if graph_override is None:
+        from inference import resolve_match_graphs
+        graphs, feature_action_indices = resolve_match_graphs(match, model, post_action)
+        labels = match.labels
+    else:
+        graphs, labels = graph_override, label_override
+    task = model.args["task"]
+    records[task] = AuxiliaryPredictionRecord(
+        task, str(model_id), probabilities, match, graphs, labels,
+        None if feature_action_indices is None else tuple(int(i) for i in feature_action_indices),
+        bool(post_action), str(device), _prediction_settings(model),
+    )
+
+
+def _reused_prediction(record, match, auxiliary, device, *, graphs, labels,
+                       feature_action_indices, event_indices, post_action):
+    if not isinstance(record, AuxiliaryPredictionRecord):
+        return None
+    indices = None if feature_action_indices is None else tuple(int(i) for i in feature_action_indices)
+    if (record.task != auxiliary.args.get("task")
+            or record.model_id != auxiliary.args.get("model_id")
+            or record.match is not match or record.graphs is not graphs or record.labels is not labels
+            or record.feature_action_indices != indices or record.post_action != bool(post_action)
+            or record.device != str(device) or record.settings != _prediction_settings(auxiliary)):
+        return None
+    probabilities = record.probabilities
+    requested = [int(i) for i in (labels[:, 0].tolist() if event_indices is None else event_indices)]
+    if (not probabilities.index.is_unique or not probabilities.columns.is_unique
+            or not all(i in probabilities.index for i in requested)):
+        return None
+    return probabilities.loc[requested].copy()
 
 
 def add_auxiliary_arguments(parser):
@@ -99,13 +164,21 @@ def original_input_fingerprint(graphs, labels):
 
 
 def predict_auxiliaries(match, model, device, *, graphs, labels, event_indices=None, post_action=False,
-                        feature_action_indices=None):
+                        feature_action_indices=None, precomputed_auxiliaries=None):
     """Reuse only identical original inputs and effective model preparations within a match."""
     from inference import inference_gnn
     from models.inference_masks import inference_mask_metadata
     predictions = {}
     cache = match.__dict__.setdefault("_xpass_auxiliary_predictions", {})
     for task, auxiliary in getattr(model, "_xpass_auxiliary_models", {}).items():
+        reused = _reused_prediction(
+            (precomputed_auxiliaries or {}).get(task), match, auxiliary, device,
+            graphs=graphs, labels=labels, feature_action_indices=feature_action_indices,
+            event_indices=event_indices, post_action=post_action,
+        )
+        if reused is not None:
+            predictions[task] = reused
+            continue
         digest = hashlib.sha256()
         digest.update(json.dumps([auxiliary.args, inference_mask_metadata(auxiliary),
                                  list(event_indices) if event_indices is not None else None,

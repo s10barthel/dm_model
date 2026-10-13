@@ -863,7 +863,13 @@ def inference_gnn(
     label_override: torch.Tensor | None = None,
     pass_height_probs: pd.DataFrame | None = None,
     auxiliary_prediction: bool = False,
+    precomputed_auxiliaries: dict | None = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Predict options, recording/reusing auxiliaries within one collector invocation.
+
+    A supplied precomputed_auxiliaries dictionary must be local to this input state
+    and configuration. Original graphs and labels remain immutable during its use.
+    """
     if (graph_override is None) != (label_override is None):
         raise ValueError("graph_override and label_override must be supplied together.")
     if hasattr(model, "eval"):
@@ -901,7 +907,8 @@ def inference_gnn(
         from pc_xpass_auxiliary import predict_auxiliaries
         auxiliary = predict_auxiliaries(match, model, device, graphs=match_graphs, labels=source_labels,
                                         event_indices=labels[:, 0].tolist(), post_action=post_action,
-                                        feature_action_indices=feature_action_indices)
+                                        feature_action_indices=feature_action_indices,
+                                        precomputed_auxiliaries=precomputed_auxiliaries)
         pass_height_probs = auxiliary.get("pass_height", pass_height_probs)
         pass_intent_probs = auxiliary.get("pass_intent", pass_intent_probs)
         version = physical_xpass_weight_version(model.args)
@@ -1220,7 +1227,15 @@ def inference_gnn(
         probs_1 = pd.DataFrame(probs_1).set_index("index")[players]
         return probs_0, probs_1
     else:
-        return pd.DataFrame(probs).set_index("index")[players], None
+        probabilities = pd.DataFrame(probs).set_index("index")[players]
+        if precomputed_auxiliaries is not None and not auxiliary_prediction:
+            from pc_xpass_auxiliary import record_component_prediction
+            record_component_prediction(
+                precomputed_auxiliaries, match, model, probabilities, device,
+                post_action=post_action, graph_override=match_graphs, label_override=source_labels,
+                feature_action_indices=feature_action_indices,
+            )
+        return probabilities, None
 
 
 def inference_gnn_posterior(

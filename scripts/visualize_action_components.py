@@ -692,7 +692,10 @@ def collect_action_components(
             match_cache.require_format(physical_cache_dir)
         pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root)
 
-    for component_name, model in loaded_models.items():
+    precomputed_auxiliaries = {}
+    # Prepare reusable component probabilities before pass-success, regardless of selection order.
+    component_order = {"pass_intent": -2, "pass_height": -1}
+    for component_name, model in sorted(loaded_models.items(), key=lambda item: component_order.get(item[0], 0)):
         if component_name.startswith("xpass_"):
             continue
         uses_possession = pc_state is not None and (
@@ -736,6 +739,7 @@ def collect_action_components(
                     post_action=False,
                     event_indices=[model_index],
                     pass_intent_probs=intent,
+                    precomputed_auxiliaries=precomputed_auxiliaries,
                     **state_inputs,
                 )
                 component_prob_rows[component_name] = probs.loc[model_index]

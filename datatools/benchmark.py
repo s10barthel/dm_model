@@ -602,7 +602,14 @@ def infer_benchmark_components(
         return components
 
     action_intent, _ = inference_gnn(state, model_specs["action_intent"], device=device, post_action=False)
-    pass_intent, _ = inference_gnn(state, model_specs["pass_intent"], device=device, post_action=False)
+    precomputed_auxiliaries = {}
+    pass_intent, _ = inference_gnn(state, model_specs["pass_intent"], device=device, post_action=False,
+                                   precomputed_auxiliaries=precomputed_auxiliaries)
+    if "pass_height" in model_specs:
+        pass_height, _ = inference_gnn(state, model_specs["pass_height"], device=device, post_action=False,
+                                       precomputed_auxiliaries=precomputed_auxiliaries)
+    else:
+        pass_height = pd.DataFrame()
     try:
         pass_success, _ = inference_gnn(
             state,
@@ -610,13 +617,10 @@ def infer_benchmark_components(
             device=device,
             post_action=False,
             pass_intent_probs=pass_intent,
+            precomputed_auxiliaries=precomputed_auxiliaries,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
-    if "pass_height" in model_specs:
-        pass_height, _ = inference_gnn(state, model_specs["pass_height"], device=device, post_action=False)
-    else:
-        pass_height = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         state,
         model_specs["outcome_scoring"],
