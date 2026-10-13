@@ -8,6 +8,8 @@ from torch_geometric.nn import GATConv, GCNConv, GINConv, TransformerConv, globa
 from models.architecture import ARCHITECTURES, consumes_edge_attributes, normalize_architecture
 from models.relationship import RelationshipConv
 from models.self_loops import explicit_self_edges
+from models.edge_schema import normalize_input_settings, edge_names, mask_edge_inputs, project_graph_edges
+from models.input_scaling import scale_nodes, scale_edges, scale_destinations
 
 from datatools import config
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
@@ -36,6 +38,7 @@ class Encoder(nn.Module):
 
         self.args = args
         resolve_pos_node_features(args)
+        normalize_input_settings(args)
         normalize_architecture(args)
         self.model_type = args["gnn_architecture"]
         node_in_dim = args["node_in_dim"]
@@ -96,12 +99,18 @@ class Encoder(nn.Module):
             node_embeddings: [N, z] tensor.
             graph_embeddings: [B, z] tensor.
         """
+        # Direct callers may supply the same raw feature superset used by auxiliaries.
+        if self.args.get("edge_in_dim", 0) and edge_names(batch_graphs) != edge_names(self.args):
+            batch_graphs = project_graph_edges(batch_graphs.clone(), edge_names(self.args))
         node_features = mask_pos_node_features(batch_graphs.x, self.args)
         node_features = mask_goal_poss_features(node_features, self.args)
         edge_features = batch_graphs.edge_attr
         edge_index = batch_graphs.edge_index
         if self.args["self_loop_policy"] == "explicit_v1":
             edge_index, edge_features = explicit_self_edges(batch_graphs, self.args)
+        edge_features = mask_edge_inputs(edge_features, edge_index, batch_graphs.x, self.args,
+                                        names=edge_names(self.args, edge_features.shape[1]),
+                                        possessor_mask=getattr(batch_graphs, "inference_possessor_mask", None))
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
             possessor_mask = getattr(batch_graphs, "inference_possessor_mask", None)
@@ -110,6 +119,8 @@ class Encoder(nn.Module):
                 edge_features, edge_index, batch_graphs.x,
                 training=self.training, possessor_mask=possessor_mask,
             )
+        node_features = scale_nodes(node_features, self.args)
+        edge_features = scale_edges(edge_features, self.args)
         node_embeddings = self.node_in_fc(node_features)  # [N, z]
         for i, gnn_layer in enumerate(self.gnn_layers):
             if self.args["skip_conn"]:
@@ -139,6 +150,7 @@ class Decoder(nn.Module):
 
         self.args = args
         resolve_pos_node_features(args)
+        normalize_input_settings(args)
         self.physical_variant = physical_xpass_model_variant(args)
         self.use_physical_xpass = (
             args.get("task") == "pass_success"
@@ -304,6 +316,8 @@ class Decoder(nn.Module):
             node_features = runtime.mask_nodes(
                 node_features, training=self.training, possessor_mask=inference_possessor_mask,
             )
+        node_features = scale_nodes(node_features, self.args)
+        batch_dests = scale_destinations(batch_dests, self.args)
         if "dest" in self.args["task"]:
             assert batch_dests is not None
         else:
@@ -380,6 +394,7 @@ class GNN(nn.Module):  # Graph-Encoder-Grid-Decoder
 
         self.args = args
         resolve_pos_node_features(args)
+        normalize_input_settings(args)
         self.encoder = Encoder(args)
         self.decoder = Decoder(args)
 

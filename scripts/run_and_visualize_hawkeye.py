@@ -25,6 +25,7 @@ from datatools.hawkeye import (
 )
 from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
+from models.edge_schema import generation_kwargs
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -399,6 +400,7 @@ def render_situation(
         freeze_ballreceipt=args.freeze_ballreceipt,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        **generation_kwargs(graph_schema),
     )
     if overlay_data is None:
         coach_scores = pd.Series(dtype=float)

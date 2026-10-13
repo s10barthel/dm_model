@@ -1,3 +1,4 @@
+from models.edge_schema import edge_names, legacy_edge_names, project_graph_edges, mask_edge_inputs
 import re
 from fnmatch import fnmatch
 from typing import Any, Dict, List, Tuple
@@ -1358,6 +1359,9 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     edge_index = index_map[graph.edge_index[:, edge_mask]]
     edge_attr = graph.edge_attr[edge_mask]
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
+    if getattr(graph, "edge_feature_names", None) is not None:
+        masked_graph.edge_feature_names = list(edge_names(graph))
+        masked_graph.edge_schema_version = 1
     if hasattr(graph, "node_self_edge_attr"):
         masked_graph.node_self_edge_attr = graph.node_self_edge_attr[node_mask]
     if hasattr(graph, "source_node_positions"):
@@ -1426,45 +1430,36 @@ def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max
     return graph
 
 
-def adapt_graph_edge_features(graph: Data, edge_in_dim: int | None = None) -> Data:
-    if graph is None or edge_in_dim is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
+def adapt_graph_edge_features(graph: Data, edge_in_dim: int | None = None, edge_feature_names=None) -> Data:
+    if graph is None or (edge_in_dim is None and edge_feature_names is None):
         return graph
-
-    edge_in_dim = int(edge_in_dim)
-    actual_edge_dim = int(graph.edge_attr.shape[1])
-    if actual_edge_dim < edge_in_dim:
-        raise ValueError(
-            f"Graph edge schema is incompatible with the requested model schema: "
-            f"graph_edge_dim={actual_edge_dim}, required_edge_dim={edge_in_dim}."
-        )
-    if actual_edge_dim == edge_in_dim:
-        return graph
-
-    graph.edge_attr = graph.edge_attr[:, :edge_in_dim]
-    return graph
+    names = tuple(edge_feature_names) if edge_feature_names is not None else legacy_edge_names(edge_in_dim)
+    return project_graph_edges(graph, names)
 
 
 def mask_possessor_velocity_edge_features(graph: Data, possessor_index: int) -> Data:
     if graph is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
         return graph
-    if int(graph.edge_attr.shape[1]) < 4:
+    names = edge_names(graph)
+    if "velocity_angle_cos" not in names:
         return graph
 
     edge_index = graph.edge_index
     incident_edges = (edge_index[0] == int(possessor_index)) | (edge_index[1] == int(possessor_index))
-    graph.edge_attr[incident_edges, 2:4] = 0
+    graph.edge_attr[incident_edges.unsqueeze(-1) & torch.tensor([name in ("velocity_angle_cos", "velocity_angle_sin") for name in names], device=graph.edge_attr.device).unsqueeze(0)] = 0
     return graph
 
 
 def mask_possessor_relative_speed_edge_features(graph: Data, possessor_index: int) -> Data:
     if graph is None or not hasattr(graph, "edge_attr") or graph.edge_attr is None:
         return graph
-    if int(graph.edge_attr.shape[1]) < 5:
+    names = edge_names(graph)
+    if "relative_speed" not in names:
         return graph
 
     edge_index = graph.edge_index
     incident_edges = (edge_index[0] == int(possessor_index)) | (edge_index[1] == int(possessor_index))
-    graph.edge_attr[incident_edges, 4] = 0
+    graph.edge_attr[incident_edges, names.index("relative_speed")] = 0
     return graph
 
 
@@ -1586,7 +1581,7 @@ def filter_features_and_labels(
             if args.get("lane_survival", False):
                 from physical_pass_model import physical_state_hash
                 graph.pc_xpass_input_hash = physical_state_hash(graph)
-            graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"))
+            graph = adapt_graph_edge_features(graph, args.get("edge_in_dim"), args.get("edge_feature_names"))
             capture_self_attributes(graph)
             if not hasattr(graph, "inference_possessor_mask"):
                 graph.inference_possessor_mask = graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
@@ -1599,6 +1594,9 @@ def filter_features_and_labels(
             graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
         if should_mask_possessor_relative_speed_edge_features(args):
             graph = mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
+
+        graph.edge_attr = mask_edge_inputs(graph.edge_attr, graph.edge_index, graph.x, args, names=edge_names(graph),
+                                           possessor_mask=getattr(graph, "inference_possessor_mask", None))
 
         if args["xy_only"]:
             graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0

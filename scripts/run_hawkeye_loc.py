@@ -34,6 +34,7 @@ from datatools.hawkeye import (
 )
 from inference import configure_lane_survival_runtime_cache
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
+from models.edge_schema import generation_kwargs
 from models.utils import (
     extract_model_feature_signature,
     get_model_provenance,
@@ -702,6 +703,7 @@ def build_location_target(
         freeze_ballreceipt=True,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        **generation_kwargs(graph_schema),
         align_frozen_ball_to_possessor=True,
         target_abs_time=float(frame["abs_time"]),
         clamp_target_possessor=True,

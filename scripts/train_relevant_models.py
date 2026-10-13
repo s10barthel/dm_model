@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from models.edge_schema import (add_interaction_arguments, input_setting_flags, normalize_input_settings,
+                                selected_edge_names, schema_for_names, edge_names, INTERACTION_GROUPS)
 from datatools import config
 from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity, resolve_architecture
 from models.node_feature_config import resolve_pos_node_features
@@ -254,6 +256,8 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
         lane_survival_mode = normalize_pc_xpass_lane_survival_mode(lane_survival_mode)
     resolved_flags["lane_survival"] = lane_survival_mode is not None
     resolved_flags["lane_survival_mode"] = lane_survival_mode
+    settings = normalize_input_settings(vars(args).copy(), fresh=True)
+    resolved_flags.update({key: settings[key] for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")})
     return resolved_flags
 
 
@@ -272,6 +276,7 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
         command.append("--no-lane-survival")
     else:
         command.extend(["--lane-survival", str(lane_survival_mode)])
+    command.extend(input_setting_flags(feature_flags))
     return command
 
 
@@ -675,6 +680,7 @@ def validate_external_pass_intent_model_id(
             cli_v_edge_feature_mode(args),
             cli_relative_speed_edge_feature_mode(args),
             lane_survival=bool(feature_flags.get("lane_survival", False)),
+            input_settings=feature_flags,
         )
 
     required_schema = record.get("graph_schema", {})
@@ -697,7 +703,7 @@ def validate_external_pass_intent_model_id(
 
     runtime_edge_dim = int(runtime_schema.get("edge_in_dim", 0) or 0)
     required_edge_dim = int(required_schema.get("edge_in_dim", 0) or 0)
-    if required_edge_dim and runtime_edge_dim < required_edge_dim:
+    if required_edge_dim and not set(edge_names(required_schema)).issubset(edge_names(runtime_schema)):
         suggestion = ""
         if required_edge_dim >= 5 and runtime_edge_dim <= 4:
             suggestion = " Use --relative-speed-edge-features or a feature run with relative-speed edge features."
@@ -720,6 +726,7 @@ def resolve_pass_success_runtime_schema(
     v_edge_feature_mode: str,
     relative_speed_edge_feature_mode: str = "none",
     lane_survival: bool = False,
+    input_settings: dict | None = None,
 ) -> dict[str, int | bool]:
     action_graph_dir = get_action_graph_dir(feature_root)
     try:
@@ -728,28 +735,18 @@ def resolve_pass_success_runtime_schema(
         metadata = load_feature_run_metadata(Path(feature_root).name, required=False) or {}
         metadata_schema = dict(metadata.get("graph_schema") or {})
         metadata_edge_dim = int(metadata_schema.get("edge_in_dim", 4) or 4)
-        feature_schema = {
-            "node_in_dim": int(metadata_schema.get("node_in_dim", 25) or 25),
-            "edge_in_dim": metadata_edge_dim,
-            "add_v_edge_features": bool(metadata_schema.get("add_v_edge_features", metadata_edge_dim > 2)),
-            "add_relative_speed_edge_features": bool(
-                metadata_schema.get("add_relative_speed_edge_features", metadata_edge_dim > 4)
-            ),
-        }
-    training_edge_schema = infer_training_edge_schema(
+        feature_schema = {"node_in_dim": int(metadata_schema.get("node_in_dim", 25) or 25), **metadata_schema}
+        feature_schema.setdefault("edge_in_dim", metadata_edge_dim)
+    infer_training_edge_schema(
         feature_schema,
         v_edge_feature_mode=v_edge_feature_mode,
         relative_speed_edge_feature_mode=relative_speed_edge_feature_mode,
+        **{f"{group}_edge_feature_mode": (input_settings or {}).get(f"{group}_edge_feature_mode", "none") for group in INTERACTION_GROUPS},
     )
     node_in_dim = int(feature_schema["node_in_dim"]) if feature_schema.get("node_in_dim") is not None else None
     if node_in_dim is not None and bool(lane_survival):
         node_in_dim += 1
-    return {
-        "node_in_dim": node_in_dim,
-        "edge_in_dim": int(training_edge_schema["edge_in_dim"]),
-        "add_v_edge_features": bool(training_edge_schema["add_v_edge_features"]),
-        "add_relative_speed_edge_features": bool(training_edge_schema["add_relative_speed_edge_features"]),
-    }
+    return {**feature_schema, "node_in_dim": node_in_dim}
 
 
 def retained_bundle_model_ids(model_ids: dict[str, str]) -> dict[str, str]:
@@ -803,6 +800,9 @@ def derive_bundle_shared_context(
             "v_edge_feature_mode": v_edge_feature_mode,
             "use_relative_speed_edge_features": bool(graph_schema.get("add_relative_speed_edge_features", False)),
             "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
+            "source_input_settings": {task: {key: record.get("feature_signature", {}).get(key)
+                                      for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")}
+                                      for task, record in model_records.items()},
             "source_architectures": {task: record.get("architecture_identity", architecture_identity(record.get("args", {})))
                                      for task, record in model_records.items()},
             "source_feature_run_ids": shared.get("source_feature_run_ids", {}),
@@ -822,7 +822,10 @@ def derive_bundle_shared_context(
         "return_type": cli_args.return_type,
         "target_family": cli_args.target_family,
         "graph_schema": {
-            "edge_in_dim": 5 if use_relative_speed_edge_features else 4 if use_v_edge_features else 2,
+            **schema_for_names(selected_edge_names({**vars(cli_args), "v_edge_feature_mode": v_edge_feature_mode,
+                                                    "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode}, fresh=True)),
+            "edge_in_dim": len(selected_edge_names({**vars(cli_args), "v_edge_feature_mode": v_edge_feature_mode,
+                                                    "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode}, fresh=True)),
             "add_v_edge_features": use_v_edge_features,
             "add_relative_speed_edge_features": use_relative_speed_edge_features,
         },
@@ -1023,6 +1026,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use raw relative-speed edge features except on edges incident to the ball possessor.",
     )
     parser.set_defaults(relative_speed_edge_feature_mode="none")
+    add_interaction_arguments(parser)
     pin_memory_group = parser.add_mutually_exclusive_group()
     pin_memory_group.add_argument(
         "--pin-memory",
@@ -2364,6 +2368,7 @@ def main() -> None:
                for task in trained_model_ids},
         },
         "training_feature_flags": feature_flags,
+        **{key: feature_flags.get(key) for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")},
         "batch_sizes": trained_batch_sizes,
         "physical_xpass": physical_xpass_settings(cli_args),
         "lane_survival": {
@@ -2378,6 +2383,7 @@ def main() -> None:
         **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
         "return_type": bundle_shared.get("return_type"),
+        "source_input_settings": bundle_shared.get("source_input_settings", {}),
         "source_feature_run_ids": bundle_shared.get("source_feature_run_ids", {}),
         "source_intended_receiver_modes": bundle_shared.get("source_intended_receiver_modes", {}),
         "source_return_types": bundle_shared.get("source_return_types", {}),

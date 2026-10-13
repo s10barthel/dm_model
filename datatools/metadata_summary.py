@@ -44,6 +44,12 @@ SUMMARY_COLUMNS = [
     "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
+    "position_direction_edge_feature_mode",
+    "relative_velocity_edge_feature_mode",
+    "separation_rate_edge_feature_mode",
+    "goal_edge_movement",
+    "scaling",
+    "scaling_profile",
     "status",
     "model_name",
     "ipw_model_id",
@@ -74,6 +80,12 @@ FEATURE_COLUMNS = [
     "lane_survival",
     "v_edge_feature_mode",
     "relative_speed_edge_feature_mode",
+    "position_direction_edge_feature_mode",
+    "relative_velocity_edge_feature_mode",
+    "separation_rate_edge_feature_mode",
+    "goal_edge_movement",
+    "scaling",
+    "scaling_profile",
 ]
 
 

@@ -432,6 +432,9 @@ def _build_frame_action_label_graph(
     feature_dim: int,
     add_v_edge_features: bool,
     add_relative_speed_edge_features: bool,
+    add_position_direction_edge_features: bool,
+    add_relative_velocity_edge_features: bool,
+    add_separation_rate_edge_features: bool,
 ) -> tuple[dict[str, Any], list[float], Data, None] | tuple[None, None, None, str]:
     possessor_object_id = str(frame_row["possessor_object_id"])
 
@@ -450,6 +453,9 @@ def _build_frame_action_label_graph(
         rotate_to_ltr=False,
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
+        add_position_direction_edge_features=add_position_direction_edge_features,
+        add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+        add_separation_rate_edge_features=add_separation_rate_edge_features,
     )
     if graph is None:
         return None, None, None, "skipped_missing_graph"
@@ -532,6 +538,9 @@ def _evaluate_skillcorner_frame(
     feature_dim: int,
     add_v_edge_features: bool,
     add_relative_speed_edge_features: bool,
+    add_position_direction_edge_features: bool,
+    add_relative_velocity_edge_features: bool,
+    add_separation_rate_edge_features: bool,
     stats: dict[str, int],
 ) -> tuple[dict[str, Any], list[float], Data] | None:
     stats["evaluated_frames"] += 1
@@ -543,6 +552,9 @@ def _evaluate_skillcorner_frame(
         feature_dim,
         add_v_edge_features,
         add_relative_speed_edge_features,
+        add_position_direction_edge_features,
+        add_relative_velocity_edge_features,
+        add_separation_rate_edge_features,
     )
     if skip_key is not None:
         stats[skip_key] += 1
@@ -554,6 +566,9 @@ def _build_actions_and_labels(
     possession: SkillcornerPossession,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
     scope: str = "actions",
     frames: int = 1,
 ) -> tuple[pd.DataFrame, torch.Tensor, list[Data], dict[str, int]]:
@@ -573,7 +588,7 @@ def _build_actions_and_labels(
             frame_rows, start, end,
             lambda frame: _evaluate_skillcorner_frame(
                 possession, frame, frame_rows[frame], period_tracking, feature_dim,
-                add_v_edge_features, add_relative_speed_edge_features, stats,
+                add_v_edge_features, add_relative_speed_edge_features, add_position_direction_edge_features, add_relative_velocity_edge_features, add_separation_rate_edge_features, stats,
             ), scope=scope, frames=frames,
         )
         possession.frame_selection = selection
@@ -596,6 +611,9 @@ def build_skillcorner_possession(
     event_index: int,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
     scope: str = "actions",
     frames: int = 1,
 ) -> tuple[SkillcornerPossession, dict[str, int]]:
@@ -639,6 +657,9 @@ def build_skillcorner_possession(
         possession,
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
+        add_position_direction_edge_features=add_position_direction_edge_features,
+        add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+        add_separation_rate_edge_features=add_separation_rate_edge_features,
         scope=scope,
         frames=frames,
     )

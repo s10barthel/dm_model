@@ -45,6 +45,8 @@ def build_action_dataset_kwargs(
     lane_survival_cache_dir: str | None = None,
 ) -> dict[str, Any]:
     """Build the feature-sensitive ActionDataset options shared by train and test."""
+    from models.edge_feature_config import normalize_v_edge_feature_args
+    args = normalize_v_edge_feature_args(dict(args) if isinstance(args, Mapping) else vars(args).copy())
     task = str(_get_arg(args, "task"))
     v_edge_feature_mode = normalize_v_edge_feature_mode(
         _get_arg(args, "v_edge_feature_mode", None),
@@ -107,6 +109,7 @@ def build_action_dataset_kwargs(
         "drop_non_blockers": _bool_arg(args, "filter_blockers", False),
         "sparsify": _get_arg(args, "sparsify", "none"),
         "max_edge_dist": float(_get_arg(args, "max_edge_dist", 10.0)),
+        **{key: _get_arg(args, key) for key in ("edge_feature_names", "edge_schema_version", "scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")},
         "edge_in_dim": int(_get_arg(args, "edge_in_dim", 2)),
         "v_edge_feature_mode": v_edge_feature_mode,
         "relative_speed_edge_feature_mode": relative_speed_edge_feature_mode,
@@ -136,6 +139,8 @@ def build_action_dataset_kwargs(
 
 
 _IPW_CHECKPOINT_FEATURE_KEYS = (
+    "edge_feature_names", "edge_schema_version", "scaling", "scaling_profile", "goal_edge_movement",
+    "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode",
     "xy_only",
     "possessor_aware",
     "keeper_aware",

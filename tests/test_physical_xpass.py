@@ -8105,8 +8105,14 @@ class PhysicalXPassTests(unittest.TestCase):
                 higher_state_id,
                 add_v_edge_features,
                 add_relative_speed_edge_features,
+                add_position_direction_edge_features,
+                add_relative_velocity_edge_features,
+                add_separation_rate_edge_features,
             ):
                 del higher_state_id, add_v_edge_features, add_relative_speed_edge_features
+                self.assertFalse(add_position_direction_edge_features)
+                self.assertFalse(add_relative_velocity_edge_features)
+                self.assertFalse(add_separation_rate_edge_features)
                 if modification_id == 2 and game_state_id == 2:
                     raise ValueError("bad state")
                 state = SimpleNamespace(

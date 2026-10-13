@@ -458,13 +458,18 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
 
 
 def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope="actions", frames=1,
-                              add_v_edge_features=False, add_relative_speed_edge_features=False, possession_ids=None):
+                              add_v_edge_features=False, add_relative_speed_edge_features=False, possession_ids=None,
+                              add_position_direction_edge_features=True, add_relative_velocity_edge_features=True,
+                              add_separation_rate_edge_features=True):
     """Yield physical partitions; semantic spell ownership is kept in the manifest."""
     if scope not in ("actions", "frames") or not isinstance(frames, int) or frames < 1:
         raise ValueError("Expected scope actions/frames and a positive frame stride")
     if "ball_accel" not in match.tracking.columns:
         match.tracking = preprocess.calc_physical_features(match.tracking, match.fps)
-    options = dict(add_v_edge_features=add_v_edge_features, add_relative_speed_edge_features=add_relative_speed_edge_features)
+    options = dict(add_v_edge_features=add_v_edge_features, add_relative_speed_edge_features=add_relative_speed_edge_features,
+                   add_position_direction_edge_features=add_position_direction_edge_features,
+                   add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                   add_separation_rate_edge_features=add_separation_rate_edge_features)
     plan = reconstruct_sportec_states(match, match_id, feature_root, graph_options=options)
     match.sportec_state_plan = plan
     report = dict(**plan.provenance, possessions={}, excluded_states=[], selected_states=0)

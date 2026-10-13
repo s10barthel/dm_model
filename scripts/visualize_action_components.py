@@ -28,6 +28,7 @@ from datatools.viz_helpers import (
 from datatools.viz_snapshot import SnapshotVisualizer
 from inference import configure_lane_survival_runtime_cache, inference_gnn, load_success_intent_labels, resolve_match_id
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
+from models.edge_schema import generation_kwargs
 from models.utils import (
     aggregate_graph_schemas,
     get_model_record,
@@ -256,6 +257,9 @@ def load_match(
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
     use_carries: bool = False,
+    add_position_direction_edge_features: bool = False,
+    add_relative_velocity_edge_features: bool = False,
+    add_separation_rate_edge_features: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -265,6 +269,11 @@ def load_match(
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
     match.runtime_feature_root = feature_root
+    match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
+                                       add_relative_speed_edge_features=add_relative_speed_edge_features,
+                                       add_position_direction_edge_features=add_position_direction_edge_features,
+                                       add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                                       add_separation_rate_edge_features=add_separation_rate_edge_features)
     resolved_action_path = get_resolved_action_path(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -294,6 +303,9 @@ def load_match(
             post_action=False,
             add_v_edge_features=add_v_edge_features,
             add_relative_speed_edge_features=add_relative_speed_edge_features,
+            add_position_direction_edge_features=add_position_direction_edge_features,
+            add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+            add_separation_rate_edge_features=add_separation_rate_edge_features,
         )
 
     return match
@@ -338,6 +350,7 @@ def run_success_intent_component(
             post_action=False,
             add_v_edge_features=bool(schema["add_v_edge_features"]),
             add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),
+            **generation_kwargs(schema),
         )
         if graph is None:
             raise ValueError(f"Could not construct a success-intent graph for action {action_index}.")
@@ -1021,6 +1034,7 @@ def main() -> None:
         feature_root=feature_root,
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+        **generation_kwargs(graph_schema),
         use_carries=use_carries,
     )
     selected_actions = resolve_action_indices(match, args)

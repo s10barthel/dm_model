@@ -50,7 +50,8 @@ def normalize_v_edge_feature_mode(
     if add_v_edge_features is not None:
         return V_EDGE_FEATURE_MODE_ALL if bool(add_v_edge_features) else V_EDGE_FEATURE_MODE_NONE
     if edge_in_dim is not None:
-        return V_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 2 else V_EDGE_FEATURE_MODE_NONE
+        from models.edge_schema import legacy_edge_names
+        return V_EDGE_FEATURE_MODE_ALL if "velocity_angle_cos" in legacy_edge_names(edge_in_dim) else V_EDGE_FEATURE_MODE_NONE
     return V_EDGE_FEATURE_MODE_NONE
 
 
@@ -77,7 +78,8 @@ def normalize_relative_speed_edge_feature_mode(
     if add_relative_speed_edge_features is not None:
         return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if bool(add_relative_speed_edge_features) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
     if edge_in_dim is not None:
-        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if int(edge_in_dim) > 4 else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
+        from models.edge_schema import legacy_edge_names
+        return RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL if "relative_speed" in legacy_edge_names(edge_in_dim) else RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
     return RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE
 
 
@@ -106,20 +108,10 @@ def validate_relative_speed_edge_feature_mode(
 
 
 def normalize_v_edge_feature_args(args: dict[str, Any]) -> dict[str, Any]:
-    mode = normalize_v_edge_feature_mode(
-        args.get("v_edge_feature_mode"),
-        use_v_edge_features=args.get("use_v_edge_features"),
-        mask_possessor_v_edge_features=args.get("mask_possessor_v_edge_features"),
-        add_v_edge_features=args.get("add_v_edge_features"),
-        edge_in_dim=args.get("edge_in_dim"),
-    )
-    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
-        args.get("relative_speed_edge_feature_mode"),
-        use_relative_speed_edge_features=args.get("use_relative_speed_edge_features"),
-        mask_possessor_relative_speed_edge_features=args.get("mask_possessor_relative_speed_edge_features"),
-        add_relative_speed_edge_features=args.get("add_relative_speed_edge_features"),
-        edge_in_dim=args.get("edge_in_dim"),
-    )
+    from models.edge_schema import group_mode, normalize_input_settings
+    normalize_input_settings(args)
+    mode = group_mode(args, "v")
+    relative_speed_mode = group_mode(args, "relative_speed")
     validate_relative_speed_edge_feature_mode(mode, relative_speed_mode)
     args["v_edge_feature_mode"] = mode
     args["use_v_edge_features"] = use_v_edge_features_for_mode(mode)

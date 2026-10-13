@@ -31,6 +31,8 @@ from models.architecture import GNN_ARCHITECTURES, normalize_architecture, archi
 from models.self_loops import capture_self_attributes
 from models.gnn import GNN
 from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
+from models.edge_schema import (edge_names, schema_for_names, selected_edge_names,
+                                project_graph_edges, mask_edge_inputs, CANONICAL_FEATURES, INTERACTION_GROUPS)
 from models.edge_feature_config import (
     RELATIVE_SPEED_EDGE_FEATURE_MODE_ALL,
     RELATIVE_SPEED_EDGE_FEATURE_MODE_NONE,
@@ -142,6 +144,7 @@ def should_stop_early(
 
 
 def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
+    normalize_v_edge_feature_args(args)
     pos_node_features_aware = resolve_pos_node_features(args)
     v_edge_feature_mode = normalize_v_edge_feature_mode(
         args.get("v_edge_feature_mode"),
@@ -196,6 +199,9 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
     signature["add_relative_speed_edge_features"] = use_relative_speed_edge_features_for_mode(
         relative_speed_edge_feature_mode
     )
+    signature.update({key: args.get(key) for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")})
+    if args.get("edge_feature_names") is not None:
+        signature.update(edge_feature_names=list(edge_names(args)), edge_schema_version=1)
     return signature
 
 
@@ -265,8 +271,8 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     task, run_id = parse_model_id(model_id)
 
     args.setdefault("edge_in_dim", 2)
-    args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
-    args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
+    args.setdefault("add_v_edge_features", "velocity_angle_cos" in edge_names(args))
+    args.setdefault("add_relative_speed_edge_features", "relative_speed" in edge_names(args))
     args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
     args["pos_node_features_aware"] = resolve_pos_node_features(args)
     args["goal_poss_dist"] = resolve_goal_poss_dist(args)
@@ -321,6 +327,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "feature_signature": feature_signature,
         "graph_schema": {
             "node_in_dim": feature_signature["node_in_dim"],
+            **schema_for_names(edge_names(args), explicit=args.get("edge_feature_names") is not None),
             "edge_in_dim": feature_signature["edge_in_dim"],
             "add_v_edge_features": feature_signature["add_v_edge_features"],
             "add_relative_speed_edge_features": feature_signature["add_relative_speed_edge_features"],
@@ -536,8 +543,8 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
             args = json.load(f)
         metadata = _read_json_if_exists(model_path / "metadata.json") or {}
         args.setdefault("edge_in_dim", 2)
-        args.setdefault("add_v_edge_features", bool(args["edge_in_dim"] > 2))
-        args.setdefault("add_relative_speed_edge_features", bool(args["edge_in_dim"] > 4))
+        args.setdefault("add_v_edge_features", "velocity_angle_cos" in edge_names(args))
+        args.setdefault("add_relative_speed_edge_features", "relative_speed" in edge_names(args))
         args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
         args["pos_node_features_aware"] = resolve_pos_node_features(args)
         args["goal_poss_dist"] = resolve_goal_poss_dist(args)
@@ -675,9 +682,7 @@ def is_feature_graph_schema_compatible(
             return False
         if int(feature_node_dim) < int(required_node_dim):
             return False
-    feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
-    required_edge_dim = int(required_schema.get("edge_in_dim", 0))
-    return feature_edge_dim >= required_edge_dim
+    return set(edge_names(required_schema)).issubset(edge_names(feature_schema))
 
 
 def validate_feature_graph_schema(
@@ -694,30 +699,26 @@ def validate_feature_graph_schema(
 
 
 def infer_training_edge_schema(
-    feature_schema: dict[str, int | bool],
-    use_v_edge_features: bool | None = None,
-    v_edge_feature_mode: str | None = None,
-    use_relative_speed_edge_features: bool | None = None,
-    relative_speed_edge_feature_mode: str | None = None,
-) -> dict[str, int | bool]:
+    feature_schema, use_v_edge_features=None, v_edge_feature_mode=None,
+    use_relative_speed_edge_features=None, relative_speed_edge_feature_mode=None,
+    position_direction_edge_feature_mode="none", relative_velocity_edge_feature_mode="none",
+    separation_rate_edge_feature_mode="none",
+):
     mode = normalize_v_edge_feature_mode(v_edge_feature_mode, use_v_edge_features=use_v_edge_features)
-    relative_speed_mode = normalize_relative_speed_edge_feature_mode(
-        relative_speed_edge_feature_mode,
-        use_relative_speed_edge_features=use_relative_speed_edge_features,
-    )
-    validate_relative_speed_edge_feature_mode(mode, relative_speed_mode)
-    feature_edge_dim = int(feature_schema.get("edge_in_dim", 0))
-    required_edge_dim = 5 if use_relative_speed_edge_features_for_mode(relative_speed_mode) else 4 if use_v_edge_features_for_mode(mode) else 2
-    if feature_edge_dim < required_edge_dim:
-        raise ValueError(
-            "Selected feature artifacts do not provide the requested edge-feature schema: "
-            f"features={feature_schema}, required_edge_dim={required_edge_dim}."
-        )
-    return {
-        "edge_in_dim": required_edge_dim,
-        "add_v_edge_features": use_v_edge_features_for_mode(mode),
-        "add_relative_speed_edge_features": use_relative_speed_edge_features_for_mode(relative_speed_mode),
-    }
+    relative_mode = normalize_relative_speed_edge_feature_mode(relative_speed_edge_feature_mode,
+                                                               use_relative_speed_edge_features=use_relative_speed_edge_features)
+    validate_relative_speed_edge_feature_mode(mode, relative_mode)
+    settings = dict(v_edge_feature_mode=mode, relative_speed_edge_feature_mode=relative_mode,
+                    position_direction_edge_feature_mode=position_direction_edge_feature_mode,
+                    relative_velocity_edge_feature_mode=relative_velocity_edge_feature_mode,
+                    separation_rate_edge_feature_mode=separation_rate_edge_feature_mode)
+    required = selected_edge_names(settings)
+    if not set(required).issubset(edge_names(feature_schema)):
+        raise ValueError("Selected feature artifacts do not provide the requested edge-feature schema: "
+                         f"features={feature_schema}, required_edge_dim={len(required)}, missing={sorted(set(required).difference(edge_names(feature_schema)))}. "
+                         "Use --extend-interaction-edge-features or regenerate the feature run.")
+    explicit = feature_schema.get("edge_feature_names") is not None or any(settings[f"{group}_edge_feature_mode"] != "none" for group in INTERACTION_GROUPS)
+    return schema_for_names(required, explicit=explicit)
 
 
 def get_model_records(model_ids: dict[str, str]) -> dict[str, dict[str, Any]]:
@@ -728,16 +729,10 @@ def aggregate_graph_schemas(schemas: dict[str, dict[str, Any]]) -> dict[str, int
     if not schemas:
         return {"edge_in_dim": 2, "add_v_edge_features": False, "add_relative_speed_edge_features": False}
 
-    edge_dims = [int(schema.get("edge_in_dim", 2)) for schema in schemas.values()]
     node_dims = [int(schema["node_in_dim"]) for schema in schemas.values() if schema.get("node_in_dim") is not None]
-    edge_in_dim = max(edge_dims) if edge_dims else 2
-    result: dict[str, int | bool] = {
-        "edge_in_dim": edge_in_dim,
-        "add_v_edge_features": bool(edge_in_dim > 2 or any(schema.get("add_v_edge_features") for schema in schemas.values())),
-        "add_relative_speed_edge_features": bool(
-            edge_in_dim > 4 or any(schema.get("add_relative_speed_edge_features") for schema in schemas.values())
-        ),
-    }
+    union = set().union(*(edge_names(schema) for schema in schemas.values()))
+    names = tuple(name for name in CANONICAL_FEATURES if name in union)
+    result = schema_for_names(names, explicit=any(schema.get("edge_feature_names") is not None for schema in schemas.values()))
     if node_dims:
         result["node_in_dim"] = max(node_dims)
     return result
@@ -940,13 +935,8 @@ def resolve_model_selection(
 def get_model_graph_schema(model: GNN | None) -> dict[str, int | bool] | None:
     if model is None or not hasattr(model, "args"):
         return None
-    edge_in_dim = int(model.args.get("edge_in_dim", 2))
-    return {
-        "node_in_dim": int(model.args.get("node_in_dim", 0)),
-        "edge_in_dim": edge_in_dim,
-        "add_v_edge_features": bool(model.args.get("add_v_edge_features", edge_in_dim > 2)),
-        "add_relative_speed_edge_features": bool(model.args.get("add_relative_speed_edge_features", edge_in_dim > 4)),
-    }
+    return {"node_in_dim": int(model.args.get("node_in_dim", 0)),
+            **schema_for_names(edge_names(model.args), explicit=model.args.get("edge_feature_names") is not None)}
 
 
 def validate_model_graph_schemas(models: dict[str, GNN | None]) -> dict[str, int | bool]:
@@ -971,13 +961,10 @@ def infer_feature_graph_schema(feature_dir: str | Path) -> dict[str, int | bool]
             if first_graph is None:
                 continue
             node_in_dim = int(first_graph.x.shape[1]) if getattr(first_graph, "x", None) is not None else 0
-            edge_in_dim = int(first_graph.edge_attr.shape[1]) if getattr(first_graph, "edge_attr", None) is not None else 0
-            return {
-                "node_in_dim": node_in_dim,
-                "edge_in_dim": edge_in_dim,
-                "add_v_edge_features": bool(edge_in_dim > 2),
-                "add_relative_speed_edge_features": bool(edge_in_dim > 4),
-            }
+            return {"node_in_dim": node_in_dim,
+                    **schema_for_names(edge_names(first_graph), explicit=getattr(first_graph, "edge_feature_names", None) is not None)}
+        except ValueError as exc:
+            raise ValueError(f"Invalid graph schema in {graph_file}: {exc}") from exc
         except Exception:
             continue
     raise FileNotFoundError(f"Could not infer graph schema from feature directory {feature_dir}.")
@@ -1195,33 +1182,12 @@ def adapt_batch_graphs_for_model(
             f"but runtime graphs provide node_in_dim={actual_node_dim}."
         )
 
-    required_edge_dim = int(model_args.get("edge_in_dim", 0) or 0)
-    actual_edge_dim = int(batch_graphs.edge_attr.shape[1]) if getattr(batch_graphs, "edge_attr", None) is not None else 0
-    if required_edge_dim and actual_edge_dim < required_edge_dim:
-        raise ValueError(
-            f"{context} requires edge_in_dim={required_edge_dim}, "
-            f"but runtime graphs provide edge_in_dim={actual_edge_dim}."
+    if model_args.get("edge_in_dim", 0):
+        batch_graphs = project_graph_edges(batch_graphs, edge_names(model_args))
+        batch_graphs.edge_attr = mask_edge_inputs(
+            batch_graphs.edge_attr, batch_graphs.edge_index, batch_graphs.x, model_args,
+            names=edge_names(batch_graphs), possessor_mask=getattr(batch_graphs, "inference_possessor_mask", None),
         )
-
-    if (
-        should_mask_possessor_v_edge_features_for_model(model_args)
-        and actual_edge_dim >= 4
-        and actual_node_dim > config.NODE_FEATURE_IS_POSSESSOR
-    ):
-        possessor_nodes = batch_graphs.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
-        incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
-        batch_graphs.edge_attr[incident_edges, 2:4] = 0
-    if (
-        should_mask_possessor_relative_speed_edge_features_for_model(model_args)
-        and actual_edge_dim >= 5
-        and actual_node_dim > config.NODE_FEATURE_IS_POSSESSOR
-    ):
-        possessor_nodes = batch_graphs.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
-        incident_edges = possessor_nodes[batch_graphs.edge_index[0]] | possessor_nodes[batch_graphs.edge_index[1]]
-        batch_graphs.edge_attr[incident_edges, 4] = 0
-
-    if required_edge_dim and actual_edge_dim > required_edge_dim:
-        batch_graphs.edge_attr = batch_graphs.edge_attr[:, :required_edge_dim]
     if required_node_dim and actual_node_dim > required_node_dim:
         batch_graphs.x = batch_graphs.x[:, :required_node_dim]
     return batch_graphs

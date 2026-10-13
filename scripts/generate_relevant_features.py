@@ -16,6 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from models.edge_schema import (edge_names, schema_for_names, generation_edge_names, add_interaction_arguments,
+                                generation_kwargs, interaction_values, CANONICAL_FEATURES, INTERACTION_GROUPS, EDGE_GROUPS)
 from datatools import config
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
@@ -97,6 +99,7 @@ class FeatureExtensionPlan:
     graph_schema: dict[str, Any]
     commands: list[list[str]]
     command_steps: list[FeatureGenerationStep]
+    extend_interaction_edge_features: bool = False
 
 
 def parse_args() -> argparse.Namespace:
@@ -228,6 +231,9 @@ def parse_args() -> argparse.Namespace:
         help="Do not generate raw relative-speed edge features.",
     )
     parser.set_defaults(add_relative_speed_edge_features=False)
+    add_interaction_arguments(parser, training=False)
+    parser.add_argument("--extend-interaction-edge-features", action="store_true",
+                        help="Add positional direction, relative velocity and separation rate to an existing feature run using its raw node inputs.")
     next_action_group = parser.add_mutually_exclusive_group()
     next_action_group.add_argument(
         "--next-action-conditions-on",
@@ -263,6 +269,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
     if args.pass_height_threshold is not None and not args.pass_height:
         parser.error("--pass-height-threshold requires --pass-height.")
+    if args.extend_interaction_edge_features and not args.extend_feature_run_id:
+        parser.error("--extend-interaction-edge-features requires --extend-feature-run-id.")
     if args.extend_relative_speed_edge_features and not args.extend_feature_run_id:
         parser.error("--extend-relative-speed-edge-features requires --extend-feature-run-id.")
     if (args.in_place or args.overwrite_feature_run) and not args.extend_feature_run_id:
@@ -314,6 +322,9 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         if bool(getattr(args, "add_relative_speed_edge_features", False))
         else "--no-relative-speed-edge-features"
     )
+    for group in INTERACTION_GROUPS:
+        option = group.replace("_", "-") + "-edge-features"
+        command.append("--" + ("" if getattr(args, f"add_{group}_edge_features", True) else "no-") + option)
     if bool(getattr(args, "pass_height", False)):
         command.extend(["--pass-height-threshold", str(pass_height_threshold_meters(args))])
     return command
@@ -414,11 +425,10 @@ def full_generation_commands(python: str, use_carries: bool = False) -> list[Fea
 def normalize_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(schema, dict):
         return {}
-    normalized = {
-        "edge_in_dim": int(schema.get("edge_in_dim", -1)),
-        "add_v_edge_features": bool(schema.get("add_v_edge_features", False)),
-        "add_relative_speed_edge_features": bool(schema.get("add_relative_speed_edge_features", False)),
-    }
+    normalized = dict(schema)
+    normalized.update(edge_in_dim=int(schema.get("edge_in_dim", -1)),
+                      add_v_edge_features=bool(schema.get("add_v_edge_features", False)),
+                      add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)))
     if schema.get("node_in_dim") is not None:
         normalized["node_in_dim"] = int(schema["node_in_dim"])
     return normalized
@@ -426,28 +436,22 @@ def normalize_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
 
 def normalize_edge_graph_schema(schema: dict[str, Any] | None) -> dict[str, Any]:
     normalized = normalize_graph_schema(schema)
-    return {
-        "edge_in_dim": int(normalized.get("edge_in_dim", -1)),
-        "add_v_edge_features": bool(normalized.get("add_v_edge_features", False)),
-        "add_relative_speed_edge_features": bool(normalized.get("add_relative_speed_edge_features", False)),
-    }
+    return {key: value for key, value in normalized.items() if key != "node_in_dim"}
 
 
 def is_supported_edge_graph_schema(schema: dict[str, Any]) -> bool:
-    normalized = normalize_edge_graph_schema(schema)
-    return any(normalized == expected for expected in SUPPORTED_EDGE_GRAPH_SCHEMAS)
+    try:
+        names = edge_names(schema)
+        return bool(names) and ("relative_speed" not in names or "velocity_angle_cos" in names)
+    except (ValueError, TypeError):
+        return False
 
 
 def graph_schema_from_args(args: argparse.Namespace) -> dict[str, Any]:
-    add_v_edge_features = bool(getattr(args, "add_v_edge_features", False))
-    add_relative_speed_edge_features = bool(getattr(args, "add_relative_speed_edge_features", False))
-    edge_in_dim = 5 if add_relative_speed_edge_features else 4 if add_v_edge_features else 2
-    return {
-        "node_in_dim": infer_node_feature_dim(extend=True),
-        "edge_in_dim": edge_in_dim,
-        "add_v_edge_features": add_v_edge_features,
-        "add_relative_speed_edge_features": add_relative_speed_edge_features,
-    }
+    names = generation_edge_names(bool(getattr(args, "add_v_edge_features", False)),
+                                  bool(getattr(args, "add_relative_speed_edge_features", False)),
+                                  *(getattr(args, f"add_{group}_edge_features", True) for group in INTERACTION_GROUPS))
+    return {"node_in_dim": infer_node_feature_dim(extend=True), **schema_for_names(names)}
 
 
 def edge_feature_flags_for_schema(schema: dict[str, Any]) -> list[str]:
@@ -458,6 +462,9 @@ def edge_feature_flags_for_schema(schema: dict[str, Any]) -> list[str]:
         if normalized["add_relative_speed_edge_features"]
         else "--no-relative-speed-edge-features"
     )
+    for group, enabled in generation_kwargs(normalized).items():
+        option = group.removeprefix("add_").replace("_", "-")
+        flags.append("--" + ("" if enabled else "no-") + option)
     return flags
 
 
@@ -821,9 +828,10 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     refresh_target_families = args_refresh_target_families(args)
     refresh_pass_height_labels = bool(getattr(args, "pass_height", False))
     extend_relative_speed_edge_features = bool(getattr(args, "extend_relative_speed_edge_features", False))
+    extend_interaction_edge_features = bool(getattr(args, "extend_interaction_edge_features", False))
     if extend_relative_speed_edge_features:
         edge_schema = normalize_edge_graph_schema(graph_schema)
-        if edge_schema != ALIGNMENT_EDGE_GRAPH_SCHEMA:
+        if edge_names(edge_schema) != tuple(CANONICAL_FEATURES[:4]):
             raise ValueError(
                 "--extend-relative-speed-edge-features requires a completed 4-column velocity-angle feature run "
                 f"with graph_schema={ALIGNMENT_EDGE_GRAPH_SCHEMA!r}; got {edge_schema!r}."
@@ -878,11 +886,12 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         and not refresh_target_families
         and not refresh_pass_height_labels
         and not extend_relative_speed_edge_features
+        and not extend_interaction_edge_features
     ):
         raise ValueError(
             "Extension would not add any return types, intended-receiver modes, or target-label refreshes. "
             "Use a fresh full run or request a new --return_type / --intended-receiver-model-id / "
-            "--refresh-target-family / --pass-height / --extend-relative-speed-edge-features."
+            "--refresh-target-family / --pass-height / --extend-relative-speed-edge-features / --extend-interaction-edge-features."
         )
 
     in_place = bool(getattr(args, "in_place", False))
@@ -955,9 +964,11 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     commands = [step.command for step in command_steps]
     final_graph_schema = copy.deepcopy(graph_schema)
     if extend_relative_speed_edge_features:
-        final_graph_schema["edge_in_dim"] = 5
-        final_graph_schema["add_v_edge_features"] = True
-        final_graph_schema["add_relative_speed_edge_features"] = True
+        final_graph_schema.update(schema_for_names(CANONICAL_FEATURES[:5],
+                                  explicit=graph_schema.get("edge_feature_names") is not None))
+    if extend_interaction_edge_features:
+        union = set(edge_names(final_graph_schema)) | {name for group in INTERACTION_GROUPS for name in EDGE_GROUPS[group]}
+        final_graph_schema.update(schema_for_names([name for name in CANONICAL_FEATURES if name in union]))
     return FeatureExtensionPlan(
         base_run_id=base_run_id,
         output_run_id=output_run_id,
@@ -973,6 +984,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         refresh_target_families=refresh_target_families,
         refresh_pass_height_labels=refresh_pass_height_labels,
         extend_relative_speed_edge_features=extend_relative_speed_edge_features,
+        extend_interaction_edge_features=extend_interaction_edge_features,
         refreshed_return_types=final_return_types if refresh_target_families or refresh_pass_height_labels else [],
         refreshed_intended_receiver_modes=final_modes if refresh_target_families or refresh_pass_height_labels else [],
         intended_receiver_model_id=final_model_id,
@@ -999,6 +1011,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_refresh_target_families": plan.refresh_target_families,
         "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
         "extension_relative_speed_edge_features": plan.extend_relative_speed_edge_features,
+        "extension_interaction_edge_features": plan.extend_interaction_edge_features,
         "pass_height_threshold_meters": pass_height_threshold_meters(args),
         "extension_refreshed_return_types": plan.refreshed_return_types,
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
@@ -1042,6 +1055,7 @@ def extension_history_entry(
         "refresh_target_families": plan.refresh_target_families,
         "refresh_pass_height_labels": plan.refresh_pass_height_labels,
         "relative_speed_edge_features": plan.extend_relative_speed_edge_features,
+        "interaction_edge_features": plan.extend_interaction_edge_features,
         "refreshed_return_types": plan.refreshed_return_types,
         "refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
@@ -1099,6 +1113,7 @@ def mutating_metadata(
             ),
             "extension_refresh_target_families": plan.refresh_target_families,
             "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
+            "extension_interaction_edge_features": plan.extend_interaction_edge_features if advertise_final_state else False,
             "extension_relative_speed_edge_features": (
                 plan.extend_relative_speed_edge_features if advertise_final_state else False
             ),
@@ -1182,7 +1197,7 @@ def relative_speed_graph_dirs(feature_root: Path, intended_receiver_modes: list[
     dirs.extend(get_augmented_feature_dir(mode, root=feature_root) for mode in intended_receiver_modes)
     unique: list[Path] = []
     seen: set[Path] = set()
-    for directory in dirs:
+    for directory in [*dirs, *(Path(str(directory) + "_carries") for directory in dirs)]:
         resolved = Path(directory)
         if resolved in seen or not resolved.exists():
             continue
@@ -1211,6 +1226,11 @@ def append_relative_speed_to_graph(graph: object) -> object:
     dst_vy = graph.x[graph.edge_index[1], config.NODE_FEATURE_VY]
     relative_speed = torch.sqrt((src_vx - dst_vx).square() + (src_vy - dst_vy).square()).unsqueeze(-1)
     graph.edge_attr = torch.cat([graph.edge_attr, relative_speed.to(dtype=graph.edge_attr.dtype)], dim=1)
+    if getattr(graph, "edge_feature_names", None) is not None:
+        graph.edge_feature_names = list(CANONICAL_FEATURES[:5])
+    saved_self = getattr(graph, "node_self_edge_attr", None)
+    if saved_self is not None:
+        graph.node_self_edge_attr = torch.cat([saved_self, saved_self.new_zeros((graph.num_nodes, 1))], dim=1)
     return graph
 
 
@@ -1253,6 +1273,55 @@ def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_mo
     return [graph_file for graph_file, _ in temp_files]
 
 
+def append_interactions_to_graph(graph):
+    if graph is None:
+        return None
+    source = edge_names(graph)
+    interactions = interaction_values(graph.x, graph.edge_index)
+    names = tuple(name for name in CANONICAL_FEATURES if name in source or name in interactions)
+    columns = [graph.edge_attr[:, source.index(name)] if name in source else interactions[name].to(graph.edge_attr)
+               for name in names]
+    graph.edge_attr = torch.stack(columns, dim=-1)
+    graph.edge_feature_names = list(names)
+    graph.edge_schema_version = 1
+    # Preserve saved physical loop attributes and append zero-valued new self inputs.
+    saved_self = getattr(graph, "node_self_edge_attr", None)
+    if saved_self is not None:
+        if saved_self.shape != (graph.num_nodes, len(source)):
+            raise ValueError("Saved self-edge metadata does not match the source schema.")
+        graph.node_self_edge_attr = torch.stack([
+            saved_self[:, source.index(name)] if name in source else saved_self.new_zeros(graph.num_nodes)
+            for name in names
+        ], dim=-1)
+    return graph
+
+
+def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes: list[str]) -> list[Path]:
+    graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
+                   for path in sorted(directory.glob("*.pt"))]
+    if not graph_files:
+        raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
+    temporary = []
+    try:
+        # Validate and stage every artifact before replacing any source file.
+        for path in graph_files:
+            graphs = torch.load(path, weights_only=False)
+            if not isinstance(graphs, list):
+                raise TypeError(f"Graph artifact {path} is not a list.")
+            upgraded = [append_interactions_to_graph(graph) for graph in graphs]
+            temp = path.with_name(path.name + ".interactions.tmp")
+            temporary.append((path, temp))
+            torch.save(upgraded, temp)
+        for path, temp in temporary:
+            temp.replace(path)
+    finally:
+        for _, temp in temporary:
+            if temp.exists():
+                temp.unlink()
+    print(f"Extended interaction edge features in {len(graph_files)} graph files.")
+    return graph_files
+
+
 def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
     if plan.extension_mode == EXTENSION_MODE_DERIVED:
@@ -1264,6 +1333,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             run_generation_steps(plan.command_steps)
             if plan.extend_relative_speed_edge_features:
                 extend_relative_speed_edge_features(output_root, plan.final_intended_receiver_modes)
+            if plan.extend_interaction_edge_features:
+                extend_interaction_edge_features(output_root, plan.final_intended_receiver_modes)
         except Exception as exc:
             write_run_metadata(output_root, derived_metadata(args, plan, "failed", error=str(exc)))
             raise
@@ -1284,6 +1355,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
         run_generation_steps(plan.command_steps)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes)
+        if plan.extend_interaction_edge_features:
+            extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes)
     except Exception as exc:
         if plan.extension_mode == EXTENSION_MODE_IN_PLACE:
             write_run_metadata(
@@ -1378,8 +1451,16 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
         updated["base_feature_run_id"] = base_run_id
     write_run_metadata(output_root, updated)
     steps = carry_extension_steps(args, metadata, output_run_id)
+    extend_interactions = bool(getattr(args, "extend_interaction_edge_features", False))
     try:
         run_generation_steps(steps)
+        if extend_interactions:
+            extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata))
+            source_names = edge_names(normalize_graph_schema(metadata.get("graph_schema")))
+            updated["graph_schema"] = schema_for_names(tuple(
+                name for name in CANONICAL_FEATURES
+                if name in source_names or any(name in EDGE_GROUPS[group] for group in INTERACTION_GROUPS)
+            ))
     except Exception as exc:
         updated["status"] = "completed" if args.in_place else "failed"
         updated["carry_variant_error"] = str(exc)
@@ -1391,6 +1472,7 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
         {
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "type": "carry_variant",
+            "interaction_edge_features": extend_interactions,
             "status": "completed",
             "base_feature_run_id": base_run_id,
             "commands": [step.command for step in steps],

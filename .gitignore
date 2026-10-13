@@ -94,3 +94,5 @@ _vendor/defcon/saved
 !tests/test_visualization_comparison.py
 
 !tests/test_gnn_architectures.py
+
+!tests/test_interaction_inputs.py

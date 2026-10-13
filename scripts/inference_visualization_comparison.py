@@ -7,6 +7,7 @@ import torch
 
 from models.inference_masks import configure_inference_masks, flatten_mask_values, resolve_inference_mask_configurations
 from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
+from models.edge_schema import generation_kwargs
 from models.utils import (
     aggregate_graph_schemas, get_model_record, load_bundle_record, load_model,
     validate_model_record_consistency, validate_model_graph_schemas,
@@ -144,7 +145,7 @@ def hawkeye_groups(args, mod, variants, selection, schema, device):
         scene_tracking = tracking.loc[tracking.id.eq(str(identifier))].copy()
         subject, _, _ = mod.build_hawkeye_situation(scene_tracking, ball,
             freeze_ballreceipt=args.freeze_ballreceipt, add_v_edge_features=bool(schema["add_v_edge_features"]),
-            add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)))
+            add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)), **generation_kwargs(schema))
         selected_frames = mod.resolve_hawkeye_png_frames(subject, mod.resolve_ballreceipt(scene_tracking), mod.requested_time_norms(args))
         frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
         tables, cache = [], {}
@@ -182,6 +183,7 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
     subject = mod.load_match(args.match_id, intended_receiver_mode=runtime["intended_receiver_mode"],
         return_type=return_type, feature_root=feature_root, add_v_edge_features=bool(schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),
+        **generation_kwargs(schema),
         use_carries=bool(shared.get("use_carries", (bundle or {}).get("use_carries", False))))
     actions = mod.resolve_action_indices(subject, args)
     if not actions:

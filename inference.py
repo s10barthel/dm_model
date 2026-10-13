@@ -1268,7 +1268,8 @@ def inference_gnn_posterior(
             intent_onehot = torch.zeros(graph_i.x.shape[0]).to(device)
             intent_onehot[intent_index] = 1
             intended_nodes = torch.cat([graph_i.x, intent_onehot.unsqueeze(1)], -1)
-            intended_graph = Data(x=intended_nodes, edge_index=graph_i.edge_index, edge_attr=graph_i.edge_attr)
+            intended_graph = graph_i.clone()
+            intended_graph.x = intended_nodes
             if hasattr(graph_i, "inference_possessor_mask"):
                 intended_graph.inference_possessor_mask = graph_i.inference_possessor_mask
             intended_graphs.append(intended_graph)

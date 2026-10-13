@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from models.edge_schema import generation_kwargs
+
 import pandas as pd
 import torch
 
@@ -309,6 +311,7 @@ def save_export_outputs(
                 feature_root=feature_root,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                **generation_kwargs(graph_schema),
             )
             epv_action_values = infer_match_epv(match, model_specs, device)
             annotated_events, exported_epv = annotate_match_epv(events, epv_action_values)

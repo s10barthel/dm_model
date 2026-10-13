@@ -32,6 +32,7 @@ from training_monitor import TrainingMonitor
 from training_refit import (HISTORY_VERSION, append_rate_history, apply_refit_rate,
                             load_refit_config, validate_rate_history, ValidationExampleIdentity)
 from models.graph_diagnostics import install_collation_diagnostics
+from models.edge_schema import add_interaction_arguments, normalize_input_settings, INTERACTION_GROUPS
 from datatools import config
 from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
 from datatools.endpoint_policy import nonnegative_duration
@@ -44,6 +45,7 @@ from models.utils import (
     get_args_str,
     get_losses_str,
     infer_training_edge_schema,
+    infer_feature_graph_schema,
     is_validation_loss_improved,
     load_splits,
     mask_possessor_relative_speed_edge_features_for_mode,
@@ -433,6 +435,7 @@ relative_speed_edge_feature_group.add_argument(
     help="Use raw relative-speed edge features except on edges incident to the ball possessor.",
 )
 parser.set_defaults(relative_speed_edge_feature_mode="none")
+add_interaction_arguments(parser)
 pin_memory_group = parser.add_mutually_exclusive_group()
 pin_memory_group.add_argument(
     "--pin-memory",
@@ -778,6 +781,18 @@ if __name__ == "__main__":
             resume_args = json.loads((resume_root / "args.json").read_text(encoding="utf-8"))
             resume_meta = load_existing_metadata(str(resume_root))
             resume_record = {**resume_args, **resume_meta}
+        # The older --cont path also inherits new input settings from its source.
+        saved_inputs = normalize_input_settings(dict(resume_record))
+        input_options = {"scaling": ("--scaling",), "goal_edge_movement": ("--no-goal-edge-movement",)}
+        input_options.update({f"{group}_edge_feature_mode": (f"--{group.replace('_', '-')}-edge-features",
+                              f"--no-{group.replace('_', '-')}-edge-features", f"--{group.replace('_', '-')}-edge-features-no-poss")
+                              for group in INTERACTION_GROUPS})
+        supplied_options = {token.split("=", 1)[0] for token in sys.argv[1:]}
+        for key, options in input_options.items():
+            if args.cont and supplied_options.intersection(options) and getattr(args, key) != saved_inputs[key]:
+                raise ValueError(f"Continuation restores saved input settings; conflicting {key} override.")
+            setattr(args, key, saved_inputs[key])
+        args.scaling_profile = saved_inputs["scaling_profile"]
         if args.feature_run_id is None:
             args.feature_run_id = resume_record.get("feature_run_id")
         elif resume_record.get("feature_run_id") != args.feature_run_id:
@@ -878,17 +893,14 @@ if __name__ == "__main__":
         config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE if args.require_goal_next10_diagnostics else None
     )
     args.node_in_dim = infer_node_in_dim(args.train_feature_dir, args.task, lane_survival=args.lane_survival)
-    _, feature_edge_dim = infer_graph_input_dims(args.train_feature_dir)
-    feature_schema = {
-        "edge_in_dim": int(feature_edge_dim),
-        "add_v_edge_features": bool(feature_edge_dim > 2),
-        "add_relative_speed_edge_features": bool(feature_edge_dim > 4),
-    }
+    feature_schema = infer_feature_graph_schema(args.train_feature_dir)
     training_schema = infer_training_edge_schema(
         feature_schema,
         v_edge_feature_mode=args.v_edge_feature_mode,
         relative_speed_edge_feature_mode=args.relative_speed_edge_feature_mode,
+        **{f"{group}_edge_feature_mode": getattr(args, f"{group}_edge_feature_mode", "none") for group in INTERACTION_GROUPS},
     )
+    vars(args).update(training_schema)
     args.edge_in_dim = int(training_schema["edge_in_dim"])
     args.add_v_edge_features = bool(training_schema["add_v_edge_features"])
     args.add_relative_speed_edge_features = bool(training_schema["add_relative_speed_edge_features"])
@@ -956,6 +968,7 @@ if __name__ == "__main__":
         "goal_context_version": args.goal_context_version,
         "goal_nodes_aware": args.goal_nodes_aware,
         "goal_poss_dist": args.goal_poss_dist,
+        **{key: getattr(args, key, None) for key in ("scaling", "scaling_profile", "goal_edge_movement", "edge_feature_names", "edge_schema_version", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")},
         "include_goals": args.include_goals,
         "model_id": args.model_id,
         "task": args.task,

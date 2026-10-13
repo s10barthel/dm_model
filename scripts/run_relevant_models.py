@@ -22,6 +22,7 @@ from datatools.graph_feature import construct_graph_features
 from datatools.match import Match
 from inference import PhysicalXPassNoUsableRowsError, inference_gnn, load_success_intent_labels
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
+from models.edge_schema import generation_kwargs
 from models.utils import (
     get_model_provenance,
     infer_feature_graph_schema,
@@ -165,6 +166,9 @@ def load_match(
     add_relative_speed_edge_features: bool = False,
     use_carries: bool = False,
     load_endpoint_graphs: bool = True,
+    add_position_direction_edge_features: bool = False,
+    add_relative_velocity_edge_features: bool = False,
+    add_separation_rate_edge_features: bool = False,
 ) -> Match:
     feature_root = Path(feature_root) if feature_root is not None else None
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
@@ -176,7 +180,10 @@ def load_match(
     match.sportec_canonical_source = events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
-                                       add_relative_speed_edge_features=add_relative_speed_edge_features)
+                                       add_relative_speed_edge_features=add_relative_speed_edge_features,
+                                       add_position_direction_edge_features=add_position_direction_edge_features,
+                                       add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                                       add_separation_rate_edge_features=add_separation_rate_edge_features)
     resolved_action_path = get_resolved_action_path(
         match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -211,6 +218,9 @@ def load_match(
                 post_action=False,
                 add_v_edge_features=add_v_edge_features,
                 add_relative_speed_edge_features=add_relative_speed_edge_features,
+                add_position_direction_edge_features=add_position_direction_edge_features,
+                add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                add_separation_rate_edge_features=add_separation_rate_edge_features,
             )
         else:
             if count_valid_graphs(match.graph_features_0) == 0:
@@ -221,6 +231,9 @@ def load_match(
                     post_action=False,
                     add_v_edge_features=add_v_edge_features,
                     add_relative_speed_edge_features=add_relative_speed_edge_features,
+                    add_position_direction_edge_features=add_position_direction_edge_features,
+                    add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                    add_separation_rate_edge_features=add_separation_rate_edge_features,
                 )
     else:
         match.graph_features_0 = construct_graph_features(
@@ -229,6 +242,9 @@ def load_match(
             post_action=False,
             add_v_edge_features=add_v_edge_features,
             add_relative_speed_edge_features=add_relative_speed_edge_features,
+            add_position_direction_edge_features=add_position_direction_edge_features,
+            add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+            add_separation_rate_edge_features=add_separation_rate_edge_features,
         )
     if count_valid_graphs(match.graph_features_0) == 0:
         raise ValueError("No usable action graphs are available for this match.")
@@ -246,6 +262,9 @@ def load_match(
                 post_action=True,
                 add_v_edge_features=add_v_edge_features,
                 add_relative_speed_edge_features=add_relative_speed_edge_features,
+                add_position_direction_edge_features=add_position_direction_edge_features,
+                add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                add_separation_rate_edge_features=add_separation_rate_edge_features,
             )
         else:
             if count_valid_graphs(match.graph_features_1) == 0:
@@ -256,6 +275,9 @@ def load_match(
                     post_action=True,
                     add_v_edge_features=add_v_edge_features,
                     add_relative_speed_edge_features=add_relative_speed_edge_features,
+                    add_position_direction_edge_features=add_position_direction_edge_features,
+                    add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                    add_separation_rate_edge_features=add_separation_rate_edge_features,
                 )
     else:
         match.graph_features_1 = construct_graph_features(
@@ -264,6 +286,9 @@ def load_match(
             post_action=True,
             add_v_edge_features=add_v_edge_features,
             add_relative_speed_edge_features=add_relative_speed_edge_features,
+            add_position_direction_edge_features=add_position_direction_edge_features,
+            add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+            add_separation_rate_edge_features=add_separation_rate_edge_features,
         )
     if count_valid_graphs(match.graph_features_1) == 0:
         raise ValueError("No usable post-action graphs are available for this match.")
@@ -819,6 +844,7 @@ def main() -> None:
                 feature_root=feature_root,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                **generation_kwargs(graph_schema),
                 use_carries=use_carries,
                 load_endpoint_graphs=False,
             )
@@ -830,6 +856,7 @@ def main() -> None:
                 match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
                 add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                **generation_kwargs(graph_schema),
             ):
                 try:
                     components = infer_skillcorner_components(state, model_specs, device=device)

@@ -159,7 +159,8 @@ def synthetic_training(tmp_path, monkeypatch):
         labels[:, config.LABEL_INDEX["is_pass"]] = 1
         labels[:, config.LABEL_INDEX["intent_index"]] = 1
         labels[:, 7] = 1
-        torch.save([graph(5, 3)], features / f"{match}.pt")
+        from scripts.generate_relevant_features import append_interactions_to_graph
+        torch.save([append_interactions_to_graph(graph(5, 3))], features / f"{match}.pt")
         torch.save(labels, labels_dir / f"{match}.pt")
     manifest = {"manifest_id": "fixture", "train": ids, "test": [], "metadata": {"train_size": 5}}
     monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: None)

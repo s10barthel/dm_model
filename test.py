@@ -18,6 +18,7 @@ from datatools import config
 from models import utils
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, outcome_bootstrap
 from models.dataset_config import build_action_dataset_kwargs
+from models.edge_schema import edge_names, schema_for_names, INTERACTION_GROUPS
 from models.inference_masks import (
     add_inference_mask_arguments,
     configure_inference_masks,
@@ -69,6 +70,26 @@ from project_config import (
 )
 from models.pass_height import (add_pass_height_argument, evaluation_height,
                                height_export_context, definition)
+
+
+
+def validate_checkpoint_edge_schema(feature_schema, model_args):
+    settings = vars(model_args) if not isinstance(model_args, dict) else model_args
+    model_schema = schema_for_names(edge_names(settings), explicit=settings.get("edge_feature_names") is not None)
+    reconstructed = infer_training_edge_schema(
+        feature_schema,
+        v_edge_feature_mode=settings.get("v_edge_feature_mode"),
+        relative_speed_edge_feature_mode=settings.get("relative_speed_edge_feature_mode"),
+        **{f"{group}_edge_feature_mode": settings.get(f"{group}_edge_feature_mode", "none")
+           for group in INTERACTION_GROUPS},
+    )
+    if edge_names(reconstructed) != edge_names(model_schema):
+        raise ValueError(
+            "Checkpoint edge-feature settings do not reconstruct its recorded graph schema: "
+            f"reconstructed={reconstructed}, checkpoint={model_schema}."
+        )
+    validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
+    return model_schema
 
 
 def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_id):
@@ -963,24 +984,7 @@ if __name__ == "__main__":
     )
     lane_survival_cache_dir = resolve_lane_survival_context(model_args, args)
     feature_schema = infer_feature_graph_schema(feature_dir)
-    model_schema = {
-        "edge_in_dim": int(getattr(model_args, "edge_in_dim", 2)),
-        "add_v_edge_features": bool(getattr(model_args, "add_v_edge_features", getattr(model_args, "edge_in_dim", 2) > 2)),
-        "add_relative_speed_edge_features": bool(
-            getattr(model_args, "add_relative_speed_edge_features", getattr(model_args, "edge_in_dim", 2) > 4)
-        ),
-    }
-    reconstructed_schema = infer_training_edge_schema(
-        feature_schema,
-        v_edge_feature_mode=getattr(model_args, "v_edge_feature_mode", None),
-        relative_speed_edge_feature_mode=getattr(model_args, "relative_speed_edge_feature_mode", None),
-    )
-    if reconstructed_schema != model_schema:
-        raise ValueError(
-            "Checkpoint edge-feature settings do not reconstruct its recorded graph schema: "
-            f"reconstructed={reconstructed_schema}, checkpoint={model_schema}."
-        )
-    validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
+    model_schema = validate_checkpoint_edge_schema(feature_schema, model_args)
 
     checkpoint_record = utils.get_model_record(args.model_id)
     evaluation_manifest, split_source = resolve_evaluation_split(args, checkpoint_record, resolved_feature_run_id)

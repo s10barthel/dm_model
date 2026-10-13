@@ -28,6 +28,7 @@ from datatools.skillcorner import (
     load_skillcorner_models,
     summarize_skillcorner_stats,
 )
+from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -372,6 +373,7 @@ def main() -> None:
                         int(event_index),
                         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                        **generation_kwargs(graph_schema),
                         scope=args.scope,
                         frames=args.frames,
                     )

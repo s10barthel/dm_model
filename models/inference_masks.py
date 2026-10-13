@@ -16,29 +16,20 @@ from typing import Any, Iterable, Mapping
 import torch
 
 from datatools import config
+from models.edge_schema import EDGE_GROUPS, edge_names, group_mode
+from models.input_scaling import node_schema, NODE_FEATURE_NAMES, OPTIONAL_NODE_FEATURE_NAMES
 from models.edge_feature_config import (
     normalize_relative_speed_edge_feature_mode,
     normalize_v_edge_feature_mode,
 )
 
 
-NODE_FEATURE_NAMES = {
-    "is_teammate": 0, "is_keeper": 1, "is_goal": 2,
-    "x": 3, "y": 4, "vx": 5, "vy": 6, "speed": 7, "accel": 8,
-    "goal_dist": 9, "goal_dx_norm": 10, "goal_dy_norm": 11, "ball_z": 12,
-    "is_possessor": 13, "poss_dist": 14, "poss_dx_norm": 15, "poss_dy_norm": 16,
-    "poss_vangle_cos": 17, "poss_vangle_sin": 18,
-}
-OPTIONAL_NODE_FEATURE_NAMES = (
-    "nearby_opponents_to_target", "nearest_opponent_to_target", "closer_opponents_to_goal",
-    "nearest_opponent_to_pass", "potential_interceptors", "potential_blockers",
-    "offside", "lane_survival", "pass_mean_speed", "pass_direction_x", "pass_direction_y",
-    "pass_direction_z", "intended_target",
-)
 EDGE_FEATURE_NAMES = {
     "distance": 0, "is_teammate": 1, "velocity_angle_cos": 2,
     "velocity_angle_sin": 3, "relative_speed": 4,
 }
+
+EDGE_FEATURE_NAMES.update({name: None for group in ("position_direction", "relative_velocity", "separation_rate") for name in EDGE_GROUPS[group]})
 
 _VELOCITY = tuple(f"node.{name}" for name in ("vx", "vy", "speed", "accel"))
 _GOAL = tuple(f"node.{name}" for name in ("goal_dist", "goal_dx_norm", "goal_dy_norm"))
@@ -67,7 +58,7 @@ INFERENCE_MASK_GROUPS = {
     "relative-speed-edge-features": (("edge.relative_speed", "all"),),
     "mask-possessor-v-edge-features": tuple((name, "possessor_incident") for name in _V_EDGES),
     "mask-possessor-relative-speed-edge-features": (("edge.relative_speed", "possessor_incident"),),
-    "motion": tuple((name, "all") for name in (*_VELOCITY, *_POSS_ANGLES, *_V_EDGES, "edge.relative_speed")),
+    "motion": tuple((name, "all") for name in (*_VELOCITY, *_POSS_ANGLES, *_V_EDGES, "edge.relative_speed", "edge.relative_vx", "edge.relative_vy", "edge.separation_rate")),
 }
 INFERENCE_MASK_GROUPS["v-edge-features-no-poss"] = INFERENCE_MASK_GROUPS["mask-possessor-v-edge-features"]
 INFERENCE_MASK_GROUPS["relative-speed-edge-features-no-poss"] = INFERENCE_MASK_GROUPS["mask-possessor-relative-speed-edge-features"]
@@ -189,40 +180,7 @@ def resolve_scoped_masks(values, participating_tasks: Iterable[str]) -> dict[str
     return resolved
 
 
-def _node_schema(args: Mapping[str, Any]) -> dict[str, int]:
-    width = int(args.get("node_in_dim", 0))
-    schema = {f"node.{name}": index for name, index in NODE_FEATURE_NAMES.items() if index < width}
-    explicit_names = args.get("node_feature_names")
-    if explicit_names is not None:
-        if len(explicit_names) != width or len(set(explicit_names)) != width:
-            raise ValueError("Ambiguous node_feature_names schema: names must uniquely identify every input column.")
-        return {name if str(name).startswith("node.") else f"node.{name}": index for index, name in enumerate(explicit_names)}
-    task = str(args.get("task", ""))
-    failure = int(task == "failure_receiver")
-    node_task = str(args.get("gnn_task", "node")).startswith("node")
-    lane = int(bool(args.get("lane_survival", False)) and node_task)
-    base_width = width - failure - lane
-    if failure:
-        schema["node.intended_target"] = width - 1
-    if lane:
-        schema["node.lane_survival"] = width - failure - 1
-    success_variant = task == "success_intent" or args.get("feature_variant") == "success_intent"
-    if success_variant:
-        if base_width in (23, 24):
-            for index, name in enumerate(OPTIONAL_NODE_FEATURE_NAMES[8:12], start=19):
-                schema[f"node.{name}"] = index
-            if base_width == 24:
-                schema["node.offside"] = 23
-    elif base_width in (25, 26):
-        for index, name in enumerate(OPTIONAL_NODE_FEATURE_NAMES[:6], start=19):
-            schema[f"node.{name}"] = index
-        if base_width == 26:
-            schema["node.offside"] = 25
-    elif base_width == 20:
-        schema["node.offside"] = 19
-    # Unknown optional layouts deliberately remain unresolved. Core columns are
-    # stable, but an optional slot cannot safely be inferred from an arbitrary width.
-    return schema
+_node_schema = node_schema
 
 
 def _edge_mode(args, relative=False):
@@ -242,8 +200,10 @@ def _disabled(args, feature: str, column: int, subset: str) -> str | None:
         from models.architecture import consumes_edge_attributes
         if not consumes_edge_attributes(args):
             return "architecture does not consume edge attributes"
-        if column >= 2:
-            mode = _edge_mode(args, relative=column == 4)
+        name = feature.removeprefix("edge.")
+        group = next((group for group, members in EDGE_GROUPS.items() if name in members), None)
+        if group:
+            mode = group_mode(args, group)
             if mode == "none" or (mode == "no_poss" and subset == "possessor_incident"):
                 return "disabled in checkpoint training configuration"
         return None
@@ -349,11 +309,13 @@ class RuntimeInferenceMasks:
 def _resolve_runtime(args: Mapping[str, Any], names: list[str]) -> RuntimeInferenceMasks:
     node_schema = _node_schema(args)
     edge_width = int(args.get("edge_in_dim", 0))
-    edge_schema = {f"edge.{name}": index for name, index in EDGE_FEATURE_NAMES.items() if index < edge_width}
+    edge_schema = {f"edge.{name}": index for index, name in enumerate(edge_names(args, edge_width))}
     requested = {}
     for name in names:
         for feature, subset in _expand_name(name):
             schema = node_schema if feature.startswith("node.") else edge_schema
+            if feature not in schema and name == "motion":
+                continue
             if feature not in schema:
                 raise ValueError(f"Inference mask {name!r} requires {feature}, absent or ambiguous in checkpoint task={args.get('task')!r} schema (node={args.get('node_in_dim')}, edge={edge_width}).")
             requested[(feature, subset)] = schema[feature]

@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 
 import datatools.preprocess as proc
+from models.edge_schema import generation_kwargs
 from datatools import config, utils
 from datatools.endpoint_policy import sample_is_eligible, valid_interval
 from datatools.epv import merge_epv_annotations
@@ -346,6 +347,7 @@ class Match(ABC):
                     post_action=False,
                     add_v_edge_features=add_v_edge_features,
                     add_relative_speed_edge_features=add_relative_speed_edge_features,
+                    **generation_kwargs(graph_schema),
                 )
                 if graph is None:
                     continue

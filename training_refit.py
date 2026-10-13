@@ -171,6 +171,8 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
     args = copy.deepcopy(settings)
     from models.architecture import normalize_architecture
     normalize_architecture(args)
+    from models.edge_schema import normalize_input_settings
+    normalize_input_settings(args)
     args["goal_poss_dist"] = resolve_goal_poss_dist(settings)
     args.update(split_selector(manifest))
     args.update(run_id=run_id, model_id=f"{task}/{run_id}", ipw_model_id=dependency_id, trial=None, cont=False,

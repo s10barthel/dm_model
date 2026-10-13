@@ -1020,6 +1020,47 @@ The existing low-level feature toggles on `train.py` are:
 
 Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
 
+### Scaling and directed interaction edges
+
+Fresh feature generation and fresh model training enable positional direction, relative velocity, and separation rate. The legacy velocity-angle and relative-speed edge groups remain off by default. Each new training group has three mutually exclusive controls:
+
+| Group | Enable (default) | Disable | Exclude possessor-incident edges |
+|---|---|---|---|
+| Positional direction | `--position-direction-edge-features` | `--no-position-direction-edge-features` | `--position-direction-edge-features-no-poss` |
+| Relative velocity | `--relative-velocity-edge-features` | `--no-relative-velocity-edge-features` | `--relative-velocity-edge-features-no-poss` |
+| Separation rate | `--separation-rate-edge-features` | `--no-separation-rate-edge-features` | `--separation-rate-edge-features-no-poss` |
+
+These controls are available on `train.py` and `scripts/train_relevant_models.py`. Feature generation exposes the enable/disable controls on `datatools/graph_feature.py` and `scripts/generate_relevant_features.py`; the exclusions are applied to model inputs so stored artifacts remain reusable.
+
+For a directed edge from source i to destination j, define `r = position_j - position_i`, `d = ||r||`, and `u = velocity_j - velocity_i`. Positional direction stores `(r_x/d, r_y/d)`, relative velocity stores `(u_x, u_y)` in m/s, and separation rate stores `dot(r/d, u)` in m/s. Negative separation rate means approaching; positive means moving apart. Reversing the edge negates direction and relative velocity while preserving separation rate. Calculations use the existing graph coordinate frame. Goals are stationary points. At distances no greater than `1e-6` m, direction and separation rate are zero; relative velocity is retained. All five new self-edge attributes are zero.
+
+`--no-goal-edge-movement` zeros relative velocity, separation rate, legacy relative speed, and both legacy velocity-angle attributes on **every edge involving a goal**, including both player-to-goal and goal-to-player directions and goal self-edges. It preserves the edges, distance, positional direction, and teammate indicator. Movement on goal edges is enabled by default. This option is independent of `--goal-poss-dist`, which controls goal-node inputs. Possessor exclusions likewise affect both directions and combine with goal exclusions. Node-only awareness flags retain their existing scope; the runtime `motion` mask also covers relative velocity and separation rate.
+
+`--scaling` enables the saved `physical_v1` input profile; it defaults off. Scaling divides copies of learned inputs without centering or clipping:
+
+| Quantity | Divisor |
+|---|---:|
+| x coordinates and x displacements | Pitch length (105 m) |
+| y coordinates and y displacements | Pitch width (68 m) |
+| Scalar distances, including polar radius | 100 m |
+| Speed, velocity components, relative speed/velocity, separation rate | 10 m/s |
+| Acceleration | 10 m/s^2 |
+| Ball height | 10 m |
+| Opponent/interceptor/blocker counts | 11 |
+| Binary indicators, probabilities, unit directions, sine/cosine, angles in radians | 1 |
+
+Scaling applies at encoder, decoder skip-input, and destination-input boundaries, including grid decoding. Already normalized destination coordinates are not divided again. Zero masks remain zero, signs are preserved, and values may exceed one. Stored graphs, prepared tensors, graph-distance thresholds, spatial processing, physical xPass calculations, physical logits, and labels retain their original units or values. Scaling alone requires no graph regeneration.
+
+Models save feature modes, goal-edge movement, scaling profile, and an explicit ordered edge schema. Evaluation and inference use those settings automatically; auxiliary/IPW models use their own settings. Historical checkpoints missing the new settings keep their original feature layout and unscaled behavior. Resume, continuation, and refit inherit source settings and retain existing compatibility and fingerprint checks. Legacy velocity-angle calculations, including their stationary-direction and unsigned-angle conventions, are unchanged.
+
+To add the new groups to a completed legacy feature run using its preserved raw coordinates and velocities:
+
+```powershell
+python scripts/generate_relevant_features.py --extend-feature-run-id <source_run_id> --run-id <upgraded_run_id> --extend-interaction-edge-features
+```
+
+Use the source run's split selector when it differs from the default. This creates a derived run by default, preserving labels, node identities, graph structure, existing edge attributes, and null graph placeholders. Existing explicit `--in-place` / `--overwrite-feature-run` extension modes remain available. Upgrade covers action, post-action, intent-training, success-intent, augmented, and available carry graph families. Required raw coordinates and velocities must be present and finite; otherwise regenerate the feature run. Training reports missing requested attributes instead of substituting zeros. Prepared caches invalidate through the normal schema/options/fingerprint mechanism.
+
 `--goal-poss-dist` (available on `scripts/train_relevant_models.py` and `train.py`) enables `poss_dist`, `poss_dx_norm`, and `poss_dy_norm` (columns 14-16) on both goal nodes. New training runs zero these three values on goal nodes by default; player values, graph width, coordinates, and edge distances are preserved. Broader possessor-feature masks and `xy-only` take precedence. Evaluation, inference, resume, and refit follow the saved setting; older checkpoints without it retain their original enabled behavior. Existing resume checks still apply.
 
 `--no-pos-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `x` and `y` for every node, including the possessor and goal nodes, at the encoder and decoder inputs. Positions are enabled by default. Graph width stays unchanged, and original coordinates remain available for graph processing, physical calculations, and destination features. Other spatial features remain independently controlled. The setting is saved with the checkpoint for evaluation and inference. Combining it with `--xy-only` (`--xy_only` in `train.py`) is rejected.

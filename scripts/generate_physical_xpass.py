@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from models.edge_schema import generation_kwargs
+
 import reachability as reach
 import pandas as pd
 import torch
@@ -1769,6 +1771,7 @@ def run_runtime_sportec_possessions(args: argparse.Namespace) -> dict[str, Any]:
                 match, str(match_id), feature_root, scope=args.scope, frames=args.frames,
                 add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                 add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+                **generation_kwargs(runtime_graph_schema_from_args(args)),
             ):
                 pc_resume.record_source(args, "sportec", state.pc_cache_match_id, state.pc_state_descriptor)
                 reports[str(match_id)] = report
@@ -1991,6 +1994,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     int(data["higher_state_id"]),
                     add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                     add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+                    **generation_kwargs(runtime_graph_schema_from_args(args)),
                 )[0],
                 build_benchmark_state(
                     data["game_state_2"],
@@ -1999,6 +2003,7 @@ def run_runtime_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     int(data["higher_state_id"]),
                     add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                     add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+                    **generation_kwargs(runtime_graph_schema_from_args(args)),
                 )[0],
             ]
             items: list[dict[str, Any]] = []
@@ -2089,6 +2094,7 @@ def run_runtime_hawkeye(args: argparse.Namespace) -> dict[str, Any]:
                 freeze_ballreceipt=args.freeze_ballreceipt,
                 add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                 add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+                **generation_kwargs(runtime_graph_schema_from_args(args)),
             )[0]
             graphs, labels, frame_selections = filter_hawkeye_runtime_graphs_by_time_norm(
                 situation,
@@ -2196,6 +2202,7 @@ def run_runtime_skillcorner(args: argparse.Namespace) -> dict[str, Any]:
                         int(event_index),
                         add_v_edge_features=runtime_add_v_edge_features_from_args(args),
                         add_relative_speed_edge_features=runtime_add_relative_speed_edge_features_from_args(args),
+                        **generation_kwargs(runtime_graph_schema_from_args(args)),
                         scope=args.scope if args.pc_xpass else "actions",
                         frames=args.frames if args.pc_xpass else 1,
                     )

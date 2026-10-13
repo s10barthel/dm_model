@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from datatools import config
 from models.self_loops import capture_self_attributes
+from models.edge_schema import edge_names, mask_edge_inputs
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.goal_context import (goal_policy, validate_source_goals, validate_observed_goal_target,
                                  node_index_invalid_reason, failure_receiver_target_invalid_reason,
@@ -253,6 +254,14 @@ class ActionDataset(Dataset):
         sparsify="none",
         max_edge_dist=10.0,
         edge_in_dim=None,
+        edge_feature_names=None,
+        edge_schema_version=None,
+        position_direction_edge_feature_mode="none",
+        relative_velocity_edge_feature_mode="none",
+        separation_rate_edge_feature_mode="none",
+        goal_edge_movement=True,
+        scaling=False,
+        scaling_profile=None,
         v_edge_feature_mode="none",
         relative_speed_edge_feature_mode="none",
         mask_possessor_v_edge_features=False,
@@ -548,7 +557,7 @@ class ActionDataset(Dataset):
                 from physical_pass_model import physical_state_hash
                 graph = graph.clone()
                 graph.pc_xpass_input_hash = physical_state_hash(graph)
-            graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None))
+            graph = adapt_graph_edge_features(graph.clone(), getattr(self, "edge_in_dim", None), edge_feature_names)
             capture_self_attributes(graph)
             graph.source_node_positions = torch.arange(graph.num_nodes)
             # Preserve roles used by runtime subset masks before training feature masks.
@@ -563,6 +572,15 @@ class ActionDataset(Dataset):
                 graph = mask_possessor_velocity_edge_features(graph, int(possessor_index))
             if self.mask_possessor_relative_speed_edge_features:
                 graph = _mask_possessor_relative_speed_edge_features(graph, int(possessor_index))
+
+            edge_settings = dict(edge_feature_names=list(edge_names(graph)), edge_in_dim=graph.edge_attr.shape[1],
+                                 v_edge_feature_mode=v_edge_feature_mode, relative_speed_edge_feature_mode=relative_speed_edge_feature_mode,
+                                 position_direction_edge_feature_mode=position_direction_edge_feature_mode,
+                                 relative_velocity_edge_feature_mode=relative_velocity_edge_feature_mode,
+                                 separation_rate_edge_feature_mode=separation_rate_edge_feature_mode,
+                                 goal_edge_movement=goal_edge_movement)
+            graph.edge_attr = mask_edge_inputs(graph.edge_attr, graph.edge_index, graph.x, edge_settings,
+                                               possessor_mask=graph.inference_possessor_mask)
 
             if task == "failure_receiver" and inplay_only and policy.version == 1:
                 n_teammates = int((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1).sum().item())

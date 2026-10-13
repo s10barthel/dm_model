@@ -151,7 +151,7 @@ class EdgeFeatureConstructionTests(unittest.TestCase):
 
         assert graph is not None
         edge_mask = (graph.edge_index[0] == 0) & (graph.edge_index[1] == 1)
-        self.assertEqual(graph.edge_attr.shape[1], 5)
+        self.assertEqual(graph.edge_attr.shape[1], 10)
         self.assertTrue(torch.allclose(graph.edge_attr[edge_mask, 4], torch.tensor([5.0])))
 
     def test_construct_graph_for_frame_rejects_relative_speed_without_alignment(self) -> None:

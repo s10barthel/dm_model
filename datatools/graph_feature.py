@@ -23,6 +23,7 @@ from tqdm import tqdm
 
 import datatools.preprocess as proc
 from datatools import config, utils
+from models.edge_schema import generation_edge_names, interaction_values, schema_for_names, add_interaction_arguments, INTERACTION_GROUPS
 from datatools.endpoint_policy import valid_interval
 from datatools.config import LABEL_INDEX
 from models.pass_height import positive_height
@@ -318,14 +319,12 @@ def infer_node_feature_dim(extend: bool = True, feature_variant: str = "base") -
     return base_dim
 
 
-def infer_edge_feature_dim(add_v_edge_features: bool = False, add_relative_speed_edge_features: bool = False) -> int:
-    if add_relative_speed_edge_features and not add_v_edge_features:
-        raise ValueError("Relative-speed edge features require velocity-angle edge features.")
-    return (
-        BASE_EDGE_FEATURE_DIM
-        + (VELOCITY_EDGE_FEATURE_EXTRA_DIM if add_v_edge_features else 0)
-        + (RELATIVE_SPEED_EDGE_FEATURE_EXTRA_DIM if add_relative_speed_edge_features else 0)
-    )
+def infer_edge_feature_dim(add_v_edge_features=False, add_relative_speed_edge_features=False,
+                           add_position_direction_edge_features=True, add_relative_velocity_edge_features=True,
+                           add_separation_rate_edge_features=True):
+    return len(generation_edge_names(add_v_edge_features, add_relative_speed_edge_features,
+                                    add_position_direction_edge_features, add_relative_velocity_edge_features,
+                                    add_separation_rate_edge_features))
 
 
 def load_frame_snapshot(primary_tracking: pd.DataFrame, fallback_tracking: pd.DataFrame, frame: int) -> pd.DataFrame:
@@ -524,6 +523,9 @@ def construct_graph_for_frame(
     extra_node_features: np.ndarray | None = None,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> Data | None:
     if pd.isna(frame) or possessor.split("_")[0] not in ["home", "away"]:
         return None
@@ -602,8 +604,16 @@ def construct_graph_for_frame(
             edge_features.append(relative_speed)
     elif add_relative_speed_edge_features:
         raise ValueError("Relative-speed edge features require velocity-angle edge features.")
+    names = generation_edge_names(add_v_edge_features, add_relative_speed_edge_features,
+                                  add_position_direction_edge_features, add_relative_velocity_edge_features,
+                                  add_separation_rate_edge_features)
+    if any(name in names for name in ("position_dx_norm", "relative_vx", "separation_rate")):
+        interactions = interaction_values(node_attr, edge_index)
+        edge_features.extend(interactions[name] for name in names[len(edge_features):])
     edge_attr = torch.stack(edge_features, dim=-1)
     graph = Data(x=node_attr, edge_index=edge_index.clone(), edge_attr=edge_attr)
+    graph.edge_feature_names = list(names)
+    graph.edge_schema_version = 1
     graph.node_ids = list(player_ids)
     return graph
 
@@ -617,6 +627,9 @@ def construct_graph_for_action(
     rotate_to_ltr: bool = True,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> Data | None:
     if action_index not in match.actions.index:
         return None
@@ -644,6 +657,9 @@ def construct_graph_for_action(
         extra_node_features=extra_node_features,
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
+        add_position_direction_edge_features=add_position_direction_edge_features,
+        add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+        add_separation_rate_edge_features=add_separation_rate_edge_features,
     )
 
 
@@ -656,6 +672,9 @@ def construct_graph_features(
     verbose=True,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> List[Data | None]:
     if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
@@ -680,6 +699,9 @@ def construct_graph_features(
             post_action=post_action,
             add_v_edge_features=add_v_edge_features,
             add_relative_speed_edge_features=add_relative_speed_edge_features,
+            add_position_direction_edge_features=add_position_direction_edge_features,
+            add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+            add_separation_rate_edge_features=add_separation_rate_edge_features,
         )
         feature_graphs.append(graph)
 
@@ -1089,6 +1111,9 @@ def construct_intent_training_samples(
     verbose: bool = True,
     add_v_edge_features: bool = False,
     add_relative_speed_edge_features: bool = False,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
     return_action_indices: bool = False,
 ) -> Tuple[List[Data], torch.Tensor] | Tuple[List[Data], torch.Tensor, list[int]]:
     if "ball_accel" not in match.tracking.columns:
@@ -1118,6 +1143,9 @@ def construct_intent_training_samples(
             extend=extend,
             add_v_edge_features=add_v_edge_features,
             add_relative_speed_edge_features=add_relative_speed_edge_features,
+            add_position_direction_edge_features=add_position_direction_edge_features,
+            add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+            add_separation_rate_edge_features=add_separation_rate_edge_features,
         )
         if base_graph is None:
             continue
@@ -1146,6 +1174,9 @@ def construct_intent_training_samples(
                 extend=extend,
                 add_v_edge_features=add_v_edge_features,
                 add_relative_speed_edge_features=add_relative_speed_edge_features,
+                add_position_direction_edge_features=add_position_direction_edge_features,
+                add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+                add_separation_rate_edge_features=add_separation_rate_edge_features,
             )
             if graph is None:
                 continue
@@ -1275,6 +1306,8 @@ def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
         "use_carries": bool(args.use_carries),
         "add_v_edge_features": bool(args.add_v_edge_features),
         "add_relative_speed_edge_features": bool(args.add_relative_speed_edge_features),
+        **schema_for_names(generation_edge_names(args.add_v_edge_features, args.add_relative_speed_edge_features,
+                            *(getattr(args, f"add_{group}_edge_features", True) for group in INTERACTION_GROUPS))),
     }
 
 
@@ -1353,6 +1386,9 @@ def _save_success_intent_match(
     add_v_edge_features: bool,
     add_relative_speed_edge_features: bool,
     show_progress: bool,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> MatchGenerationResult:
     resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, return_types)
     for labels in success_intent_labels.values():
@@ -1370,6 +1406,9 @@ def _save_success_intent_match(
         feature_variant="success_intent",
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
+        add_position_direction_edge_features=add_position_direction_edge_features,
+        add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+        add_separation_rate_edge_features=add_separation_rate_edge_features,
         verbose=show_progress,
     )
     invalid_graphs = count_invalid_graphs(success_graphs)
@@ -1396,6 +1435,9 @@ def _save_action_type_all_match(
     paths: FeatureGenerationPaths,
     args: argparse.Namespace,
     show_progress: bool,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> MatchGenerationResult:
     if args.labels_only:
         _validate_labels_only_base_artifacts(
@@ -1469,6 +1511,9 @@ def _save_action_type_all_match(
             extend=True,
             add_v_edge_features=args.add_v_edge_features,
             add_relative_speed_edge_features=args.add_relative_speed_edge_features,
+            add_position_direction_edge_features=getattr(args, "add_position_direction_edge_features", True),
+            add_relative_velocity_edge_features=getattr(args, "add_relative_velocity_edge_features", True),
+            add_separation_rate_edge_features=getattr(args, "add_separation_rate_edge_features", True),
             return_action_indices=True,
             verbose=show_progress,
         )
@@ -1509,6 +1554,9 @@ def _save_action_type_all_match(
         action_indices=base_action_indices,
         add_v_edge_features=args.add_v_edge_features,
         add_relative_speed_edge_features=args.add_relative_speed_edge_features,
+        add_position_direction_edge_features=getattr(args, "add_position_direction_edge_features", True),
+        add_relative_velocity_edge_features=getattr(args, "add_relative_velocity_edge_features", True),
+        add_separation_rate_edge_features=getattr(args, "add_separation_rate_edge_features", True),
         verbose=show_progress,
     )
     invalid_graphs = count_invalid_graphs(match.graph_features_0)
@@ -1530,6 +1578,9 @@ def _save_action_type_all_match(
             action_indices=base_action_indices,
             add_v_edge_features=args.add_v_edge_features,
             add_relative_speed_edge_features=args.add_relative_speed_edge_features,
+            add_position_direction_edge_features=getattr(args, "add_position_direction_edge_features", True),
+            add_relative_velocity_edge_features=getattr(args, "add_relative_velocity_edge_features", True),
+            add_separation_rate_edge_features=getattr(args, "add_separation_rate_edge_features", True),
             verbose=show_progress,
         )
         torch.save(match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt")
@@ -1572,6 +1623,9 @@ def _save_non_all_match(
     add_v_edge_features: bool,
     add_relative_speed_edge_features: bool,
     show_progress: bool,
+    add_position_direction_edge_features: bool = True,
+    add_relative_velocity_edge_features: bool = True,
+    add_separation_rate_edge_features: bool = True,
 ) -> MatchGenerationResult:
     primary_return_type = return_types[0]
     match.labels = match.construct_labels(return_type=primary_return_type)
@@ -1590,6 +1644,9 @@ def _save_non_all_match(
         action_indices=action_indices,
         add_v_edge_features=add_v_edge_features,
         add_relative_speed_edge_features=add_relative_speed_edge_features,
+        add_position_direction_edge_features=add_position_direction_edge_features,
+        add_relative_velocity_edge_features=add_relative_velocity_edge_features,
+        add_separation_rate_edge_features=add_separation_rate_edge_features,
         verbose=show_progress,
     )
     valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
@@ -1636,6 +1693,7 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
                 args.add_v_edge_features,
                 args.add_relative_speed_edge_features,
                 task.show_progress,
+                **{f"add_{group}_edge_features": getattr(args, f"add_{group}_edge_features", True) for group in INTERACTION_GROUPS},
             )
         return _save_action_type_all_match(
             match,
@@ -1654,6 +1712,7 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
         args.add_v_edge_features,
         args.add_relative_speed_edge_features,
         task.show_progress,
+        **{f"add_{group}_edge_features": getattr(args, f"add_{group}_edge_features", True) for group in INTERACTION_GROUPS},
     )
 
 
@@ -1760,6 +1819,7 @@ def parse_args() -> argparse.Namespace:
         help="Do not store relative-speed edge features.",
     )
     parser.set_defaults(add_relative_speed_edge_features=False)
+    add_interaction_arguments(parser, training=False)
     next_action_group = parser.add_mutually_exclusive_group()
     next_action_group.add_argument(
         "--next-action-conditions-on",

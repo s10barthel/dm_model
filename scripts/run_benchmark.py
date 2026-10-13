@@ -25,6 +25,7 @@ from datatools.benchmark import (
     load_benchmark_modification_data,
     summarize_benchmark_stats,
 )
+from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
@@ -382,6 +383,7 @@ def main() -> None:
                     higher_state_id=int(modification_data["higher_state_id"]),
                     add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
                     add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
+                    **generation_kwargs(graph_schema),
                 )
                 built_states.append((int(modification_id), int(game_state_id), state, state_rows, stats))
             except Exception as exc:
