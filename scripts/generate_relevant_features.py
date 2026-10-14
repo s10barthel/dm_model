@@ -20,6 +20,8 @@ from models.edge_schema import (edge_names, schema_for_names, generation_edge_na
                                 generation_kwargs, interaction_values, CANONICAL_FEATURES, INTERACTION_GROUPS, EDGE_GROUPS)
 from scripts.feature_extension_diagnostics import ExtensionAttempt, extend_graph_files
 from datatools import config
+from datatools.artifact_storage import clone_feature_artifacts
+from datatools.xt_refresh import refresh_xt
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
@@ -49,6 +51,7 @@ from project_config import (
     validate_intended_receiver_mode,
     write_latest_run,
     write_run_metadata,
+    XT_MATCH_DIR,
 )
 
 EXPECTED_GRAPH_SCHEMA = {
@@ -122,6 +125,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional success_intent checkpoint used to add the model-backed intended-receiver variant.",
     )
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--artifact-copy-mode", choices=("hardlink", "copy"), default="hardlink",
+                        help="Storage for unchanged derived-run artifacts; copying requires explicit opt-in.")
+    parser.add_argument("--xt-match-dir", type=Path, default=XT_MATCH_DIR,
+                        help="xT annotation directory used by the targeted xT refresh.")
     parser.add_argument(
         "--extend-feature-run-id",
         default=None,
@@ -266,6 +273,18 @@ def parse_args() -> argparse.Namespace:
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
+    if "xt" in args.refresh_target_families:
+        if args.use_carries or len(args.refresh_target_families) != 1:
+            parser.error("xT refresh must run separately from carry generation and other target refreshes.")
+        # A target-only operation inherits the source split/selection settings unless
+        # the caller explicitly supplies them (build_extension_plan checks equality).
+        if args.extend_feature_run_id:
+            base = load_feature_run_metadata(args.extend_feature_run_id, required=True)
+            supplied = {token.split("=", 1)[0] for token in sys.argv[1:]}
+            if not supplied.intersection({"--train-count", "--train-split"}):
+                vars(args).update(split_selector(base))
+            if not supplied.intersection({"--next-action-conditions-on", "--next-action-conditions-off"}):
+                args.next_action_conditions_enabled = metadata_next_action_conditions_enabled(base)
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
     if args.pass_height_threshold is not None and not args.pass_height:
@@ -884,6 +903,13 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     else:
         final_model_id = base_model_id
 
+    if "xt" in refresh_target_families:
+        if (len(refresh_target_families) != 1 or added_return_types or added_modes or replace_model
+                or regenerate_model_mode or refresh_pass_height_labels or extend_relative_speed_edge_features
+                or extend_interaction_edge_features or bool(getattr(args, "use_carries", False))):
+            raise ValueError("xT refresh must run separately from other refreshes, new return types, "
+                             "receiver replacement/addition, graph extensions, and carry generation.")
+
     if (
         not added_return_types
         and not added_modes
@@ -967,6 +993,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             for step in command_steps
         ]
     commands = [step.command for step in command_steps]
+    if refresh_target_families == ["xt"]:
+        command_steps, commands = [], []
     final_graph_schema = copy.deepcopy(graph_schema)
     if extend_relative_speed_edge_features:
         final_graph_schema.update(schema_for_names(CANONICAL_FEATURES[:5],
@@ -1003,9 +1031,16 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     )
 
 
+def extension_pass_height_threshold(args, plan):
+    if plan.refresh_target_families == ["xt"]:
+        return plan.base_metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)
+    return pass_height_threshold_meters(args)
+
+
 def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, status: str, error: str | None = None) -> dict[str, Any]:
     split_manifest = resolve_split_manifest(**split_selector(args))
     metadata = {
+        **copy.deepcopy(plan.base_metadata),
         "run_id": plan.output_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
@@ -1017,7 +1052,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "extension_refresh_pass_height_labels": plan.refresh_pass_height_labels,
         "extension_relative_speed_edge_features": plan.extend_relative_speed_edge_features,
         "extension_interaction_edge_features": plan.extend_interaction_edge_features,
-        "pass_height_threshold_meters": pass_height_threshold_meters(args),
+        "pass_height_threshold_meters": extension_pass_height_threshold(args, plan),
         "extension_refreshed_return_types": plan.refreshed_return_types,
         "extension_refreshed_intended_receiver_modes": plan.refreshed_intended_receiver_modes,
         "extension_replaced_intended_receiver_model_id": plan.replaced_intended_receiver_model_id,
@@ -1040,6 +1075,8 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
     }
     if error:
         metadata["error"] = error
+    else:
+        metadata.pop("error", None)
     return metadata
 
 
@@ -1069,7 +1106,7 @@ def extension_history_entry(
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
         "commands": plan.commands,
-        "pass_height_threshold_meters": pass_height_threshold_meters(args),
+        "pass_height_threshold_meters": extension_pass_height_threshold(args, plan),
     }
     if error:
         entry["error"] = error
@@ -1122,7 +1159,7 @@ def mutating_metadata(
             "extension_relative_speed_edge_features": (
                 plan.extend_relative_speed_edge_features if advertise_final_state else False
             ),
-            "pass_height_threshold_meters": (pass_height_threshold_meters(args) if advertise_final_state
+            "pass_height_threshold_meters": (extension_pass_height_threshold(args, plan) if advertise_final_state
                                              else plan.base_metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)),
             "extension_refreshed_return_types": plan.refreshed_return_types if advertise_final_state else [],
             "extension_refreshed_intended_receiver_modes": (
@@ -1155,19 +1192,11 @@ def mutating_metadata(
     return metadata
 
 
-def copy_base_feature_run(base_run_id: str, output_run_id: str) -> Path:
+def copy_base_feature_run(base_run_id: str, output_run_id: str, *, mode="hardlink", diagnostics=None) -> Path:
     base_root = get_feature_run_root(base_run_id)
     output_root = get_feature_run_root(output_run_id)
 
-    def ignore_root_metadata(current_dir: str, names: list[str]) -> set[str]:
-        if Path(current_dir).resolve() == base_root.resolve() and "metadata.json" in names:
-            return {"metadata.json"}
-        return set()
-
-    # The extension publishes its copying phase before copying starts.
-    if output_root.exists() and any(path.name != "metadata.json" for path in output_root.iterdir()):
-        raise FileExistsError(f"Derived feature run directory is not empty: {output_root}")
-    shutil.copytree(base_root, output_root, ignore=ignore_root_metadata, dirs_exist_ok=True)
+    clone_feature_artifacts(base_root, output_root, mode=mode, diagnostics=diagnostics)
     return output_root
 
 
@@ -1316,14 +1345,15 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                   relative_speed_edge_features=plan.extend_relative_speed_edge_features,
                   interaction_edge_features=plan.extend_interaction_edge_features,
                   refresh_target_families=plan.refresh_target_families,
-                  pass_height_threshold_meters=pass_height_threshold_meters(args),
+                  pass_height_threshold_meters=extension_pass_height_threshold(args, plan),
                   next_action_conditions_enabled=plan.next_action_conditions_enabled)
     attempt = ExtensionAttempt(target_root, "feature_extension", plan.extension_mode, target,
                                metadata_factory, lambda root, payload: write_run_metadata(root, payload))
     try:
         if derived:
             attempt.begin_mutation("copying", current_file=target_root)
-            copy_base_feature_run(plan.base_run_id, plan.output_run_id)
+            copy_base_feature_run(plan.base_run_id, plan.output_run_id,
+                                  mode=getattr(args, "artifact_copy_mode", "hardlink"), diagnostics=attempt.data)
             attempt.mutation_finished()
         else:
             attempt.enter("staging")
@@ -1331,7 +1361,11 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             attempt.begin_mutation("removing_artifacts", current_file=target_root)
             remove_model_mode_artifacts(target_root, plan.final_return_types)
             attempt.mutation_finished()
-        run_generation_steps(plan.command_steps, attempt=attempt)
+        if plan.refresh_target_families == ["xt"]:
+            refresh_xt(target_root, plan.base_metadata, xt_match_dir=getattr(args, "xt_match_dir", XT_MATCH_DIR),
+                       attempt=attempt)
+        else:
+            run_generation_steps(plan.command_steps, attempt=attempt)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
         if plan.extend_interaction_edge_features:
@@ -1450,7 +1484,8 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
     try:
         if not args.in_place:
             attempt.begin_mutation("copying", current_file=output_root)
-            copy_base_feature_run(base_run_id, output_run_id)
+            copy_base_feature_run(base_run_id, output_run_id,
+                                  mode=getattr(args, "artifact_copy_mode", "hardlink"), diagnostics=attempt.data)
             attempt.mutation_finished()
         else:
             attempt.enter("staging")

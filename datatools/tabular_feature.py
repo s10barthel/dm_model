@@ -10,6 +10,7 @@ if not os.getcwd() in sys.path:
 import numpy as np
 import pandas as pd
 import torch
+from datatools.artifact_storage import atomic_torch_save, atomic_parquet_save
 from tqdm import tqdm
 
 import datatools.preprocess as proc
@@ -304,13 +305,13 @@ if __name__ == "__main__":
             assert np.all(np.sort(action_indices) == action_indices)
 
             match.tabular_features_0 = construct_tabular_features(match, event_xg_model=event_xg_model, verbose=True)
-            torch.save(match.tabular_features_0, f"{feature_dir}/{match_id}.pt")
-            torch.save(match.labels, f"{label_dir}/{match_id}.pt")
+            atomic_torch_save(match.tabular_features_0, f"{feature_dir}/{match_id}.pt")
+            atomic_torch_save(match.labels, f"{label_dir}/{match_id}.pt")
             print(f"Successfully saved for {match.labels.shape[0]} events.")
 
     if args.action_type == "shot":
         features = torch.cat(features)
-        torch.save(features, f"{feature_dir}/{args.split}.pt")
+        atomic_torch_save(features, f"{feature_dir}/{args.split}.pt")
 
         labels = pd.concat(labels)
-        labels.to_parquet(f"{label_dir}/{args.split}.parquet")
+        atomic_parquet_save(labels, f"{label_dir}/{args.split}.parquet")

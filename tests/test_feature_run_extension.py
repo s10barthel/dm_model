@@ -186,9 +186,20 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertTrue(all("--overwrite-labels" in command for command in plan.commands))
 
     def test_refresh_target_families_are_deduplicated_in_order(self) -> None:
-        plan = self.build_plan(make_args(refresh_target_families=["epv", "xt", "epv", "goal_distance"]))
+        plan = self.build_plan(make_args(refresh_target_families=["epv", "epv", "goal_distance"]))
 
-        self.assertEqual(plan.refresh_target_families, ["epv", "xt", "goal_distance"])
+        self.assertEqual(plan.refresh_target_families, ["epv", "goal_distance"])
+
+    def test_xt_refresh_is_dedicated_and_rejects_mixed_changes(self) -> None:
+        plan = self.build_plan(make_args(refresh_target_families=["xt", "xt"]))
+        self.assertEqual(plan.commands, [])
+        self.assertEqual(plan.refresh_target_families, ["xt"])
+        for args in [make_args(refresh_target_families=["xt", "epv"]),
+                     make_args(["next_3"], refresh_target_families=["xt"]),
+                     make_args(model_id="new", refresh_target_families=["xt"]),
+                     make_args(pass_height=True, refresh_target_families=["xt"])]:
+            with self.assertRaisesRegex(ValueError, "separately"):
+                self.build_plan(args)
 
     def test_unknown_refresh_target_family_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

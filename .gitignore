@@ -110,3 +110,5 @@ _vendor/defcon/saved
 !tests/test_resource_monitor.py
 
 !tests/test_packed_graphs.py
+
+!tests/test_xt_refresh.py

@@ -1236,6 +1236,31 @@ class XTXYGLMTests(unittest.TestCase):
         self.assertTrue(fit.diagnostics["optimizer"]["success"])
         self.assertTrue(fit.diagnostics["monotonicity_check"]["passed"])
 
+    def test_constrained_xt_glm_is_invariant_to_weight_scale(self) -> None:
+        # Scaling all weights represents more copies of the same data. It must
+        # not change the solution or make a boundary-constrained fit fail.
+        terms = xt.resolve_xt_glm_terms(use_interaction=True, nonlinear_axes=["x", "y"])
+        sample = xt.build_xt_glm_fit_sample(
+            _xt_calibration_actions(), _source_xt_grid(invert_x=True), terms=terms
+        )
+        design = np.column_stack([np.ones(len(sample)), sample[list(terms)].to_numpy(dtype=float)])
+        y = sample["source_grid_xT"].to_numpy(dtype=float)
+        weights = sample["weight"].to_numpy(dtype=float)
+        params, diagnostics = xt.fit_constrained_xt_glm_params(design, y, weights, terms)
+        scaled_params, scaled_diagnostics = xt.fit_constrained_xt_glm_params(
+            design, y, weights * 1e6, terms
+        )
+
+        np.testing.assert_allclose(scaled_params, params, rtol=1e-5, atol=1e-6)
+        self.assertTrue(diagnostics["success"])
+        self.assertTrue(scaled_diagnostics["success"])
+        self.assertAlmostEqual(diagnostics["mean_objective"], scaled_diagnostics["mean_objective"], places=9)
+        self.assertAlmostEqual(
+            diagnostics["objective"], diagnostics["mean_objective"] * weights.sum(), places=9
+        )
+        constraints = xt.build_xt_glm_monotonicity_constraint_matrix(terms)
+        self.assertGreaterEqual(float(np.min(constraints @ scaled_params)), -xt.XT_GLM_MONOTONIC_TOL)
+
     def test_xt_glm_nonlinear_terms_use_quadratic_cubic_features(self) -> None:
         terms = xt.resolve_xt_glm_terms(nonlinear_axes=["x", "y"])
         features = xt.build_xt_glm_design_frame(

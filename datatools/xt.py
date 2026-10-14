@@ -443,16 +443,21 @@ def fit_constrained_xt_glm_params(
     terms: tuple[str, ...],
 ) -> tuple[np.ndarray, dict[str, object]]:
     constraint_matrix = build_xt_glm_monotonicity_constraint_matrix(terms)
+    weight_sum = float(np.sum(weights))
+    if not np.isfinite(weight_sum) or weight_sum <= 0.0:
+        raise ValueError("x/y xT GLM weights must have a finite positive sum.")
     initial_params = _unconstrained_xt_glm_initial_params(design, y, weights, terms, constraint_matrix)
 
     def objective(params: np.ndarray) -> float:
         linear = design @ params
-        return float(np.sum(weights * (np.logaddexp(0.0, linear) - y * linear)))
+        # SLSQP uses absolute tolerances. Keep its loss/gradient scale independent
+        # of match count without changing the weighted-likelihood minimizer.
+        return float(np.sum(weights * (np.logaddexp(0.0, linear) - y * linear)) / weight_sum)
 
     def gradient(params: np.ndarray) -> np.ndarray:
         linear = design @ params
         probabilities = expit(linear)
-        return design.T @ (weights * (probabilities - y))
+        return (design.T @ (weights * (probabilities - y))) / weight_sum
 
     constraint = LinearConstraint(constraint_matrix, lb=0.0, ub=np.inf)
     result = minimize(
@@ -470,7 +475,10 @@ def fit_constrained_xt_glm_params(
         "status": int(result.status),
         "message": str(result.message),
         "iterations": int(getattr(result, "nit", 0)),
-        "objective": float(result.fun) if np.isfinite(result.fun) else None,
+        "objective": float(result.fun * weight_sum) if np.isfinite(result.fun) else None,
+        "mean_objective": float(result.fun) if np.isfinite(result.fun) else None,
+        "objective_scaling": "weighted_mean",
+        "weight_sum": weight_sum,
         "maxiter": XT_GLM_OPTIMIZER_MAXITER,
         "ftol": XT_GLM_OPTIMIZER_FTOL,
         "constraint_grid_size": XT_GLM_MONOTONIC_GRID_SIZE,

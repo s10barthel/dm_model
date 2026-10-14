@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
+from datatools.artifact_storage import atomic_torch_save
 from torch_geometric.data import Data
 
 from datatools import config
@@ -89,5 +90,5 @@ if __name__ == "__main__":
 
         tabular_features = graph_to_tabular(graphs, labels, concat_intent)
         out_path = output_dir / f"{match_id}.pt"
-        torch.save(tabular_features, out_path)
+        atomic_torch_save(tabular_features, out_path)
         print(f"[Saved] {match_id}: {tabular_features.shape} -> {out_path}")

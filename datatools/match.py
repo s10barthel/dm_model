@@ -18,6 +18,7 @@ from datatools.endpoint_policy import sample_is_eligible, valid_interval
 from datatools.epv import merge_epv_annotations
 from datatools.goal_distance import merge_goal_distance_annotations
 from datatools.xt import merge_xt_annotations
+from datatools.xt_returns import label_xt_for_return_type
 from datatools.viz_snapshot import SnapshotVisualizer
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
@@ -213,12 +214,6 @@ class Match(ABC):
         if return_kind == "next":
             lookahead_len = int(return_value)
             events = utils.label_returns(events, lookahead_len, skip_first=skip_first)
-            events = utils.label_xt_returns(
-                events,
-                lookahead_len=lookahead_len,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-            )
             events = utils.label_goal_distance_returns(
                 events,
                 lookahead_len=lookahead_len,
@@ -234,11 +229,6 @@ class Match(ABC):
         elif return_kind == "in":
             action_offset = int(return_value)
             events = utils.label_returns(events, action_offset)
-            events = utils.label_xt_in_state_returns(
-                events,
-                action_offset=action_offset,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-            )
             events = utils.label_goal_distance_in_state_returns(
                 events,
                 action_offset=action_offset,
@@ -253,13 +243,6 @@ class Match(ABC):
             b, z = return_value
             stop_at_set_pieces = return_type.endswith("_spstop")
             events = utils.label_returns(events, lookahead_len=10, skip_first=False)
-            events = utils.label_polynomial_xt_returns(
-                events,
-                b=b,
-                z=z,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                stop_at_set_pieces=stop_at_set_pieces,
-            )
             events = utils.label_polynomial_goal_distance_returns(
                 events,
                 b=b,
@@ -277,13 +260,6 @@ class Match(ABC):
             soft_discount_aggregation = "max" if return_kind == "disc_max" else "probability"
             events = utils.label_discounted_goal_returns(events, gamma, skip_first=skip_first)
             events = utils.label_discounted_returns(events, gamma, skip_first=skip_first)
-            events = utils.label_discounted_xt_returns(
-                events,
-                gamma=gamma,
-                eligible_types=tuple(config.XT_ACTION_TYPES),
-                skip_first=skip_first,
-                aggregation=soft_discount_aggregation,
-            )
             events = utils.label_discounted_goal_distance_returns(
                 events,
                 gamma=gamma,
@@ -299,6 +275,7 @@ class Match(ABC):
                 aggregation=soft_discount_aggregation,
             )
 
+        events = label_xt_for_return_type(events, return_type)
         self._cached_events_by_return_type[return_type] = events
         return events
 

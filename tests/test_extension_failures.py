@@ -260,7 +260,7 @@ def test_derived_copy_failure_is_diagnosed_and_source_unchanged(environment, mon
     before = (root / "metadata.json").read_bytes()
     def fail_copy(*a, **kw):
         raise OSError("copy failed")
-    monkeypatch.setattr(generator.shutil, "copytree", fail_copy)
+    monkeypatch.setattr(generator, "clone_feature_artifacts", fail_copy)
     with pytest.raises(OSError, match="copy failed"):
         run(derived=True)
     meta = read(root.parent / "derived")

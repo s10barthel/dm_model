@@ -16,6 +16,7 @@ if not os.getcwd() in sys.path:
 import numpy as np
 import pandas as pd
 import torch
+from datatools.artifact_storage import atomic_torch_save, atomic_parquet_save
 from scipy.spatial.distance import cdist
 from torch_geometric.data import Data
 from torch_geometric.utils import dense_to_sparse
@@ -954,7 +955,7 @@ def save_resolved_actions_if_missing(
         if resolved_action_path.exists() and not overwrite:
             continue
         resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_actions.to_parquet(resolved_action_path)
+        atomic_parquet_save(resolved_actions, resolved_action_path)
 
 
 def save_action_labels_if_missing(
@@ -973,7 +974,7 @@ def save_action_labels_if_missing(
         if label_path.exists() and not overwrite:
             continue
         label_dir.mkdir(parents=True, exist_ok=True)
-        torch.save(labels, label_path)
+        atomic_torch_save(labels, label_path)
 
 
 def save_intent_train_labels_from_existing_source(
@@ -1007,7 +1008,7 @@ def save_intent_train_labels_from_existing_source(
             continue
         label_dir.mkdir(parents=True, exist_ok=True)
         intent_train_labels = build_intent_train_labels_from_source_actions(base_labels, source_labels)
-        torch.save(intent_train_labels, label_path)
+        atomic_torch_save(intent_train_labels, label_path)
 
 
 def save_augmented_blocks_from_existing_graphs(
@@ -1039,8 +1040,8 @@ def save_augmented_blocks_from_existing_graphs(
         match.labels = labels_by_key[(mode, return_type)]
         match.graph_features_0 = list(base_graphs)
         augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=verbose)
-        torch.save(augmented_graph_features, augmented_feature_path)
-        torch.save(augmented_labels, augmented_label_path)
+        atomic_torch_save(augmented_graph_features, augmented_feature_path)
+        atomic_torch_save(augmented_labels, augmented_label_path)
         if verbose:
             print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
 
@@ -1415,9 +1416,9 @@ def _save_success_intent_match(
     valid_graphs = len(success_graphs) - invalid_graphs
     if valid_graphs == 0:
         raise ValueError("No usable success-intent graphs were constructed for this match.")
-    torch.save(success_graphs, f"{feature_dir}/{match_id}.pt")
+    atomic_torch_save(success_graphs, f"{feature_dir}/{match_id}.pt")
     label_dir = get_success_intent_label_dir(root=feature_root)
-    torch.save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
+    atomic_torch_save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
     if invalid_graphs and show_progress:
         print(f"  Skipped {invalid_graphs} corrupted action frames while building success-intent graphs.")
     if show_progress:
@@ -1491,7 +1492,7 @@ def _save_action_type_all_match(
             use_carries=args.use_carries,
         )
         resolved_action_path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_actions.to_parquet(resolved_action_path)
+        atomic_parquet_save(resolved_actions, resolved_action_path)
 
     primary_mode = args.intended_receiver_modes[0]
     primary_return_type = args.return_types[0]
@@ -1519,7 +1520,7 @@ def _save_action_type_all_match(
         )
         if not augmented_graphs:
             raise ValueError("No usable intent-training samples were constructed for this match.")
-        torch.save(augmented_graphs, f"{paths.feature_dir}/{match_id}.pt")
+        atomic_torch_save(augmented_graphs, f"{paths.feature_dir}/{match_id}.pt")
         for mode in args.intended_receiver_modes:
             for return_type in args.return_types:
                 label_lookup = {
@@ -1535,7 +1536,7 @@ def _save_action_type_all_match(
                     intended_receiver_mode=mode,
                     root=feature_root,
                 )
-                torch.save(augmented_labels, f"{label_dir}/{match_id}.pt")
+                atomic_torch_save(augmented_labels, f"{label_dir}/{match_id}.pt")
         if show_progress:
             print(f"Successfully saved {len(augmented_graphs)} augmented intent samples.")
         return MatchGenerationResult(
@@ -1563,7 +1564,7 @@ def _save_action_type_all_match(
     valid_graphs = len(match.graph_features_0) - invalid_graphs
     if valid_graphs == 0:
         raise ValueError("No usable action graphs were constructed for this match.")
-    torch.save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    atomic_torch_save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
     if invalid_graphs and show_progress:
         print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
 
@@ -1583,7 +1584,7 @@ def _save_action_type_all_match(
             add_separation_rate_edge_features=getattr(args, "add_separation_rate_edge_features", True),
             verbose=show_progress,
         )
-        torch.save(match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt")
+        atomic_torch_save(match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt")
 
     for mode in args.intended_receiver_modes:
         for return_type in args.return_types:
@@ -1593,7 +1594,7 @@ def _save_action_type_all_match(
                 root=feature_root,
                 use_carries=args.use_carries,
             )
-            torch.save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
+            atomic_torch_save(labels_by_key[(mode, return_type)], f"{label_dir}/{match_id}.pt")
 
     if args.augment_blocks:
         for mode in args.intended_receiver_modes:
@@ -1602,8 +1603,8 @@ def _save_action_type_all_match(
             augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=show_progress)
             augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
             augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
-            torch.save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
-            torch.save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
+            atomic_torch_save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
+            atomic_torch_save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
             if show_progress:
                 print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
 
@@ -1652,8 +1653,8 @@ def _save_non_all_match(
     valid_graphs = len(match.graph_features_0) - count_invalid_graphs(match.graph_features_0)
     if valid_graphs == 0:
         raise ValueError("No usable action graphs were constructed for this match.")
-    torch.save(match.labels, f"{paths.label_dir}/{match_id}.pt")
-    torch.save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    atomic_torch_save(match.labels, f"{paths.label_dir}/{match_id}.pt")
+    atomic_torch_save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
     return MatchGenerationResult(
         match_id=match_id,
         summary=f"saved {len(match.graph_features_0)} action graphs",
