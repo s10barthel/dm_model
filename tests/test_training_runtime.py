@@ -158,13 +158,14 @@ def test_wrapper_lr_overrides_preserve_model_defaults():
     with patch.object(wrapper, "resolve_feature_run_id", return_value="feature_run"), \
          patch.object(wrapper, "resolve_feature_root", return_value=Path("fixture_features")):
         baseline = wrapper.build_training_commands(args)[0]
-        args.start_lr, args.accumulation_steps, args.monitoring = .004, 2, "on"
+        args.start_lr, args.accumulation_steps, args.monitoring, args.batch_loader = .004, 2, "light", "pyg"
         changed = wrapper.build_training_commands(args)[0]
         for before, after in zip(baseline, changed):
             assert wrapper.get_cli_value(after, "--start_lr") == "0.004"
             assert wrapper.get_cli_value(after, "--min_lr") == wrapper.get_cli_value(before, "--min_lr")
             assert wrapper.get_cli_value(after, "--accumulation-steps") == "2"
-            assert wrapper.get_cli_value(after, "--monitoring") == "on"
+            assert wrapper.get_cli_value(after, "--monitoring") == "light"
+            assert wrapper.get_cli_value(after, "--batch-loader") == "pyg"
         args.start_lr, args.min_lr = None, .000001
         changed = wrapper.build_training_commands(args)[0]
         for before, after in zip(baseline, changed):
@@ -218,7 +219,7 @@ def test_monitor_process_records_sample_and_exits(tmp_path):
     assert process.poll() is not None
 
 
-@pytest.mark.parametrize("monitoring", ["off", "on"])
+@pytest.mark.parametrize("monitoring", ["off", "light", "on"])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, device, monitoring):
     """Exercise the actual entry point, disk loader, optimizer loop and resume path."""
@@ -264,7 +265,7 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
         return result
 
     monkeypatch.setattr(utils, "run_epoch", plateau)
-    monkeypatch.setattr(sys, "argv", base + ["--run-id", "baseline"])
+    monkeypatch.setattr(sys, "argv", base + ["--run-id", "baseline", "--batch-loader", "pyg"])
     runpy.run_path(str(entry), run_name="__main__")
     baseline = load_checkpoint(tmp_path / "saved/pass_intent/baseline" / CHECKPOINT_NAME)
     original = utils.run_epoch
@@ -283,11 +284,19 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
     checkpoint = load_checkpoint(checkpoint_path)
     assert checkpoint["metadata"]["last_epoch"] == 1 and not checkpoint["finished"]
     monkeypatch.setattr(utils, "run_epoch", original)
+    # Exercise a legacy argument record and an explicit runtime override through
+    # the real entry point, while preserving the saved optimizer/RNG state.
+    if monitoring == "light":
+        checkpoint["args"].pop("batch_loader")
+        atomic_torch_save(checkpoint, checkpoint_path)
+    override = ["--batch-loader", "pyg"] if monitoring == "off" else []
     monkeypatch.setattr(sys, "argv", ["train.py", "--resume-checkpoint", str(checkpoint_path),
-                                    "--monitoring", monitoring])
+                                    "--monitoring", monitoring] + override)
     runpy.run_path(str(entry), run_name="__main__")
     resumed = load_checkpoint(checkpoint_path)
     assert resumed["finished"] and resumed["metadata"]["last_epoch"] == 5
+    assert resumed["args"]["batch_loader"] == ("auto" if monitoring == "on" else "pyg")
+    assert all(split["effective"] == "pyg" for split in resumed["metadata"]["batch_loaders"].values())
     assert resumed["metadata"]["lr"] == .001  # plateau rolled back best model and optimizer
     assert resumed["metadata"]["resume_events"][0]["completed_epoch"] == 1
     for key, value in baseline["model"].items():

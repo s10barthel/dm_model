@@ -1837,7 +1837,8 @@ def run_epoch(
             identity.update(batch_graphs, batch_labels)
         context = {"epoch": getattr(args, "_epoch", None), "batch": batch_index,
                    "phase": "train" if train else "validation"}
-        if monitor is not None:
+        sample_monitor = monitor is not None and monitor.should_sample_batch(batch_index)
+        if sample_monitor:
             monitor.event("batch_loaded", device, **context, graphs=batch_graphs.num_graphs,
                           nodes=batch_graphs.num_nodes, edges=batch_graphs.num_edges,
                           **batch_identifiers(batch_graphs))
@@ -1850,7 +1851,7 @@ def run_epoch(
         if args.gnn_task in {"node_binary", "node_regression"}:
             observed = observed_layout(batch_graphs, batch_labels, args.include_out,
                                        args.task in {"outcome_scoring", "outcome_conceding", "outcome_return"})
-        if monitor is not None:
+        if sample_monitor:
             monitor.event("forward", device, **context)
         batch_graphs: Batch = batch_graphs.to(device)
         batch_ipw: torch.Tensor = batch_ipw.to(device)
@@ -2226,10 +2227,10 @@ def run_epoch(
         metrics["l1_loss"] += l1_loss.item() * batch_graphs.num_graphs
 
         if train:
-            if monitor is not None:
+            if sample_monitor:
                 monitor.event("backward_update", device, **context)
             accumulator.backward(pred_loss + l1_loss, batch_graphs.num_graphs)
-        if monitor is not None:
+        if sample_monitor:
             monitor.event("batch_complete", device, **context)
 
         if train and batch_index % args.print_freq == 0:

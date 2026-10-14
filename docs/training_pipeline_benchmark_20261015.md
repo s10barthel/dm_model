@@ -2,7 +2,7 @@
 
 The measurements favor direct batching from packed tensors and a separate lightweight monitoring mode. Ordinary one-batch background prefetching helps the existing loader, but adding it to the faster direct reader slowed training in the follow-up. Pinned transfers and deferred metric copies did not justify changing their defaults.
 
-The production training code, checkpoints, and cache files were not changed. Only a reusable diagnostic harness and this report were added. The pc-xPass process tree was suspended with explicit user permission and resumed after each suite. Its CPU counters did not advance during the isolation checks; all eight workers were verified running and consuming CPU afterward. Total suspension time was 218 seconds, approximately 3.6 minutes. A separate resume watchdog protected both runs.
+During the original prototype measurements below, production training code, checkpoints, and cache files were not changed. Only a reusable diagnostic harness and this report were added. The subsequent production implementation and verification are described at the end. The pc-xPass process tree was suspended with explicit user permission and resumed after each suite. Its CPU counters did not advance during the isolation checks; all eight workers were verified running and consuming CPU afterward. Total suspension time was 218 seconds, approximately 3.6 minutes. A separate resume watchdog protected both runs.
 
 The reference was `saved/outcome_scoring/outcome_scoring_20261014T134452_571990_ade6798f/holdout`: relationship-attention, two layers, width 128, four heads, batch size 512, FP32, and an RTX 2080 SUPER (8 GiB). Python was 3.11.5, PyTorch 2.7.1+cu118, and PyG 2.7.0. torch-scatter, torch-sparse, and pyg-lib were absent in this environment.
 
@@ -59,8 +59,57 @@ The implementation priorities are:
 3. Keep one-batch CPU prefetch optional for the current loader. Do not enable it automatically alongside direct batching based on these results.
 4. Leave pinning, transfer flags, deferred metric collection, and CPU-thread defaults unchanged for now. They showed no clear additional gain or were slower in these trials.
 
-The percentages describe the tested short loops. Full-epoch speed depends on storage behavior, other matches, metric/reporting costs, and system load; the savings should not be added together or treated as guaranteed epoch forecasts. No production optimization has been applied.
+The percentages describe the tested short loops. Full-epoch speed depends on storage behavior, other matches, metric/reporting costs, and system load; the savings should not be added together or treated as guaranteed epoch forecasts. At the end of the prototype measurements, no production optimization had been applied.
 
 Benchmark harness: [benchmark_training_pipeline.py](../scripts/diagnostics/benchmark_training_pipeline.py). Local raw results: [main suite](../out/training_pipeline_benchmark/isolated_20261015/results.json), [follow-up](../out/training_pipeline_benchmark/followup_20261015/results.json), and [CPU correctness](../out/training_pipeline_benchmark/correctness_20261015/results.json). Suspension and resume audit files are alongside the corresponding results.
 
 To reproduce after competing workloads have been stopped, run the harness with the saved run path, a new output directory, `--steps 12 --repeats 3 --contention isolated`. Add `--suite followup` for the second suite, or `--correctness-only --steps 2` for the CPU equivalence check. The harness itself does not suspend other workloads and refuses GPU measurements while a `train.py` process is active.
+
+
+## Production implementation verification
+
+Implemented `--batch-loader auto|pyg` (new-run default `auto`) and `--monitoring off|light|on` (default `off`). Prepared disk datasets use direct tensor batching in auto mode; unsupported schemas fall back per batch. Memory-backed data and full monitoring use PyG. Cache format and preprocessing fingerprints are unchanged. Older argument records retain PyG on resume unless explicitly overridden, subject to the existing source/code fingerprint checks.
+
+The new `scripts/diagnostics/benchmark_packed_loader.py` runs the production reader and `run_epoch`, including warm cache file reads, mandatory CPU validation, device transfers, ordinary interim and final metrics. It checks existing cache checksums and source signatures without preparing or modifying caches. Each configuration resets weights, Adam, and random seeds. Case order is randomized, CPU threads remain eight, and CUDA synchronization occurs at timing boundaries only. Initialization and numerical comparisons are excluded.
+
+An initial production comparison repeated 12 batches across four matches, three times per configuration. A follow-up repeated 50 batches (25,600 examples) across 20 selected matches, three times per configuration, to exercise multiple match buffers and the normal one-in-50 sampling cadence. Training uses shuffled four-match buffers; validation uses sequential one-match buffers. Validation examples are selected training examples for throughput measurement, not a holdout assessment. Both checks were isolated by pausing pc-xPass with a watchdog and resuming all ten processes afterward. Neither launched a complete training run.
+
+Median production results:
+
+| Comparison | Existing PyG, off | Packed, off | Packed, light | Packed time saved vs PyG |
+|---|---:|---:|---:|---:|
+| 12 batches, training | 212.4 ms | 170.0 ms | 179.0 ms | 20.0% |
+| 12 batches, validation | 196.7 ms | 174.8 ms | 168.6 ms | 11.1% |
+| 50 batches, training | 218.9 ms | 170.6 ms | 167.5 ms | 22.1% |
+| 50 batches, validation | 231.0 ms | 161.9 ms | 168.5 ms | 29.9% |
+
+The 50-batch run met the 15% training-time reduction target: 22.1% less time, with throughput increasing from 2,339 to 3,002 samples/second. Validation used 29.9% less time. Loader wait (including file reads) fell from 5.69 to 2.78 seconds for training and from 5.21 to 3.15 seconds for validation. No measured packed batch required schema fallback.
+
+The initial short trial showed 5.3% extra training time with light monitoring. Its child sampler was still performing its first asynchronous resource/GPU query during the timed epoch. The follow-up waited for that initial sample before timing, matching ordinary training, which starts monitoring before dataset preparation. At 50 batches, light monitoring was 1.8% faster than off in training (timing variation, not a claimed optimization) and 4.1% slower in validation. This supports the sampled mode while retaining monitoring off as the default.
+
+Peak GPU allocations were identical between loaders: approximately 2,893 MiB during training and 762 MiB during validation. Sampled process RSS peaks were roughly 1.2-1.5 GiB, with variation from allocator reuse and case order; this does not establish a full-split RAM estimate. Storage-release tests independently verify that old match buffers are released, including partial batches spanning buffers.
+
+Every selected production batch matched PyG tensors, labels, weights, metadata, slice dictionaries, and increment dictionaries exactly. CUDA predictions differed by at most 4.1e-8 across the two production suites. After 50 training updates, parameter differences relative to the first training trial reached about 2.45e-4; exact CUDA optimizer replay is not claimed. Deterministic CPU tests check exact predictions, dropout RNG, parameter updates and Adam state, and actual entrypoint tests check interruption/resume with both loader selections and all monitoring modes.
+
+Raw production trials and suspension/resume records are under `out/training_pipeline_benchmark/production_20261015/` and `out/training_pipeline_benchmark/production_long_20261015/`. Total pc-xPass suspension for these implementation checks was 293.0 seconds. All eight workers were verified running and accumulating CPU time afterward. These are warm-cache short-run measurements, not cold-disk or full-epoch guarantees.
+
+
+Reproduce the production comparison after competing workloads have been stopped:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/diagnostics/benchmark_packed_loader.py `
+  --run saved/outcome_scoring/outcome_scoring_20261014T134452_571990_ade6798f/holdout `
+  --output out/training_pipeline_benchmark/production_recheck `
+  --matches 20 --steps 50 --repeats 3 --contention isolated
+```
+
+The benchmark does not suspend competing workloads itself. It reads a trusted
+existing run and writes only diagnostic results under the chosen output directory.
+
+
+Implementation validation: **271 tests passed** across packed batching/packing,
+prepared datasets, graph diagnostics, runtime controls, resource monitoring,
+training controls, source refits and IPW preparation. This includes real CPU and
+CUDA training/checkpoint-resume comparisons, legacy missing-loader arguments,
+explicit loader overrides, exact CPU Adam/dropout replay, fallback errors and
+match-storage release. `git diff --check` also passed.

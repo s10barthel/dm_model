@@ -16,7 +16,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import WeightedRandomSampler
 from torch_geometric.data import Batch
-from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
 from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading, saved_dataset_loading
@@ -30,6 +29,8 @@ from training_state import (add_training_runtime_arguments, validate_learning_ra
     environment_versions, add_training_control_arguments, restore_training_control_defaults,
     reduce_learning_rate, lr_reduction_grace_complete)
 from training_monitor import TrainingMonitor
+from packed_batch_loader import make_batch_loader, batch_loader_metadata
+from training_state import restored_batch_loader
 from training_refit import (HISTORY_VERSION, append_rate_history, apply_refit_rate,
                             load_refit_config, validate_rate_history, ValidationExampleIdentity)
 from models.graph_diagnostics import install_collation_diagnostics
@@ -505,7 +506,8 @@ resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
 resume_probe.add_argument("--keep-cache", action="store_true")
 add_pass_height_argument(resume_probe)
-resume_probe.add_argument("--monitoring", choices=("on", "off"), default="off")
+resume_probe.add_argument("--monitoring", choices=("on", "light", "off"), default="off")
+resume_probe.add_argument("--batch-loader", choices=("auto", "pyg"))
 resume_nodes = resume_probe.add_mutually_exclusive_group()
 resume_nodes.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true")
 resume_nodes.add_argument("--no-goal-nodes", dest="goal_nodes_aware", action="store_false")
@@ -517,7 +519,7 @@ resume_options, resume_extra = resume_probe.parse_known_args()
 resume_checkpoint = None
 if resume_options.resume_checkpoint:
     if resume_extra:
-        parser.error("Resume restores saved settings; only --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
+        parser.error("Resume restores saved settings; only --batch-loader, --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
     resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
     from models.goal_context import resolve_training_goal_settings
     resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
@@ -534,6 +536,7 @@ if resume_options.resume_checkpoint:
     args.resume_run_id = args.run_id
     args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
     args.monitoring = resume_options.monitoring
+    args.batch_loader = restored_batch_loader(resume_checkpoint["args"], resume_options.batch_loader)
     args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
 elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
     refit_probe = argparse.ArgumentParser(add_help=False)
@@ -544,6 +547,8 @@ else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+if not hasattr(args, "batch_loader"):
+    args.batch_loader = "auto"
 try:
     normalize_architecture(vars(args), fresh=resume_checkpoint is None and "--refit-config" not in sys.argv and not args.cont)
 except ValueError as exc:
@@ -939,7 +944,7 @@ def main(cache_session):
         "sources": dataset_signature(args),
         "preprocessing": LOADED_PREPROCESSING_FINGERPRINT,
         "training_code": hashlib.sha256(b"".join(path.read_bytes() for path in
-            [Path(__file__), Path("training_state.py"), Path("training_refit.py"), Path("project_config.py"),
+            [Path(__file__), Path("training_state.py"), Path("training_refit.py"), Path("project_config.py"), Path("packed_batch_loader.py"),
              *sorted(Path("models").glob("*.py"))])).hexdigest(),
     }
     if resume_checkpoint is not None and source_identity != resume_checkpoint["dataset_identity"]:
@@ -988,6 +993,7 @@ def main(cache_session):
         "accumulation_steps": args.accumulation_steps,
         "effective_batch_size": args.batch_size * args.accumulation_steps,
         "monitoring": args.monitoring,
+        "batch_loader": args.batch_loader,
         "cache_session": args.cache_session,
         "keep_cache": getattr(args, "keep_cache", False),
         "ipw_settings": {"batch_size": args.ipw_batch_size, "probability_cache": args.ipw_probability_cache,
@@ -1001,6 +1007,7 @@ def main(cache_session):
             "previous_environment": existing_metadata.get("environment"),
             "environment": environment_versions(),
             "monitoring": args.monitoring,
+            "batch_loader": args.batch_loader,
             "cache_session": args.cache_session,
             "keep_cache": getattr(args, "keep_cache", False),
         }] if resume_checkpoint is not None else []),
@@ -1133,7 +1140,7 @@ def main(cache_session):
     )
     write_run_metadata(Path(trial_path), metadata)
 
-    monitor = TrainingMonitor(trial_path, enabled=args.monitoring == "on")
+    monitor = TrainingMonitor(trial_path, mode=args.monitoring)
     args._batch_failure_dir = trial_path
     if monitor.enabled:
         args._monitor = monitor
@@ -1205,10 +1212,6 @@ def main(cache_session):
         pos_weight = n_negatives / n_positives if n_positives and n_negatives else 1
     else:
         pos_weight = 1
-    #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
-    #Adjust as needed for your environment.
-    #loader_args = {"batch_size": args.batch_size, "shuffle": True, "num_workers": 16, "pin_memory": True}
-    loader_args = {"batch_size": args.batch_size, "shuffle": not bool(disk_args), "num_workers": 0, "pin_memory": args.pin_memory}
     if args.ipw_model_id != "none":
         print("\nCalculating inverse propensity weights...")
         ipw_model_record = get_model_record(args.ipw_model_id)
@@ -1238,11 +1241,18 @@ def main(cache_session):
         finally:
             preparer.close()
 
-    train_loader = DataLoader(train_dataset, **loader_args)
-    valid_loader = None if valid_dataset is None else DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=args.pin_memory)
+    train_loader = make_batch_loader(train_dataset, batch_size=args.batch_size, shuffle=not bool(disk_args),
+                                    pin_memory=args.pin_memory, batch_loader=args.batch_loader, monitoring=args.monitoring)
+    valid_loader = None if valid_dataset is None else make_batch_loader(
+        valid_dataset, batch_size=args.batch_size, pin_memory=args.pin_memory,
+        batch_loader=args.batch_loader, monitoring=args.monitoring)
     for loader in (train_loader, valid_loader):
         if loader is not None:
             install_collation_diagnostics(loader, enabled=args.monitoring == "on", directory=trial_path)
+    metadata["batch_loaders"] = {name: batch_loader_metadata(loader)
+                                 for name, loader in (("training", train_loader), ("validation", valid_loader))
+                                 if loader is not None}
+    write_run_metadata(Path(trial_path), metadata)
 
     # Train loop
     default_lr = max(args.start_lr, args.min_lr)
@@ -1427,6 +1437,9 @@ def main(cache_session):
         )
         if finished:
             metadata["completed_at"] = datetime.now().isoformat(timespec="seconds")
+        metadata["batch_loaders"] = {name: batch_loader_metadata(loader)
+                                     for name, loader in (("training", train_loader), ("validation", valid_loader))
+                                     if loader is not None}
         checkpoint = make_checkpoint(unwrap_model(model), optimizer, args, metadata, source_identity,
                                      best_snapshot, best_acc_weights, finished=finished)
         atomic_torch_save(checkpoint, Path(trial_path) / CHECKPOINT_NAME)

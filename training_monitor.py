@@ -91,8 +91,10 @@ def sample_resources(pid, created, *, include_top=False):
 
 
 class TrainingMonitor:
-    def __init__(self, directory, enabled=False):
-        self.enabled = enabled
+    def __init__(self, directory, enabled=False, *, mode=None):
+        self.mode = mode if mode is not None else ("on" if enabled else "off")
+        self.enabled = self.mode != "off"
+        enabled = self.enabled
         self.directory = Path(directory)
         self.process = None
         self.warned = False
@@ -114,6 +116,9 @@ class TrainingMonitor:
         if not self.warned:
             print(f"Monitoring unavailable or incomplete (training continues): {error}", flush=True)
             self.warned = True
+
+    def should_sample_batch(self, batch_index):
+        return self.enabled and (self.mode == "on" or batch_index % 50 == 0)
 
     def event(self, stage, device=None, **details):
         if not self.enabled:

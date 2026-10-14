@@ -64,7 +64,8 @@ the existing model/feature selection options:
 | `--max-epochs INT` | `100` | Hard cap per validation training stage |
 | `--seed INT` | `100` | Seed for every selected model; integer from 0 through 2**32 - 1 |
 | `--accumulation-steps INT` | `1` | Physical batches per optimizer update, for every selected model |
-| `--monitoring {on,off}` | `off` | Process/system RAM, GPU and training telemetry |
+| `--monitoring {off,light,on}` | `off` | Sampled telemetry (`light`) or full telemetry and collation diagnostics (`on`) |
+| `--batch-loader {auto,pyg}` | `auto` | Direct packed batching with PyG fallback, or the existing loader |
 | `--keep-cache` | Disabled | Retain prepared graph caches after successful workflow completion |
 | `--ipw-batch-size INT` | `256` | IPW inference batch size, independent of training |
 | `--ipw-probability-cache {on,off}` | `on` | Reuse per-match propensity probabilities |
@@ -236,12 +237,19 @@ the original wrapper pipeline may still have unstarted stages.
 
 ## Optional monitoring
 
-`--monitoring on` creates these files in the individual model/stage directory:
+`--monitoring light` and `--monitoring on` create these files in the individual model/stage directory:
 
 - `gpu_monitor.jsonl`: a separate process samples NVIDIA telemetry approximately
   every 30 seconds, including memory, utilization, temperature, power and clocks.
 - `training_monitor.jsonl`: epoch/batch/stage markers, allocated/reserved/peak
   PyTorch memory, graph sizes, and match/source-row identifiers.
+- `resource_monitor.jsonl`: process/system memory samples every five seconds.
+
+`light` records batch events on batches 0, 50, 100, etc., separately in training
+and validation. Lifecycle, epoch and preparation events remain available. The
+sampling check runs before collecting identifiers or resource counters. `on`
+records every batch and enables the additional per-graph collation diagnostics.
+Mandatory CPU batch validation and failure snapshots apply in every mode.
 
 Logs are flushed regularly. The sampler exits when the parent closes its pipe
 or dies. Unsupported counters and telemetry failures are nonfatal. With monitoring
@@ -278,7 +286,7 @@ crash dumps. Retain or delete these artifacts manually after investigation.
 
 ## Process and system memory telemetry
 
-With `--monitoring on`, the lightweight child sampler writes
+With `--monitoring light` or `--monitoring on`, the child sampler writes
 `resource_monitor.jsonl` every five seconds, independently of GPU queries.
 Samples include training PID and creation time, RSS, private committed memory
 where available, and physical RAM totals/usage/availability. Windows samples
@@ -304,3 +312,33 @@ reconstruction. Epoch loading logs report deserialization, reconstruction, and
 combined seconds separately. RAM monitoring and workflow cache cleanup retain
 their existing controls; old retained graph-object caches require a one-time
 rebuild and are not pruned automatically. See [prepared cache documentation](intent_dataset_loading.md).
+
+
+## Packed batch loading
+
+New runs default to `--batch-loader auto`. For prepared disk datasets, the reader
+constructs batches directly from packed tensors. It preserves seeded sample order,
+labels, IPW, metadata and partial batches; a partial batch spanning match buffers
+owns copied storage so previous match buffers can be released. Memory-backed
+runs use PyG. `--batch-loader pyg` explicitly selects the existing loader.
+
+Unsupported attributes (including optional fields, nested mappings and custom
+index rules) fall back to ordinary PyG collation for that batch. Invalid caches
+or collation errors still fail. `--monitoring on` selects PyG for the whole run
+so the additional collation diagnostics remain available. `light` supports the
+packed reader. Existing packed caches and preprocessing fingerprints are unchanged.
+
+Arguments/metadata record the requested loader. `batch_loaders` in run metadata
+records each split's effective loader, direct/fallback batch counts and fallback
+reasons. Counts cover the current process; `last_batching_seconds` covers its last
+iteration and excludes file loading and model work.
+
+Resume preserves the checkpoint's loader selection. Checkpoints without that
+setting select PyG. Both `train.py --resume-checkpoint ...` and the wrapper's
+`--resume-id ...` accept an explicit `--batch-loader auto|pyg` override. Monitoring
+retains its existing runtime override behavior (default off). These controls do
+not bypass existing source/preprocessing/training-code fingerprint checks; an
+unfinished checkpoint from older training code may still be rejected.
+
+The runtime reader changes neither the model nor transfer, pinning, precision,
+thread, metric or batch-size defaults. CPU prefetch remains deferred.

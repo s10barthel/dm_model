@@ -220,7 +220,7 @@ def test_preparation_fingerprint_has_narrow_code_boundary():
     assert "datatools/utils.py" in standard
     for training_only in (
         "models/utils.py", "models/gnn.py", "models/node_selection.py",
-        "train.py", "training_state.py", "training_monitor.py",
+        "train.py", "training_state.py", "training_monitor.py", "packed_batch_loader.py",
     ):
         assert training_only not in standard
     assert "physical_pass_model.py" not in standard
@@ -267,7 +267,7 @@ def test_cache_identity_uses_all_action_dataset_options_but_not_runtime_controls
     assert set(first.options) == expected
     for training_only in (
         "batch_size", "accumulation_steps", "start_lr", "min_lr", "n_epochs",
-        "optimizer", "early_stopping", "monitoring", "device", "pin_memory",
+        "optimizer", "early_stopping", "monitoring", "batch_loader", "device", "pin_memory",
         "seed", "shuffle", "buffer_matches",
     ):
         assert training_only not in first.identity["options"]
