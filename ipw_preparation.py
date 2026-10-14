@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 
 import torch
 from torch_geometric.loader import DataLoader
@@ -56,7 +57,7 @@ def sample_records(dataset, indices=None):
     records = []
     if len(dataset.features) != len(dataset.labels):
         raise ValueError("IPW dataset graph/label counts differ.")
-    for index in range(len(dataset)) if indices is None else indices:
+    for index in range(len(dataset.features)) if indices is None else indices:
         graph, label = dataset.features[index], dataset.labels[index]
         identity = (str(graph.evaluation_match_id), int(graph.evaluation_source_row))
         occurrence = occurrences[identity]
@@ -100,8 +101,11 @@ def predict_probabilities(dataset, model, *, device, batch_size, pin_memory):
 
 
 def normalized_ipw(probabilities, labels):
+    return normalize_with_carries(probabilities, labels[:, config.LABEL_INDEX["is_dribble"]] == 1)
+
+
+def normalize_with_carries(probabilities, carries):
     inverse = probabilities.clamp_min(0.01).reciprocal()
-    carries = labels[:, config.LABEL_INDEX["is_dribble"]] == 1
     normalizer = inverse[~carries].mean() if bool((~carries).any()) else 1.0
     weights = inverse / normalizer
     weights[carries] = 1.0
@@ -200,18 +204,21 @@ class IPWPreparer:
         ids = [str(m) for m in match_ids]
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate match IDs in IPW split.")
-        groups = defaultdict(list)
-        for index, graph in enumerate(dataset.features):
-            groups[str(graph.evaluation_match_id)].append(index)
-        if set(groups) - set(ids):
+        if isinstance(dataset, PreparedActionDataset):
+            present = {entry["match_id"] for entry in dataset.entries}
+        else:
+            present = {str(graph.evaluation_match_id) for graph in dataset.features}
+        if present - set(ids):
             raise ValueError("Main dataset contains samples outside the IPW split.")
         result = torch.empty(len(dataset), dtype=torch.float32)
+        carries = torch.empty(len(dataset), dtype=torch.bool)
         stats = {"hits": 0, "misses": 0, "samples": len(dataset), "cache_id": self.cache_id,
                  "cache": "on" if self.enabled else "off"}
         if self.monitor is not None:
             self.monitor.event("ipw_preparation_" + split, self.device)
-        for match_id in tqdm(ids, desc=f"IPW {split}"):
-            expected = sample_records(dataset, groups[match_id])
+        for match_id, indices, expected, match_carries in tqdm(
+                self._main_records(dataset, ids), total=len(ids), desc=f"IPW {split}"):
+            carries[indices] = match_carries
             sources = self._source_signatures(match_id)
             path = self.cache_root / (_digest(match_id) + ".json")
             values = self._read(path, match_id, sources, expected) if self.enabled else None
@@ -253,7 +260,7 @@ class IPWPreparer:
             self._check_stable()
             if self._source_signatures(match_id) != sources:
                 raise RuntimeError(f"IPW sources changed during preparation of {match_id}.")
-            for index, value in zip(groups[match_id], values):
+            for index, value in zip(indices, values):
                 result[index] = value
         self._check_stable(code=True)
         stats["seconds"] = time.perf_counter() - started
@@ -261,7 +268,33 @@ class IPWPreparer:
               f"{len(dataset):,} samples in {stats['seconds']:.1f}s.", flush=True)
         if self.monitor is not None:
             self.monitor.event("ipw_complete_" + split, self.device)
-        return normalized_ipw(result, dataset.labels), stats
+        return normalize_with_carries(result, carries), stats
+
+    @staticmethod
+    def _main_records(dataset, ids):
+        """Release main graphs before constructing the propensity-model view."""
+        if isinstance(dataset, PreparedActionDataset):
+            entries = {e["match_id"]: e for e in dataset.entries}
+            for match_id in ids:
+                entry = entries.get(match_id)
+                if entry is None:
+                    yield match_id, [], [], torch.empty(0, dtype=torch.bool)
+                    continue
+                payload = dataset._load_entry(entry)
+                try:
+                    expected = sample_records(SimpleNamespace(features=payload["graphs"], labels=payload["labels"]))
+                    carries = payload["labels"][:, config.LABEL_INDEX["is_dribble"]] == 1
+                finally:
+                    del payload
+                yield match_id, list(range(entry["offset"], entry["offset"] + entry["count"])), expected, carries
+        else:
+            groups = defaultdict(list)
+            for index, graph in enumerate(dataset.features):
+                groups[str(graph.evaluation_match_id)].append(index)
+            for match_id in ids:
+                indices = groups[match_id]
+                yield (match_id, indices, sample_records(dataset, indices),
+                       dataset.labels[indices, config.LABEL_INDEX["is_dribble"]] == 1)
 
     def close(self):
         self.model = None

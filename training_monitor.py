@@ -8,10 +8,14 @@ from __future__ import annotations
 import atexit
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
+
+import psutil
 
 
 def append_event(path, event):
@@ -20,16 +24,85 @@ def append_event(path, event):
         stream.write(json.dumps(event, default=str) + "\n")
 
 
+def windows_commit():
+    """Actual commit counters; physical RAM usage cannot diagnose commit exhaustion."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PerformanceInformation(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in (
+                "CommitTotal", "CommitLimit", "CommitPeak", "PhysicalTotal",
+                "PhysicalAvailable", "SystemCache", "KernelTotal", "KernelPaged",
+                "KernelNonpaged", "PageSize")
+        ] + [(name, wintypes.DWORD) for name in ("HandleCount", "ProcessCount", "ThreadCount")]
+
+    info = PerformanceInformation()
+    info.cb = ctypes.sizeof(info)
+    query = ctypes.WinDLL("psapi", use_last_error=True).GetPerformanceInfo
+    query.argtypes = [ctypes.POINTER(PerformanceInformation), wintypes.DWORD]
+    query.restype = wintypes.BOOL
+    if not query(ctypes.byref(info), info.cb):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return dict(commit_charge_bytes=info.CommitTotal * info.PageSize,
+                commit_limit_bytes=info.CommitLimit * info.PageSize,
+                commit_remaining_bytes=(info.CommitLimit - info.CommitTotal) * info.PageSize)
+
+
+def memory_fields(memory):
+    return dict(rss_bytes=memory.rss, private_committed_bytes=getattr(memory, "private", None),
+                virtual_memory_bytes=memory.vms)
+
+
+def sample_resources(pid, created, *, include_top=False):
+    event = {"pid": pid, "process_created": created}
+    try:
+        process = psutil.Process(pid)
+        if abs(process.create_time() - created) >= .001:
+            raise RuntimeError("Training PID has been reused; process memory is unavailable.")
+        event["process"] = memory_fields(process.memory_info())
+    except (psutil.Error, RuntimeError) as exc:
+        event["process_error"] = str(exc)
+    try:
+        memory = psutil.virtual_memory()
+        event["system"] = dict(physical_total_bytes=memory.total, physical_used_bytes=memory.used,
+                               physical_available_bytes=memory.available)
+        if os.name == "nt":
+            try:
+                event["system"].update(windows_commit())
+            except OSError as exc:
+                event["system"]["commit_error"] = str(exc)
+    except psutil.Error as exc:
+        event["system_error"] = str(exc)
+    if include_top:
+        processes = []
+        for process in psutil.process_iter():
+            try:
+                with process.oneshot():
+                    processes.append(dict(pid=process.pid, name=process.name(),
+                                          process_created=process.create_time(),
+                                          **memory_fields(process.memory_info())))
+            except psutil.Error:
+                continue
+        event["largest_processes"] = sorted(
+            processes, key=lambda p: (p["private_committed_bytes"] if p["private_committed_bytes"] is not None
+                                     else p["rss_bytes"]), reverse=True)[:5]
+    return event
+
+
 class TrainingMonitor:
     def __init__(self, directory, enabled=False):
         self.enabled = enabled
         self.directory = Path(directory)
         self.process = None
         self.warned = False
+        self.pid = os.getpid()
+        self.created = psutil.Process(self.pid).create_time() if enabled else None
         if enabled:
             try:
                 self.process = subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), str(self.directory / "gpu_monitor.jsonl")],
+                    [sys.executable, str(Path(__file__).resolve()), str(self.directory / "gpu_monitor.jsonl"),
+                     str(self.pid), str(self.created)],
                     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
@@ -52,6 +125,7 @@ class TrainingMonitor:
                                reserved_bytes=torch.cuda.memory_reserved(device),
                                peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
                                peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
+            details["resources"] = sample_resources(self.pid, self.created)
             append_event(self.directory / "training_monitor.jsonl", {"stage": stage, **details})
         except Exception as exc:
             self._warning(exc)
@@ -91,14 +165,7 @@ def sample_gpu():
     return {"fields": fields.split(","), "rows": [line.split(", ") for line in result.stdout.strip().splitlines()]}
 
 
-def monitor_main(path):
-    stopped = threading.Event()
-
-    def watch_parent():
-        sys.stdin.buffer.read()
-        stopped.set()
-
-    threading.Thread(target=watch_parent, daemon=True).start()
+def gpu_loop(path, stopped):
     while not stopped.is_set():
         try:
             event = sample_gpu()
@@ -111,5 +178,40 @@ def monitor_main(path):
         stopped.wait(30)
 
 
+def resource_loop(path, pid, created, stopped):
+    next_top = 0.0
+    while not stopped.is_set():
+        now = time.monotonic()
+        include_top = now >= next_top
+        if include_top:
+            next_top = now + 30
+        try:
+            event = sample_resources(pid, created, include_top=include_top)
+        except Exception as exc:
+            event = {"pid": pid, "process_created": created, "error": str(exc)}
+        try:
+            append_event(path, event)
+        except OSError:
+            return
+        stopped.wait(5)
+
+
+def monitor_main(path, pid=None, created=None):
+    pid = os.getppid() if pid is None else pid
+    created = psutil.Process(pid).create_time() if created is None else created
+    stopped = threading.Event()
+
+    def watch_parent():
+        sys.stdin.buffer.read()
+        stopped.set()
+
+    threading.Thread(target=watch_parent, daemon=True).start()
+    gpu = threading.Thread(target=gpu_loop, args=(path, stopped), daemon=True)
+    gpu.start()
+    resource_loop(Path(path).with_name("resource_monitor.jsonl"), pid, created, stopped)
+    gpu.join(timeout=6)
+
+
 if __name__ == "__main__":
-    monitor_main(sys.argv[1])
+    monitor_main(sys.argv[1], int(sys.argv[2]) if len(sys.argv) > 2 else None,
+                 float(sys.argv[3]) if len(sys.argv) > 3 else None)

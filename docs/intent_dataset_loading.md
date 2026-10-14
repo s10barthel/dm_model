@@ -1,10 +1,13 @@
-# Intent training with a prepared graph cache
+# Training with a prepared graph cache
 
-Pass-intent and action-intent training now use a prepared disk cache by default.
+Fresh training runs use a prepared disk cache by default for all eight wrapper
+tasks: action/pass/success intent, pass success, pass height, scoring/conceding
+outcomes, and failure receiver. Supported IPW and physical-feature configurations
+use the same bounded loader.
 The existing graph and label files remain the source of truth. Preparation runs
 the existing dataset filters and feature transformations once per match and
 saves the accepted CPU graphs and labels. Compatible later runs reuse them.
-Other model tasks retain the memory loader.
+Tasks outside this set retain their existing loading behavior.
 
 ## Controls
 
@@ -13,18 +16,27 @@ These options work in `train.py`, `scripts/train_relevant_models.py`, and
 
 | Option | Default | Effect |
 | --- | --- | --- |
-| `--dataset-loading` | `auto` | `auto` selects disk for pass/action intent; `memory` uses the previous loader; `disk` explicitly requires a supported intent task. |
+| `--dataset-loading` | `auto` | `auto` selects disk for all eight supported tasks in fresh runs; `memory` explicitly selects the full in-memory loader; `disk` requires a supported task. |
 | `--dataset-buffer-matches` | `4` | Number of prepared matches mixed during training. Must be positive. Validation always reads one match at a time. |
-| `--dataset-cache-dir` | `data/cache/intent_datasets` under the repository | Shared cache location. A different drive can be used if space is limited. |
+| `--dataset-cache-dir` | `data/cache/intent_datasets` under the repository | Shared cache location; the historical directory name remains for compatibility. A different drive can be used. |
+| `--keep-cache` | Disabled | Keep prepared graph/label caches after the complete workflow succeeds. |
 
 Add these options to an existing training command; feature regeneration is not
-needed. Disk loading currently requires no inverse-propensity model.
+needed. Disk loading supports inverse-propensity weighting. Preparation releases
+the main match graphs before constructing the corresponding propensity-model
+view. Only scalar probabilities, carry masks, and weights span the full split;
+weights remain separate from shared graph caches.
 
 Training shuffles match order each epoch, loads a group of matches, and shuffles
 all samples in that group. Each accepted sample appears once per epoch, including
 each earlier-frame augmentation. Batches can cross group boundaries. Validation
 retains source order. The shuffle is deterministic for a given seed and epoch,
 including resumed epoch numbers, but differs from the old global shuffle.
+Fresh disk and memory runs can therefore produce different trained weights.
+Resume and source-based refits preserve the recorded loading mode and buffer
+size; historical `auto` settings use their original interpretation if a resolved
+mode was not saved. Existing source/code compatibility checks still apply.
+The buffer bounds graph counts by matches, not a fixed number of bytes.
 
 ## Cache lifetime and disk use
 
@@ -55,7 +67,7 @@ cannot be assigned the identity of code that the process has not loaded.
 The initial scan estimates additional disk usage conservatively from source file
 sizes. The writer checks space between entries and keeps a 10 GiB free-space
 reserve. If space is insufficient, free space or choose another cache directory
-and rerun. No other cache is deleted automatically. Source signatures use paths,
+and rerun. No fallback to full in-memory loading occurs. Source signatures use paths,
 sizes, and modification times; do not replace source contents while preserving
 their timestamps deliberately.
 
@@ -64,7 +76,37 @@ release intentionally does not accept the older broad-fingerprint caches. Delete
 those caches manually and allow one rebuild. No automatic cache migration or
 legacy-ID aliasing is performed.
 
-Run metadata records each cache directory and identity, accepted sample counts,
+Prepared entries created by training have durable ownership records in
+`.ownership.sqlite`; a process-safe root lock protects claims, validation,
+publication, and deletion. One wrapper workflow owns caches through all selected
+models, validation stages, and final refits. Direct training owns its own session.
+
+After successful model and workflow artifact publication, entries are deleted
+only when every participating workflow succeeded, no process still reads them,
+and no workflow requested `--keep-cache`. A later workflow can collect entries
+whose cleanup was deferred by an active reader. Failure, cancellation, and
+abrupt exits retain completed entries. PID creation times prevent PID reuse from
+mistaking a different process for the original owner. Uncertain process access
+is treated conservatively.
+
+`--keep-cache` persistently retains entries for compatible later runs. Entries
+that existed before ownership tracking, and caches prepared directly through
+the library without a training session, are retained. Automatic cleanup never
+prunes source features, labels, model checkpoints, physical caches, or the
+separately controlled IPW probability cache. Retained entries can be deleted
+manually when no process uses them.
+
+Resume of a direct run reconnects its failed cache session. Resuming one stage
+from an interrupted wrapper does not complete the original multi-stage
+workflow, so its retained caches remain protected. Cleanup errors are reported
+without changing successful training status.
+
+Workflow manifests under `.sessions/` and `cache_lifetime` in workflow/model
+metadata report created/reused entries, deleted/retained bytes, retention
+reasons, and cleanup errors. Ownership and retention options do not enter the
+prepared-data identity.
+
+Run metadata also records each cache directory and identity, accepted sample counts,
 built/reused entry counts, cache bytes, preparation duration, and graph loading
 time for the latest epoch. When no training process uses a cache, its corresponding
 directory can be removed manually; a future run rebuilds it. This does not remove
@@ -94,7 +136,27 @@ records a training log and memory report, terminating the verification subproces
 if resident memory or private committed memory exceeds 24 GiB. It does not launch
 a full multi-epoch training run.
 
-## Verified on this machine
+For any supported task, compare representative matches and then prepare and
+stream the complete saved training/validation split, without training a model:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_dataset_loading.py `
+  --source-metadata saved/<task>/<run-id>/<stage>/metadata.json `
+  --output-dir tmp/dataset_loading_verification
+```
+
+Use a new output directory, or add `--resume` to reconnect the cache ownership
+of an interrupted verification in the same directory. Active verification
+processes cannot be resumed concurrently. The verifier uses one CPU tensor
+thread for its small graph transformations; training thread settings are unchanged.
+The supervisor enforces a 24 GiB process-tree RSS or
+private-commit limit and writes `memory_report.json`, `metadata.json`, resource
+telemetry, and `verification.log`. Successful verification removes its managed
+cache by default; add `--keep-cache` to retain it. Failure preserves completed
+entries for inspection. This verifies data equivalence and loading behavior,
+not model-training throughput or full-epoch GPU memory.
+
+## Historical intent verification on this machine
 
 The completed September 23, 2026 check used all 612 training matches
 (1,572,460 samples) and 153 validation matches (136,978 samples). One training
@@ -109,3 +171,23 @@ verification attempts are retained separately and are not included in that size.
 The checkpoint is marked `verification_completed` and excluded from automatic
 selection of trained models. This was a one-epoch integration check, not a full
 model-training run.
+
+
+## Outcome-scoring verification, October 14, 2026
+
+The configuration from the interrupted October 13 outcome-scoring run was
+verified on all 612 training and 153 validation matches. Three representative
+matches produced identical eager and prepared graphs, attributes, labels, and
+weights. Complete iteration streamed 1,068,759 training samples and 279,139
+validation samples using four-match training groups and one-match validation.
+
+The supervised process tree peaked at 2.01 GiB private committed memory and
+0.89 GiB RSS, below the 24 GiB guard. This measures preparation and streaming,
+not a full model-training epoch or GPU memory. Verification resumed its original
+ownership session after a controlled restart and reused 191 completed entries.
+After successful completion, automatic cleanup removed all 765 graph/label
+entries, freeing 38.66 GiB, with zero retained graph bytes or cleanup errors.
+
+Reports, resource telemetry and the verification log are retained locally under
+`tmp/outcome_scoring_cache_verification_20261014/`. The source model run and its
+feature/label artifacts were not modified.

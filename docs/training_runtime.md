@@ -64,7 +64,8 @@ the existing model/feature selection options:
 | `--max-epochs INT` | `100` | Hard cap per validation training stage |
 | `--seed INT` | `100` | Seed for every selected model; integer from 0 through 2**32 - 1 |
 | `--accumulation-steps INT` | `1` | Physical batches per optimizer update, for every selected model |
-| `--monitoring {on,off}` | `off` | GPU and training telemetry |
+| `--monitoring {on,off}` | `off` | Process/system RAM, GPU and training telemetry |
+| `--keep-cache` | Disabled | Retain prepared graph caches after successful workflow completion |
 | `--ipw-batch-size INT` | `256` | IPW inference batch size, independent of training |
 | `--ipw-probability-cache {on,off}` | `on` | Reuse per-match propensity probabilities |
 | `--ipw-probability-cache-dir PATH` | `data/cache/ipw_probabilities` under the repository | Probability cache location |
@@ -77,12 +78,16 @@ integer; there are no per-model accumulation overrides.
 ## IPW preparation
 
 For models using inverse propensity weighting (including pass-success and
-pass-height), main training and validation graphs remain in memory. The IPW
-graph view is constructed one match at a time, used for pass-intent inference,
-and released. Peak additional graph memory therefore depends on the largest
-match and the inference batch. The main datasets must still fit in RAM.
+pass-height), fresh runs use the prepared disk loader for both the main
+training and validation datasets. Main match graphs are read for identity and
+label checks, then released before the IPW graph view is constructed for
+pass-intent inference. Only compact scalar probability/weight tensors and carry
+masks span a complete split. Shuffled prepared iteration retrieves weights by
+stable sample position. Split-dependent weights are never stored in shared
+graph caches. Explicit memory loading remains available.
 
-This preserves the global training shuffle. IPW processing restores Python,
+Disk loading uses deterministic match-group shuffling; explicit memory loading
+keeps global shuffling. IPW processing restores Python,
 NumPy and PyTorch random state, so cache reuse does not change the subsequent
 training shuffle. Probabilities are aligned by match/source-row identity and
 duplicate occurrence, with target and carry labels checked before weighting.
@@ -269,3 +274,26 @@ Load only trusted snapshots with `torch.load(path, map_location="cpu",
 weights_only=False)`, then call `models.node_selection.validate_graph_batch` on
 the saved `graphs`. They do not contain GPU state and do not replace native
 crash dumps. Retain or delete these artifacts manually after investigation.
+
+
+## Process and system memory telemetry
+
+With `--monitoring on`, the lightweight child sampler writes
+`resource_monitor.jsonl` every five seconds, independently of GPU queries.
+Samples include training PID and creation time, RSS, private committed memory
+where available, and physical RAM totals/usage/availability. Windows samples
+also include commit charge, commit limit, and remaining commitment from
+`GetPerformanceInfo`; these counters diagnose exhaustion of RAM plus paging
+capacity. Non-Windows samples leave Windows-only counters unavailable.
+
+Every thirty seconds, samples include the five largest accessible processes
+by private committed memory (RSS where private memory is unavailable), with
+PID, name, and creation time. Inaccessible processes are skipped. A reused
+training PID produces an explicit process error rather than attributing another
+process's memory to training. Unavailable counters and GPU errors are recorded
+without stopping training or the other sampler.
+
+`training_monitor.jsonl` adds resource snapshots at dataset/preparation, IPW,
+training, and validation stage boundaries. `gpu_monitor.jsonl` retains its
+thirty-second cadence and existing format. Monitoring remains opt-in and does
+not synchronize CUDA or enable CUDA debugging modes.

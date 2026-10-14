@@ -20,6 +20,7 @@ from models.architecture import add_architecture_arguments, normalize_architectu
 from models.node_feature_config import resolve_pos_node_features
 from models.goal_context import goal_policy, resolve_training_goal_settings
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
+from cache_lifetime import workflow_context
 from ipw_options import add_ipw_arguments, ipw_flags
 from crash_capture import add_crash_capture_arguments, run_training
 from training_state import (add_training_runtime_arguments, validate_learning_rates,
@@ -1316,7 +1317,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--keep-cache", "--monitoring", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
             parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         return args
@@ -2131,6 +2132,7 @@ def run_refit_batch(args) -> None:
                 for source in args.refit_source_model_id]
     batch_id = generate_run_id("refit_batch")
     root = SAVED_DIR / "refit_batches" / batch_id
+    args._cache_metadata_directory = root
     jobs = [{"source_model_id": source, "output_model_id": payload["args"]["model_id"],
              "recipe": payload["recipe"], "status": "unstarted"} for source, payload in prepared]
     metadata = {"batch_id": batch_id, "kind": "refit_batch", "status": "running",
@@ -2162,6 +2164,16 @@ def run_refit_batch(args) -> None:
 
 def main() -> None:
     cli_args = parse_args()
+    saved = None
+    if cli_args.resume_id:
+        checkpoint_path = resolve_resume_checkpoint(cli_args.resume_id, ROOT / "saved")
+        saved = load_checkpoint(checkpoint_path)["args"]
+        cli_args._cache_metadata_directory = checkpoint_path.parent
+    with workflow_context(cli_args, saved=saved):
+        _main(cli_args)
+
+
+def _main(cli_args) -> None:
     if getattr(cli_args, "refit_source_model_id", None):
         run_refit_batch(cli_args)
         return
@@ -2183,6 +2195,8 @@ def main() -> None:
             return
         command = [sys.executable, "train.py", "--resume-checkpoint", str(checkpoint_path.resolve()),
                    "--monitoring", cli_args.monitoring]
+        if getattr(cli_args, "keep_cache", False):
+            command.append("--keep-cache")
         print("Resuming:", subprocess.list2cmdline(command))
         try:
             run_training(command, cwd=ROOT, options=cli_args)
@@ -2203,6 +2217,7 @@ def main() -> None:
     python = sys.executable
     bundle_id = cli_args.bundle_id or generate_run_id("model_bundle")
     bundle_root = get_model_bundle_root(bundle_id)
+    cli_args._cache_metadata_directory = bundle_root
     commands, trained_model_ids, intended_receiver_mode, resolved_feature_run_id, feature_flags = build_training_commands(
         cli_args
     )

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from project_config import (SAVED_DIR, VALIDATION_PROTOCOL_SHARED, load_feature_run_metadata,
                             resolve_artifact_split, split_selector, load_model_splits)
-from dataset_loading import resolve_dataset_loading
+from dataset_loading import resolve_dataset_loading, saved_dataset_loading
 from models.node_feature_config import resolve_goal_poss_dist
 
 HISTORY_VERSION = 1
@@ -17,6 +17,7 @@ OPERATIONAL_OPTIONS = {
     "--device": "device", "--monitoring": "monitoring", "--pin-memory": "pin_memory",
     "--no-pin-memory": "pin_memory", "--dataset-loading": "dataset_loading",
     "--dataset-buffer-matches": "dataset_buffer_matches", "--dataset-cache-dir": "dataset_cache_dir",
+    "--keep-cache": "keep_cache",
     "--crash-dump": "crash_dump", "--procdump-path": "procdump_path",
 }
 
@@ -182,12 +183,13 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
                 training_count=None, validation_count=None, validation_fraction=None, refit_recipe=recipe,
                 split_manifest=manifest, split_manifest_id=manifest["manifest_id"],
                 training_step_index=None, training_step_total=None)
-    for key in ("refit_config", "resolved_dataset_loading", "source_identity"):
+    source_loading = saved_dataset_loading(settings)
+    args["dataset_loading"] = source_loading
+    for key in ("refit_config", "resolved_dataset_loading", "source_identity", "cache_session"):
         args.pop(key, None)
     overrides = operational or {}
     if set(overrides) - set(OPERATIONAL_OPTIONS.values()):
         raise ValueError("Refit permits operational overrides only.")
-    source_loading = resolve_dataset_loading(args.get("dataset_loading", "auto"), task, dependency_id)
     args.update(overrides)
     target_loading = resolve_dataset_loading(args.get("dataset_loading", "auto"), task, dependency_id)
     if target_loading != source_loading:

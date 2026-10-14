@@ -209,7 +209,7 @@ def test_monitor_process_records_sample_and_exits(tmp_path):
     try:
         deadline = time.monotonic() + 10
         path = tmp_path / "gpu_monitor.jsonl"
-        while not path.exists() and time.monotonic() < deadline:
+        while (not path.exists() or not path.stat().st_size) and time.monotonic() < deadline:
             time.sleep(.05)
         event = json.loads(path.read_text().splitlines()[0])
         assert "rows" in event or "error" in event  # unavailable NVIDIA telemetry is supported
@@ -250,7 +250,9 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
             "--dataset-cache-dir", str(tmp_path / "cache"), "--node_emb_dim", "8", "--graph_emb_dim", "8",
             "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping"]
     entry = Path(__file__).resolve().parents[1] / "train.py"
-    base.extend(["--no-goal-nodes", "--monitoring", monitoring])
+    base.extend(["--no-goal-nodes", "--monitoring", monitoring,
+                 "--no-position-direction-edge-features", "--no-relative-velocity-edge-features",
+                 "--no-separation-rate-edge-features"])
     original_epoch = utils.run_epoch
 
     def plateau(*a, **kw):

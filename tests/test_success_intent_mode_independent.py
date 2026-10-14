@@ -45,6 +45,10 @@ def make_training_args(feature_run_id: str, **overrides: object) -> SimpleNamesp
         target_family="goal",
         return_type="disc_0.9",
         use_v_edge_features=True,
+        # These fixtures provide legacy two/four-column interaction schemas.
+        position_direction_edge_feature_mode="none",
+        relative_velocity_edge_feature_mode="none",
+        separation_rate_edge_feature_mode="none",
         outcome_scoring_trial=None,
         outcome_conceding_trial=None,
         xy_only=None,

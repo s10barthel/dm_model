@@ -19,7 +19,8 @@ from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader
 
 from dataset import ActionDataset, requires_goal_next10_diagnostics
-from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading
+from dataset_loading import add_dataset_loading_arguments, resolve_dataset_loading, saved_dataset_loading
+from cache_lifetime import training_context
 from ipw_options import add_ipw_arguments, restore_ipw_defaults
 from ipw_preparation import IPWPreparer
 from prepared_dataset import PreparedActionDataset, LOADED_PREPROCESSING_FINGERPRINT
@@ -502,6 +503,7 @@ parser.add_argument("--training-step-total", type=int, default=None, help=argpar
 pc_versions.add_selection_argument(parser)
 resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
+resume_probe.add_argument("--keep-cache", action="store_true")
 add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "off"), default="off")
 resume_nodes = resume_probe.add_mutually_exclusive_group()
@@ -515,7 +517,7 @@ resume_options, resume_extra = resume_probe.parse_known_args()
 resume_checkpoint = None
 if resume_options.resume_checkpoint:
     if resume_extra:
-        parser.error("Resume restores saved settings; only --monitoring and matching pass-height or goal settings may accompany --resume-checkpoint.")
+        parser.error("Resume restores saved settings; only --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
     resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
     from models.goal_context import resolve_training_goal_settings
     resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
@@ -532,6 +534,7 @@ if resume_options.resume_checkpoint:
     args.resume_run_id = args.run_id
     args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
     args.monitoring = resume_options.monitoring
+    args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
 elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
     refit_probe = argparse.ArgumentParser(add_help=False)
     refit_probe.add_argument("--refit-config", required=True)
@@ -727,7 +730,8 @@ def update_training_metadata(trial_path: str, metadata: dict, **updates) -> None
     write_run_metadata(Path(trial_path), metadata)
 
 
-if __name__ == "__main__":
+def main(cache_session):
+    global resume_checkpoint
     # Set device and manual seed
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -735,7 +739,9 @@ if __name__ == "__main__":
     device = resolve_training_device(args.device)
     args.device = device
     args.pin_memory = resolve_pin_memory(args.pin_memory, device)
-    args.resolved_dataset_loading = resolve_dataset_loading(args.dataset_loading, args.task, args.ipw_model_id)
+    args.resolved_dataset_loading = (saved_dataset_loading(vars(args))
+        if resume_checkpoint is not None or args.refit_recipe is not None else
+        resolve_dataset_loading(args.dataset_loading, args.task, args.ipw_model_id))
     if args.task == "success_intent":
         args.pass_lane_features = False
     if not args.possessor_aware and (args.extend_features or args.pass_lane_features):
@@ -956,6 +962,7 @@ if __name__ == "__main__":
         raise ValueError("Checkpoint location does not match its saved model run/stage.")
     if not args.resume_run_id and (Path(trial_path) / "metadata.json").exists():
         raise ValueError(f"Training artifact already exists; use resume or a new run ID: {trial_path}")
+    args._cache_metadata_directory = trial_path
     os.makedirs(trial_path, exist_ok=True)
     crash_log_file = open(f"{trial_path}/crash.log", "a", encoding="utf-8", buffering=1)
     faulthandler.enable(file=crash_log_file, all_threads=True)
@@ -981,6 +988,8 @@ if __name__ == "__main__":
         "accumulation_steps": args.accumulation_steps,
         "effective_batch_size": args.batch_size * args.accumulation_steps,
         "monitoring": args.monitoring,
+        "cache_session": args.cache_session,
+        "keep_cache": getattr(args, "keep_cache", False),
         "ipw_settings": {"batch_size": args.ipw_batch_size, "probability_cache": args.ipw_probability_cache,
                          "probability_cache_dir": args.ipw_probability_cache_dir},
         "optimizer_policy": "persistent_adam",
@@ -992,6 +1001,8 @@ if __name__ == "__main__":
             "previous_environment": existing_metadata.get("environment"),
             "environment": environment_versions(),
             "monitoring": args.monitoring,
+            "cache_session": args.cache_session,
+            "keep_cache": getattr(args, "keep_cache", False),
         }] if resume_checkpoint is not None else []),
         "feature_run_id": args.feature_run_id,
         "use_carries": bool(args.use_carries),
@@ -1138,7 +1149,8 @@ if __name__ == "__main__":
     )
     dataset_class = PreparedActionDataset if args.resolved_dataset_loading == "disk" else ActionDataset
     disk_args = ({"cache_dir": args.dataset_cache_dir, "buffer_matches": args.dataset_buffer_matches,
-                  "seed": args.seed} if args.resolved_dataset_loading == "disk" else {})
+                  "seed": args.seed, "cache_session": cache_session} if args.resolved_dataset_loading == "disk" else {})
+    monitor.event("preparation_start", device, split="training")
     train_dataset = dataset_class(
         train_match_ids,
         feature_dir=args.train_feature_dir,
@@ -1147,6 +1159,8 @@ if __name__ == "__main__":
         **({"shuffle": True} if disk_args else {}),
         **common_dataset_args,
     )
+    monitor.event("preparation_complete", device, split="training", samples=len(train_dataset))
+    monitor.event("preparation_start", device, split="validation")
     valid_dataset = None if args.final_refit else dataset_class(
         valid_match_ids,
         feature_dir=args.valid_feature_dir,
@@ -1154,6 +1168,9 @@ if __name__ == "__main__":
         **disk_args,
         **common_dataset_args,
     )
+    monitor.event("preparation_complete", device, split="validation",
+                  samples=len(valid_dataset) if valid_dataset is not None else 0)
+    monitor.event("dataset_loaded", device)
     log_skipped_matches("training", train_dataset, trial_path)
     metadata["dataset_loading"] = {
         "requested": args.dataset_loading, "resolved": args.resolved_dataset_loading,
@@ -1313,6 +1330,7 @@ if __name__ == "__main__":
         if disk_args:
             train_dataset.set_epoch(epoch)
         train_metrics = run_epoch(args, model, train_loader, optimizer, device, pos_weight, train=True)
+        monitor.event("training_complete", device, epoch=epoch)
         printlog("Train:\t" + get_losses_str(train_metrics), trial_path)
 
         args._validation_identity = (ValidationExampleIdentity() if valid_loader is not None
@@ -1320,6 +1338,7 @@ if __name__ == "__main__":
         valid_metrics = (
             {} if valid_loader is None else run_epoch(args, model, valid_loader, optimizer, device, pos_weight, train=False)
         )
+        monitor.event("validation_complete", device, epoch=epoch)
         if args._validation_identity is not None and args._validation_identity.count:
             if args._validation_identity.count != len(valid_dataset):
                 raise ValueError("Validation example count differs from the loaded dataset.")
@@ -1442,3 +1461,8 @@ if __name__ == "__main__":
     monitor.close()
     faulthandler.disable()
     crash_log_file.close()
+
+
+if __name__ == "__main__":
+    with training_context(args) as cache_session:
+        main(cache_session)

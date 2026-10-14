@@ -268,3 +268,44 @@ def test_duplicate_occurrences_and_invalid_cached_probabilities(setup):
         path.write_text(json.dumps(entry))
         _, stats = preparer.prepare(main, ['m0', 'm1'])
         assert stats['misses'] == stats['hits'] == 1
+
+
+@pytest.mark.parametrize("task", ["pass_success", "pass_height"])
+def test_disk_ipw_equivalence_shuffle_cache_and_bounded_views(setup, tmp_path, monkeypatch, task):
+    from prepared_dataset import PreparedActionDataset
+    create, _, features, labels, options, _ = setup
+    options = dict(options, task=task)
+    eager = ActionDataset(["m0", "m1"], feature_dir=features, label_dir=labels, **options)
+    expected, _ = create(options=options).prepare(eager, ["m0", "m1"])
+    disk = PreparedActionDataset(["m0", "m1"], feature_dir=features, label_dir=labels,
+        cache_dir=tmp_path / "graphs", progress=False, shuffle=True, buffer_matches=1, **options)
+    refs = []
+    original_load = disk._load_entry
+    def bounded(entry):
+        gc.collect()
+        assert all(ref() is None for ref in refs)
+        payload = original_load(entry)
+        refs.extend(weakref.ref(g) for g in payload["graphs"])
+        return payload
+    disk._load_entry = bounded
+    weights, stats = create(options=options).prepare(disk, ["m0", "m1"])
+    assert stats["hits"] == 2
+    torch.testing.assert_close(weights, expected, atol=0, rtol=0)
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+    disk._load_entry = original_load
+    disk.set_inverse_propensity_weights(weights)
+    expected_map = {(g.evaluation_match_id, g.evaluation_source_row): expected[i] for i, g in enumerate(eager.features)}
+    for epoch in (1, 3):
+        disk.set_epoch(epoch)
+        for g, _, weight in disk:
+            torch.testing.assert_close(weight, expected_map[g.evaluation_match_id, g.evaluation_source_row])
+    uncached, stats = create(options=options, cache="off").prepare(disk, ["m0", "m1"])
+    torch.testing.assert_close(uncached, expected)
+    assert stats["misses"] == 2
+    valid = PreparedActionDataset(["m2"], feature_dir=features, label_dir=labels,
+        cache_dir=tmp_path / "graphs", progress=False, **options)
+    valid_weights, _ = create(options=options).prepare(valid, ["m2"], split="validation")
+    valid.set_inverse_propensity_weights(valid_weights)
+    noncarry = [float(w) for _, label, w in valid if label[config.LABEL_INDEX["is_dribble"]] != 1]
+    assert sum(noncarry) / len(noncarry) == pytest.approx(1.)

@@ -13,7 +13,7 @@ The model structure is copied from DEFCON, the upstream source code for the pape
 - [Produced Data Layout](#produced-data-layout)
 - [Run-Id Workflow](#run-id-workflow)
 - [Split Definition](#split-definition)
-- [Prepared cache for intent training](docs/intent_dataset_loading.md)
+- [Prepared dataset cache and bounded training memory](docs/intent_dataset_loading.md)
 - [Training controls, checkpoints and monitoring](docs/training_runtime.md)
 - [Endpoint repair, duration selection, and rollout](docs/endpoint_policy.md)
 - [Empirical reachability circles for pc-xPass](docs/reachability.md)
@@ -1756,7 +1756,9 @@ Dataset/run statistics include a separate `scheduling` record: preparation betwe
 When split flags are omitted, training infers the selector from feature-run metadata, recovering it from the recorded immutable manifest if needed. Explicit selectors are assertions and must match, including count versus percentage mode. Inconsistent modern provenance or a changed match-universe identity fails. Only runs with no split provenance assume the historical 50% split. The resolved selector, match counts, and source are printed and forwarded to training commands.
 
 - `--min_pass_dur <seconds>`: minimum pass duration applied to every selected component. Default: `0.5` seconds.
-- `--resume-id <task/run_id[/stage]>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
+- `--dataset-loading {auto,memory,disk}`: fresh runs default to prepared disk loading for all eight wrapper tasks, including IPW configurations. `memory` explicitly loads the full dataset into RAM. Training buffers four matches by default; validation loads one.
+- `--keep-cache`: retain prepared graph/label caches after success. Otherwise newly managed entries are removed after the complete workflow succeeds and all consumers finish. Failed/interrupted workflows, pre-existing entries and explicit retention requests protect caches. See [prepared dataset loading](docs/intent_dataset_loading.md).
+- `--resume-id <task/run_id[/stage]>`: resume one unfinished model run with its saved training settings. A unique bare run id is also accepted. Accepts `--keep-cache`, `--monitoring`, `--crash-dump`, `--procdump-path`, and matching pass-height or goal settings; incompatible overrides are rejected. Bundle ids are not accepted.
 - `--use-carries`: train `action_intent`, `pass_success`, `outcome_scoring`, and `outcome_conceding` on the feature run's carry-augmented artifacts. Pass-only tasks retain canonical artifacts. Requires a feature run generated or extended with `--use-carries`. Default: off.
 - `--train-split <percentage>`: optional assertion of the feature run's development percentage (1-99).
 - `--train-count <int>`: optional assertion of the feature run's exact development match count, including validation. Mutually exclusive with `--train-split`.

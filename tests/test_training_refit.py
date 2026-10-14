@@ -378,3 +378,19 @@ def test_actual_refit_entrypoint_preserves_goal_policy(synthetic_training, monke
         faulthandler.disable()
     checkpoint = load_checkpoint(root / "saved/pass_intent/goal_refit/final_refit" / CHECKPOINT_NAME)
     assert checkpoint["args"]["goal_context_version"] == (version or 1)
+
+
+def test_refit_preserves_saved_resolved_and_historical_auto(sources):
+    create, _ = sources
+    directory, settings, _ = create("outcome_scoring/source")
+    historical = refit.prepare_refit("outcome_scoring/source", "historical")
+    assert historical["args"]["dataset_loading"] == "memory"
+    settings.update(dataset_loading="auto", resolved_dataset_loading="disk", dataset_buffer_matches=3)
+    (directory / "args.json").write_text(json.dumps(settings))
+    prepared = refit.prepare_refit("outcome_scoring/source", "prepared", operational={"keep_cache": True})
+    assert prepared["args"]["dataset_loading"] == "disk" and prepared["args"]["dataset_buffer_matches"] == 3
+    assert prepared["args"]["keep_cache"]
+    with pytest.raises(ValueError, match="sampling semantics"):
+        refit.prepare_refit("outcome_scoring/source", "wrong", operational={"dataset_loading": "memory"})
+    assert wrapper.parse_args(["--resume-id", "outcome_scoring/source", "--keep-cache"]).keep_cache
+    assert wrapper.parse_args(["--refit-source-model-id", "outcome_scoring/source", "--keep-cache"]).refit_operational == {"keep_cache": True}

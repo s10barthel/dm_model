@@ -22,6 +22,8 @@ from dataset import ActionDataset
 from project_config import assert_feature_paths_usable
 from dataset_loading import DEFAULT_CACHE_DIR, PREPARED_TASKS
 from models.pass_height import positive_height, relabel_height
+from cache_lifetime import CacheWorkflow
+from training_state import capture_rng, restore_rng
 
 CACHE_VERSION = 1
 DISK_RESERVE_BYTES = 10 * 1024**3
@@ -121,12 +123,12 @@ class PreparedActionDataset(IterableDataset):
     """Only metadata survives preparation; at most one group is loaded per iterator."""
 
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
-                 buffer_matches=4, shuffle=False, seed=100, progress=True, **options):
+                 buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None, **options):
         super().__init__()
         assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
                                     options.get("pass_height_diagnostic_label_dir"))
         if options.get("task") not in PREPARED_TASKS:
-            raise ValueError("Prepared datasets support pass_intent, action_intent and pass_height only.")
+            raise ValueError(f"Prepared datasets do not support task {options.get('task')!r}.")
         if int(buffer_matches) < 1:
             raise ValueError("buffer_matches must be positive")
         self.buffer_matches = int(buffer_matches) if shuffle else 1
@@ -159,6 +161,8 @@ class PreparedActionDataset(IterableDataset):
                          "feature_dir": str(self.feature_dir), "label_dir": str(self.label_dir),
                          "options": self.options}
         self.cache_id = _digest(self.identity)
+        # Library callers retain their caches; CLI training supplies workflow ownership.
+        self.cache_session = cache_session or CacheWorkflow(cache_dir, keep=True, kind="library").session_for(cache_dir)
         self.cache_root = Path(cache_dir).resolve() / self.cache_id[:32]
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.loaded_match_ids, self.contributing_match_ids = [], []
@@ -173,20 +177,28 @@ class PreparedActionDataset(IterableDataset):
             signatures = self._source_signatures(match_id)
             key = _digest([match_id, signatures])
             path = self.cache_root / f"{key[:32]}.pt"
-            entry = self._read_entry(path, match_id, signatures)
-            pending.append((match_id, signatures, path, entry))
-        missing_bytes = sum(s[0][1] or 0 for _, s, _, entry in pending if entry is None)
+            pending.append((match_id, signatures, path, path.is_file()))
+        missing_bytes = sum(s[0][1] or 0 for _, s, _, exists in pending if not exists)
         if progress:
-            print(f"Prepared cache: {sum(e is not None for _, _, _, e in pending)} reusable, "
-                  f"{sum(e is None for _, _, _, e in pending)} to build; "
+            print(f"Prepared cache: {sum(exists for _, _, _, exists in pending)} reusable, "
+                  f"{sum(not exists for _, _, _, exists in pending)} to build; "
                   f"estimated additional disk {missing_bytes * 1.15 / 1024**3:.2f} GiB.", flush=True)
         self._check_space(math.ceil(missing_bytes * 1.15))
-        for match_id, signatures, path, entry in tqdm(pending, desc="Preparing match cache", disable=not progress):
-            if entry is None:
-                entry = self._build_entry(match_id, signatures, path)
-                self.preparation["built"] += int(entry is not None)
-            else:
-                self.preparation["reused"] += 1
+        for match_id, signatures, path, _ in tqdm(pending, desc="Preparing match cache", disable=not progress):
+            with self.cache_session.entry(path):
+                entry = self._read_entry(path, match_id, signatures)
+                built = entry is None
+                if built:
+                    rng = capture_rng()
+                    try:
+                        entry = self._build_entry(match_id, signatures, path)
+                    finally:
+                        restore_rng(rng)
+                    self.preparation["built"] += int(entry is not None)
+                else:
+                    self.preparation["reused"] += 1
+                if entry is not None:
+                    self.cache_session.recorded(path, built=built, size=entry["bytes"])
             if entry is None:
                 continue
             self.loaded_match_ids.append(match_id)
@@ -196,7 +208,11 @@ class PreparedActionDataset(IterableDataset):
             if entry["count"]:
                 self.contributing_match_ids.append(match_id)
                 self.entries.append(entry)
-        self.sample_count = sum(e["count"] for e in self.entries)
+        self.sample_count = 0
+        for entry in self.entries:
+            entry["offset"] = self.sample_count
+            self.sample_count += entry["count"]
+        self.ip_weights = None
         self.preparation["seconds"] = time.perf_counter() - started
         if progress:
             print(f"Prepared {self.sample_count:,} samples; cache {self.preparation['bytes'] / 1024**3:.2f} GiB; "
@@ -295,6 +311,20 @@ class PreparedActionDataset(IterableDataset):
             raise RuntimeError(f"Prepared sample count changed for {entry['match_id']}")
         return payload
 
+    def iter_matches(self):
+        """Source-order one-match views for IPW and other preparation passes."""
+        for entry in self.entries:
+            payload = self._load_entry(entry)
+            try:
+                yield entry["match_id"], entry["offset"], payload
+            finally:
+                del payload
+
+    def set_inverse_propensity_weights(self, weights):
+        if weights.ndim != 1 or len(weights) != len(self):
+            raise ValueError("IPW weight count differs from the prepared dataset.")
+        self.ip_weights = weights.detach().cpu()
+
     def __iter__(self):
         assert_feature_paths_usable(self.feature_dir, self.label_dir, self.options.get("diagnostic_label_dir"),
                                     self.options.get("pass_height_diagnostic_label_dir"))
@@ -315,7 +345,9 @@ class PreparedActionDataset(IterableDataset):
                 if self.shuffle:
                     rng.shuffle(rows)
                 for m, r in rows:
-                    yield group[m]["graphs"][r], group[m]["labels"][r], torch.tensor(1.0)
+                    weight = (torch.tensor(1.0) if self.ip_weights is None else
+                              self.ip_weights[entries[offset + m]["offset"] + r])
+                    yield group[m]["graphs"][r], group[m]["labels"][r], weight
                 group.clear()
         finally:
             group.clear()

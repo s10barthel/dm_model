@@ -104,3 +104,7 @@ _vendor/defcon/saved
 !tests/test_extension_failures.py
 
 !tests/test_comparison_overrides.py
+
+!tests/test_all_task_training.py
+!tests/test_cache_lifetime.py
+!tests/test_resource_monitor.py

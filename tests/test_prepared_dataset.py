@@ -16,7 +16,7 @@ from torch_geometric.loader import DataLoader
 from datatools import config
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from dataset import ActionDataset
-from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags, resolve_dataset_loading
+from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags, resolve_dataset_loading, PREPARED_TASKS, saved_dataset_loading
 import prepared_dataset as prepared
 from project_config import split_dataset_provenance
 
@@ -176,9 +176,12 @@ def test_cli_and_unsupported_modes():
     add_dataset_loading_arguments(parser)
     args = parser.parse_args([])
     assert resolve_dataset_loading(args.dataset_loading, "pass_intent") == "disk"
-    assert resolve_dataset_loading(args.dataset_loading, "outcome_scoring") == "memory"
+    assert all(resolve_dataset_loading(args.dataset_loading, task) == "disk" for task in PREPARED_TASKS)
+    assert not args.keep_cache
+    assert "--keep-cache" in dataset_loading_flags(parser.parse_args(["--keep-cache"]))
     assert dataset_loading_flags(args)[3] == "4"
-    for task, ipw in [("outcome_scoring", "none"), ("pass_intent", "some/model")]:
+    assert resolve_dataset_loading("disk", "pass_success", "some/model") == "disk"
+    for task, ipw in [("shot_blocking", "none")]:
         with pytest.raises(ValueError):
             resolve_dataset_loading("disk", task, ipw)
     with pytest.raises(SystemExit):
@@ -304,9 +307,10 @@ def test_pipeline_forwards_loading_controls(monkeypatch, tmp_path):
                                      "--target-family", "xt", "--return_type", "disc_0.9",
                                      "--intended-receiver-mode", "original",
                                      "--dataset-loading", "memory", "--dataset-buffer-matches", "7",
-                                     "--dataset-cache-dir", cache])
+                                     "--dataset-cache-dir", cache, "--keep-cache"])
     commands = main.build_commands(main.parse_args())
     command = next(c for c in commands if c[1] == "scripts/train_relevant_models.py")
+    assert "--keep-cache" in command
     for flag, value in [("--dataset-loading", "memory"), ("--dataset-buffer-matches", "7"),
                         ("--dataset-cache-dir", cache)]:
         assert command[command.index(flag) + 1] == value
@@ -352,3 +356,117 @@ def test_diagnostic_collation_preserves_eager_and_prepared_batches(tmp_path, art
     for a, b in zip(eager_batches, disk_batches):
         assert_sample_equal(a, b)
     assert not (tmp_path / "diagnostics").exists()
+
+
+@pytest.mark.parametrize("task", sorted(PREPARED_TASKS))
+@pytest.mark.parametrize("nodes", [False, True])
+def test_all_tasks_goal_carry_and_augmentation_equivalence(tmp_path, task, nodes):
+    from test_goal_context import source, settings
+    from models.dataset_config import build_action_dataset_kwargs
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir(); labels.mkdir()
+    args = settings(task, nodes, include=nodes if task == "action_intent" else False)
+    kwargs = build_action_dataset_kwargs(args, train=True, diagnostic_label_dir=None,
+                                        require_goal_next10_diagnostics=False)
+    kwargs["pass_height_threshold"] = 1.0 if task == "pass_height" else None
+    for match in ("a", "b"):
+        graphs, rows = [], []
+        for i in range(4):
+            graph, label = source(task=task)
+            label[config.LABEL_INDEX["action_index"]] = i // 2
+            label[config.LABEL_INDEX["pass_max_ball_z"]] = 2
+            if i == 2:
+                label[config.LABEL_INDEX["is_pass"]] = 0
+                label[config.LABEL_INDEX["is_dribble"]] = 1
+                label[config.LABEL_INDEX["intent_index"]] = 0
+            graphs.append(graph); rows.append(label)
+        torch.save(graphs, features / (match + ".pt"))
+        torch.save(torch.stack(rows), labels / (match + ".pt"))
+    eager = ActionDataset(["a", "b"], feature_dir=features, label_dir=labels, **kwargs)
+    disk = prepared.PreparedActionDataset(["a", "b"], feature_dir=features, label_dir=labels,
+            cache_dir=tmp_path / "cache", progress=False, **kwargs)
+    assert len(eager) == len(disk) > 0
+    for i, sample in enumerate(disk):
+        assert_sample_equal(sample, eager[i])
+    assert split_dataset_provenance(["a", "b"], disk) == split_dataset_provenance(["a", "b"], eager)
+
+
+@pytest.mark.parametrize("task", sorted(PREPARED_TASKS))
+def test_saved_auto_preserves_historical_loading(task):
+    expected = "disk" if task in {"pass_intent", "action_intent"} else "memory"
+    assert saved_dataset_loading(dict(task=task, dataset_loading="auto")) == expected
+    assert saved_dataset_loading(dict(task=task, dataset_loading="auto", resolved_dataset_loading="disk")) == "disk"
+
+
+def test_physical_and_lane_features_survive_disk_cache(tmp_path):
+    from test_physical_xpass import (make_graph, make_label, write_physical_inference_cache,
+                                    write_lane_survival_inference_cache)
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir(); labels.mkdir()
+    graph = make_graph()
+    label = make_label(action_index=7)
+    carry = make_label(action_index=8, intent_index=0)
+    carry[config.LABEL_INDEX["is_pass"]] = 0
+    carry[config.LABEL_INDEX["is_dribble"]] = 1
+    torch.save([graph, graph.clone()], features / "match_1.pt")
+    torch.save(torch.stack([label, carry]), labels / "match_1.pt")
+    physical, lane = tmp_path / "physical", tmp_path / "lane"
+    write_physical_inference_cache(physical, [7])
+    write_lane_survival_inference_cache(lane, [7])
+    kwargs = dict(feature_dir=features, label_dir=labels, task="pass_success", extend_features=False,
+                  use_physical_xpass=True, physical_cache_dir=physical, lane_survival=True,
+                  lane_survival_cache_dir=lane, lane_survival_mode="max")
+    eager = ActionDataset(["match_1"], **kwargs)
+    disk = prepared.PreparedActionDataset(["match_1"], cache_dir=tmp_path / "cache", progress=False, **kwargs)
+    assert len(eager) == len(disk) == 2
+    for index, sample in enumerate(disk):
+        assert_sample_equal(sample, eager[index])
+
+
+def test_wrapper_forwards_keep_cache_to_every_task():
+    from scripts import train_relevant_models as wrapper
+    from test_success_intent_mode_independent import make_training_args
+    args = make_training_args("feature_run", pass_success_ipw=False, keep_cache=True)
+    with patch.object(wrapper, "resolve_feature_run_id", return_value="feature_run"), \
+         patch.object(wrapper, "resolve_feature_root", return_value=Path("fixture_features")):
+        commands = wrapper.build_training_commands(args)[0]
+    assert commands and all("--keep-cache" in command for command in commands)
+
+
+def test_full_split_verifier_resumes_owned_entries_and_cleans_up(tmp_path, artifacts, monkeypatch):
+    from scripts import verify_dataset_loading as verifier
+    root = tmp_path / "verification"
+    root.mkdir()
+    source = tmp_path / "source.json"
+    args = {k: str(v) if isinstance(v, Path) else v for k, v in artifacts.items()}
+    metadata = dict(training_args=args, train_match_ids=["m0", "m1", "m2", "m3"],
+                    validation_match_ids=["m4"], resolved_dirs={
+                        "train_feature_dir": str(artifacts["feature_dir"]),
+                        "train_label_dir": str(artifacts["label_dir"]),
+                        "valid_feature_dir": str(artifacts["feature_dir"]),
+                        "valid_label_dir": str(artifacts["label_dir"])})
+    source.write_text(json.dumps(metadata))
+    options = SimpleNamespace(source_metadata=str(source), output_dir=str(root), keep_cache=False, resume=False)
+    original = prepared.PreparedActionDataset._build_entry
+    def interrupted(self, match_id, *args):
+        if match_id == "m2":
+            raise RuntimeError("verification interrupted")
+        return original(self, match_id, *args)
+    threads = torch.get_num_threads()
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(prepared.PreparedActionDataset, "_build_entry", interrupted)
+            with pytest.raises(RuntimeError, match="verification interrupted"):
+                verifier.worker(options)
+        previous = json.loads((root / "metadata.json").read_text())
+        assert previous["cache_lifetime"]["status"] == "failed"
+        options.resume = True
+        verifier.worker(options)
+        report = json.loads((root / "metadata.json").read_text())
+        assert report["status"] == "completed"
+        assert report["cache_session"]["id"] == previous["cache_session"]["id"]
+        assert report["splits"]["training"]["streamed_samples"] > 0
+        assert report["splits"]["validation"]["streamed_samples"] > 0
+        assert not list((root / "cache").rglob("*.pt"))
+    finally:
+        torch.set_num_threads(threads)
