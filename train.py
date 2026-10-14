@@ -1350,8 +1350,11 @@ def main(cache_session):
             metadata["dataset_loading"]["train"] = train_dataset.metadata()
             if valid_dataset is not None:
                 metadata["dataset_loading"]["validation"] = valid_dataset.metadata()
-            printlog(f"Prepared graph loading: train {train_dataset.last_load_seconds:.1f}s, "
-                     f"validation {valid_dataset.last_load_seconds if valid_dataset is not None else 0:.1f}s", trial_path)
+            for split, dataset in (("train", train_dataset), ("validation", valid_dataset)):
+                if dataset is not None:
+                    printlog(f"Prepared graph loading {split}: deserialize {dataset.last_load_seconds:.1f}s, "
+                             f"reconstruct {dataset.last_reconstruct_seconds:.1f}s, "
+                             f"combined {dataset.last_load_seconds + dataset.last_reconstruct_seconds:.1f}s", trial_path)
 
         epoch_time = time.time() - start_time
         append_rate_history(metadata, epoch, lr)

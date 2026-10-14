@@ -6,8 +6,72 @@ outcomes, and failure receiver. Supported IPW and physical-feature configuration
 use the same bounded loader.
 The existing graph and label files remain the source of truth. Preparation runs
 the existing dataset filters and feature transformations once per match and
-saves the accepted CPU graphs and labels. Compatible later runs reuse them.
+saves the accepted CPU graph tensors and labels in the version 2
+`packed_tensors` format. Compatible later runs reuse them.
 Tasks outside this set retain their existing loading behavior.
+
+## Packed tensor format
+
+Each match stores contiguous CPU tensors with per-sample offsets, plus labels
+and graph metadata. Node/edge indices remain local to each graph. The loader
+constructs graph objects only when requested, using tensor views; it does not
+materialize or memoize the complete graph list. Optional attributes, scalar and
+empty tensors, diagnostics, dtypes and precision are preserved. Unsupported
+attribute structures raise an error. Tensor views are read-only inputs for the
+training pipeline; PyG collation creates the batch tensors. Memory remains
+bounded by one match during preparation, the training match group, and batches
+that may cross group boundaries. This is a match bound, not a byte limit.
+
+Plain `torch.load` is used, with memory mapping disabled. There is no additional
+format flag: disk loading automatically selects packed tensors for all eight
+tasks. IPW still attaches split-normalized weights by stable sample position;
+shared packed files never contain these weights. Pass-height thresholds remain
+applied at load time, so compatible threshold experiments can share raw labels.
+
+Version 1 graph-object caches are rebuilt from source into a separate identity.
+There is no legacy reader or migration. Existing retained cache files are left
+untouched and can be removed manually when unused. Saved loading modes, buffer
+sizes and deterministic sample ordering remain subject to the existing
+resume/refit compatibility checks. Checkpoints written before this update fail
+the existing preprocessing-fingerprint check under updated code; resuming those
+checkpoints requires matching preprocessing code. Source-based refits can rebuild
+with the current format while retaining saved loading choices. The codec is part
+of the preparation code fingerprint; this change can also trigger one-time IPW
+probability recomputation.
+IPW probability files keep their separate retention policy.
+
+Manifests and run metadata record `format` and `version`. Preparation reports
+`packing_seconds`, `transform_seconds`, and `save_and_hash_seconds`; these measure
+work performed in the current invocation. `last_load_seconds` measures epoch
+deserialization, `last_reconstruct_seconds` measures lazy graph reconstruction,
+and `last_load_and_reconstruct_seconds` is their sum. Epoch logs show both and
+the combined value; batch collation/model work is outside these timers.
+
+The initial prototype benchmark used 7,018 outcome-scoring samples, warm OS file
+cache and two-epoch GPU trials. Plain packed tensors reduced cache size by 5.2%,
+training time by 28.1%, and preparation plus training by 15.8%. These subset
+measurements motivated integration; they are not promised full-run speedups.
+The repeated production comparison recorded a 25.0% reduction in preparation,
+startup and two-epoch training combined (39.96 s to 29.95 s), with exact equality
+for all 7,018 samples and 22 shuffled batches. Median training/validation time was
+16.24 s for graph objects and 9.73 s for packed tensors. Timing ranges overlapped
+between some trials; treat these as subset results. Production measurements
+include dataset initialization and validation, which the original prototype did
+not measure. The full original outcome-scoring split also streamed all
+1,347,898 samples successfully: peak private memory 2.09 GiB and RSS 0.94 GiB
+under a 24 GiB guard. Its 36.61 GiB packed cache was automatically removed after
+successful verification, with zero cleanup errors. Reproduce the comparison with:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/benchmark_cache_formats.py --source-metadata <saved-run-metadata.json> --output-dir <new-output-directory>
+```
+
+The comparison writes temporary baseline/packed caches and model weights only
+under its output directory and retains them for inspection. It uses fresh
+processes with a 24 GiB memory guard, identical sample/batch checks, repeated
+creation/reading/training trials and the production packed loader. It does not
+flush the Windows file cache. The full-split verifier can separately confirm
+bounded memory and automatic cleanup without training a model.
 
 ## Controls
 

@@ -1,13 +1,12 @@
-"""Isolated graph-cache layout comparison; production loaders are unchanged.
+"""Compare the graph-object baseline with the production packed-cache loader.
 
 Each phase runs in a fresh process under a 24 GiB process-tree memory guard.
-The packed prototype concatenates tensors with offsets, retaining all attributes.
+Packed trials exercise production preparation, validation, and iteration.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
-import copy
 import gc
 import hashlib
 import io
@@ -35,57 +34,13 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
-def pack_graphs(graphs, labels):
-    import torch
-    if not graphs:
-        return dict(version=1, count=0, fields={}, labels=labels)
-    keys = set(graphs[0].keys())
-    if any(set(g.keys()) != keys for g in graphs):
-        raise ValueError('This prototype requires consistent attribute keys within a match.')
-    fields = {}
-    for key in sorted(keys):
-        values = [g[key] for g in graphs]
-        first = values[0]
-        if isinstance(first, torch.Tensor):
-            if any(v.dtype != first.dtype or v.ndim != first.ndim for v in values):
-                raise ValueError(f'Inconsistent tensor schema: {key}')
-            dim = graphs[0].__cat_dim__(key, first)
-            scalar = first.ndim == 0 or dim is None
-            if scalar:
-                value = torch.stack(values)
-                offsets = torch.arange(len(values) + 1)
-                dim = 0
-            else:
-                sizes = [v.shape[dim] for v in values]
-                offsets = torch.tensor([0, *list(__import__('itertools').accumulate(sizes))])
-                value = torch.cat(values, dim=dim)
-            fields[key] = dict(kind='tensor', value=value, offsets=offsets, dim=dim, scalar=scalar)
-        elif all(v == first for v in values):
-            fields[key] = dict(kind='constant', value=first)
-        elif isinstance(first, (int, float, bool)):
-            dtype = torch.float64 if isinstance(first, float) else torch.bool if isinstance(first, bool) else torch.int64
-            fields[key] = dict(kind='scalar', value=torch.tensor(values, dtype=dtype))
-        else:
-            fields[key] = dict(kind='objects', value=values)
-    return dict(version=1, count=len(graphs), fields=fields, labels=labels)
-
-
-def unpack_graph(payload, row):
-    from torch_geometric.data import Data
-    graph = Data()
-    for key, field in payload['fields'].items():
-        kind, value = field['kind'], field['value']
-        if kind == 'tensor':
-            start, end = int(field['offsets'][row]), int(field['offsets'][row + 1])
-            view = value.narrow(field['dim'], start, end - start)
-            graph[key] = view.squeeze(0) if field['scalar'] else view
-        elif kind == 'scalar':
-            graph[key] = value[row].item()
-        elif kind == 'constant':
-            graph[key] = copy.deepcopy(value)
-        else:
-            graph[key] = copy.deepcopy(value[row])
-    return graph
+def dataset_kwargs(config, split):
+    from models.dataset_config import build_action_dataset_kwargs
+    args = config['args']
+    return build_action_dataset_kwargs(args, train=split == 'training',
+        diagnostic_label_dir=args.get('diagnostic_label_dir'),
+        require_goal_next10_diagnostics=args.get('require_goal_next10_diagnostics'),
+        physical_cache_dir=args.get('physical_cache_dir'), lane_survival_cache_dir=args.get('lane_survival_cache_dir'))
 
 
 def atomic_save(payload, path):
@@ -106,23 +61,51 @@ def configuration(output):
 
 
 def cache_path(output, mode, match_id):
-    return Path(output) / ('baseline' if mode == 'baseline' else 'packed') / (match_id + '.pt')
+    if mode == 'packed':
+        return Path(configuration(output)['packed_paths'][match_id])
+    return Path(output) / 'baseline' / (match_id + '.pt')
 
 
 def build_cache(options, config):
     import torch
     from dataset import ActionDataset
-    from models.dataset_config import build_action_dataset_kwargs
-    args = config['args']
-    kwargs = build_action_dataset_kwargs(args, train=True,
-        diagnostic_label_dir=args.get('diagnostic_label_dir'),
-        require_goal_next10_diagnostics=args.get('require_goal_next10_diagnostics'),
-        physical_cache_dir=args.get('physical_cache_dir'), lane_survival_cache_dir=args.get('lane_survival_cache_dir'))
+    from prepared_dataset import PreparedActionDataset
+    from cache_lifetime import CacheWorkflow
+    session = CacheWorkflow(Path(options.output_dir) / 'production_cache', keep=True, kind='benchmark').session_for(
+        Path(options.output_dir) / 'production_cache') if options.mode == 'packed' else None
     result = dict(preprocess_seconds=0., packing_seconds=0., save_and_hash_seconds=0., bytes=0, samples=0, matches=[])
     for split in ('training', 'validation'):
         dirs = config['dirs']
         prefix = 'train' if split == 'training' else 'valid'
+        kwargs = dataset_kwargs(config, split)
         for match_id in config[split + '_ids']:
+            if options.mode == 'packed':
+                old = config.get('packed_paths', {}).get(match_id)
+                if old:
+                    # Isolated benchmark entries only; rebuild each creation trial.
+                    target = Path(old).resolve()
+                    target.relative_to((Path(options.output_dir) / 'production_cache').resolve())
+                    target.unlink(missing_ok=True)
+                    target.with_suffix('.json').unlink(missing_ok=True)
+                started = time.perf_counter()
+                dataset = PreparedActionDataset([match_id], feature_dir=dirs[prefix + '_feature_dir'],
+                    label_dir=dirs[prefix + '_label_dir'], cache_dir=Path(options.output_dir) / 'production_cache',
+                    cache_session=session, progress=False, **kwargs)
+                elapsed = time.perf_counter() - started
+                entry = dataset.entries[0]
+                config.setdefault('packed_paths', {})[match_id] = entry['path']
+                write_json(Path(options.output_dir) / 'config.json', config)
+                row = dict(match_id=match_id, samples=len(dataset), bytes=entry['bytes'],
+                    preprocess_seconds=dataset.preparation['transform_seconds'],
+                    packing_seconds=dataset.preparation['packing_seconds'],
+                    save_and_hash_seconds=dataset.preparation['save_and_hash_seconds'],
+                    creation_seconds=elapsed)
+                result['matches'].append(row)
+                for name in ('preprocess_seconds', 'packing_seconds', 'save_and_hash_seconds', 'bytes', 'samples'):
+                    result[name] += row[name]
+                del dataset
+                gc.collect()
+                continue
             path = cache_path(options.output_dir, options.mode, match_id)
             path.parent.mkdir(exist_ok=True)
             started = time.perf_counter()
@@ -133,8 +116,6 @@ def build_cache(options, config):
             started = time.perf_counter()
             if options.mode == 'baseline':
                 payload = dict(graphs=dataset.features, labels=dataset.labels)
-            else:
-                payload = pack_graphs(dataset.features, dataset.labels)
             packing = time.perf_counter() - started
             started = time.perf_counter()
             atomic_save(payload, path)
@@ -146,7 +127,7 @@ def build_cache(options, config):
                 result[name] += row[name]
             del payload, dataset
             gc.collect()
-    result['creation_seconds'] = result['preprocess_seconds'] + result['packing_seconds'] + result['save_and_hash_seconds']
+    result['creation_seconds'] = sum(row.get('creation_seconds', row['preprocess_seconds'] + row['packing_seconds'] + row['save_and_hash_seconds']) for row in result['matches'])
     return result
 
 
@@ -169,6 +150,16 @@ class CacheDataset:
         config = configuration(output)
         counts = config.get('sample_counts', {})
         self.count = sum(counts[m] for m in ids)
+        # Mirror the old prepared reader's startup manifest/checksum validation.
+        for match_id in self.ids:
+            path = cache_path(output, 'baseline', match_id)
+            manifest = json.loads(path.with_suffix('.json').read_text())
+            digest = hashlib.sha256()
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(4 * 1024**2), b''):
+                    digest.update(block)
+            if path.stat().st_size != manifest['bytes'] or digest.hexdigest() != manifest['sha256']:
+                raise ValueError(f'Invalid baseline cache: {match_id}')
 
     def __len__(self):
         return self.count
@@ -189,18 +180,13 @@ class CacheDataset:
                 for match_id in ids[offset:offset + self.buffer_matches]:
                     started = time.perf_counter()
                     group.append(torch.load(cache_path(self.output, self.mode, match_id), weights_only=False,
-                                            map_location='cpu', mmap=self.mode == 'mmap'))
+                                            map_location='cpu', mmap=False))
                     self.load_seconds += time.perf_counter() - started
                 rows = [(m, r) for m, p in enumerate(group) for r in range(len(p['labels']))]
                 if self.shuffle:
                     rng.shuffle(rows)
                 for m, row in rows:
-                    if self.mode == 'baseline':
-                        graph = group[m]['graphs'][row]
-                    else:
-                        started = time.perf_counter()
-                        graph = unpack_graph(group[m], row)
-                        self.reconstruct_seconds += time.perf_counter() - started
+                    graph = group[m]['graphs'][row]
                     yield graph, group[m]['labels'][row], torch.tensor(1.)
                 group.clear()
         finally:
@@ -228,12 +214,23 @@ class TimedLoader:
             yield batch
 
 
+def make_dataset(options, config, split):
+    if options.mode == 'baseline':
+        return CacheDataset(options.output_dir, options.mode, config[split + '_ids'],
+            shuffle=split == 'training', seed=config['args']['seed'],
+            buffer_matches=config['args'].get('dataset_buffer_matches', 4))
+    from prepared_dataset import PreparedActionDataset
+    prefix = 'train' if split == 'training' else 'valid'
+    return PreparedActionDataset(config[split + '_ids'], feature_dir=config['dirs'][prefix + '_feature_dir'],
+        label_dir=config['dirs'][prefix + '_label_dir'], cache_dir=Path(options.output_dir) / 'production_cache',
+        progress=False, shuffle=split == 'training', seed=config['args']['seed'],
+        buffer_matches=config['args'].get('dataset_buffer_matches', 4), **dataset_kwargs(config, split))
+
+
 def loaders(options, config):
     from torch_geometric.loader import DataLoader
-    common = dict(output=options.output_dir, mode=options.mode, seed=config['args']['seed'],
-                  buffer_matches=config['args'].get('dataset_buffer_matches', 4))
-    train = CacheDataset(ids=config['training_ids'], shuffle=True, **common)
-    valid = CacheDataset(ids=config['validation_ids'], shuffle=False, **common)
+    train = make_dataset(options, config, 'training')
+    valid = make_dataset(options, config, 'validation')
     batch_size = config['args']['batch_size']
     return [(dataset, TimedLoader(DataLoader(dataset, batch_size=batch_size, num_workers=0,
                                             pin_memory=config['args'].get('pin_memory', False))))
@@ -242,15 +239,18 @@ def loaders(options, config):
 
 def loader_statistics(dataset, loader):
     waits = loader.waits
-    return dict(load_seconds=dataset.load_seconds, reconstruct_seconds=dataset.reconstruct_seconds,
+    return dict(load_seconds=getattr(dataset, 'last_load_seconds', getattr(dataset, 'load_seconds', 0.)),
+                reconstruct_seconds=getattr(dataset, 'last_reconstruct_seconds', getattr(dataset, 'reconstruct_seconds', 0.)),
                 batch_delivery_seconds=sum(waits), first_batch_seconds=waits[0] if waits else 0,
                 median_batch_seconds=statistics.median(waits) if waits else 0,
                 max_batch_seconds=max(waits) if waits else 0, batches=len(waits))
 
 
 def read_cache(options, config):
-    result = dict(splits={})
-    for split, (dataset, loader) in zip(('training', 'validation'), loaders(options, config)):
+    started = time.perf_counter()
+    pairs = loaders(options, config)
+    result = dict(splits={}, dataset_setup_seconds=time.perf_counter() - started)
+    for split, (dataset, loader) in zip(('training', 'validation'), pairs):
         dataset.set_epoch(1)
         started = time.perf_counter()
         graphs_seen = 0
@@ -288,26 +288,25 @@ def equivalence(options, config):
     checked = 0
     for match_id in config['training_ids'] + config['validation_ids']:
         baseline = torch.load(cache_path(options.output_dir, 'baseline', match_id), weights_only=False)
-        for mode in ('packed', 'mmap'):
-            packed = torch.load(cache_path(options.output_dir, mode, match_id), weights_only=False, mmap=mode == 'mmap')
-            assert len(baseline['graphs']) == packed['count']
-            for row in range(packed['count']):
+        for mode in ('packed',):
+            from packed_graphs import decode_payload
+            packed = decode_payload(torch.load(cache_path(options.output_dir, mode, match_id), weights_only=False))
+            assert len(baseline['graphs']) == len(packed['graphs'])
+            for row in range(len(packed['graphs'])):
                 equal_samples((baseline['graphs'][row], baseline['labels'][row], torch.tensor(1.)),
-                              (unpack_graph(packed, row), packed['labels'][row], torch.tensor(1.)))
+                              (packed['graphs'][row], packed['labels'][row], torch.tensor(1.)))
                 checked += 1
             del packed
         del baseline
     batches = 0
     for epoch in (1, 2):
-        common = dict(output=options.output_dir, ids=config['training_ids'], shuffle=True,
-                      seed=config['args']['seed'], buffer_matches=config['args'].get('dataset_buffer_matches', 4))
-        datasets = [CacheDataset(mode=mode, **common) for mode in ('baseline', 'packed', 'mmap')]
+        datasets = [make_dataset(SimpleNamespace(output_dir=options.output_dir, mode=mode), config, 'training')
+                    for mode in ('baseline', 'packed')]
         for dataset in datasets:
             dataset.set_epoch(epoch)
         iters = [iter(DataLoader(d, batch_size=config['args']['batch_size'], num_workers=0)) for d in datasets]
         for samples in zip(*iters, strict=True):
             equal_samples(samples[0], samples[1])
-            equal_samples(samples[0], samples[2])
             batches += 1
     return dict(equivalent=True, sample_comparisons=checked, shuffled_batches=batches)
 
@@ -328,7 +327,9 @@ def train_cache(options, config):
     torch.cuda.synchronize()
     setup_seconds = time.perf_counter() - started
     torch.cuda.reset_peak_memory_stats()
+    started = time.perf_counter()
     (train, train_loader), (valid, valid_loader) = loaders(options, config)
+    dataset_setup_seconds = time.perf_counter() - started
     epochs = []
     for epoch in range(1, options.epochs + 1):
         args._epoch = epoch
@@ -348,7 +349,7 @@ def train_cache(options, config):
                            train_metrics=metrics, validation_metrics=validation))
     state = {k:v.detach().cpu() for k,v in model.state_dict().items()}
     torch.save(state, Path(options.output_dir) / (options.result_name + '_weights.pt'))
-    return dict(setup_seconds=setup_seconds, epochs=epochs,
+    return dict(setup_seconds=setup_seconds, dataset_setup_seconds=dataset_setup_seconds, epochs=epochs,
                 training_and_validation_seconds=sum(e['training_seconds'] + e['validation_seconds'] for e in epochs),
                 peak_cuda_allocated_bytes=torch.cuda.max_memory_allocated(),
                 peak_cuda_reserved_bytes=torch.cuda.max_memory_reserved(),
@@ -357,6 +358,8 @@ def train_cache(options, config):
 
 def worker(options):
     import torch
+    # Both formats pay the same production module imports before phase timing.
+    import prepared_dataset
     torch.set_num_threads(options.threads)
     config = configuration(options.output_dir)
     functions = dict(build=build_cache, read=read_cache, equivalence=equivalence, train=train_cache)
@@ -418,19 +421,22 @@ def orchestrate(options):
             for mode in (('baseline','packed') if repetition==0 else ('packed','baseline')):
                 result = supervise_phase(output,'build',mode,f'build_{repetition}_{mode}',threads=options.threads,epochs=options.epochs)
                 report['builds'].append(result)
+                config = configuration(output)
+                report['config'] = config
                 if mode=='baseline':
                     config['sample_counts'] = {r['match_id']:r['samples'] for r in result['matches']}
                     write_json(output/'config.json',config)
                 write_json(output/'results.json',report)
         report['equivalence'] = supervise_phase(output,'equivalence','baseline','equivalence',threads=options.threads,epochs=options.epochs)
-        for repetition in range(3):
-            modes = ['baseline','packed','mmap']
-            modes = modes[repetition:] + modes[:repetition]
+        for repetition in range(4):
+            modes = ['baseline','packed']
+            rotation = repetition % len(modes)
+            modes = modes[rotation:] + modes[:rotation]
             for mode in modes:
                 report['reads'].append(supervise_phase(output,'read',mode,f'read_{repetition}_{mode}',threads=options.threads,epochs=options.epochs))
                 write_json(output/'results.json',report)
         for repetition in range(2):
-            modes = ['baseline','packed','mmap'] if repetition==0 else ['mmap','packed','baseline']
+            modes = ['baseline','packed'] if repetition==0 else ['packed','baseline']
             for mode in modes:
                 report['training'].append(supervise_phase(output,'train',mode,f'train_{repetition}_{mode}',threads=options.threads,epochs=options.epochs))
                 write_json(output/'results.json',report)
@@ -450,7 +456,7 @@ def main():
     parser.add_argument('--epochs',type=int,default=2)
     parser.add_argument('--worker',action='store_true')
     parser.add_argument('--phase',choices=('build','read','equivalence','train'))
-    parser.add_argument('--mode',choices=('baseline','packed','mmap'))
+    parser.add_argument('--mode',choices=('baseline','packed'))
     parser.add_argument('--result-name')
     options=parser.parse_args()
     worker(options) if options.worker else orchestrate(options)

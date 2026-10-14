@@ -8,6 +8,7 @@ import io
 import json
 import math
 import os
+import pickle
 from pathlib import Path
 import random
 import shutil
@@ -19,16 +20,18 @@ from torch.utils.data import IterableDataset, get_worker_info
 from tqdm import tqdm
 
 from dataset import ActionDataset
+from packed_graphs import FORMAT, VERSION, pack_graphs, decode_payload, validate_payload
 from project_config import assert_feature_paths_usable
 from dataset_loading import DEFAULT_CACHE_DIR, PREPARED_TASKS
 from models.pass_height import positive_height, relabel_height
 from cache_lifetime import CacheWorkflow
 from training_state import capture_rng, restore_rng
 
-CACHE_VERSION = 1
+CACHE_VERSION = VERSION
 DISK_RESERVE_BYTES = 10 * 1024**3
 BASE_PREPARATION_FILES = (
     "prepared_dataset.py",
+    "packed_graphs.py",
     "dataset.py",
     "models/dataset_config.py",
     "models/node_feature_config.py",
@@ -168,9 +171,11 @@ class PreparedActionDataset(IterableDataset):
         self.loaded_match_ids, self.contributing_match_ids = [], []
         self.skipped_matches, self.skipped_rows = {}, {}
         self.entries = []
-        self.preparation = {"built": 0, "reused": 0, "bytes": 0}
+        self.preparation = {"built": 0, "reused": 0, "bytes": 0, "packing_seconds": 0.0,
+                            "transform_seconds": 0.0, "save_and_hash_seconds": 0.0}
         self.last_iteration_seconds = 0.0
         self.last_load_seconds = 0.0
+        self._reconstruction_timing = {"seconds": 0.0}
         started = time.perf_counter()
         pending = []
         for match_id in self.requested_match_ids:
@@ -244,22 +249,29 @@ class PreparedActionDataset(IterableDataset):
             entry = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
             if (entry["cache_id"] != self.cache_id or entry["match_id"] != match_id
                     or entry["sources"] != signatures or entry["count"] < 0
+                    or entry.get("format") != FORMAT or entry.get("version") != CACHE_VERSION
                     or not isinstance(entry["skipped_rows"], dict)
                     or path.stat().st_size != entry["bytes"]
                     or _file_digest(path) != entry["sha256"]):
                 return None
+            # A checksum alone cannot validate a well-formed but incompatible payload.
+            payload = torch.load(path, weights_only=False, map_location="cpu", mmap=False)
+            validate_payload(payload, entry["count"])
+            del payload
             entry["path"] = str(path)
             entry["cache_signature"] = _signature(path)
             entry["manifest_signature"] = _signature(path.with_suffix(".json"))
             return entry
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, pickle.UnpicklingError):
             return None
 
     def _build_entry(self, match_id, signatures, path):
         # The existing eager path is bounded here to one match, including its clones.
+        transform_started = time.perf_counter()
         with contextlib.redirect_stderr(io.StringIO()):
             dataset = ActionDataset([match_id], feature_dir=self.feature_dir,
                                     label_dir=self.label_dir, **self.options)
+        self.preparation["transform_seconds"] += time.perf_counter() - transform_started
         self.skipped_matches.update(dataset.skipped_matches)
         if match_id not in dataset.loaded_match_ids:
             return None  # Do not persist unreadable/missing matches; retry next run.
@@ -267,21 +279,31 @@ class PreparedActionDataset(IterableDataset):
             raise RuntimeError(f"Source changed while preparing {match_id}; retry with stable artifacts.")
         for graph in dataset.features:
             graph.cpu()
-        payload = {"graphs": dataset.features, "labels": dataset.labels.cpu()}
+        if dataset.features:
+            del graph
+        packing_started = time.perf_counter()
+        payload = pack_graphs(dataset.features, dataset.labels)
+        self.preparation["packing_seconds"] += time.perf_counter() - packing_started
+        count, skipped_rows = len(dataset), dict(dataset.skipped_rows)
+        del dataset
+
         temporary = path.with_suffix(f".{uuid.uuid4().hex[:12]}.tmp")
         manifest_tmp = temporary.with_suffix(".json.tmp")
         try:
+            save_started = time.perf_counter()
             self._check_space(math.ceil((signatures[0][1] or 0) * 1.15))
             # Use Python's file API, including for non-ASCII cache directories.
             with temporary.open("wb") as stream:
                 torch.save(payload, stream)
             self._check_space()
             entry = {"cache_id": self.cache_id, "match_id": match_id, "sources": signatures,
-                     "count": len(dataset), "skipped_rows": dict(dataset.skipped_rows),
+                     "format": FORMAT, "version": CACHE_VERSION,
+                     "count": count, "skipped_rows": skipped_rows,
                      "bytes": temporary.stat().st_size, "sha256": _file_digest(temporary)}
             manifest_tmp.write_text(json.dumps(entry, indent=2), encoding="utf-8")
             os.replace(temporary, path)
             os.replace(manifest_tmp, path.with_suffix(".json"))
+            self.preparation["save_and_hash_seconds"] += time.perf_counter() - save_started
         finally:
             temporary.unlink(missing_ok=True)
             manifest_tmp.unlink(missing_ok=True)
@@ -303,10 +325,14 @@ class PreparedActionDataset(IterableDataset):
                 or _signature(path.with_suffix(".json")) != entry["manifest_signature"]):
             raise RuntimeError(f"Source or prepared cache changed for {entry['match_id']}; restart preparation.")
         started = time.perf_counter()
-        payload = torch.load(path, weights_only=False, map_location="cpu")
+        try:
+            packed = torch.load(path, weights_only=False, map_location="cpu", mmap=False)
+            self.last_load_seconds += time.perf_counter() - started
+            payload = decode_payload(packed, expected_count=entry["count"], timing=self._reconstruction_timing)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, pickle.UnpicklingError) as exc:
+            raise RuntimeError(f"Invalid prepared cache for {entry['match_id']}: {exc}") from exc
         if self.pass_height_threshold is not None:
             payload["labels"] = relabel_height(payload["labels"], self.pass_height_threshold)
-        self.last_load_seconds += time.perf_counter() - started
         if len(payload["graphs"]) != entry["count"] or len(payload["labels"]) != entry["count"]:
             raise RuntimeError(f"Prepared sample count changed for {entry['match_id']}")
         return payload
@@ -335,6 +361,7 @@ class PreparedActionDataset(IterableDataset):
         if self.shuffle:
             rng.shuffle(entries)
         self.last_load_seconds = 0.0
+        self._reconstruction_timing["seconds"] = 0.0
         started = time.perf_counter()
         group = []
         try:
@@ -353,9 +380,15 @@ class PreparedActionDataset(IterableDataset):
             group.clear()
             self.last_iteration_seconds = time.perf_counter() - started
 
+    @property
+    def last_reconstruct_seconds(self):
+        return self._reconstruction_timing["seconds"]
+
     def metadata(self):
-        return {"mode": "disk", "cache_id": self.cache_id, "cache_root": str(self.cache_root),
+        return {"mode": "disk", "format": FORMAT, "version": CACHE_VERSION, "cache_id": self.cache_id, "cache_root": str(self.cache_root),
                 "pass_height_threshold_meters": self.pass_height_threshold,
                 "buffer_matches": self.buffer_matches, "shuffle": "match_groups" if self.shuffle else "sequential",
                 "sample_count": len(self), "preparation": dict(self.preparation),
-                "last_load_seconds": self.last_load_seconds}
+                "last_load_seconds": self.last_load_seconds,
+                "last_reconstruct_seconds": self.last_reconstruct_seconds,
+                "last_load_and_reconstruct_seconds": self.last_load_seconds + self.last_reconstruct_seconds}

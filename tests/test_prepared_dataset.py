@@ -63,11 +63,12 @@ def assert_sample_equal(a, b):
     assert set(ga.keys()) == set(gb.keys())
     for k in ga.keys():
         if isinstance(ga[k], torch.Tensor):
-            torch.testing.assert_close(ga[k], gb[k], equal_nan=True)
+            assert ga[k].dtype == gb[k].dtype
+            torch.testing.assert_close(ga[k], gb[k], rtol=0, atol=0, equal_nan=True)
         else:
             assert ga[k] == gb[k]
-    torch.testing.assert_close(la, lb, equal_nan=True)
-    torch.testing.assert_close(wa, wb)
+    torch.testing.assert_close(la, lb, rtol=0, atol=0, equal_nan=True)
+    torch.testing.assert_close(wa, wb, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("task", ["pass_intent", "action_intent"])
@@ -470,3 +471,145 @@ def test_full_split_verifier_resumes_owned_entries_and_cleans_up(tmp_path, artif
         assert not list((root / "cache").rglob("*.pt"))
     finally:
         torch.set_num_threads(threads)
+
+
+
+def test_packed_storage_buffer_and_cancel(tmp_path, artifacts):
+    disk = make_disk(tmp_path, artifacts, shuffle=True, buffer_matches=2)
+    refs, collections = [], []
+    load = disk._load_entry
+    def bounded(entry):
+        gc.collect()
+        assert sum(r() is not None for r in collections) < disk.buffer_matches
+        # A previous yielded tensor view can retain one extra match's storage.
+        assert sum(r() is not None for r in refs) <= disk.buffer_matches
+        payload = load(entry)
+        collections.append(weakref.ref(payload['graphs']))
+        x = next(f[2] for f in payload['graphs'].fields if f[0] == 'x')
+        refs.append(weakref.ref(x))
+        return payload
+    disk._load_entry = bounded
+    for sample in disk:
+        pass
+    del sample
+    gc.collect()
+    assert all(r() is None for r in refs + collections)
+    iterator = iter(disk)
+    sample = next(iterator)
+    iterator.close()
+    gc.collect()
+    assert all(r() is None for r in collections)
+    del sample
+    gc.collect()
+    assert all(r() is None for r in refs)
+    metadata = disk.metadata()
+    assert metadata['format'] == 'packed_tensors' and metadata['version'] == 2
+    assert metadata['last_reconstruct_seconds'] > 0
+    assert metadata['last_load_and_reconstruct_seconds'] >= metadata['last_load_seconds']
+
+
+def test_structural_corruption_rebuilds_and_fails_during_iteration(tmp_path, artifacts):
+    disk = make_disk(tmp_path, artifacts, ['m0'])
+    entry = disk.entries[0]
+    path = Path(entry['path'])
+    payload = torch.load(path, weights_only=False)
+    payload['fields']['x']['offsets'][-1] += 1
+    torch.save(payload, path)
+    manifest = json.loads(path.with_suffix('.json').read_text())
+    manifest.update(bytes=path.stat().st_size, sha256=prepared._file_digest(path))
+    path.with_suffix('.json').write_text(json.dumps(manifest))
+    # Simulate a signature-stable malformed payload: validation must still reject it.
+    entry.update(cache_signature=prepared._signature(path),
+                 manifest_signature=prepared._signature(path.with_suffix('.json')))
+    with pytest.raises(RuntimeError, match='Invalid prepared cache'):
+        disk._load_entry(entry)
+    rebuilt = make_disk(tmp_path, artifacts, ['m0'])
+    assert rebuilt.preparation['built'] == 1
+    assert len(list(rebuilt)) == 2
+
+
+def test_format_rebuild_preserves_legacy_files_and_saved_order(tmp_path, artifacts, monkeypatch):
+    with monkeypatch.context() as context:
+        context.setattr(prepared, 'CACHE_VERSION', 1)
+        legacy = make_disk(tmp_path, artifacts, ['m0', 'm1'])
+    old_paths = [Path(e['path']) for e in legacy.entries]
+    for match_id, path in zip(['m0', 'm1'], old_paths):
+        eager = ActionDataset([match_id], **artifacts)
+        torch.save({'graphs': eager.features, 'labels': eager.labels}, path)
+    before = [p.read_bytes() for p in old_paths]
+    packed = make_disk(tmp_path, artifacts, ['m0', 'm1'])
+    assert packed.cache_id != legacy.cache_id and packed.preparation['built'] == 2
+    assert [p.read_bytes() for p in old_paths] == before
+    rebuilt = make_disk(tmp_path, artifacts, ['m0', 'm1'], shuffle=True, buffer_matches=2, seed=42)
+    rebuilt.set_epoch(7)
+    expected = [identity(s) for s in rebuilt]
+    for e in rebuilt.entries:
+        Path(e['path']).unlink()
+    resumed = make_disk(tmp_path, artifacts, ['m0', 'm1'], shuffle=True, buffer_matches=2, seed=42)
+    resumed.set_epoch(7)
+    assert [identity(s) for s in resumed] == expected
+
+
+
+def test_preparation_does_not_retain_graphs_or_packed_storage(tmp_path, artifacts, monkeypatch):
+    refs = []
+    original = prepared.pack_graphs
+    def bounded(graphs, labels):
+        gc.collect()
+        assert all(ref() is None for ref in refs)
+        refs.extend(weakref.ref(g) for g in graphs)
+        payload = original(graphs, labels)
+        refs.append(weakref.ref(payload['fields']['x']['value']))
+        return payload
+    monkeypatch.setattr(prepared, 'pack_graphs', bounded)
+    disk = make_disk(tmp_path, artifacts)
+    assert disk.preparation['built'] == 5
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+def test_iteration_error_releases_packed_storage(tmp_path, artifacts):
+    disk = make_disk(tmp_path, artifacts, shuffle=True, buffer_matches=2)
+    original = disk._load_entry
+    refs = []
+    def failed(entry):
+        if refs:
+            raise OSError('read interrupted')
+        payload = original(entry)
+        refs.append(weakref.ref(payload['graphs']))
+        refs.append(weakref.ref(next(f[2] for f in payload['graphs'].fields if f[0] == 'x')))
+        return payload
+    disk._load_entry = failed
+    with pytest.raises(OSError, match='read interrupted'):
+        next(iter(disk))
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+
+
+
+def test_full_verifier_progress_contention_does_not_stop_guard(tmp_path, monkeypatch):
+    from scripts import verify_dataset_loading as verifier
+    import cache_lifetime
+    child = SimpleNamespace(pid=123, wait=lambda **kw: 0)
+    polls = iter([None, None, 0, 0])
+    child.poll = lambda: next(polls)
+    child.terminate = lambda: pytest.fail('Progress contention terminated verification')
+    watched = SimpleNamespace(children=lambda **kw: [],
+        memory_info=lambda: SimpleNamespace(rss=100, private=200, vms=300))
+    monkeypatch.setattr(verifier.subprocess, 'Popen', lambda *a, **kw: child)
+    monkeypatch.setattr(verifier.psutil, 'Process', lambda pid: watched)
+    monkeypatch.setattr(verifier.time, 'sleep', lambda _: None)
+    original = cache_lifetime.atomic_json
+    calls = []
+    def contention(path, value):
+        calls.append(path)
+        if len(calls) == 1:
+            raise PermissionError('Windows report sharing contention')
+        original(path, value)
+    monkeypatch.setattr(cache_lifetime, 'atomic_json', contention)
+    options = SimpleNamespace(output_dir=str(tmp_path / 'verify'), source_metadata='source.json',
+                              keep_cache=False, resume=False)
+    verifier.supervise(options)
+    report = json.loads((tmp_path / 'verify' / 'memory_report.json').read_text())
+    assert report['status'] == 'completed' and report['report_write_errors'] == 1
+    assert report['peak_private_bytes'] == 200

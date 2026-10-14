@@ -30,10 +30,11 @@ def verify_samples(eager, disk):
             raise AssertionError("Prepared graph attributes differ")
         for key in graph.keys():
             if isinstance(graph[key], torch.Tensor):
-                torch.testing.assert_close(graph[key], expected_graph[key], equal_nan=True)
+                assert graph[key].dtype == expected_graph[key].dtype
+                torch.testing.assert_close(graph[key], expected_graph[key], rtol=0, atol=0, equal_nan=True)
             elif graph[key] != expected_graph[key]:
                 raise AssertionError(f"Prepared graph attribute differs: {key}")
-        torch.testing.assert_close(label, expected_label, equal_nan=True)
+        torch.testing.assert_close(label, expected_label, rtol=0, atol=0, equal_nan=True)
         torch.testing.assert_close(weight, expected_weight)
     if count != len(eager):
         raise AssertionError("Prepared sample count differs")
@@ -120,8 +121,23 @@ def worker(options):
         monitor.close()
 
 
+def write_progress(path, report):
+    """Report contention must not terminate verification or disable its guard."""
+    from cache_lifetime import atomic_json
+    try:
+        atomic_json(path, report)
+    except OSError as exc:
+        report["report_write_errors"] = report.get("report_write_errors", 0) + 1
+        report["last_report_write_error"] = str(exc)
+        if report["report_write_errors"] == 1:
+            try:
+                print(f"Verification progress report temporarily unavailable: {exc}", file=sys.stderr, flush=True)
+            except OSError:
+                pass
+
+
 def supervise(options):
-    from cache_lifetime import atomic_json, workflow_running
+    from cache_lifetime import workflow_running
     output = Path(options.output_dir).resolve()
     output.mkdir(parents=True, exist_ok=options.resume)
     previous = None
@@ -166,7 +182,7 @@ def supervise(options):
                 report["peak_private_bytes"] = max(report["peak_private_bytes"],
                     sum(getattr(m, "private", m.vms) for m in memories))
                 report["elapsed_seconds"] = previous_elapsed + time.monotonic() - started
-                atomic_json(output / "memory_report.json", report)
+                write_progress(output / "memory_report.json", report)
                 if max(report["peak_rss_bytes"], report["peak_private_bytes"]) > report["memory_limit_bytes"]:
                     report["status"] = "memory_limit_exceeded"
                     for process in reversed(processes):
@@ -180,11 +196,14 @@ def supervise(options):
             report.update(returncode=returncode, elapsed_seconds=previous_elapsed + time.monotonic() - started)
             if report["status"] == "running":
                 report["status"] = "completed" if returncode == 0 else "failed"
+        except BaseException as exc:
+            report.update(status="failed", error=str(exc))
+            raise
         finally:
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=15)
-            atomic_json(output / "memory_report.json", report)
+            write_progress(output / "memory_report.json", report)
     print(json.dumps(report), flush=True)
     if report["status"] != "completed":
         raise SystemExit(1)

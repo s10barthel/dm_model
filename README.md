@@ -2702,3 +2702,9 @@ compatibility checks still apply. Auxiliary/IPW models use their own saved setti
 Use a newly trained GAT baseline to compare against the new architectures under
 the corrected self-loop policy. Architecture identity is recorded separately from
 input-feature signatures in model and bundle metadata.
+
+
+Prepared training caches use lossless packed CPU tensors with lazy graph
+reconstruction for all eight wrapper tasks. Version 1 caches rebuild once;
+`--keep-cache` and workflow cleanup retain their existing behavior. See
+[dataset loading and cache lifetime](docs/intent_dataset_loading.md).

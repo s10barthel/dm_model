@@ -285,6 +285,8 @@ def test_disk_ipw_equivalence_shuffle_cache_and_bounded_views(setup, tmp_path, m
         gc.collect()
         assert all(ref() is None for ref in refs)
         payload = original_load(entry)
+        refs.append(weakref.ref(next(f[2] for f in payload["graphs"].fields if f[0] == "x")))
+        refs.append(weakref.ref(payload["graphs"]))
         refs.extend(weakref.ref(g) for g in payload["graphs"])
         return payload
     disk._load_entry = bounded

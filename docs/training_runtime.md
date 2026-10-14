@@ -297,3 +297,10 @@ without stopping training or the other sampler.
 training, and validation stage boundaries. `gpu_monitor.jsonl` retains its
 thirty-second cadence and existing format. Monitoring remains opt-in and does
 not synchronize CUDA or enable CUDA debugging modes.
+
+
+Prepared disk datasets now use version 2 `packed_tensors` caches with lazy graph
+reconstruction. Epoch loading logs report deserialization, reconstruction, and
+combined seconds separately. RAM monitoring and workflow cache cleanup retain
+their existing controls; old retained graph-object caches require a one-time
+rebuild and are not pruned automatically. See [prepared cache documentation](intent_dataset_loading.md).
