@@ -1,4 +1,4 @@
-﻿# Targeted xT refresh
+# Targeted xT refresh
 
 `--refresh-target-family xt` refreshes existing xT targets, including carries,
 without loading graphs or tracking data or invoking receiver inference. All
@@ -28,9 +28,21 @@ another copy of hundreds of GiB of graphs. Unchanged files retain their links.
 Missing, empty, duplicate, incomplete and invalid annotations fail validation;
 valid zeros are accepted. Checks cover event identities, carry anchors, team
 perspective and label action IDs. Unrecorded variants and inconsistent metadata
-also fail. Failed outputs remain unusable. The latest-run pointer changes only
-after successful publication. Explicit `--overwrite-feature-run` is supported,
-but replacement is atomic per file, not transactional across the run.
+also fail. Failed derived outputs remain unusable. For an in-place failure,
+the original completed state is restored when data artifacts are known to be
+unchanged, and the failed attempt is recorded. Partial or uncertain changes mark
+the run failed. Replacement is atomic per file, not transactional across the run.
+
+Without a destination flag, refresh creates a derived run and updates the latest
+pointer only after successful publication. `--in-place` updates the existing run
+under the same ID without cloning or changing the latest pointer.
+`--overwrite-feature-run` is a compatibility alias with identical behavior; both
+spellings can appear together. The operation flags still determine what changes.
+New existing-run attempts are recorded as `in_place`; historical
+`overwrite_feature_run` metadata remains unchanged.
+
+Avoid concurrent readers of artifacts being changed in place. Use the default
+derived refresh when another process must continue reading the original run.
 
 ## Updated artifacts
 
@@ -73,18 +85,32 @@ Wait for annotation generation to finish. Create a new derived feature run:
   --artifact-copy-mode hardlink
 ```
 
+To refresh under the same feature-run ID instead:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
+  --extend-feature-run-id feature_20260910T110759_053479_8b508137 `
+  --refresh-target-family xt `
+  --in-place
+```
+
+In-place operations require `--extend-feature-run-id` and reject `--run-id`.
+The destination flag alone does not regenerate artifacts. Carry additions,
+receiver replacement, and other operation constraints continue to apply.
+
 The source split and next-action setting are inherited unless explicitly supplied;
-explicit mismatches are rejected. The new run ID is printed. Its `metadata.json`
+explicit mismatches are rejected. The command prints the created or updated run ID. Its `metadata.json`
 must say `completed`. Inspect `xt_refresh_report.json` for input SHA-256 hashes,
 changed rows, target means/nonzero counts, rewritten bytes and timings.
 
 Refresh all 918 matches after refitting xT because existing seasons can change.
 Receiver retraining is unnecessary for this repair.
 
-For subsequent training, pin the new feature-run ID and use `--dataset-loading
-disk` or the existing automatic setting. Cache identity includes resolved feature
-and label paths, so new caches are built automatically; old caches need not be
-deleted. Direct `train.py` calls must also update explicit `--feature_dir` and
+For subsequent training, pin the refreshed feature-run ID and use
+`--dataset-loading disk` or the existing automatic setting. A derived run gets a
+distinct cache identity through its new feature and label paths. An in-place
+refresh changes source-file signatures, so affected cache entries are rebuilt
+when preparing a new dataset. Old caches need not be deleted. Direct `train.py` calls must also update explicit `--feature_dir` and
 `--label_dir` paths and use a new training run ID. Production refresh, cache
 rebuilding and training are left for subsequent execution.
 

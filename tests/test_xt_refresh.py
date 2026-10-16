@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -241,25 +242,37 @@ def test_prepared_cache_identity_changes_for_shared_paths(sample, tmp_path):
     assert datasets[0].cache_id != datasets[1].cache_id
 
 
-@pytest.mark.parametrize("failure", [None, "replacement", "publication"])
-@pytest.mark.parametrize("overwrite", [False, True])
-def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, monkeypatch, failure, overwrite):
+@pytest.mark.parametrize("failure", [None, "validation", "replacement", "publication"])
+@pytest.mark.parametrize("destination_flags", [(), ("--in-place",), ("--overwrite-feature-run",),
+                                                ("--in-place", "--overwrite-feature-run")],
+                         ids=["derived", "in_place", "legacy_alias", "both_aliases"])
+def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, monkeypatch, failure, destination_flags):
     from scripts import generate_relevant_features as generator
-    from test_feature_run_extension import make_args
     root, events, sidecars, metadata, _, _, _ = sample
+    overwrite = bool(destination_flags)
+    historical_entry = dict(mode="overwrite_feature_run", status="completed", command="historical command")
     metadata.update(graph_schema=generator.EXPECTED_GRAPH_SCHEMA.copy(),
                     next_action_conditions_enabled=True, intended_receiver_model_id="success_intent/fixture",
-                    pass_height_threshold_meters=3.5)
-    args = make_args(run_id=None if overwrite else "derived", overwrite_feature_run=overwrite,
-                     refresh_target_families=["xt"])
+                    pass_height_threshold_meters=3.5, extension_history=[historical_entry])
     protected = tmp_path / "older_derived" if overwrite else root
     if overwrite:
         clone_feature_artifacts(root, protected)
     target = root if overwrite else tmp_path / "derived"
-    args.xt_match_dir = sidecars
     monkeypatch.setattr(generator, "resolve_feature_run_id", lambda *a, **kw: "source")
     monkeypatch.setattr(generator, "load_feature_run_metadata", lambda *a, **kw: metadata.copy())
     monkeypatch.setattr(generator, "get_feature_run_root", lambda run_id: tmp_path / run_id)
+    argv = ["generate_relevant_features.py", "--extend-feature-run-id", "source",
+            "--refresh-target-family", "xt", "--xt-match-dir", str(sidecars), *destination_flags]
+    if not overwrite:
+        argv.extend(["--run-id", "derived"])
+    monkeypatch.setattr(sys, "argv", argv)
+    args = generator.parse_args()
+    clone_calls = []
+    clone = generator.copy_base_feature_run
+    def clone_spy(*a, **kw):
+        clone_calls.append(a)
+        return clone(*a, **kw)
+    monkeypatch.setattr(generator, "copy_base_feature_run", clone_spy)
     latest = []
     monkeypatch.setattr(generator, "write_latest_run", lambda *a: latest.append(a))
     def writer(directory, payload):
@@ -278,12 +291,17 @@ def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, mo
         return original_replace(path, destination)
     monkeypatch.setattr(Path, "replace", replace)
     before = fingerprint(protected / "success_intent_labels/m.pt")
+    if failure == "validation":
+        (sidecars / "m.csv").unlink()
     if failure:
-        with pytest.raises(OSError, match=failure):
+        with pytest.raises(OSError, match="missing" if failure == "validation" else failure):
             generator.run_extension_generation(args)
         assert not latest
         output = json.loads((target / "metadata.json").read_text())
-        assert output["status"] == "failed"
+        assert output["status"] == ("completed" if overwrite and failure == "validation" else "failed")
+        if overwrite and failure == "validation":
+            assert output["extension_attempt"]["artifact_state"] == "unchanged"
+            assert fingerprint(root / "success_intent_labels/m.pt") == before
     else:
         generator.run_extension_generation(args)
         assert latest == ([] if overwrite else [("feature", "derived")])
@@ -296,3 +314,10 @@ def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, mo
             assert output["extension_attempt"]["artifact_clone"]["linked_files"] > 0
     assert fingerprint(protected / "success_intent_labels/m.pt") == before
     assert not list(target.rglob("*.tmp"))
+    if overwrite:
+        assert not clone_calls
+        assert output["last_extension_mode"] == "in_place"
+        assert output["extension_history"][0] == historical_entry
+        assert output["extension_history"][-1]["mode"] == "in_place"
+        assert output["extension_history"][-1]["status"] == ("failed" if failure else "completed")
+        assert output["command"] == generator.subprocess.list2cmdline(argv)

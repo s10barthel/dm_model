@@ -68,7 +68,6 @@ SUPPORTED_EDGE_GRAPH_SCHEMAS = (BASE_EDGE_GRAPH_SCHEMA, ALIGNMENT_EDGE_GRAPH_SCH
 REFRESH_TARGET_FAMILIES = ("xt", "goal_distance", "epv")
 EXTENSION_MODE_DERIVED = "derived"
 EXTENSION_MODE_IN_PLACE = "in_place"
-EXTENSION_MODE_OVERWRITE_FEATURE_RUN = "overwrite_feature_run"
 
 
 @dataclass(frozen=True)
@@ -133,9 +132,9 @@ def parse_args() -> argparse.Namespace:
         "--extend-feature-run-id",
         default=None,
         help=(
-            "Create a new derived feature run from this completed feature run, copying existing artifacts and "
+            "Extend this completed feature run. By default create a derived run sharing unchanged artifacts and "
             "generating only newly requested return types, refreshed target labels, or the model intended-receiver "
-            "variant."
+            "variant; use --in-place to update the existing run."
         ),
     )
     parser.add_argument(
@@ -144,8 +143,8 @@ def parse_args() -> argparse.Namespace:
         choices=REFRESH_TARGET_FAMILIES,
         default=None,
         help=(
-            "With --extend-feature-run-id, rebuild copied label tensors from current sidecar target artifacts "
-            "without rebuilding graph tensors. Repeat to record multiple refreshed target families."
+            "With --extend-feature-run-id, refresh label targets from current sidecar artifacts without "
+            "rebuilding graphs. xT refresh runs separately from other refresh families."
         ),
     )
     parser.add_argument(
@@ -188,27 +187,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help=(
-            "When extending a feature run that already contains the model intended-receiver variant, create a "
-            "new derived run and regenerate only model-mode artifacts with --intended-receiver-model-id."
+            "When extending a feature run that already contains the model intended-receiver variant, "
+            "regenerate only model-mode artifacts with --intended-receiver-model-id."
         ),
     )
-    extension_mode_group = parser.add_mutually_exclusive_group()
-    extension_mode_group.add_argument(
+    parser.add_argument(
         "--in-place",
-        action="store_true",
-        default=False,
-        help=(
-            "With --extend-feature-run-id, add only missing return-type or intended-receiver-mode artifacts "
-            "directly to the existing feature run instead of copying it."
-        ),
-    )
-    extension_mode_group.add_argument(
         "--overwrite-feature-run",
+        dest="in_place",
         action="store_true",
         default=False,
         help=(
-            "With --extend-feature-run-id, mutate the existing feature run and allow copied labels/model-mode "
-            "artifacts to be overwritten or regenerated."
+            "With --extend-feature-run-id, apply the explicitly requested extension or refresh to the "
+            "existing run. Otherwise create a derived run sharing unchanged artifacts. "
+            "--overwrite-feature-run is a compatibility alias."
         ),
     )
     edge_feature_group = parser.add_mutually_exclusive_group()
@@ -293,18 +285,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--extend-interaction-edge-features requires --extend-feature-run-id.")
     if args.extend_relative_speed_edge_features and not args.extend_feature_run_id:
         parser.error("--extend-relative-speed-edge-features requires --extend-feature-run-id.")
-    if (args.in_place or args.overwrite_feature_run) and not args.extend_feature_run_id:
-        parser.error("--in-place and --overwrite-feature-run require --extend-feature-run-id.")
-    if (args.in_place or args.overwrite_feature_run) and args.run_id:
-        parser.error("--run-id cannot be used with --in-place or --overwrite-feature-run.")
-    if args.in_place and args.refresh_target_families:
-        parser.error("--in-place only supports additive extensions; use --overwrite-feature-run for target refreshes.")
-    if args.in_place and args.pass_height:
-        parser.error("--in-place only supports additive extensions; use --overwrite-feature-run for pass-height refreshes.")
-    if args.in_place and args.replace_intended_receiver_model:
-        parser.error(
-            "--in-place only supports additive extensions; use --overwrite-feature-run to replace model-mode artifacts."
-        )
+    if args.in_place and not args.extend_feature_run_id:
+        parser.error("--in-place (alias --overwrite-feature-run) requires --extend-feature-run-id.")
+    if args.in_place and args.run_id:
+        parser.error("--run-id cannot be used with --in-place (alias --overwrite-feature-run).")
     if args.add_relative_speed_edge_features and not args.add_v_edge_features:
         parser.error("--relative-speed-edge-features requires --v-edge-features.")
     if args.worker_thread_limit < 1:
@@ -926,26 +910,10 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         )
 
     in_place = bool(getattr(args, "in_place", False))
-    overwrite_feature_run = bool(getattr(args, "overwrite_feature_run", False))
-    if in_place and overwrite_feature_run:
-        raise ValueError("--in-place and --overwrite-feature-run are mutually exclusive.")
-    if (in_place or overwrite_feature_run) and getattr(args, "run_id", None):
-        raise ValueError("--run-id cannot be used with --in-place or --overwrite-feature-run.")
+    if in_place and getattr(args, "run_id", None):
+        raise ValueError("--run-id cannot be used with --in-place (alias --overwrite-feature-run).")
 
-    extension_mode = EXTENSION_MODE_DERIVED
-    if in_place:
-        extension_mode = EXTENSION_MODE_IN_PLACE
-    elif overwrite_feature_run:
-        extension_mode = EXTENSION_MODE_OVERWRITE_FEATURE_RUN
-
-    is_regenerative = bool(
-        refresh_target_families or refresh_pass_height_labels or regenerate_model_mode or replace_model
-    )
-    if extension_mode == EXTENSION_MODE_IN_PLACE and is_regenerative:
-        raise ValueError(
-            "--in-place only supports additive extensions. Use --overwrite-feature-run for target refreshes, "
-            "pass-height refreshes, or intended-receiver model replacement."
-        )
+    extension_mode = EXTENSION_MODE_IN_PLACE if in_place else EXTENSION_MODE_DERIVED
 
     if extension_mode == EXTENSION_MODE_DERIVED:
         output_run_id = str(args.run_id) if args.run_id else generate_run_id("feature")
@@ -1430,8 +1398,6 @@ def carry_extension_steps(
 
 
 def run_carry_extension_generation(args: argparse.Namespace) -> None:
-    if args.overwrite_feature_run:
-        raise ValueError("--use-carries is additive; use --in-place or create a derived feature run.")
     base_run_id = resolve_feature_run_id(args.extend_feature_run_id, required=True, allow_latest=False)
     if base_run_id is None:
         raise FileNotFoundError("No base feature run id was provided.")
@@ -1458,10 +1424,12 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
 
     def metadata_factory(status, error, final):
         updated = copy.deepcopy(metadata)
-        updated.update(run_id=output_run_id, status=status)
+        updated.update(run_id=output_run_id, status=status, last_extension_mode=mode,
+                       command=subprocess.list2cmdline(sys.argv))
         if not args.in_place:
             updated["base_feature_run_id"] = base_run_id
-        entry = dict(created_at=datetime.now().isoformat(timespec="seconds"), type="carry_variant",
+        entry = dict(created_at=datetime.now().isoformat(timespec="seconds"), type="carry_variant", mode=mode,
+                     command=subprocess.list2cmdline(sys.argv),
                      interaction_edge_features=extend_interactions, status="failed" if error is not None else status,
                      base_feature_run_id=base_run_id, commands=[step.command for step in steps])
         if error is not None:

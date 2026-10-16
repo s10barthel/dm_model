@@ -1,6 +1,7 @@
 """Fault-injection tests for staged extensions and honest artifact publication."""
 import copy
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,10 +34,9 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(generator, "load_feature_run_metadata", lambda *a, **kw: copy.deepcopy(metadata))
     monkeypatch.setattr(generator, "write_latest_run", lambda *a: None)
 
-    def run(*, derived=False, generation=False, relative=False, overwrite=False):
+    def run(*, derived=False, generation=False, relative=False):
         args = make_args(["next_5"] if generation else None,
-                         run_id="derived" if derived else None, in_place=not derived and not overwrite,
-                         overwrite_feature_run=overwrite, extend_relative_speed_edge_features=relative)
+                         run_id="derived" if derived else None, in_place=not derived, extend_relative_speed_edge_features=relative)
         args.extend_interaction_edge_features = not generation
         plan = FeatureRunExtensionPlanTests().build_plan(args, metadata)
         monkeypatch.setattr(generator, "build_extension_plan", lambda _: plan)
@@ -237,15 +237,15 @@ def test_abrupt_stop_leaves_hazardous_phase_and_unknown_count(environment, monke
     assert read(root)["status"] == "completed"
 
 
-@pytest.mark.parametrize("derived,overwrite", [(False, False), (True, False), (False, True)])
-def test_generation_failure_is_unknown_and_does_not_advertise_new_labels(environment, monkeypatch, derived, overwrite):
+@pytest.mark.parametrize("derived", [False, True])
+def test_generation_failure_is_unknown_and_does_not_advertise_new_labels(environment, monkeypatch, derived):
     root, _, _, metadata, run = environment
     source_bytes = (root / "metadata.json").read_bytes()
     def fail(_):
         raise RuntimeError("subprocess failed")
     monkeypatch.setattr(generator, "run_command", fail)
     with pytest.raises(RuntimeError, match="subprocess failed"):
-        run(generation=True, derived=derived, overwrite=overwrite)
+        run(generation=True, derived=derived)
     target = root.parent / "derived" if derived else root
     meta = read(target)
     assert meta["status"] == "failed" and meta["extension_attempt"]["artifact_state"] == "unknown"
@@ -271,7 +271,7 @@ def test_derived_copy_failure_is_diagnosed_and_source_unchanged(environment, mon
 
 def test_refresh_removal_failure_is_unknown(environment, monkeypatch):
     root, _, _, metadata, _ = environment
-    args = make_args(model_id="success_intent/new", run_id=None, replace_model=True, overwrite_feature_run=True)
+    args = make_args(model_id="success_intent/new", run_id=None, replace_model=True, in_place=True)
     metadata["intended_receiver_model_id"] = "success_intent/old"
     metadata["intended_receiver_modes"] = ["original", "model"]
     plan = FeatureRunExtensionPlanTests().build_plan(args, metadata)
@@ -406,6 +406,25 @@ def test_write_failure_before_metadata_rename_keeps_existing_json(tmp_path, monk
     assert read(tmp_path) == original and not list(tmp_path.glob("*.tmp"))
 
 
+@pytest.mark.parametrize("flags", [("--in-place",), ("--overwrite-feature-run",),
+                                   ("--in-place", "--overwrite-feature-run")])
+def test_in_place_aliases_mark_uncertain_subprocess_outcomes_failed(environment, monkeypatch, flags):
+    root, _, _, _, _ = environment
+    monkeypatch.setattr(sys, "argv", ["generate_relevant_features.py", "--extend-feature-run-id", "base",
+                                     "--refresh-target-family", "epv", *flags])
+    monkeypatch.setattr(generator, "copy_base_feature_run", lambda *a, **kw: pytest.fail("In-place clone"))
+    monkeypatch.setattr(generator, "write_latest_run", lambda *a: pytest.fail("In-place latest update"))
+    def fail(_):
+        raise RuntimeError("subprocess failed")
+    monkeypatch.setattr(generator, "run_command", fail)
+    with pytest.raises(RuntimeError, match="subprocess failed"):
+        generator.run_extension_generation(generator.parse_args())
+    meta = read(root)
+    assert meta["status"] == "failed" and meta["extension_attempt"]["artifact_state"] == "unknown"
+    assert meta["last_extension_mode"] == meta["extension_history"][-1]["mode"] == "in_place"
+    assert meta["extension_history"][-1]["status"] == "failed"
+
+
 def test_initial_metadata_failure_prevents_any_artifact_changes(environment, monkeypatch):
     root, graphs, _, _, run = environment
     before = {p: p.read_bytes() for p in graphs.glob("*.pt")}
@@ -419,19 +438,37 @@ def test_initial_metadata_failure_prevents_any_artifact_changes(environment, mon
     assert not list(graphs.glob("*.tmp"))
 
 
-def test_successful_carry_extension_records_complete_attempt(environment, monkeypatch):
-    root, _, _, _, _ = environment
-    monkeypatch.setattr(generator, "run_command", lambda _: None)
-    generator.run_carry_extension_generation(make_args(run_id=None, in_place=True))
+@pytest.mark.parametrize("flags", [("--in-place",), ("--overwrite-feature-run",),
+                                   ("--in-place", "--overwrite-feature-run")])
+def test_successful_carry_extension_records_complete_attempt(environment, monkeypatch, flags):
+    root, _, _, metadata, _ = environment
+    monkeypatch.setattr(sys, "argv", ["generate_relevant_features.py", "--extend-feature-run-id", "base",
+                                     "--use-carries", *flags])
+    commands = []
+    monkeypatch.setattr(generator, "run_command", commands.append)
+    monkeypatch.setattr(generator, "copy_base_feature_run", lambda *a, **kw: pytest.fail("In-place clone"))
+    monkeypatch.setattr(generator, "write_latest_run", lambda *a: pytest.fail("In-place latest update"))
+    args = generator.parse_args()
+    generator.run_carry_extension_generation(args)
     meta = read(root)
     assert meta["status"] == "completed" and meta["carry_variant"]["available"]
     assert meta["extension_attempt"]["artifact_state"] == "complete"
+    assert meta["run_id"] == "base" and meta["last_extension_mode"] == "in_place"
+    assert meta["extension_history"][-1]["mode"] == "in_place"
+    assert meta["command"] == generator.subprocess.list2cmdline(sys.argv)
+    assert meta["extension_history"][-1]["command"] == meta["command"]
+    assert len(commands) == 2 and all("--use-carries" in command for command in commands)
+    metadata["carry_variant"] = meta["carry_variant"]
+    before = (root / "metadata.json").read_bytes()
+    with pytest.raises(ValueError, match="already contains"):
+        generator.run_carry_extension_generation(args)
+    assert (root / "metadata.json").read_bytes() == before
 
 
 def test_refresh_failure_retains_source_height_threshold(environment, monkeypatch):
     root, _, _, metadata, _ = environment
     metadata["pass_height_threshold_meters"] = 2.0
-    args = make_args(run_id=None, overwrite_feature_run=True, pass_height=True, pass_height_threshold=1.8)
+    args = make_args(run_id=None, in_place=True, pass_height=True, pass_height_threshold=1.8)
     plan = FeatureRunExtensionPlanTests().build_plan(args, metadata)
     monkeypatch.setattr(generator, "build_extension_plan", lambda _: plan)
     def fail(_):

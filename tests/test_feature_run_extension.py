@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -47,7 +48,6 @@ def make_args(
     pass_height: bool = False,
     pass_height_threshold: float | None = None,
     in_place: bool = False,
-    overwrite_feature_run: bool = False,
     next_action_conditions_enabled: bool = True,
     num_workers: str = "1",
     worker_thread_limit: int = 1,
@@ -66,7 +66,6 @@ def make_args(
         pass_height_threshold=pass_height_threshold,
         extend_relative_speed_edge_features=extend_relative_speed_edge_features,
         in_place=in_place,
-        overwrite_feature_run=overwrite_feature_run,
         next_action_conditions_enabled=next_action_conditions_enabled,
         num_workers=num_workers,
         worker_thread_limit=worker_thread_limit,
@@ -344,24 +343,23 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.build_plan(make_args(["next_5"], run_id="derived", in_place=True))
 
-    def test_in_place_rejects_refresh_pass_height_and_model_replacement(self) -> None:
-        with self.assertRaises(ValueError):
-            self.build_plan(make_args(run_id=None, in_place=True, refresh_target_families=["epv"]))
-
-        with self.assertRaises(ValueError):
-            self.build_plan(make_args(["next_5"], run_id=None, in_place=True, pass_height=True))
+    def test_in_place_accepts_refresh_pass_height_and_model_replacement(self) -> None:
+        for args in [make_args(run_id=None, in_place=True, refresh_target_families=["epv"]),
+                     make_args(["next_5"], run_id=None, in_place=True, pass_height=True)]:
+            self.assertEqual(self.build_plan(args).extension_mode, generator.EXTENSION_MODE_IN_PLACE)
 
         metadata = make_metadata(
             modes=["original", "angle_only", "model"],
             model_id="success_intent/old",
         )
-        with self.assertRaises(ValueError):
-            self.build_plan(
-                make_args(run_id=None, in_place=True, model_id="success_intent/new", replace_model=True),
-                metadata=metadata,
-            )
+        plan = self.build_plan(
+            make_args(run_id=None, in_place=True, model_id="success_intent/new", replace_model=True),
+            metadata=metadata,
+        )
+        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_IN_PLACE)
+        self.assertTrue(plan.regenerate_model_mode)
 
-    def test_overwrite_feature_run_targets_base_run_for_refresh_and_replacement(self) -> None:
+    def test_in_place_targets_base_run_for_refresh_and_replacement(self) -> None:
         metadata = make_metadata(
             modes=["original", "angle_only", "model"],
             model_id="success_intent/old",
@@ -369,7 +367,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         plan = self.build_plan(
             make_args(
                 run_id=None,
-                overwrite_feature_run=True,
+                in_place=True,
                 model_id="success_intent/new",
                 replace_model=True,
                 refresh_target_families=["epv"],
@@ -377,51 +375,61 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             metadata=metadata,
         )
 
-        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_OVERWRITE_FEATURE_RUN)
+        self.assertEqual(plan.extension_mode, generator.EXTENSION_MODE_IN_PLACE)
         self.assertEqual(plan.output_run_id, "base")
         self.assertEqual(plan.target_run_id, "base")
         self.assertTrue(plan.regenerate_model_mode)
         self.assertTrue(all("--run-id" in command and "base" in command for command in plan.commands))
 
-    def test_mutating_extension_modes_are_mutually_exclusive(self) -> None:
-        with self.assertRaises(ValueError):
-            self.build_plan(
-                make_args(["next_5"], run_id=None, in_place=True, overwrite_feature_run=True),
-            )
+    def test_parse_normalizes_in_place_aliases_and_accepts_both(self) -> None:
+        for flags in [["--in-place"], ["--overwrite-feature-run"], ["--in-place", "--overwrite-feature-run"]]:
+            with self.subTest(flags=flags), patch.object(
+                sys, "argv", ["generate_relevant_features.py", "--extend-feature-run-id", "base", *flags]
+            ):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    args = generator.parse_args()
+                self.assertTrue(args.in_place)
+                self.assertFalse(hasattr(args, "overwrite_feature_run"))
+                self.assertEqual(caught, [])
+        with patch.object(sys, "argv", ["generate_relevant_features.py"]):
+            self.assertFalse(generator.parse_args().in_place)
 
     def test_parse_rejects_mutating_mode_without_extension(self) -> None:
-        with patch.object(sys, "argv", ["generate_relevant_features.py", "--in-place"]):
-            with self.assertRaises(SystemExit):
-                generator.parse_args()
-
-    def test_parse_rejects_mutating_mode_with_run_id(self) -> None:
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "generate_relevant_features.py",
-                "--extend-feature-run-id",
-                "base",
-                "--run-id",
-                "derived",
-                "--overwrite-feature-run",
-            ],
-        ):
-            with self.assertRaises(SystemExit):
-                generator.parse_args()
-
-    def test_parse_rejects_in_place_regenerative_flags(self) -> None:
-        for flag in ["--refresh-target-family", "--pass-height", "--replace-intended-receiver-model"]:
-            argv = ["generate_relevant_features.py", "--extend-feature-run-id", "base", "--in-place"]
-            if flag == "--refresh-target-family":
-                argv.extend([flag, "epv"])
-            elif flag == "--replace-intended-receiver-model":
-                argv.extend(["--intended-receiver-model-id", "success_intent/new", flag])
-            else:
-                argv.append(flag)
-            with patch.object(sys, "argv", argv):
+        for flag in ["--in-place", "--overwrite-feature-run"]:
+            with self.subTest(flag=flag), patch.object(sys, "argv", ["generate_relevant_features.py", flag]):
                 with self.assertRaises(SystemExit):
                     generator.parse_args()
+
+    def test_parse_rejects_mutating_mode_with_run_id(self) -> None:
+        for flags in [["--in-place"], ["--overwrite-feature-run"], ["--in-place", "--overwrite-feature-run"]]:
+            with self.subTest(flags=flags), patch.object(sys, "argv", [
+                "generate_relevant_features.py", "--extend-feature-run-id", "base", "--run-id", "derived", *flags
+            ]):
+                with self.assertRaises(SystemExit):
+                    generator.parse_args()
+
+    def test_aliases_produce_identical_additive_and_regenerative_plans(self) -> None:
+        for operation in [["--return_type", "next_5"], ["--refresh-target-family", "epv"],
+                          ["--pass-height"], ["--intended-receiver-model-id", "success_intent/new"],
+                          ["--intended-receiver-model-id", "success_intent/new", "--replace-intended-receiver-model"],
+                          ["--extend-interaction-edge-features"]]:
+            plans = []
+            for flag in ["--in-place", "--overwrite-feature-run"]:
+                with self.subTest(operation=operation, flag=flag), patch.object(
+                    sys, "argv", ["generate_relevant_features.py", "--extend-feature-run-id", "base", flag, *operation]
+                ):
+                    args = generator.parse_args()
+                metadata = (make_metadata(modes=["original", "angle_only", "model"], model_id="success_intent/old")
+                            if "--replace-intended-receiver-model" in operation else DEFAULT_METADATA)
+                plans.append(self.build_plan(args, metadata))
+            self.assertEqual(plans[0], plans[1])
+            self.assertEqual(plans[0].extension_mode, generator.EXTENSION_MODE_IN_PLACE)
+            self.assertEqual(plans[0].target_run_id, "base")
+
+    def test_destination_flag_alone_does_not_regenerate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "would not add"):
+            self.build_plan(make_args(run_id=None, in_place=True))
 
     def test_next_action_conditions_off_propagates_to_extension_commands(self) -> None:
         metadata = make_metadata(next_action_conditions_enabled=False)
@@ -837,8 +845,8 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(output_metadata["extension_history"][-1]["status"], "failed")
             self.assertIn("boom", output_metadata["extension_history"][-1]["error"])
 
-    def test_overwrite_feature_run_refresh_mutates_base_without_copy_or_latest_update(self) -> None:
-        args = make_args(run_id=None, overwrite_feature_run=True, refresh_target_families=["epv"])
+    def test_in_place_refresh_mutates_base_without_copy_or_latest_update(self) -> None:
+        args = make_args(run_id=None, in_place=True, refresh_target_families=["epv"])
         metadata = make_metadata(return_types=["next_5", "in_3"])
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -863,7 +871,7 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(output_metadata["status"], "completed")
             self.assertEqual(output_metadata["run_id"], "base")
             self.assertEqual(output_metadata["return_types"], ["next_5", "in_3"])
-            self.assertEqual(output_metadata["last_extension_mode"], generator.EXTENSION_MODE_OVERWRITE_FEATURE_RUN)
+            self.assertEqual(output_metadata["last_extension_mode"], generator.EXTENSION_MODE_IN_PLACE)
             self.assertEqual(output_metadata["extension_history"][-1]["status"], "completed")
             self.assertTrue(all("--overwrite-labels" in call.args[0] for call in run_command.call_args_list))
 
@@ -988,12 +996,12 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(run_command.call_count, 3)
             write_latest_run.assert_called_once_with("feature", "derived")
 
-    def test_overwrite_feature_run_replacement_removes_base_model_mode_artifacts(self) -> None:
+    def test_in_place_replacement_removes_base_model_mode_artifacts(self) -> None:
         args = make_args(
             model_id="success_intent/new",
             run_id=None,
             replace_model=True,
-            overwrite_feature_run=True,
+            in_place=True,
         )
         metadata = make_metadata(
             modes=["original", "angle_only", "model"],
@@ -1063,8 +1071,8 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertIn("boom", output_metadata["error"])
             write_latest_run.assert_not_called()
 
-    def test_failed_overwrite_feature_run_marks_base_metadata_failed(self) -> None:
-        args = make_args(run_id=None, overwrite_feature_run=True, refresh_target_families=["epv"])
+    def test_failed_in_place_marks_base_metadata_failed(self) -> None:
+        args = make_args(run_id=None, in_place=True, refresh_target_families=["epv"])
         metadata = make_metadata()
 
         with tempfile.TemporaryDirectory() as tmpdir:
