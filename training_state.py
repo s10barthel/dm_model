@@ -226,12 +226,15 @@ def publish_stage_artifacts(directory):
         root_metadata = json.loads(root_metadata_path.read_text(encoding="utf-8"))
         if root_metadata.get("status") == "completed" and order(root_metadata.get("artifact_stage")) > order(stage):
             return
-    for name in ("args.json", "metadata.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
+    for name in ("args.json", "best_weights.pt", "best_acc_weights.pt", "last_weights.pt"):
         source, target = directory / name, directory.parent / name
         if source.exists():
             shutil.copy2(source, target)
         elif name == "best_acc_weights.pt":
             target.unlink(missing_ok=True)
+    # Publish metadata last so the task summary indexes the completed root artifacts.
+    from project_config import write_run_metadata
+    write_run_metadata(directory.parent, metadata)
 
 
 def publish_checkpoint_artifacts(checkpoint, directory):

@@ -324,6 +324,141 @@ def test_write_run_metadata_refreshes_only_matching_parent_summary(tmp_path, mon
     assert not summary_path(saved / "pass_success").exists()
 
 
+@pytest.fixture
+def staged_model(tmp_path, monkeypatch):
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    run_root = saved / "pass_success" / "pass_success_1"
+
+    def create(stage, **overrides):
+        directory = run_root / stage
+        write_json(directory / "metadata.json", model_metadata(artifact_stage=stage, **overrides))
+        write_json(directory / "args.json", {"artifact_stage": stage})
+        for name in ("best_weights.pt", "last_weights.pt"):
+            (directory / name).write_bytes(stage.encode())
+        return directory
+
+    return run_root, create
+
+
+@pytest.mark.parametrize("stage", ["holdout", "fold_1", "final_refit"])
+def test_stage_publication_refreshes_only_matching_summary(staged_model, stage) -> None:
+    from training_state import publish_stage_artifacts
+
+    run_root, create = staged_model
+    unrelated = run_root.parent.parent / "action_intent" / "action_intent_1"
+    project_config.write_run_metadata(unrelated, model_metadata(
+        model_id="action_intent/action_intent_1", task="action_intent", run_id="action_intent_1"))
+    unrelated_summary = summary_path(unrelated.parent)
+    original = (unrelated_summary.read_bytes(), unrelated_summary.stat().st_mtime_ns)
+    directory = create(stage, last_epoch=42, best_loss=0.111)
+
+    publish_stage_artifacts(directory)
+
+    rows = read_summary(summary_path(run_root.parent))
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == run_root.name
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["last_epoch"] == "42"
+    assert float(rows[0]["best_loss"]) == 0.111
+    assert json.loads((run_root / "metadata.json").read_text())["artifact_stage"] == stage
+    assert (run_root / "best_weights.pt").read_bytes() == stage.encode()
+    assert not summary_path(run_root).exists()
+    assert original == (unrelated_summary.read_bytes(), unrelated_summary.stat().st_mtime_ns)
+
+
+def test_later_stage_updates_summary_and_older_stage_cannot_replace_it(staged_model) -> None:
+    from training_state import publish_stage_artifacts
+
+    run_root, create = staged_model
+    fold = create("fold_1", last_epoch=12, best_loss=0.3)
+    publish_stage_artifacts(fold)
+    final_refit = create("final_refit", last_epoch=20, best_loss=0.2)
+    publish_stage_artifacts(final_refit)
+
+    csv_path = summary_path(run_root.parent)
+    rows = read_summary(csv_path)
+    assert len(rows) == 1
+    assert rows[0]["last_epoch"] == "20"
+    assert float(rows[0]["best_loss"]) == 0.2
+    original_metadata = (run_root / "metadata.json").read_bytes()
+    original_summary = (csv_path.read_bytes(), csv_path.stat().st_mtime_ns)
+
+    publish_stage_artifacts(fold)
+
+    assert (run_root / "metadata.json").read_bytes() == original_metadata
+    assert (csv_path.read_bytes(), csv_path.stat().st_mtime_ns) == original_summary
+    assert (run_root / "best_weights.pt").read_bytes() == b"final_refit"
+
+
+def test_completed_checkpoint_recreates_summary_without_changing_stage(staged_model) -> None:
+    from training_state import publish_checkpoint_artifacts, publish_stage_artifacts
+
+    run_root, create = staged_model
+    directory = create("holdout")
+    publish_stage_artifacts(directory)
+    csv_path = summary_path(run_root.parent)
+    csv_path.unlink()
+    original = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in directory.iterdir()}
+    checkpoint = {
+        "finished": True, "args": {"artifact_stage": "holdout"},
+        "metadata": json.loads((directory / "metadata.json").read_text()),
+        "best": None, "best_acc_weights": None,
+    }
+
+    publish_checkpoint_artifacts(checkpoint, directory)
+
+    rows = read_summary(csv_path)
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+    assert rows[0]["last_epoch"] == "12"
+    assert original == {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in directory.iterdir()}
+
+
+@pytest.mark.parametrize("failure", ["locked_csv", "unexpected_exception"])
+def test_stage_publication_keeps_artifacts_when_summary_refresh_fails(staged_model, monkeypatch, failure) -> None:
+    from training_state import publish_stage_artifacts
+
+    run_root, create = staged_model
+    directory = create("holdout")
+    if failure == "locked_csv":
+        original_open = Path.open
+
+        def locked_open(path, *args, **kwargs):
+            if path == summary_path(run_root.parent):
+                raise PermissionError("file is locked")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", locked_open)
+    else:
+        def fail_refresh(*args, **kwargs):
+            raise RuntimeError("unexpected summary failure")
+
+        monkeypatch.setattr(metadata_summary, "update_summary_for_run", fail_refresh)
+
+    with pytest.warns(RuntimeWarning, match="Skipping metadata summary refresh"):
+        publish_stage_artifacts(directory)
+
+    assert json.loads((run_root / "metadata.json").read_text())["status"] == "completed"
+    for name in ("args.json", "best_weights.pt", "last_weights.pt"):
+        assert (run_root / name).read_bytes() == (directory / name).read_bytes()
+
+
+@pytest.mark.parametrize("overrides", [{"status": "running"}, {"artifact_stage": None}])
+def test_unpublishable_stage_does_not_create_root_metadata_or_summary(staged_model, overrides) -> None:
+    from training_state import publish_stage_artifacts
+
+    run_root, create = staged_model
+    directory = create("holdout")
+    metadata = json.loads((directory / "metadata.json").read_text())
+    metadata.update(overrides)
+    write_json(directory / "metadata.json", metadata)
+
+    publish_stage_artifacts(directory)
+
+    assert not (run_root / "metadata.json").exists()
+    assert not summary_path(run_root.parent).exists()
+
+
 def test_refresh_summary_removes_legacy_metadata_summary_csv(tmp_path, monkeypatch) -> None:
     saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
     parent_dir = saved / "pass_success"
