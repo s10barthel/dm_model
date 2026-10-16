@@ -155,6 +155,26 @@ def cleanup_temporary_files(temporary, attempt, primary=None):
                 primary.add_note(attempt.data["secondary_errors"][-1])
 
 
+def replace_staged_graphs(temporary, attempt):
+    """Publish complete files without ever writing into a shared hard link."""
+    attempt.enter("replacing", current_file=temporary[0][0], hazardous=True)
+    for path, temp in temporary:
+        attempt.data["current_file"] = str(path)
+        try:
+            temp.replace(path)
+        except BaseException as primary:
+            try:
+                if not temp.exists():
+                    attempt.uncertain = True
+            except OSError as secondary:
+                attempt.uncertain = True
+                attempt.secondary("Checking replacement outcome failed", secondary, temp)
+                primary.add_note(attempt.data["secondary_errors"][-1])
+            raise
+        attempt.changed = True
+        attempt.data["completed_replacements"] += 1
+
+
 def extend_graph_files(files, transform, suffix, attempt):
     """Stage all files first, then replace them; never resume or reuse old staging."""
     temporary = []
@@ -171,24 +191,7 @@ def extend_graph_files(files, transform, suffix, attempt):
             temp = path.with_name(path.name + suffix)
             temporary.append((path, temp))  # Register before opening or writing.
             save_staged_graphs(upgraded, temp, attempt)
-        attempt.enter("replacing", current_file=first, hazardous=True)
-        for path, temp in temporary:
-            attempt.data["current_file"] = str(path)
-            try:
-                temp.replace(path)
-            except BaseException as primary:
-                # If rename completed just before an interruption, its return/count
-                # may be missing. Treat disappearance of staging as uncertain.
-                try:
-                    if not temp.exists():
-                        attempt.uncertain = True
-                except OSError as secondary:
-                    attempt.uncertain = True
-                    attempt.secondary("Checking replacement outcome failed", secondary, temp)
-                    primary.add_note(attempt.data["secondary_errors"][-1])
-                raise
-            attempt.changed = True
-            attempt.data["completed_replacements"] += 1
+        replace_staged_graphs(temporary, attempt)
     except BaseException as error:
         primary = error
         raise

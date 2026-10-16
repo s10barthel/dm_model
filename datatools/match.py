@@ -305,6 +305,9 @@ class Match(ABC):
             return actions
 
         model, graph_schema = self._get_cached_intended_receiver_model(intended_receiver_model_id)
+        from datatools.trajectory import TRAJECTORY_SPEED, require_speed_definition, speed_definition
+        require_speed_definition(TRAJECTORY_SPEED, speed_definition(model.args),
+                                 context=f"On-demand intended receivers ({intended_receiver_model_id})")
         expected_edge_dim = int(graph_schema["edge_in_dim"])
         add_v_edge_features = bool(graph_schema["add_v_edge_features"])
         add_relative_speed_edge_features = bool(graph_schema.get("add_relative_speed_edge_features", False))

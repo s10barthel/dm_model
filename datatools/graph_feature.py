@@ -31,6 +31,7 @@ from models.pass_height import positive_height
 from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
+from datatools.trajectory import TRAJECTORY_SPEED
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -434,8 +435,8 @@ def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to
     if not pd.isna(receive_frame) and int(receive_frame) in match.tracking.index:
         end_z = float(match.tracking.at[int(receive_frame), "ball_z"]) if "ball_z" in match.tracking.columns else start_z
 
-    if any(pd.isna(v) for v in [start_x, start_y, end_x, end_y]):
-        return np.zeros(SUCCESS_INTENT_EXTRA_DIM, dtype=float)
+    if not np.isfinite([start_x, start_y, end_x, end_y, start_z, end_z]).all():
+        return None
 
     dx = end_x - start_x
     dy = end_y - start_y
@@ -450,6 +451,8 @@ def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to
 
     frame = action.get("frame_id", np.nan)
     duration = (float(receive_frame) - float(frame)) / match.fps
+    if not np.isfinite(duration) or duration <= 0:
+        return None
     mean_speed = disp_norm / duration
     return np.array([mean_speed, *direction], dtype=float)
 
@@ -460,6 +463,7 @@ def summarize_ball_trajectory(
     fps: int | None = None,
     rotate_to_ltr: bool = True,
 ) -> np.ndarray | None:
+    """Early-pass net 3D displacement speed and unit direction, not launch velocity."""
     fps = fps or match.fps
     action = match.actions.loc[action_index]
     frame = action.get("frame_id", np.nan)
@@ -479,7 +483,7 @@ def summarize_ball_trajectory(
     if not valid_interval(match.tracking, frame, end_frame, period=action.get("period_id")):
         return None
 
-    available_cols = [col for col in ["ball_x", "ball_y", "ball_z", "ball_speed", "ball_vz"] if col in match.tracking.columns]
+    available_cols = [col for col in ["ball_x", "ball_y", "ball_z", "timestamp"] if col in match.tracking.columns]
     trajectory = match.tracking.loc[frame:end_frame, available_cols].copy()
     if trajectory.empty or not {"ball_x", "ball_y"}.issubset(set(trajectory.columns)):
         return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
@@ -491,6 +495,8 @@ def summarize_ball_trajectory(
 
     start_xyz = spatial.iloc[0].to_numpy(dtype=float)
     end_xyz = spatial.iloc[-1].to_numpy(dtype=float)
+    if not np.isfinite([start_xyz, end_xyz]).all():
+        return None
     disp = end_xyz - start_xyz
     if rotate_to_ltr and str(action["object_id"]).startswith("away"):
         disp[0] = -disp[0]
@@ -499,18 +505,13 @@ def summarize_ball_trajectory(
     disp_norm = float(np.linalg.norm(disp))
     direction = disp / disp_norm if disp_norm > 1e-6 else np.zeros(3, dtype=float)
 
-    if {"ball_speed", "ball_vz"}.issubset(set(trajectory.columns)):
-        velocity = trajectory[["ball_speed", "ball_vz"]].dropna()
-        if not velocity.empty:
-            mean_speed = float(np.sqrt(velocity["ball_speed"].astype(float) ** 2 + velocity["ball_vz"].astype(float) ** 2).mean())
-        else:
-            duration = max((spatial.index[-1] - spatial.index[0]) / fps, 1 / fps)
-            mean_speed = disp_norm / duration
+    if "timestamp" in trajectory:
+        duration = float(trajectory.at[spatial.index[-1], "timestamp"]) - float(trajectory.at[spatial.index[0], "timestamp"])
     else:
-        duration = max((spatial.index[-1] - spatial.index[0]) / fps, 1 / fps)
-        mean_speed = disp_norm / duration
-
-    return np.array([mean_speed, *direction], dtype=float)
+        duration = (spatial.index[-1] - spatial.index[0]) / fps
+    if not np.isfinite(duration) or duration <= 0:
+        return None
+    return np.array([disp_norm / duration, *direction], dtype=float)
 
 
 def construct_graph_for_frame(
@@ -635,7 +636,7 @@ def construct_graph_for_action(
     if action_index not in match.actions.index:
         return None
 
-    if "ball_accel" not in match.tracking.columns or (feature_variant == "success_intent" and "ball_vz" not in match.tracking.columns):
+    if "ball_accel" not in match.tracking.columns:
         match.tracking = proc.calc_physical_features(match.tracking, match.fps)
 
     frame, possessor, period_tracking = resolve_action_graph_context(match, action_index, post_action=post_action)
@@ -647,7 +648,7 @@ def construct_graph_for_action(
         if extra_node_features is None:
             return None
 
-    return construct_graph_for_frame(
+    graph = construct_graph_for_frame(
         match,
         frame,
         possessor,
@@ -662,6 +663,9 @@ def construct_graph_for_action(
         add_relative_velocity_edge_features=add_relative_velocity_edge_features,
         add_separation_rate_edge_features=add_separation_rate_edge_features,
     )
+    if graph is not None and feature_variant == "success_intent":
+        graph.trajectory_speed_definition = TRAJECTORY_SPEED
+    return graph
 
 
 def construct_graph_features(

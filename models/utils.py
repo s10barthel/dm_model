@@ -202,6 +202,9 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
     signature.update({key: args.get(key) for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")})
     if args.get("edge_feature_names") is not None:
         signature.update(edge_feature_names=list(edge_names(args)), edge_schema_version=1)
+    if args.get("task") == "success_intent":
+        from datatools.trajectory import speed_definition
+        signature["trajectory_speed_definition"] = speed_definition(args)
     return signature
 
 
@@ -227,6 +230,8 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
 
 
 def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if args.get("task") == "success_intent" and (metadata or {}).get("trajectory_speed_definition"):
+        args.setdefault("trajectory_speed_definition", metadata["trajectory_speed_definition"])
     if (metadata or {}).get("pass_height_definition"):
         args.setdefault("pass_height_definition", metadata["pass_height_definition"])
         args.setdefault("pass_height_threshold", metadata["pass_height_definition"]["threshold_meters"])
@@ -316,6 +321,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "timestamp": created_at,
         "feature_run_id": metadata.get("feature_run_id", args.get("feature_run_id")),
         "pass_height_definition": args.get("pass_height_definition"),
+        **({"trajectory_speed_definition": feature_signature["trajectory_speed_definition"]} if task == "success_intent" else {}),
         **split_metadata(metadata if any(metadata.get(key) is not None for key in ("train_split_percent", "train_count")) else args),
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,

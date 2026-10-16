@@ -113,3 +113,4 @@ _vendor/defcon/saved
 !tests/test_packed_graphs.py
 
 !tests/test_xt_refresh.py
+!tests/test_trajectory_speed_refresh.py

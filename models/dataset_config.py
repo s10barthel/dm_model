@@ -79,6 +79,7 @@ def build_action_dataset_kwargs(
 
     return {
         "task": task,
+        "trajectory_speed_definition": _get_arg(args, "trajectory_speed_definition", None) if task == "success_intent" else None,
         "pass_height_threshold": _get_arg(args, "pass_height_threshold", None),
         "defer_pass_height_relabel": False,
         "inplay_only": task.split("_")[1] == "receiver" and not bool(_get_arg(args, "include_out", False)),

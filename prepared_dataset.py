@@ -42,6 +42,7 @@ BASE_PREPARATION_FILES = (
     "models/pass_height.py",
     "datatools/config.py",
     "datatools/utils.py",
+    "datatools/trajectory.py",
 )
 PHYSICAL_PREPARATION_FILES = (
     "physical_pass_model.py",
@@ -145,6 +146,10 @@ class PreparedActionDataset(IterableDataset):
         bound.apply_defaults()
         self.options = {k: v for k, v in bound.arguments.items()
                         if k not in {"self", "match_ids", "feature_dir", "label_dir"}}
+        if self.options.get("task") == "success_intent":
+            from datatools.trajectory import directory_speed_definition, require_speed_definition
+            require_speed_definition(directory_speed_definition(self.feature_dir),
+                                     self.options.get("trajectory_speed_definition"), context="Prepared success_intent inputs")
         self.pass_height_threshold = self.options.get("pass_height_threshold")
         self.options["pass_height_threshold"] = None
         if self.pass_height_threshold is not None:
@@ -225,6 +230,8 @@ class PreparedActionDataset(IterableDataset):
 
     def _source_signatures(self, match_id):
         paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
+        if self.options.get("task") == "success_intent":
+            paths.append(self.feature_dir.parent / "metadata.json")
         for key, directory in self.options.items():
             if not key.endswith("_dir") or directory is None:
                 continue

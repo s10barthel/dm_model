@@ -779,6 +779,18 @@ def _load_feature_action_indices(match: Match, feature_path: Path, model: GNN) -
 def resolve_match_graphs(match: Match, model: GNN, post_action: bool = False) -> tuple[list[Data], np.ndarray | None]:
     feature_path = resolve_runtime_graph_feature_dir(match, model, post_action)
     cache_key = str(feature_path)
+    if model.args.get("task") == "success_intent":
+        from project_config import assert_feature_paths_usable
+        assert_feature_paths_usable(feature_path)
+        try:
+            match_id = resolve_match_id(match)
+        except ValueError:
+            match_id = None  # In-memory graph overrides need not have a file identity.
+        if match_id is not None:
+            graph_path = feature_path / f"{match_id}.pt"
+            if graph_path.exists():
+                stat = graph_path.stat()
+                cache_key = f"{feature_path}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
     graph_cache, action_index_cache = _get_graph_caches(match)
 
     if cache_key in graph_cache:

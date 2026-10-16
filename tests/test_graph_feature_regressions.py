@@ -1108,6 +1108,8 @@ class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
         )
         match.actions.attrs["intended_receiver_stats"] = {}
         model = DummyNodeModel("success_intent", logits=[0.0, 5.0, 1.0, -1.0])
+        from datatools.trajectory import TRAJECTORY_SPEED
+        model.args["trajectory_speed_definition"] = TRAJECTORY_SPEED
         model.args["edge_in_dim"] = 4
         model.args["add_v_edge_features"] = True
 

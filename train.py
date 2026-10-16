@@ -896,6 +896,8 @@ def main(cache_session):
     args.train_label_dir = getattr(args, "train_label_dir", None) or label_dir
     args.valid_feature_dir = getattr(args, "valid_feature_dir", None) or feature_dir
     args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
+    from datatools.trajectory import resolve_training_speed
+    resolve_training_speed(args, checkpoint=goal_source)
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
     args.require_goal_next10_diagnostics = requires_goal_next10_diagnostics(args.task)
     args.diagnostic_feature_run_id, args.diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, feature_root)
@@ -984,6 +986,7 @@ def main(cache_session):
         "include_goals": args.include_goals,
         "model_id": args.model_id,
         "task": args.task,
+        **({"trajectory_speed_definition": args.trajectory_speed_definition} if args.task == "success_intent" else {}),
         "run_id": args.run_id,
         "trial": args.trial,
         "created_at": existing_metadata.get("created_at", datetime.now().isoformat(timespec="seconds")),

@@ -1359,6 +1359,8 @@ def drop_nodes(graph: Data, labels: torch.Tensor, node_mask: torch.BoolTensor) -
     edge_index = index_map[graph.edge_index[:, edge_mask]]
     edge_attr = graph.edge_attr[edge_mask]
     masked_graph = Data(x=node_attr, edge_index=edge_index, edge_attr=edge_attr)
+    if getattr(graph, "trajectory_speed_definition", None) is not None:
+        masked_graph.trajectory_speed_definition = graph.trajectory_speed_definition
     if getattr(graph, "edge_feature_names", None) is not None:
         masked_graph.edge_feature_names = list(edge_names(graph))
         masked_graph.edge_schema_version = 1
@@ -1522,6 +1524,9 @@ def filter_features_and_labels(
     feature_action_indices: np.ndarray | torch.Tensor | list[int] | None = None,
     *, validate_targets: bool = True,
 ) -> Tuple[List[Data], torch.Tensor]:
+    if args.get("task") == "success_intent":
+        from datatools.trajectory import speed_definition, validate_trajectory_graphs
+        validate_trajectory_graphs(features, speed_definition(args), context="success_intent graph inputs")
     policy = goal_policy(args)
     filtered_features = []
     filtered_labels = []

@@ -295,6 +295,7 @@ class ActionDataset(Dataset):
         auxiliary_model_args=None,
         auxiliary_models_args=None,
         pass_distance_cache_dir=None,
+        trajectory_speed_definition=None,
     ):
         assert_feature_paths_usable(feature_dir, label_dir, diagnostic_label_dir, pass_height_diagnostic_label_dir)
         # Preserve geometry here; encoder and decoder mask only learned inputs.
@@ -394,6 +395,9 @@ class ActionDataset(Dataset):
                     f"feature_label_length_mismatch:{len(match_features)}!={int(match_labels.shape[0])}"
                 )
                 continue
+            if task == "success_intent":
+                from datatools.trajectory import validate_trajectory_graphs
+                validate_trajectory_graphs(match_features, trajectory_speed_definition, context=str(feature_path))
             if pass_height_diagnostic_label_root is not None:
                 pass_height_diagnostic_path = pass_height_diagnostic_label_root / f"{match_id}.pt"
                 if not pass_height_diagnostic_path.exists():
