@@ -902,7 +902,8 @@ def inference_gnn(
         model.args,
         event_indices,
         feature_action_indices=feature_action_indices,
-        validate_targets=not auxiliary_prediction,
+        # Success-intent predicts recipients even when no receiver was observed.
+        validate_targets=not auxiliary_prediction and model.args["task"] != "success_intent",
     )
     if graph_override is not None and not graphs:
         raise ValueError("No usable graphs remain for the selected inference actions.")

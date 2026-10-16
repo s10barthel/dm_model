@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+import matplotlib
+
+# Render exports without a GUI or Tcl/Tk installation.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch

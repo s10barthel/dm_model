@@ -18,7 +18,7 @@ def context():
         labels=torch.ones((2, len(config.LABEL_COLUMNS))),
         runtime_feature_root=Path("original"),
     )
-    graph = SimpleNamespace(edge_attr=torch.zeros((2, 2)))
+    graph = SimpleNamespace(edge_attr=torch.zeros((2, 2)), num_nodes=4)
     return match, graph
 
 

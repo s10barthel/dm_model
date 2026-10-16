@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+import matplotlib
+
+# Render exports without a GUI or Tcl/Tk installation.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -358,6 +362,11 @@ def run_success_intent_component(
             raise ValueError("Runtime success-intent graph edge schema does not match the checkpoint.")
         selected_labels = torch.zeros((1, len(config.LABEL_COLUMNS)), dtype=torch.float32)
         selected_labels[0, 0] = float(action_index)
+        selected_labels[0, config.LABEL_INDEX["is_pass"]] = 1
+        selected_labels[0, config.LABEL_INDEX["n_players"]] = graph.num_nodes
+        selected_labels[0, config.LABEL_INDEX["success"]] = float(match.actions.at[action_index, "success"])
+        selected_labels[0, config.LABEL_INDEX["intent_index"]] = -1
+        selected_labels[0, config.LABEL_INDEX["receiver_index"]] = -1
 
     probs, _ = inference_gnn(
         match, model, device=device, post_action=False, event_indices=[action_index],

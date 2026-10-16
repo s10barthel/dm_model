@@ -287,6 +287,7 @@ class Match(ABC):
         from torch_geometric.data import Batch
 
         from datatools.graph_feature import construct_graph_for_action
+        from models.goal_context import candidate_mask
 
         failed_pass_indices = actions.index[
             (actions["action_type"] == "pass")
@@ -334,7 +335,13 @@ class Match(ABC):
 
                 dummy_label = torch.zeros((1, len(config.LABEL_COLUMNS)), dtype=torch.float32)
                 dummy_label[0, 0] = float(action_index)
-                filtered_graphs, _ = utils.filter_features_and_labels([graph], dummy_label, model.args, [action_index])
+                dummy_label[0, config.LABEL_INDEX["is_pass"]] = 1
+                dummy_label[0, config.LABEL_INDEX["n_players"]] = graph.num_nodes
+                dummy_label[0, config.LABEL_INDEX["intent_index"]] = -1
+                dummy_label[0, config.LABEL_INDEX["receiver_index"]] = -1
+                filtered_graphs, _ = utils.filter_features_and_labels(
+                    [graph], dummy_label, model.args, [action_index], validate_targets=False,
+                )
                 if not filtered_graphs:
                     continue
 
@@ -344,11 +351,11 @@ class Match(ABC):
                 graph_teammate_ids.append(
                     [
                         node_id
-                        for node_id, is_teammate in zip(
+                        for node_id, is_candidate in zip(
                             filtered_node_ids,
-                            filtered_graphs[0].x[:, config.NODE_FEATURE_IS_TEAMMATE].tolist(),
+                            candidate_mask(filtered_graphs[0], model.args).tolist(),
                         )
-                        if is_teammate == 1
+                        if is_candidate
                     ]
                 )
         finally:
@@ -377,7 +384,7 @@ class Match(ABC):
             for graph_index, action_index in enumerate(graph_action_indices):
                 teammate_logits = logits[
                     (batch_graphs.batch == graph_index)
-                    & (batch_graphs.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                    & candidate_mask(batch_graphs, model.args)
                 ]
                 if teammate_logits.numel() == 0:
                     continue
