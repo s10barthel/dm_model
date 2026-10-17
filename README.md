@@ -1851,13 +1851,23 @@ Evaluation-only overrides leave checkpoint training provenance unchanged:
 
 - `--intended-receiver-mode original|angle_only|model` selects a common receiver reference; omission retains each checkpoint's resolution.
 - `--diagnostic-return-type next_3` changes the common binary goal diagnostic (default `next_10`). Supported definitions are `next_<N>` and undiscounted `disc_1` equivalents, optionally `_skip1`; continuous diagnostics are rejected. Native continuous-target metrics remain available.
-- `--min-pass-duration SECONDS` applies a common finite, nonnegative pass-duration filter. Zero removes the minimum; omission retains checkpoint settings. Carry inclusion remains checkpoint-defined.
+- `--filter pass` evaluates only rows with `is_pass == 1`, including when a checkpoint uses carry-inclusive artifacts. Omission retains the checkpoint's action population. The filter applies before inference to all metrics, diagnostics, exports, and bootstrap intervals; it does not alter graphs or targets. Filtered-out samples are counted separately from unusable rows.
+- `--min-pass-duration SECONDS` applies a common finite, nonnegative pass-duration filter, retaining passes with duration greater than or equal to the threshold. Zero removes the minimum; omission retains checkpoint settings. Combine it with `--filter pass` to compare passes under a shared duration threshold. Requested and effective thresholds, the filter, and selection counts are recorded in evaluation metadata and each experiment-manifest entry.
 - `--season 24_25 --season-half second` explicitly selects matchdays 18?34. Omit the half for the full season; `first` selects 1?17. Seasons can be repeated. Requested matches are never silently intersected with existing test lists. Training/validation overlap, unknown exclusion provenance, and unavailable required artifacts fail, including for participating learned auxiliaries.
 
 Statistical and visualization comparisons explain material limitations and ask for explicit `yes` or `no`; empty answers do not accept warnings. `--accept-comparison-warnings` accepts them for unattended execution. Warnings and acceptance are saved in run metadata. This option never bypasses statistical action-alignment or held-out exclusion errors. New evaluation overrides cannot be combined with learning-curve mode.
 
 - Task-specific model selectors are repeatable. Without `--compare` or masks, every specified checkpoint is evaluated independently, including several checkpoints of one task and different tasks sharing a run identifier. Explicit selections replace the corresponding task's bundle entry.
 - `--compare`: compare at least two completed checkpoints of one task. Use repeatable task-specific selectors; there is no generic `--model-id`. Feature configurations, architectures, seeds, and training sizes may differ. Comparison requires identical evaluated action identities. Different targets, receiver resolution, and intent candidate membership produce warnings requiring explicit acceptance; target differences are qualified per metric. Training and validation overlap remains an error.
+
+New prediction exports align by `(match_id, action_index)` even when artifact row positions differ. The original `source_index` remains available for tracing each artifact. Comparisons of older exports without event IDs retain source-row alignment; mixing old and new identity formats requires re-exporting predictions. Event sets must match exactly; no intersection is performed. Native continuous targets are compared with `rtol=1e-6, atol=1e-8`; binary goal labels and execution branches are compared exactly.
+
+For the July and October outcome models, use a shared pass population:
+
+```powershell
+python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-duration 0.1 --outcome-scoring-model-id outcome_scoring/outcome_scoring_20260731T153011_091203_ec216b1d --outcome-scoring-model-id outcome_scoring/outcome_scoring_20261016T100710_860045_d961f19d --diagnostic-feature-run-id feature_20261015T011549_082721_d5ab6c0a --season 24_25 --season-half second
+```
+
 - `--inference-mask <name> [<name> ...]`: automatically compare the selected checkpoint without masks against one combined masked configuration. Repeating this argument adds names to that same configuration.
 - `--inference-mask-1 <name> ...`, `--inference-mask-2 <name> ...`: define independent configurations, compared with unmasked inference separately for each selected checkpoint. Numbered identifiers must be positive and unique; do not mix numbered and unnumbered forms. Multiple tasks/checkpoints are allowed, but masked evaluation never compares different checkpoint runs. Masks take precedence over an additional `--compare` flag.
 - `--comparison-bootstrap-resamples <N>` and `--comparison-bootstrap-seed <N>`: comparison whole-match bootstrap settings. Defaults: 2000 and 42. Zero resamples disables intervals; otherwise at least two contributing matches are required. Reports include all within-group pairwise differences and pointwise 95% intervals.
@@ -1904,6 +1914,7 @@ Statistical and visualization comparisons explain material limitations and ask f
 
 `test.py` is the low-level single-checkpoint evaluator normally launched by `scripts/evaluate_relevant_models.py`.
 
+- `--filter pass` and `--min-pass-duration SECONDS` have the same evaluation-only behavior as the wrapper options above.
 - `--pass-height-threshold <meters>`: evaluate with relabelled observed height targets and cutoff-relative diagnostics. Omit it to use the checkpoint definition; this never changes the event predicted by the checkpoint.
 
 ### Shared inference masks

@@ -230,6 +230,8 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    if getattr(args, "evaluation_filter", None) is not None:
+        command.extend(["--filter", args.evaluation_filter])
     for name in ("intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season_half"):
         value = getattr(args, name, None)
         if value is not None:
@@ -455,6 +457,8 @@ def _entry_name(model_id: str) -> str:
 
 def evaluation_options(args: argparse.Namespace) -> dict:
     return {
+        "filter": getattr(args, "evaluation_filter", None),
+        "min_pass_duration": args.min_pass_duration,
         "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
         "evaluate_xpass": bool(args.evaluate_xpass),
         "evaluate_combined_success": bool(args.evaluate_combined_success),
@@ -498,7 +502,7 @@ def _main(args, policy) -> None:
     configurations = resolve_inference_mask_configurations(args)
     if args.learning_curve:
         if any(getattr(args, name, None) is not None for name in (
-                "intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season", "season_half")):
+                "evaluation_filter", "intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season", "season_half")):
             raise ValueError("Evaluation overrides cannot be combined with --learning-curve.")
         run_learning_curve(args)
         return
@@ -578,6 +582,7 @@ def _main(args, policy) -> None:
         "comparison_confidence_level": 0.95,
         "comparison_interval_scope": "pointwise",
         "evaluation_context": {"intended_receiver_mode": args.intended_receiver_mode,
+            "filter": args.evaluation_filter,
             "diagnostic_target_family": "goal", "diagnostic_return_type": args.diagnostic_return_type or "next_10",
             "min_pass_duration": args.min_pass_duration, "seasons": args.season,
             "season_half": args.season_half, "requested_match_ids": selected_matches,
@@ -627,6 +632,7 @@ def _main(args, policy) -> None:
                                               "requested_inference_masks": variant["masks"]})
             artifact_metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
             record["inference_masks"] = artifact_metadata.get("inference_masks", {})
+            record["evaluation_context"] = artifact_metadata.get("evaluation_context", {})
             records.append(record)
             report["entries"].append(record)
             _write_manifest(manifest_path, report)

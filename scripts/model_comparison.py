@@ -14,7 +14,7 @@ import pandas as pd
 
 from models.utils import get_model_record, parse_model_id
 from project_config import load_recorded_split_manifest
-from scripts.comparison_utils import INTENT_TASKS, paired_bootstrap
+from scripts.comparison_utils import INTENT_TASKS, paired_bootstrap, comparison_identity_columns
 from scripts.comparison_warnings import ComparisonWarnings, metadata_differences
 from models.evaluation_context import check_heldout, recorded_manifest_id
 
@@ -23,6 +23,15 @@ TARGET_DEFINITION_KEYS = ("target_family", "return_type", "intended_receiver_mod
                           "pass_height_definition")
 IDENTITY_COLUMNS = ("soft_target", "execution_branch",
                     "evaluation_pass_height_threshold_meters", "pass_height_label_mode")
+SOFT_TARGET_RTOL = 1e-6
+SOFT_TARGET_ATOL = 1e-8
+
+
+def reference_differences(left: pd.Series, right: pd.Series, field: str) -> pd.Series:
+    if field == "soft_target":
+        return pd.Series(~np.isclose(left.to_numpy(dtype=float), right.to_numpy(dtype=float),
+                                    rtol=SOFT_TARGET_RTOL, atol=SOFT_TARGET_ATOL), index=left.index)
+    return left != right
 
 
 def checkpoint(model_id: str, *, expected_task: str | None = None) -> dict:
@@ -101,7 +110,8 @@ def reference_qualification(task, metric, records, frames):
         "diagnostic_return_type", "evaluation_pass_height_threshold_meters"]
     for field in fields:
         if any(field in frame for frame in frames):
-            if any(field not in frame for frame in frames) or any(not frame[field].equals(frames[0][field]) for frame in frames[1:]):
+            if any(field not in frame for frame in frames) or any(
+                    reference_differences(frame[field], frames[0][field], field).any() for frame in frames[1:]):
                 return "different_references"
     keys = ("target_family", "return_type", "label_source") if native else (
         ("label_source", "pass_height_definition") if task == "pass_height" else (() if task.startswith("outcome_") else ("label_source",)))
@@ -127,21 +137,28 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
     messages = []
     reference = None
     reference_candidates = None
-    for record in records:
+    raw_frames = [pd.read_csv(Path(record["output_dir"]) / "learning_curve_predictions.csv",
+                              dtype={"match_id": str, "target_id": str, "prediction_id": str},
+                              keep_default_na=False) for record in records]
+    identity_columns = comparison_identity_columns(raw_frames)
+    for record, frame in zip(records, raw_frames):
         path = Path(record["output_dir"]) / "learning_curve_predictions.csv"
-        frame = pd.read_csv(path, dtype={"match_id": str, "target_id": str, "prediction_id": str},
-                            keep_default_na=False)
-        required = {"match_id", "source_index", "target", "prediction"}
+        required = {"match_id", "source_index", "target", "prediction", *identity_columns}
         intent = record["task"] in INTENT_TASKS
         if intent:
             required |= {"target_id", "prediction_id", "candidate_ids", "target_probability", "reciprocal_rank"}
         if frame.empty or not required.issubset(frame):
             raise ValueError(f"Missing prediction columns or rows in {path}.")
-        if frame.duplicated(["match_id", "source_index"]).any():
+        if "action_index" in frame:
+            action_indices = pd.to_numeric(frame["action_index"], errors="coerce")
+            if not (np.isfinite(action_indices) & (action_indices % 1 == 0)).all():
+                raise ValueError(f"Missing or invalid event identities in {path}.")
+            frame["action_index"] = action_indices.astype("int64")
+        if frame.duplicated(identity_columns).any():
             raise ValueError(f"Duplicate example identities in {path}.")
         if frame["match_id"].eq("").any() or frame["source_index"].eq("").any():
             raise ValueError(f"Missing example identities in {path}.")
-        frame = frame.sort_values(["match_id", "source_index"]).reset_index(drop=True)
+        frame = frame.sort_values(identity_columns).reset_index(drop=True)
         if record.get("test_match_ids") is not None and not set(frame["match_id"]).issubset(record["test_match_ids"]):
             raise ValueError(f"Predictions outside the test manifest in {path}.")
         if set(frame["match_id"]).intersection(record.get("train_match_ids") or []):
@@ -151,7 +168,7 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
         target_name = "target_id" if intent else "target"
         if intent and (frame["target_id"].eq("").any() or frame["prediction_id"].eq("").any()):
             raise ValueError(f"Missing semantic intent identities in {path}.")
-        identity = frame[["match_id", "source_index"]].copy()
+        identity = frame[identity_columns].copy()
         if reference is None:
             reference = identity
         elif not identity.equals(reference):
@@ -166,11 +183,11 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
                     if name not in frame or name not in frames[0]:
                         different = pd.Series(True, index=frame.index)
                     else:
-                        different = frame[name] != frames[0][name]
+                        different = reference_differences(frame[name], frames[0][name], name)
                     if different.any():
                         messages.append({"kind": "evaluation_reference_mismatch", "column": name,
                                          "model_id": record["model_id"], "affected_row_count": int(different.sum()),
-                                         "examples": frame.loc[different, ["match_id", "source_index"]].head(5).to_dict("records")})
+                                         "examples": frame.loc[different, identity_columns].head(5).to_dict("records")})
         if intent:
             candidates = frame["candidate_ids"].map(_candidate_set)
             if reference_candidates is None:
@@ -178,7 +195,7 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
             else:
                 different = candidates != reference_candidates
                 if different.any():
-                    sample = frame.loc[different, ["match_id", "source_index"]].head(5).to_dict("records")
+                    sample = frame.loc[different, identity_columns].head(5).to_dict("records")
                     message = {
                         "kind": "candidate_membership_mismatch", "model_id": record["model_id"],
                         "configuration_id": record.get("configuration_id", "unmasked"),
@@ -265,17 +282,19 @@ def write_report(records: list[dict], output_dir: Path, *, resamples: int, seed:
             lambda metric: reference_qualification(task, metric, records, frames))
     summary.to_csv(output_dir / "comparison_metrics.csv", index=False)
     differences.to_csv(output_dir / "comparison_differences.csv", index=False)
-    identity_names = [name for name in ("match_id", "source_index", "target", "target_id", *IDENTITY_COLUMNS)
+    identity_names = [name for name in ("match_id", "action_index", "source_index", "target", "target_id", *IDENTITY_COLUMNS)
                       if name in frames[0]]
     aligned = frames[0][identity_names].copy()
     for index, frame in enumerate(frames):
-        for name in ("target", "target_id", *IDENTITY_COLUMNS, "receiver_id", "diagnostic_return_type",
+        for name in ("source_index", "target", "target_id", *IDENTITY_COLUMNS, "receiver_id", "diagnostic_return_type",
                      "prediction", "prediction_id", "target_probability", "reciprocal_rank", "candidate_ids"):
             if name in frame:
                 aligned[f"{name}_{index}"] = frame[name].to_numpy()
     aligned.to_csv(output_dir / "aligned_predictions.csv", index=False)
     save_plot(summary, output_dir / "comparison.png", task)
     report = {"task": task, "variants": records, **policy.metadata(), "reference_differences": messages,
+              "identity_columns": comparison_identity_columns(frames),
+              "soft_target_tolerance": {"rtol": SOFT_TARGET_RTOL, "atol": SOFT_TARGET_ATOL},
               "example_count": len(frames[0]), "contributing_match_ids": sorted(frames[0].match_id.unique().tolist()),
               "bootstrap_resamples": resamples, "bootstrap_seed": seed, "confidence_level": 0.95,
               "interval_method": "paired_match_percentile", "interval_scope": "pointwise",

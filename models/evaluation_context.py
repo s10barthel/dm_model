@@ -30,10 +30,13 @@ def binary_goal_return(value):
 
 
 def add_evaluation_arguments(parser):
+    parser.add_argument("--filter", dest="evaluation_filter", choices=("pass",), default=None,
+                        help="Evaluate only is_pass events; omission retains the checkpoint's action population.")
     parser.add_argument("--intended-receiver-mode", choices=INTENDED_RECEIVER_MODES)
     parser.add_argument("--diagnostic-return-type", type=binary_goal_return, default=None,
                         help="Binary goal diagnostic return definition; defaults to next_10.")
-    parser.add_argument("--min-pass-duration", type=nonnegative_duration, default=None)
+    parser.add_argument("--min-pass-duration", type=nonnegative_duration, default=None,
+                        help="Minimum pass duration in seconds (inclusive); 0 removes the minimum, omission uses checkpoint settings.")
     add_season_argument(parser, help_text="Explicit held-out season(s); repeat for multiple seasons. Training/validation overlap is an error.")
     parser.add_argument("--season-half", choices=("first", "second"),
                         help="Requires --season: first selects matchdays 1-17; second selects 18-34.")

@@ -906,8 +906,8 @@ if __name__ == "__main__":
                                     ("intended_receiver_mode", "min_pass_dur", "return_type")}
     if args.intended_receiver_mode is not None:
         model_args.intended_receiver_mode = args.intended_receiver_mode
-    if args.min_pass_duration is not None:
-        model_args.min_pass_dur = args.min_pass_duration
+    model_args.min_pass_dur = (args.min_pass_duration if args.min_pass_duration is not None
+                               else getattr(model_args, "min_pass_dur", 0.0))
     model_args.diagnostic_return_type = args.diagnostic_return_type or "next_10"
     model_args.pass_height_threshold, height_context = evaluation_height(model_args, args.pass_height_threshold)
     height_export = height_export_context(height_context)
@@ -1032,6 +1032,7 @@ if __name__ == "__main__":
         pass_height_diagnostic_label_dir=pass_height_diagnostic_label_dir,
         physical_cache_dir=physical_cache_dir,
         lane_survival_cache_dir=lane_survival_cache_dir,
+        evaluation_filter=args.evaluation_filter,
     )
     if evaluated_task in {"outcome_scoring", "outcome_conceding"} and args.diagnostic_return_type is not None:
         diagnostic_root = resolve_feature_root(args.diagnostic_feature_run_id) if args.diagnostic_feature_run_id else feature_root
@@ -1074,7 +1075,9 @@ if __name__ == "__main__":
     if test_dataset.skipped_matches:
         raise ValueError(f"Required evaluation artifacts could not be loaded: {test_dataset.skipped_matches}")
     if len(test_dataset) == 0:
-        raise ValueError("No usable test samples remained after loading graph and label artifacts.")
+        raise ValueError(f"No usable test samples remained after evaluation selection "
+                         f"(filter={args.evaluation_filter!r}, min_pass_duration={model_args.min_pass_dur}): "
+                         f"{test_dataset.selection_counts}.")
     validate_test_dataset_dimensions(test_dataset, model_args)
     if args.comparison_rows and model_args.gnn_task in {"node_selection", "node_binary"}:
         ensure_dataset_node_identities(test_dataset, feature_root, model_args)
@@ -1090,6 +1093,7 @@ if __name__ == "__main__":
         pin_memory=bool(getattr(model_args, "pin_memory", False)),
     )
     test_split_provenance = split_dataset_provenance(test_match_ids, test_dataset)
+    test_split_provenance["selection_counts"] = test_dataset.selection_counts
     print(f"Evaluating {args.model_id}: {len(test_match_ids)} requested, "
           f"{test_split_provenance['loaded_match_count']} loaded, "
           f"{test_split_provenance['contributing_match_count']} contributing matches with {len(test_dataset)} samples")
@@ -1198,6 +1202,10 @@ if __name__ == "__main__":
             diagnostic_feature_run_id=diagnostic_feature_run_id,
             evaluation_timestamp=getattr(args, "evaluation_timestamp", None),
             evaluation_options={
+                "filter": args.evaluation_filter,
+                "requested_min_pass_duration": args.min_pass_duration,
+                "min_pass_duration": model_args.min_pass_dur,
+                "selection_counts": test_dataset.selection_counts,
                 "configuration_id": configuration_id,
                 "inference_masks": mask_metadata,
                 **height_context,
@@ -1249,6 +1257,9 @@ if __name__ == "__main__":
         metadata_path = Path(args.evaluation_output_dir) / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["evaluation_context"] = {"training_settings": training_evaluation_settings,
+            "filter": args.evaluation_filter,
+            "requested_min_pass_duration": args.min_pass_duration,
+            "selection_counts": test_dataset.selection_counts,
             "intended_receiver_mode": getattr(model_args, "intended_receiver_mode", None),
             "diagnostic_target_family": "goal", "diagnostic_return_type": model_args.diagnostic_return_type,
             "min_pass_duration": getattr(model_args, "min_pass_dur", 0),

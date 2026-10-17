@@ -1939,6 +1939,7 @@ def run_epoch(
                     learning_curve_rows.append({
                         "match_id": str(batch_graphs.evaluation_match_id[gi]),
                         "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                        "action_index": int(batch_labels[gi, config.LABEL_INDEX["action_index"]].item()),
                         "target": int(target_value), "prediction": int(prediction),
                         "reciprocal_rank": reciprocal_rank, "target_probability": probability,
                         **(semantic_rows[gi] if semantic_rows is not None else {}),
@@ -2106,6 +2107,7 @@ def run_epoch(
                         learning_curve_rows.append({
                             "match_id": str(batch_graphs.evaluation_match_id[gi]),
                             "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                            "action_index": int(batch_labels[gi, config.LABEL_INDEX["action_index"]].item()),
                             "target": float(observed), "prediction": float(prediction),
                             **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),
                         })
@@ -2134,6 +2136,7 @@ def run_epoch(
                         learning_curve_rows.append({
                             "match_id": str(batch_graphs.evaluation_match_id[gi]),
                             "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                            "action_index": int(batch_labels[gi, config.LABEL_INDEX["action_index"]].item()),
                             "target": float(observed), "prediction": float(prediction),
                             "soft_target": float(soft_target), "execution_branch": int(branch),
                             **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),

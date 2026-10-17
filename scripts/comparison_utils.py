@@ -14,6 +14,14 @@ INTENT_TASKS = {"action_intent", "pass_intent", "success_intent"}
 BINARY_TASKS = {"pass_success", "pass_height"}
 
 
+def comparison_identity_columns(frames: list[pd.DataFrame]) -> list[str]:
+    """Use event identities for new exports and source rows for legacy exports."""
+    has_events = ["action_index" in frame for frame in frames]
+    if any(has_events) and not all(has_events):
+        raise ValueError("Cannot mix event identities and legacy source-row identities; re-export all comparison predictions.")
+    return ["match_id", "action_index" if all(has_events) else "source_index"]
+
+
 def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
             *, threshold: float | None = None, strict_threshold: bool = False) -> dict[str, float]:
     data = frame if indices is None else frame.iloc[indices]
@@ -77,8 +85,9 @@ def paired_bootstrap(task: str, frames: list[pd.DataFrame], *, resamples: int, s
         raise ValueError("Bootstrap resamples and seed must be nonnegative.")
     if not frames or any(frame.empty for frame in frames):
         raise ValueError("Comparison requires nonempty aligned prediction frames.")
-    reference_rows = frames[0][["match_id", "source_index"]].reset_index(drop=True)
-    if any(not frame[["match_id", "source_index"]].reset_index(drop=True).equals(reference_rows)
+    identity_columns = comparison_identity_columns(frames)
+    reference_rows = frames[0][identity_columns].reset_index(drop=True)
+    if any(not frame[identity_columns].reset_index(drop=True).equals(reference_rows)
            for frame in frames[1:]):
         raise ValueError("Paired bootstrap requires aligned row identities.")
     groups = frames[0].groupby("match_id", sort=True).indices

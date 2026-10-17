@@ -43,6 +43,7 @@ def build_action_dataset_kwargs(
     require_goal_next10_diagnostics: bool | None = None,
     physical_cache_dir: str | None = None,
     lane_survival_cache_dir: str | None = None,
+    evaluation_filter: str | None = None,
 ) -> dict[str, Any]:
     """Build the feature-sensitive ActionDataset options shared by train and test."""
     from models.edge_feature_config import normalize_v_edge_feature_args
@@ -121,6 +122,7 @@ def build_action_dataset_kwargs(
         "train": bool(train),
         "diagnostic_label_dir": diagnostic_label_dir,
         "evaluation_diagnostic_label_dir": None,
+        "evaluation_filter": evaluation_filter,
         "pass_height_diagnostic_label_dir": pass_height_diagnostic_label_dir,
         "require_goal_next10_diagnostics": require_diagnostics,
         "use_physical_xpass": model_uses_physical_xpass(args),

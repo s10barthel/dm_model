@@ -296,7 +296,12 @@ class ActionDataset(Dataset):
         auxiliary_models_args=None,
         pass_distance_cache_dir=None,
         trajectory_speed_definition=None,
+        evaluation_filter=None,
     ):
+        if evaluation_filter not in (None, "pass"):
+            raise ValueError(f"Unknown evaluation filter: {evaluation_filter!r}.")
+        if evaluation_filter is not None and train:
+            raise ValueError("evaluation_filter is available only with train=False.")
         assert_feature_paths_usable(feature_dir, label_dir, diagnostic_label_dir, pass_height_diagnostic_label_dir)
         # Preserve geometry here; encoder and decoder mask only learned inputs.
         resolve_pos_node_features(dict(xy_only=xy_only, pos_node_features_aware=pos_node_features_aware))
@@ -322,6 +327,9 @@ class ActionDataset(Dataset):
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
         self.skipped_rows: dict[str, int] = {}
+        self.selection_counts = dict(loaded_samples=0, task_eligible_samples=0,
+                                     excluded_by_filter=0, excluded_by_duration=0,
+                                     selected_samples=0, evaluated_samples=0)
         self.use_physical_xpass = bool(use_physical_xpass)
         self.lane_survival = bool(lane_survival) and str(TASK_CONFIG.at[task, "gnn_task"]).startswith("node")
         self.lane_survival_mode = lane_survival_mode
@@ -469,6 +477,7 @@ class ActionDataset(Dataset):
             return
 
         condition: torch.Tensor = torch.ones(labels.shape[0]).bool()
+        self.selection_counts["loaded_samples"] = int(labels.shape[0])
 
         if not TASK_CONFIG.at[task, "pass"]:
             condition &= labels[:, 1] == 0
@@ -532,9 +541,18 @@ class ActionDataset(Dataset):
             # Only include actions with valid receivers (excluding out-of-play)
             condition &= labels[:, 6] != -1
 
+        self.selection_counts["task_eligible_samples"] = int(condition.sum())
+        if evaluation_filter == "pass":
+            pass_rows = labels[:, LABEL_INDEX["is_pass"]] == 1
+            self.selection_counts["excluded_by_filter"] = int((condition & ~pass_rows).sum())
+            condition &= pass_rows
+
         if min_pass_dur > 0:
             # Remove passes with not enough durations
-            condition &= (labels[:, 1] == 0) | (labels[:, 7] >= min_pass_dur)
+            duration_rows = (labels[:, LABEL_INDEX["is_pass"]] == 0) | (labels[:, 7] >= min_pass_dur)
+            self.selection_counts["excluded_by_duration"] = int((condition & ~duration_rows).sum())
+            condition &= duration_rows
+        self.selection_counts["selected_samples"] = int(condition.sum())
 
         self.features = []
         self.labels = []
@@ -834,6 +852,8 @@ class ActionDataset(Dataset):
         else:
             self.labels = torch.empty((0, labels.shape[1]), dtype=labels.dtype)
         self.ip_weights = None
+
+        self.selection_counts["evaluated_samples"] = len(self.labels)
 
     def set_inverse_propensity_weights(self, ip_weights: torch.Tensor):
         assert len(ip_weights) == len(self)
