@@ -19,6 +19,7 @@ from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled,
 
 MODEL_TASKS = ("action_intent", "pass_intent", "success_intent", "pass_success", "pass_height",
                "outcome_scoring", "outcome_conceding")
+OUTCOME_TASKS = ("outcome_scoring", "outcome_conceding")
 
 
 class RepeatableSelection(argparse.Action):
@@ -46,13 +47,14 @@ def validate_comparison_args(parser, args, *, inference=False):
             configurations = resolve_inference_mask_configurations(args)
             numbered = any(entry["id"] != "mask" for entry in configurations)
             selections = {task: selection_list(getattr(args, f"{task}_model_id", None)) for task in MODEL_TASKS}
+            repeated = [task for task, ids in selections.items() if len(ids) > 1]
+            paired = args.compare and not numbered and set(repeated) == set(OUTCOME_TASKS)
             for task, ids in selections.items():
-                if len(ids) != len(set(ids)):
+                if len(ids) != len(set(ids)) and not (paired and task in OUTCOME_TASKS):
                     raise ValueError(f"Duplicate {task} checkpoint selection.")
                 for identifier in ids:
                     if identifier.split("/", 1)[0] != task or "/" not in identifier:
                         raise ValueError(f"Checkpoint {identifier!r} does not match selector task {task!r}.")
-            repeated = [task for task, ids in selections.items() if len(ids) > 1]
             if numbered:
                 if args.compare:
                     raise ValueError("Numbered inference masks already enable mask comparison; omit --compare.")
@@ -60,8 +62,16 @@ def validate_comparison_args(parser, args, *, inference=False):
                     raise ValueError("Numbered masks require one checkpoint per task, including fixed supporting models.")
                 mode = "masks"
             elif args.compare:
-                if len(repeated) != 1:
-                    raise ValueError("--compare requires at least two checkpoints of exactly one varied model task.")
+                if paired:
+                    scoring, conceding = (selections[task] for task in OUTCOME_TASKS)
+                    if len(scoring) != len(conceding):
+                        raise ValueError("Paired outcome comparison requires equal numbers of scoring and conceding checkpoints.")
+                    pairs = list(zip(scoring, conceding))
+                    if len(pairs) != len(set(pairs)):
+                        raise ValueError("Duplicate outcome checkpoint pair selection.")
+                elif len(repeated) != 1:
+                    raise ValueError("--compare requires at least two checkpoints of one varied model task, "
+                                     "or equal-length lists of outcome_scoring and outcome_conceding checkpoints.")
                 mode = "checkpoints"
             elif repeated:
                 raise ValueError("Repeated model selectors require --compare.")

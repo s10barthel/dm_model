@@ -88,7 +88,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
-    parser.epilog = ("Use --compare with repeated same-task model IDs, optionally with one combined --inference-mask. "
+    parser.epilog = ("Use --compare with repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
+                     "Outcome IDs pair by selection order; repeat a fixed counterpart explicitly for each pair. "
+                     "Varying outcomes for derived outputs requires pairs. Optionally apply one combined --inference-mask. "
                      "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
                      "against unmasked inference; numbered masks cannot be combined with --compare. PNG only.")
     parser.add_argument(

@@ -66,6 +66,95 @@ def test_inference_cli(script, required):
             script.parse_args(["--accept-comparison-warnings", "--inference-mask-1", "accel", "--output", "mp4"])
 
 
+def _outcome_pair_flags(pairs):
+    return [flag for scoring, conceding in pairs for flag in (
+        "--outcome-scoring-model-id", f"outcome_scoring/{scoring}",
+        "--outcome-conceding-model-id", f"outcome_conceding/{conceding}")]
+
+
+@pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
+@pytest.mark.parametrize("pairs", [[("b", "x"), ("a", "y")],
+                                   [("a", "x"), ("b", "x"), ("b", "y")]])
+def test_outcome_pair_selection_order_and_identity(script, required, pairs, inference_fixture):
+    flags = ["--compare", "--only-outcome-success", *_outcome_pair_flags(pairs)]
+    args = script.parse_args([*required, *flags])
+    assert args.visualization_comparison == "checkpoints"
+    variants, _, _, _, _ = inference_compare.resolve_variants(args, script, script is av)
+    for variant, (scoring, conceding) in zip(variants, pairs):
+        expected = {"outcome_scoring": f"outcome_scoring/{scoring}",
+                    "outcome_conceding": f"outcome_conceding/{conceding}"}
+        assert variant.provenance["model_ids"] == expected
+        assert json.loads(variant.identifier.removeprefix("outcome_pair:")) == list(expected.values())
+        assert all(identifier in variant.label for identifier in expected.values())
+        assert {task: model.identifier for task, model in variant.models.items()} == expected
+    for task in ("outcome_scoring", "outcome_conceding"):
+        selected = {}
+        for variant in variants:
+            identifier = variant.provenance["model_ids"][task]
+            assert variant.models[task] is selected.setdefault(identifier, variant.models[task])
+    reversed_args = script.parse_args([*required, "--compare", "--only-outcome-success",
+                                       *_outcome_pair_flags(list(reversed(pairs)))])
+    reversed_variants, _, _, _, _ = inference_compare.resolve_variants(reversed_args, script, script is av)
+    assert [variant.identifier for variant in reversed_variants] == [variant.identifier for variant in reversed(variants)]
+
+
+@pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
+def test_outcome_pair_invalid_cli(script, required):
+    pairs = _outcome_pair_flags([("a", "x"), ("b", "y")])
+    invalid = [
+        ["--compare", *_outcome_pair_flags([("a", "x"), ("a", "x")])],
+        ["--compare", *pairs, "--outcome-conceding-model-id", "outcome_conceding/z"],
+        ["--compare", *pairs, "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b"],
+        ["--compare", *pairs, "--inference-mask-1", "all:accel"],
+        [*pairs, "--inference-mask-1", "all:accel"],
+        pairs,
+        ["--compare", "--outcome-scoring-model-id", "outcome_scoring/a", "--outcome-scoring-model-id", "outcome_scoring/a"],
+    ]
+    for flags in invalid:
+        with pytest.raises(SystemExit):
+            script.parse_args([*required, *flags])
+    if script is dv:
+        with pytest.raises(SystemExit):
+            script.parse_args(["--compare", *pairs, "--output", "mp4"])
+
+
+@pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
+@pytest.mark.parametrize("task", ["outcome_scoring", "outcome_conceding"])
+@pytest.mark.parametrize("output", ["outcome-success", "outcome-failure", "pass-score"])
+@pytest.mark.parametrize("counterpart", ["missing", "explicit", "bundle"])
+def test_derived_outcome_requires_pairs_before_loading(script, required, task, output, counterpart, monkeypatch):
+    other = "outcome_conceding" if task == "outcome_scoring" else "outcome_scoring"
+    selector = "--" + task.replace("_", "-") + "-model-id"
+    flags = ["--compare", selector, f"{task}/a", selector, f"{task}/b", f"--only-{output}"]
+    if counterpart == "explicit":
+        flags += ["--" + other.replace("_", "-") + "-model-id", f"{other}/fixed"]
+    elif counterpart == "bundle":
+        flags += ["--bundle-id", "fixed"]
+        monkeypatch.setattr(inference_compare, "load_bundle_record", lambda identifier: {
+            "model_ids": {other: f"{other}/fixed", "pass_success": "pass_success/fixed"}})
+    load = Mock()
+    monkeypatch.setattr(inference_compare, "load_model", load)
+    args = script.parse_args([*required, *flags])
+    with pytest.raises(ValueError, match="Repeat --outcome-scoring-model-id and --outcome-conceding-model-id equally"):
+        inference_compare.resolve_variants(args, script, script is av)
+    load.assert_not_called()
+
+
+@pytest.mark.parametrize("script,required", [(dv, []), (av, ["--match-id", "m"])])
+@pytest.mark.parametrize("task", ["outcome_scoring", "outcome_conceding"])
+def test_raw_outcome_single_task_comparison(script, required, task, inference_fixture):
+    option = task.replace("_", "-")
+    args = script.parse_args([*required, "--compare", f"--{option}-model-id", f"{task}/a",
+                              f"--{option}-model-id", f"{task}/b", f"--only-{option}"])
+    variants, _, _, _, _ = inference_compare.resolve_variants(args, script, script is av)
+    assert [variant.identifier for variant in variants] == [f"{task}/a", f"{task}/b"]
+    assert all(set(variant.models) == {task} for variant in variants)
+    paired_args = script.parse_args([*required, "--compare", f"--only-{option}",
+                                    *_outcome_pair_flags([("a", "x"), ("b", "y")])])
+    with pytest.raises(ValueError, match="does not contribute"):
+        inference_compare.resolve_variants(paired_args, script, script is av)
+
+
 def test_alignment_candidates_and_strict_rows():
     a = pd.Series({"home_1": 0.0, "home_2": 0.8})
     b = pd.Series({"home_2": 0.3, "home_1": 0.0})
@@ -232,6 +321,140 @@ def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatc
     metadata = json.loads((tmp_path / "checkpoints/metadata.json").read_text())
     assert [item["id"] for item in metadata["variants"]] == ["pass_success/a", "pass_success/b"]
     assert (tmp_path / "checkpoints/s/pass_score_0.png").exists()
+
+
+@pytest.fixture(params=[dv, av], ids=["hawkeye", "sportec"])
+def outcome_pipeline(request, tmp_path, monkeypatch, inference_fixture):
+    script = request.param
+    subject, models, _, build = inference_fixture
+    required = []
+    if script is av:
+        required = ["--match-id", "match"]
+        subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"],
+            spadl_type=["pass"], action_type=["pass"]), index=[10])
+        monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
+            "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
+        build = Mock(return_value=subject)
+        monkeypatch.setattr(av, "load_match", build)
+        monkeypatch.setattr(av, "resolve_action_indices", lambda *a: [(10, "42")])
+        monkeypatch.setattr(av, "configure_lane_survival_runtime_cache", lambda *a: None)
+    values = {"outcome_scoring/a": (0.10, 0.80), "outcome_scoring/b": (0.25, 0.50),
+              "outcome_conceding/x": (0.02, 0.10), "outcome_conceding/y": (0.30, 0.20),
+              "pass_success/fixed": (0.60,)}
+    calls = []
+    def predict(scene, model, **kwargs):
+        masked = bool(getattr(model, "inference_masks", None))
+        calls.append((model.identifier, masked))
+        frames = [pd.DataFrame({"home_1": [0.], "home_2": [value * (0.5 if masked else 1.0)],
+                                "away_3": [0.05]}, index=[10]) for value in values[model.identifier]]
+        return (frames[0], frames[1]) if len(frames) == 2 else (frames[0], None)
+    monkeypatch.setattr(script, "inference_gnn", predict)
+    render = Mock(side_effect=lambda *a, **kw: Image.new("RGB", (100, 70), "green"))
+    monkeypatch.setattr(script, "render_component" if script is av else "render_frame_image", render)
+    return script, required, models, calls, build, render
+
+
+def test_paired_outcomes_end_to_end(tmp_path, monkeypatch, outcome_pipeline):
+    from scripts import visualization_comparison as comparison
+    script, required, models, calls, build, render = outcome_pipeline
+    pairs = [("a", "x"), ("b", "x"), ("b", "y")]
+    monkeypatch.setattr(inference_compare, "load_bundle_record", lambda identifier: {
+        "model_ids": {"pass_success": "pass_success/fixed", "outcome_scoring": "outcome_scoring/unused",
+                      "outcome_conceding": "outcome_conceding/unused"}})
+    compose = Mock(wraps=compose_panels)
+    monkeypatch.setattr(comparison, "compose_panels", compose)
+    args = script.parse_args([*required, "--compare", *_outcome_pair_flags(pairs), "--bundle-id", "fixed",
+        "--only-outcome-success", "--only-outcome-failure", "--only-pass-score", "--inference-mask", "all:accel",
+        "--output-dir", str(tmp_path), "--run-id", "pairs"])
+    monkeypatch.setattr(script, "parse_args", lambda: args)
+    script.main()
+    assert build.call_count == 1
+    assert len(calls) == len(set(calls)) == 5
+    assert all(masked for _, masked in calls)
+    assert set(models) == {"pass_success/fixed", "outcome_scoring/a", "outcome_scoring/b",
+                           "outcome_conceding/x", "outcome_conceding/y"}
+    assert all(model.inference_masks is None for model in models.values())
+    assert render.call_count == 9 and compose.call_count == 3
+    root = tmp_path / "pairs"
+    metadata = json.loads((root / "metadata.json").read_text())
+    assert metadata["status"] == "completed" and metadata["comparison_mode"] == "checkpoints"
+    assert len(metadata["output_paths"]) == 3
+    assert all(Path(path).exists() for path in metadata["output_paths"])
+    aligned = pd.read_csv(root / "aligned_predictions.csv")
+    # Expected values use the common mask's 0.5 factor, including p_success=0.30.
+    expected = [(0.35, 0.04, 0.133), (0.20, 0.115, 0.1405), (0.15, -0.025, 0.0275)]
+    for index, (variant, pair, (success, failure, score)) in enumerate(zip(metadata["variants"], pairs, expected)):
+        scoring, conceding = f"outcome_scoring/{pair[0]}", f"outcome_conceding/{pair[1]}"
+        assert json.loads(variant["id"].removeprefix("outcome_pair:")) == [scoring, conceding]
+        assert variant["provenance"]["model_ids"] == {
+            "pass_success": "pass_success/fixed", "outcome_scoring": scoring, "outcome_conceding": conceding}
+        assert variant["requested_masks"] == ["all:accel"]
+        assert scoring in variant["label"] and conceding in variant["label"]
+        column = "prediction:" + variant["id"]
+        for component, value in (("outcome_success", success), ("outcome_failure", failure), ("pass_score", score)):
+            row = aligned.loc[aligned.component.eq(component) & aligned.candidate_id.eq("home_2")]
+            assert row[column].iloc[0] == pytest.approx(value)
+        for invocation in compose.call_args_list:
+            label = invocation.args[1][index]
+            assert scoring in label and conceding in label and "Masked: all:accel" in label
+
+
+@pytest.mark.parametrize("field", ["target_family", "return_type"])
+def test_within_pair_warnings_require_acceptance(tmp_path, monkeypatch, outcome_pipeline, field):
+    from scripts.comparison_warnings import ComparisonCancelled
+    script, required, _, calls, build, render = outcome_pipeline
+    alternative = "xt" if field == "target_family" else "next_10"
+    def record(identifier):
+        result = _record(identifier)
+        # Each task is constant across variants, so only the within-pair check detects this.
+        if identifier.startswith("outcome_conceding/"):
+            result[field] = alternative
+        return result
+    monkeypatch.setattr(inference_compare, "get_model_record", record)
+    monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
+    flags = [*required, "--compare", *_outcome_pair_flags([("a", "x"), ("b", "y")]),
+             "--only-outcome-success", "--output-dir", str(tmp_path), "--run-id", "warnings"]
+    args = script.parse_args(flags)
+    with pytest.raises(ComparisonCancelled, match="explicit acceptance"):
+        inference_compare.run_comparison(args, script)
+    assert not calls and not build.call_count and not render.call_count
+    path = tmp_path / "warnings/metadata.json"
+    metadata = json.loads(path.read_text())
+    assert metadata["status"] == "cancelled"
+    assert all(any("Within outcome pair" in message and field in message and variant["id"] in message
+                   for message in metadata["warnings"]) for variant in metadata["variants"])
+    args = script.parse_args([*flags, "--accept-comparison-warnings"])
+    inference_compare.run_comparison(args, script)
+    metadata = json.loads(path.read_text())
+    assert metadata["status"] == "completed"
+    assert metadata["warning_acceptances"][0]["method"] == "command_line"
+    assert set(metadata["warning_acceptances"][0]["warnings"]) == set(metadata["warnings"])
+    assert calls and render.call_count == 2
+
+
+@pytest.mark.parametrize("definitions", ["different_between_pairs", "missing"])
+def test_pair_definition_differences_and_missing_metadata(tmp_path, monkeypatch, outcome_pipeline, definitions):
+    script, required, _, _, _, _ = outcome_pipeline
+    def record(identifier):
+        result = _record(identifier)
+        if definitions == "missing" and identifier.startswith("outcome_conceding/"):
+            result["target_family"] = result["return_type"] = None
+        elif definitions == "different_between_pairs" and identifier.endswith(("/b", "/y")):
+            result.update(target_family="xt", return_type="next_10")
+        return result
+    monkeypatch.setattr(inference_compare, "get_model_record", record)
+    args = script.parse_args([*required, "--compare", *_outcome_pair_flags([("a", "x"), ("b", "y")]),
+        "--only-outcome-success", "--accept-comparison-warnings", "--output-dir", str(tmp_path), "--run-id", "definitions"])
+    inference_compare.run_comparison(args, script)
+    metadata = json.loads((tmp_path / "definitions/metadata.json").read_text())
+    assert metadata["status"] == "completed"
+    assert not any("Within outcome pair" in message for message in metadata["warnings"])
+    if definitions == "different_between_pairs":
+        assert any("target_family" in message for message in metadata["warnings"])
+        assert any("return_type" in message for message in metadata["warnings"])
+        assert metadata["warning_acceptances"]
+    else:
+        assert not metadata["warnings"]
 
 
 def test_masked_auxiliary_changes_v5_prediction_cache_dependency():

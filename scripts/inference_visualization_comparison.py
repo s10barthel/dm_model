@@ -1,6 +1,7 @@
 """Checkpoint and runtime-mask comparison adapters for inference visualizers."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import pandas as pd
 import torch
@@ -13,10 +14,14 @@ from models.utils import (
     validate_model_record_consistency, validate_model_graph_schemas,
 )
 from scripts.visualization_comparison import (
-    MODEL_TASKS, ComparisonExport, Variant, selection_list,
+    MODEL_TASKS, OUTCOME_TASKS, ComparisonExport, Variant, selection_list,
     validate_metadata_definitions,
     render_independent_groups,
 )
+from scripts.comparison_warnings import metadata_differences
+
+
+DERIVED_OUTCOMES = {"outcome_success", "outcome_failure", "pass_score"}
 
 
 def resolve_variants(args, mod, sportec):
@@ -29,19 +34,35 @@ def resolve_variants(args, mod, sportec):
     required = ["success_intent" if task == "intended_recipient" else task
                 for task in selection.required_component_groups
                 if task in MODEL_TASKS or task == "intended_recipient"]
+    varied = [task for task, ids in explicit.items() if len(ids) > 1]
+    paired = set(varied) == set(OUTCOME_TASKS)
+    for task in varied:
+        if task not in required:
+            raise ValueError(f"Compared task {task} does not contribute to the selected visualization components.")
+    if (args.visualization_comparison == "checkpoints" and set(varied) & set(OUTCOME_TASKS)
+            and set(OUTCOME_TASKS).issubset(required) and not paired):
+        raise ValueError("Selected outcome outputs require explicit scoring/conceding checkpoint pairs. "
+                         "Repeat --outcome-scoring-model-id and --outcome-conceding-model-id equally, "
+                         "including repeating a fixed counterpart explicitly for each pair; "
+                         "bundle defaults do not supply compared counterparts. "
+                         "For a single outcome model, select only its raw outputs with --only-outcome-scoring "
+                         "or --only-outcome-conceding.")
     base = {}
     for task in required:
         identifiers = explicit[task] or selection_list(bundle_ids.get(task))
         if not identifiers:
             raise ValueError(f"Missing --{task.replace('_', '-')}-model-id or bundle checkpoint for selected components.")
         base[task] = identifiers[0]
-    varied = next((task for task, ids in explicit.items() if len(ids) > 1), None)
-    if varied and varied not in required:
-        raise ValueError(f"Compared task {varied} does not contribute to the selected visualization components.")
     common_masks = flatten_mask_values(args.inference_mask)
     if args.visualization_comparison == "checkpoints":
-        specifications = [(identifier, identifier, {**base, varied: identifier}, common_masks)
-                          for identifier in explicit[varied]]
+        if paired:
+            specifications = [("outcome_pair:" + json.dumps(pair, separators=(",", ":")),
+                               "\n".join(pair), {**base, **dict(zip(OUTCOME_TASKS, pair))}, common_masks)
+                              for pair in zip(*(explicit[task] for task in OUTCOME_TASKS))]
+        else:
+            task = varied[0]
+            specifications = [(identifier, identifier, {**base, task: identifier}, common_masks)
+                              for identifier in explicit[task]]
     else:
         specifications = [("unmasked", "Unmasked", base, [])]
         for entry in resolve_inference_mask_configurations(args):
@@ -229,6 +250,12 @@ def run_comparison(args, mod):
                            source_context=shared, bundle_id=args.bundle_id)
     try:
         validate_metadata_definitions([variant.provenance for variant in variants], report.policy, tasks=required_tasks(selection))
+        if DERIVED_OUTCOMES.intersection(names):
+            for variant in variants:
+                records = [variant.provenance["models"][task] for task in OUTCOME_TASKS]
+                for message in metadata_differences(records, ("target_family", "return_type"),
+                        prefix=f"Within outcome pair {variant.identifier}: "):
+                    report.policy.add(message)
         report.policy.confirm()
         same_schema = all(variant.provenance["graph_schema"] == schema for variant in variants)
         same_context = all(variant.provenance["source_context"] == variants[0].provenance["source_context"] for variant in variants)

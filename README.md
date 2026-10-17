@@ -1963,6 +1963,7 @@ The inference visualizers `scripts/visualize_action_components.py` and
 |---|---|
 | Unnumbered `--inference-mask` alone | One masked prediction pipeline; no comparison |
 | `--compare` and repeated same-task model IDs | Compare checkpoint predictions |
+| `--compare` and equally repeated scoring/conceding model IDs | Compare ordered outcome checkpoint pairs |
 | `--compare`, repeated same-task model IDs, and unnumbered masks | Compare masked predictions; each checkpoint runs once, with no unmasked variant |
 | One or more numbered masks | One unmasked pipeline, then each independent numbered configuration |
 
@@ -1972,14 +1973,30 @@ python scripts/run_and_visualize_hawkeye.py --compare `
   --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b `
   --inference-mask accel vel-node-features --situation-id SITUATION --only-pass-success
 
+# Compare two complete outcome configurations. First scoring pairs with first conceding.
+python scripts/run_and_visualize_hawkeye.py --compare `
+  --outcome-scoring-model-id outcome_scoring/run_a --outcome-conceding-model-id outcome_conceding/run_a `
+  --outcome-scoring-model-id outcome_scoring/run_b --outcome-conceding-model-id outcome_conceding/run_b `
+  --situation-id SITUATION --only-outcome-success --only-outcome-failure
+
 # A single numbered mask is enough to compare against unmasked inference.
 python scripts/visualize_action_components.py --match-id MATCH --action-id 10 `
   --pass-success-model-id pass_success/run_a --only-pass-success `
   --inference-mask-1 accel --inference-mask-2 pos-node-features
 ```
 
-Only one model task may have alternative checkpoints. Fixed supporting models can be selected
-individually or through a bundle; explicit selections override that task's bundle entry. Numbered
+Alternative checkpoints must vary one model task or the scoring/conceding outcome pair. Paired
+comparison requires equal-length lists with at least two entries each, paired by selection order;
+no combinations are generated automatically. A checkpoint may appear in several distinct pairs,
+but duplicate complete pairs are rejected. To hold conceding fixed, repeat its ID explicitly for
+each scoring checkpoint. Both outcome tasks must contribute to the selected outputs.
+When varying an outcome model, derived `outcome_success`, `outcome_failure`, and `pass_score`
+require explicit pairs; a single counterpart or bundle default cannot supply the other compared
+checkpoint. Use `--only-outcome-scoring` or `--only-outcome-conceding` to compare one model's raw
+outputs. Comparing raw scoring and conceding outputs together also requires explicit pairs.
+Other model tasks remain fixed during paired comparisons. Fixed supporting models can be selected
+individually or through a bundle; explicit selections override that task's bundle entry. Comparing
+another task, such as pass success, can retain a fixed outcome pair. Numbered
 masks require one checkpoint per participating task and reject `--compare`, repeated alternative
 checkpoints, and mixed numbered/unnumbered masks. Numbers must be positive and unique, and are
 processed numerically. Unscoped masks require one participating task, including dependencies;
@@ -1991,6 +2008,9 @@ keeps game states 1 and 2 as rows, with all compared runs arranged horizontally 
 The full-image title contains the scene identifier, time where available, and component. Panel
 titles identify component-run IDs, qualified model IDs, or `Unmasked` / `mask-<n>: <inputs>`.
 Common unnumbered masks appear in the panel labels. Long labels wrap without changing pitch sizes.
+Outcome-pair labels show both full checkpoint IDs; variant IDs encode both IDs independently of
+selection position. Known target-family or return-horizon differences within a pair used for derived
+outputs require the existing warning acceptance, as do differences between complete variants.
 Each variant renders with its own runtime context and geometry, as in standalone visualization.
 Different receiver modes, target definitions, schemas, geometry, and scene membership produce
 warnings rather than compatibility errors. Different image sizes are padded without distortion.
