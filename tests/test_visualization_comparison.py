@@ -214,7 +214,7 @@ def test_export_precision_availability_and_identity(tmp_path):
 def _args(task="pass_success"):
     return dict(task=task, model="gat", gnn_task="node_binary", node_in_dim=26, edge_in_dim=5,
                 node_emb_dim=8, graph_emb_dim=8, gnn_layers=1, gnn_heads=1, skip_conn=True,
-                out_dim=1, include_out=False, possessor_aware=True, poss_vel_aware=True,
+                out_dim=1, include_out=False, use_carries=True, possessor_aware=True, poss_vel_aware=True,
                 poss_rel_vel_aware=True, extend_features=True, keeper_aware=True, ball_z_aware=True)
 
 
@@ -228,7 +228,7 @@ class TinyModel(torch.nn.Module):
 def _record(identifier):
     task = identifier.split("/")[0]
     return dict(task=task, model_id=identifier, is_complete=True, args=_args(task), metadata={},
-                feature_run_id="feature", intended_receiver_mode="predict", use_carries=False,
+                feature_run_id="feature", intended_receiver_mode="predict", use_carries=True,
                 return_type="next_5", target_family="goal",
                 graph_schema=dict(node_in_dim=26, edge_in_dim=5, add_v_edge_features=True,
                                   add_relative_speed_edge_features=True))

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -77,6 +78,7 @@ from project_config import (
 )
 from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
+from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
@@ -618,7 +620,7 @@ def render_component(
 
     rotate_pitch = attacking_prefix == "away"
     title = f"{action['spadl_type']} {display_action_id} - {component_name.replace('_', ' ').title()}"
-    if component_name == "model_pass_success" and component_probs.dropna().empty:
+    if component_name in {"pass_success", "model_pass_success", "pass_score"} and component_probs.dropna().empty:
         title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
@@ -778,6 +780,9 @@ def collect_action_components(
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
             **({"cache_selection": match_cache.selection_for(pc_state)} if pc_state is not None else {}),
         )
+
+    if "pass_success" in component_prob_rows and not bool(loaded_models["pass_success"].args.get("use_carries", False)):
+        mask_unsupported_carry_success(component_prob_rows, match.actions.at[action_index, "object_id"])
 
     validate_derived_inputs(rendered_components, component_prob_rows)
     for case in ("failure", "success"):
@@ -964,6 +969,7 @@ def main() -> None:
             require_intended_receiver_mode=False,
             require_return_type=False,
             require_target_family=False,
+            allow_pass_only_success=True,
         )
     else:
         resolved_model_ids = {}
@@ -979,6 +985,9 @@ def main() -> None:
         raise ValueError("--only-intended-recipient/--no-intended-recipient require a selected success_intent model.")
     if success_intent_model_id:
         shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
+    carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
+    for message in carry_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
     component_selection = resolve_component_selection(
         args,
         include_intended_recipient=bool(success_intent_model_id),
@@ -1153,6 +1162,8 @@ def main() -> None:
         "intended_receiver_mode": intended_receiver_mode,
         "return_type": return_type,
         "use_carries": use_carries,
+        "source_use_carries": shared_context.get("source_use_carries", {}),
+        "warnings": carry_warnings,
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
         "show_physical_xpass": bool(args.show_physical_xpass),

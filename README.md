@@ -1969,6 +1969,25 @@ Masking occurs after feature derivation at encoder and decoder learned-input bou
 
 Physical xPass values remain unchanged. Masked learned predictions can change the blended result, and masked pass-intent predictions may change v5 blending weights. Output metadata records mask names, expansions, and effectiveness; evaluation artifacts and summaries distinguish configurations. Ordinary Hawkeye inference retains its existing visualization layout; comparison layouts are described below.
 
+### Carry availability in inference visualizations
+
+`scripts/run_and_visualize_hawkeye.py` and `scripts/visualize_action_components.py`
+allow a pass-success checkpoint with `use_carries=False` alongside carry-trained
+action-intent and outcome checkpoints. In each frame, the ball carrier's candidate
+represents the carry option, including synthetic Hawkeye pass frames. Its
+`pass_success`, optional `model_pass_success`, and derived `pass_score` values are
+unavailable when the success checkpoint was trained without carries. Teammate
+pass predictions and carry-trained outcome values remain available. This masking
+also applies when all selected checkpoints have `use_carries=False`.
+
+Ordinary visualizations emit a warning; comparisons retain explicit warning
+acceptance through an interactive answer or `--accept-comparison-warnings`.
+Metadata records warnings and per-checkpoint `source_use_carries`. Sportec uses
+carry-inclusive runtime artifacts when any selected carry-sensitive checkpoint
+requires them. Comparison exports retain unsupported values as null/`N/A`.
+Other carry-setting mismatches and default model consistency validation remain
+strict; raw inference predictions are unchanged.
+
 ### PNG prediction comparison visualizations
 
 Saved-component visualization supports `--compare` with repeated `--component-run-id` in

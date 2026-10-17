@@ -119,10 +119,12 @@ def test_saved_component_paths(module, component, expected):
 def test_sportec_derives_without_rendering_sources(tmp_path, component, expected):
     source = tables()
     def infer(match, model, **kwargs):
+        model = model.args["task"]
         if model == "pass_success":
             return source[model], None
         return source[f"{model}_failure"], source[f"{model}_success"]
-    models = {name: name for name in ["pass_success", "outcome_scoring", "outcome_conceding"]}
+    models = {name: SimpleNamespace(args={"task": name, "use_carries": True})
+              for name in ["pass_success", "outcome_scoring", "outcome_conceding"]}
     with patch.object(sportec, "inference_gnn", side_effect=infer), patch.object(sportec, "render_component") as render:
         sportec.render_action_components(object(), models, tmp_path, "cpu", 10, "10", tmp_path, rendered_components=[component])
     render.assert_called_once()
@@ -135,8 +137,10 @@ def test_direct_hawkeye_derives_outputs(tmp_path, output):
     source = tables()
     situation = SimpleNamespace(labels=SimpleNamespace(numel=lambda: 1), graph_features_0=[1], frame_meta=pd.DataFrame(index=[10]), match_id="m")
     args = SimpleNamespace(output=output, freeze_ballreceipt=True, show_trajectories=False, tracking_csv="tracking.csv")
-    models = {name: name for name in ["pass_success", "outcome_scoring", "outcome_conceding"]}
+    models = {name: SimpleNamespace(args={"task": name, "use_carries": True})
+              for name in ["pass_success", "outcome_scoring", "outcome_conceding"]}
     def infer(situation, model, **kwargs):
+        model = model.args["task"]
         if model == "pass_success":
             return source[model], None
         return source[f"{model}_failure"], source[f"{model}_success"]

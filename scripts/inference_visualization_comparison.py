@@ -19,6 +19,7 @@ from scripts.visualization_comparison import (
     render_independent_groups,
 )
 from scripts.comparison_warnings import metadata_differences
+from scripts.visualization_carries import carry_visualization_warnings
 
 
 DERIVED_OUTCOMES = {"outcome_success", "outcome_failure", "pass_score"}
@@ -93,7 +94,8 @@ def resolve_variants(args, mod, sportec):
             pipeline_records[task] = records[model_id]
             pipeline_models["intended_recipient" if task == "success_intent" else task] = models[model_id]
         context = validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
-            require_intended_receiver_mode=False, require_return_type=False, require_target_family=False)
+            require_intended_receiver_mode=False, require_return_type=False, require_target_family=False,
+            allow_pass_only_success=True)
         contexts.append(context)
         auxiliaries = configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
         for role, auxiliary in auxiliaries.items():
@@ -250,6 +252,9 @@ def run_comparison(args, mod):
                            source_context=shared, bundle_id=args.bundle_id)
     try:
         validate_metadata_definitions([variant.provenance for variant in variants], report.policy, tasks=required_tasks(selection))
+        for variant in variants:
+            for message in carry_visualization_warnings(variant.provenance["source_context"].get("source_use_carries", {})):
+                report.policy.add(f"Within variant {variant.identifier}: {message}")
         if DERIVED_OUTCOMES.intersection(names):
             for variant in variants:
                 records = [variant.provenance["models"][task] for task in OUTCOME_TASKS]

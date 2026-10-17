@@ -414,7 +414,7 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
                     rows.append(row)
                     scene_geometries.append(repr(scene.get("geometry", {})))
                     if component in names:
-                        unavailable = component == "model_pass_success" and row.dropna().empty
+                        unavailable = component in {"pass_success", "model_pass_success", "pass_score"} and row.dropna().empty
                         images.append(None if unavailable else scene["render"](component, row))
                         labels.append(variant_description(report.variants[index]) + "\n" + scene["title"] +
                                       "\n" + geometry_description(scene) +

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +74,7 @@ from scripts.hawkeye_visualization_overlays import (
 )
 from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
+from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 from scripts.visualize_hawkeye import (
     output_mode,
     requested_time_norm_range,
@@ -273,7 +275,7 @@ def render_frame_image(
     if component_name == "pass_score" and selections_enabled:
         denominators = selection_denominators or {}
         title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
-    if component_name == "model_pass_success" and component_probs.dropna().empty:
+    if component_name in {"pass_success", "model_pass_success", "pass_score"} and component_probs.dropna().empty:
         title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
@@ -371,6 +373,11 @@ def collect_situation_components(situation, model_specs, device, inference_frame
             )
             components["outcome_conceding_success"] = conceding_success
             components["outcome_conceding_failure"] = conceding_failure
+
+    if "pass_success" in components and not bool(model_specs["pass_success"].args.get("use_carries", False)):
+        possessors = (situation.actions["object_id"] if hasattr(situation, "actions")
+                      else situation.frame_meta["possessor_object_id"])
+        mask_unsupported_carry_success(components, possessors)
 
     validate_derived_inputs(rendered_components, components)
     component_frames = dict(components)
@@ -618,7 +625,11 @@ def main() -> None:
         require_intended_receiver_mode=False,
         require_return_type=False,
         require_target_family=False,
+        allow_pass_only_success=True,
     )
+    carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
+    for message in carry_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
@@ -733,6 +744,9 @@ def main() -> None:
         "source_intended_receiver_modes": shared_context.get("source_intended_receiver_modes", {}),
         "source_return_types": shared_context.get("source_return_types", {}),
         "source_target_families": shared_context.get("source_target_families", {}),
+        "source_use_carries": shared_context.get("source_use_carries", {}),
+        "use_carries": shared_context.get("use_carries"),
+        "warnings": carry_warnings,
         "requested_component_groups": component_selection.requested_component_groups,
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,

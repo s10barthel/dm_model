@@ -751,7 +751,13 @@ def validate_model_record_consistency(
     require_return_type: bool = True,
     require_target_family: bool = True,
     outcome_tasks: tuple[str, ...] = ("outcome_scoring", "outcome_conceding"),
+    allow_pass_only_success: bool = False,
 ) -> dict[str, Any]:
+    """Validate checkpoints and select the runtime carry artifact family.
+
+    Callers opting into allow_pass_only_success must mask unsupported carry
+    success predictions before displaying or deriving values from them.
+    """
     if not model_records:
         raise ValueError("No model records were provided for consistency validation.")
 
@@ -762,12 +768,23 @@ def validate_model_record_consistency(
         task: record for task, record in model_records.items() if task in carry_sensitive_tasks
     }
     carry_values = {bool(record.get("use_carries", False)) for record in carry_records.values()}
-    if len(carry_values) > 1:
+    pass_only_success_exception = (
+        allow_pass_only_success
+        and "pass_success" in carry_records
+        and not bool(carry_records["pass_success"].get("use_carries", False))
+        and all(bool(record.get("use_carries", False))
+                for task, record in carry_records.items() if task != "pass_success")
+    )
+    if len(carry_values) > 1 and not pass_only_success_exception:
         details = ", ".join(
             f"{task}={bool(record.get('use_carries', False))}" for task, record in carry_records.items()
         )
         raise ValueError(f"Selected carry-sensitive checkpoints do not agree on use_carries: {details}.")
-    shared["use_carries"] = next(iter(carry_values)) if carry_values else None
+    # Select the runtime artifact family; retain each checkpoint's training setting.
+    shared["use_carries"] = any(carry_values) if carry_values else None
+    shared["source_use_carries"] = {
+        task: bool(record.get("use_carries", False)) for task, record in carry_records.items()
+    }
 
     feature_run_ids = {record.get("feature_run_id") for record in model_records.values()}
     feature_run_ids.discard(None)
@@ -847,6 +864,7 @@ def resolve_model_selection(
     require_intended_receiver_mode: bool = True,
     require_return_type: bool = True,
     require_target_family: bool = True,
+    allow_pass_only_success: bool = False,
 ) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
     explicit_model_ids = explicit_model_ids or {}
 
@@ -867,6 +885,7 @@ def resolve_model_selection(
         require_intended_receiver_mode=require_intended_receiver_mode,
         require_return_type=require_return_type,
         require_target_family=require_target_family,
+        allow_pass_only_success=allow_pass_only_success,
     )
     shared["model_records"] = model_records
     split_values = {tuple(split_selector(record).values()) for record in model_records.values()}
