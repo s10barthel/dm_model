@@ -75,6 +75,7 @@ from project_config import (
     get_success_intent_graph_dir,
     write_run_metadata,
 )
+from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -599,7 +600,7 @@ def render_component(
     highlight_players = resolve_highlight_players(snapshot, action, component_name)
     ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name)
 
-    if not comparison:
+    if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
@@ -610,13 +611,15 @@ def render_component(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
-        show_missing_annotations=comparison,
+        show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
 
     rotate_pitch = attacking_prefix == "away"
     title = f"{action['spadl_type']} {display_action_id} - {component_name.replace('_', ' ').title()}"
+    if component_name == "model_pass_success" and component_probs.dropna().empty:
+        title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     if not comparison:
@@ -742,7 +745,7 @@ def collect_action_components(
                           if component_name == "pass_success" and "pass_intent" in component_prob_rows else None)
                 if intent is not None:
                     intent.index = [model_index]
-                probs, _ = cached_prediction(
+                probs, model_probabilities = cached_prediction(
                     prediction_cache, inference_gnn,
                     model_match,
                     model,
@@ -750,10 +753,19 @@ def collect_action_components(
                     post_action=False,
                     event_indices=[model_index],
                     pass_intent_probs=intent,
+                    return_model_pass_success=(component_name == "pass_success" and "model_pass_success" in rendered_components),
                     precomputed_auxiliaries=precomputed_auxiliaries,
                     **state_inputs,
                 )
-                component_prob_rows[component_name] = probs.loc[model_index]
+                component_prob_rows[component_name] = (
+                    probs.loc[model_index] if model_index in probs.index
+                    else pd.Series(float("nan"), index=probs.columns, dtype=float)
+                )
+                if component_name == "pass_success" and "model_pass_success" in rendered_components:
+                    component_prob_rows["model_pass_success"] = (
+                        model_probabilities.loc[model_index] if model_index in model_probabilities.index
+                        else pd.Series(float("nan"), index=probs.columns, dtype=float)
+                    )
 
     if show_physical_xpass:
         cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
@@ -1197,6 +1209,10 @@ def main() -> None:
         "physical_xpass_runtime_stats": physical_xpass_runtime_stats,
         "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available=getattr(args, "show_model_pass_success", False), output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

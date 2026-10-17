@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from models.inference_masks import flatten_mask_values
+from datatools.pass_success import require_model_pass_success
 from scripts.visualization_comparison import (
     ComparisonExport, Variant, derive_components,
     require_row, require_same_selection, selection_list, source_components,
@@ -249,7 +250,10 @@ def skillcorner_groups(args, mod, exports, metadata, names):
                             raise ValueError(f"Incompatible SkillCorner frame scope for {component}.") from exc
                 predictions = {}
                 for frame in frames:
-                    predictions[frame] = mod.build_visualization_probs(rows.loc[frame] if frame in rows.index else None)
+                    predictions[frame] = mod.build_visualization_probs(
+                        rows.loc[frame] if frame in rows.index else None,
+                        **({"preserve_missing": True} if component == "model_pass_success" else {}),
+                    )
                     if component == "action_intent" and frame in rows.index and pd.notna(rows.loc[frame].get("shot")):
                         predictions[frame]["home_goal"] = float(rows.loc[frame, "shot"])
                 table[component] = pd.DataFrame.from_dict(predictions, orient="index")
@@ -290,6 +294,7 @@ def run_comparison(args, mod):
             folder = mod.get_skillcorner_component_run_root(identifier)
             info = mod.load_run_metadata(folder, required=False) or {}
             raw = mod.load_skillcorner_component_tables(folder, args.match_id)
+        require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
         recorded_masks = info.get("inference_masks") or {}
         requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
         variants.append(Variant(identifier, identifier,

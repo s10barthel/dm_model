@@ -46,6 +46,7 @@ from physical_pass_model import (
 import pc_xpass_versions as pc_versions
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
+from datatools.pass_success import model_pass_success_metadata
 from project_config import (
     BENCHMARK_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
@@ -533,6 +534,7 @@ def main() -> None:
         "graph_schema": graph_schema,
         "status": "completed",
     }
+    metadata.update(model_pass_success_metadata())
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == BENCHMARK_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("benchmark_component", component_run_id)

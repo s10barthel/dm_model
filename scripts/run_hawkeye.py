@@ -54,6 +54,7 @@ from physical_pass_model import (
 import pc_xpass_versions as pc_versions
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
+from datatools.pass_success import model_pass_success_metadata
 from project_config import (
     HAWKEYE_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
@@ -479,6 +480,7 @@ def main() -> None:
     csv_path = output_dir / "hawkeye_data.csv"
     hawkeye_table.to_parquet(parquet_path, index=False)
     hawkeye_table.to_csv(csv_path, index=False)
+    metadata.update(model_pass_success_metadata())
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == HAWKEYE_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("hawkeye_component", component_run_id)

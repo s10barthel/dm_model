@@ -71,6 +71,7 @@ from scripts.hawkeye_visualization_overlays import (
     filter_coach_rated_situation_ids,
     load_overlay_data,
 )
+from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualize_hawkeye import (
     output_mode,
@@ -253,7 +254,7 @@ def render_frame_image(
         else None
     )
 
-    if not comparison:
+    if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
@@ -263,7 +264,7 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
-        show_missing_annotations=comparison,
+        show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -272,6 +273,8 @@ def render_frame_image(
     if component_name == "pass_score" and selections_enabled:
         denominators = selection_denominators or {}
         title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
+    if component_name == "model_pass_success" and component_probs.dropna().empty:
+        title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     if not comparison:
@@ -333,16 +336,19 @@ def collect_situation_components(situation, model_specs, device, inference_frame
                 precomputed_auxiliaries=precomputed_auxiliaries,
             )
         if "pass_success" in model_specs:
-            components["pass_success"], _ = cached_prediction(
+            components["pass_success"], model_probabilities = cached_prediction(
                 prediction_cache, inference_gnn,
                 situation,
                 model_specs["pass_success"],
                 device=device,
                 post_action=False,
+                return_model_pass_success="model_pass_success" in rendered_components,
                 event_indices=inference_frame_ids,
                 pass_intent_probs=components.get("pass_intent"),
                 precomputed_auxiliaries=precomputed_auxiliaries,
             )
+            if "model_pass_success" in rendered_components:
+                components["model_pass_success"] = model_probabilities
         if "outcome_scoring" in model_specs:
             scoring_failure, scoring_success = cached_prediction(
                 prediction_cache, inference_gnn,
@@ -802,6 +808,10 @@ def main() -> None:
         "overlay_sources": overlay_metadata,
         "graph_schema": graph_schema,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available=getattr(args, "show_model_pass_success", False), output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

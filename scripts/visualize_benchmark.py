@@ -52,6 +52,7 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
+from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -101,7 +102,7 @@ def render_state_image(
         component_probs = probs.loc[attack_targets].sort_values(ascending=False)
 
     possessor_object_id = str(state.frame_meta.at[frame_id, "possessor_object_id"])
-    if not comparison:
+    if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
@@ -111,7 +112,7 @@ def render_state_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={possessor_object_id: "#ffd400"},
-        show_missing_annotations=comparison,
+        show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix="home",
     )
@@ -121,6 +122,8 @@ def render_state_image(
         f"Game State {state.game_state_id} | "
         f"{component_name.replace('_', ' ').title()}"
     )
+    if component_name == "model_pass_success" and component_probs.dropna().empty:
+        title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     if not comparison:
@@ -166,6 +169,8 @@ def _probs_for_component_frame(
     component_tables: dict[str, pd.DataFrame],
     frame_id: int,
 ) -> pd.Series:
+    if component_name == "model_pass_success":
+        return model_pass_success_row(component_tables, frame_id)
     validate_derived_inputs([component_name], component_tables)
     if component_name in {"outcome_failure", "outcome_success"}:
         case = component_name.removeprefix("outcome_")
@@ -217,6 +222,7 @@ def main() -> None:
         component_dir = get_benchmark_component_run_root(component_run_id)
 
     component_export, component_metadata = load_benchmark_component_run(component_dir)
+    require_model_pass_success(component_export, getattr(args, "show_model_pass_success", False))
     state_pairs = resolve_benchmark_component_states(
         component_export,
         metadata=component_metadata,
@@ -346,6 +352,10 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available=("model_pass_success" in component_export), output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Benchmark visualization run id: {visualization_run_id}")
     print(f"Benchmark visualization metadata: {metadata_path}")

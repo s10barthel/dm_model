@@ -33,6 +33,7 @@ COMPONENT_COLUMNS = [
     "action_intent",
     "pass_intent",
     "pass_success",
+    "model_pass_success",
     "pass_height",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -701,17 +702,19 @@ def infer_skillcorner_components(
     else:
         pass_height = pd.DataFrame()
     try:
-        pass_success, _ = inference_gnn(
+        pass_success, model_pass_success = inference_gnn(
             possession,
             model_specs["pass_success"],
             device=device,
             post_action=False,
+            return_model_pass_success=True,
             **state_inputs,
             pass_intent_probs=pass_intent,
             precomputed_auxiliaries=precomputed_auxiliaries,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
+        model_pass_success = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         possession,
         model_specs["outcome_scoring"],
@@ -730,6 +733,7 @@ def infer_skillcorner_components(
     components["action_intent"] = action_intent
     components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
+    components["model_pass_success"] = model_pass_success
     components["pass_height"] = pass_height
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
@@ -860,8 +864,9 @@ def load_skillcorner_component_tables(component_dir: str | Path, match_id: str) 
     for component in COMPONENT_COLUMNS:
         path = match_dir / f"{component}.parquet"
         if not path.exists():
-            if component == "pass_height":
-                tables[component] = pd.DataFrame()
+            if component in {"pass_height", "model_pass_success"}:
+                if component == "pass_height":
+                    tables[component] = pd.DataFrame()
                 continue
             raise FileNotFoundError(
                 f"Component parquet not found at {path}. Run scripts/run_skillcorner.py for match {match_id} first."
@@ -870,13 +875,13 @@ def load_skillcorner_component_tables(component_dir: str | Path, match_id: str) 
     return tables
 
 
-def build_visualization_probs(row: pd.Series | None) -> pd.Series:
+def build_visualization_probs(row: pd.Series | None, *, preserve_missing: bool = False) -> pd.Series:
     if row is None:
         return pd.Series(dtype=float)
 
     probs: dict[str, float] = {}
     for column, value in row.items():
-        if column in METADATA_COLUMNS or column == "shot" or pd.isna(value):
+        if column in METADATA_COLUMNS or column == "shot" or (pd.isna(value) and not preserve_missing):
             continue
         probs[f"home_{column}"] = float(value)
     return pd.Series(probs, dtype=float).sort_values(ascending=False)

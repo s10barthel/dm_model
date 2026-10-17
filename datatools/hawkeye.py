@@ -36,6 +36,7 @@ COMPONENT_COLUMNS = [
     "action_intent",
     "pass_intent",
     "pass_success",
+    "model_pass_success",
     "pass_height",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -834,16 +835,18 @@ def infer_hawkeye_components(
     else:
         pass_height = pd.DataFrame()
     try:
-        pass_success, _ = inference_gnn(
+        pass_success, model_pass_success = inference_gnn(
             situation,
             model_specs["pass_success"],
             device=device,
             post_action=False,
+            return_model_pass_success=True,
             pass_intent_probs=pass_intent,
             precomputed_auxiliaries=precomputed_auxiliaries,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
+        model_pass_success = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         situation,
         model_specs["outcome_scoring"],
@@ -860,6 +863,7 @@ def infer_hawkeye_components(
     components["action_intent"] = action_intent
     components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
+    components["model_pass_success"] = model_pass_success
     components["pass_height"] = pass_height
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
@@ -1051,7 +1055,10 @@ def build_hawkeye_component_tables(
             component_tables[component_name] = pd.DataFrame()
             continue
 
-        component_rows = situation_rows.loc[situation_rows[component_name].notna()].copy()
+        available = situation_rows[component_name].notna()
+        if component_name == "model_pass_success":
+            available |= situation_rows["team"].eq(situation_rows["possession_team"])
+        component_rows = situation_rows.loc[available].copy()
         if component_rows.empty:
             component_tables[component_name] = pd.DataFrame()
             continue

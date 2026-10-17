@@ -66,6 +66,7 @@ from scripts.hawkeye_visualization_overlays import (
     filter_coach_rated_situation_ids,
     load_overlay_data,
 )
+from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
 from scripts.visualization_selection import (
     COMPONENT_GROUPS,
     OPTIONAL_COMPONENT_GROUPS,
@@ -194,6 +195,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             conflicts.append("--selection-format")
         if args.show_physical_xpass:
             conflicts.append("--show-physical-xpass")
+        if args.show_model_pass_success:
+            conflicts.append("--show-model-pass-success")
         if args.pc_xpass:
             conflicts.append("--pc-xpass")
         conflicts.extend(
@@ -247,7 +250,7 @@ def render_frame_image(
         else None
     )
 
-    if not comparison:
+    if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
@@ -257,7 +260,7 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players=highlight_players,
-        show_missing_annotations=comparison,
+        show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
@@ -266,6 +269,8 @@ def render_frame_image(
     if component_name == "pass_score" and selections_enabled:
         denominators = selection_denominators or {}
         title += f" | Selections (CAVE n={int(denominators.get('CAVE', 0))} | HMD n={int(denominators.get('HMD', 0))})"
+    if component_name == "model_pass_success" and component_probs.dropna().empty:
+        title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     if not comparison:
@@ -307,6 +312,8 @@ def _probs_for_component_frame(
     component_tables: dict[str, pd.DataFrame],
     frame_id: int,
 ) -> pd.Series:
+    if component_name == "model_pass_success":
+        return model_pass_success_row(component_tables, frame_id)
     validate_derived_inputs([component_name], component_tables)
     if component_name in {"outcome_failure", "outcome_success"}:
         case = component_name.removeprefix("outcome_")
@@ -676,6 +683,10 @@ def run_location_visualization(
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available="model_pass_success" in component_export, output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye location visualization run id: {visualization_run_id}")
     print(f"Hawkeye location visualization metadata: {metadata_path}")
@@ -823,6 +834,10 @@ def run_tracking_only_visualization(
         "rendered_components": [],
         "disabled_components": list(COMPONENT_COLUMNS),
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available=False, output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye tracking-only visualization run id: {visualization_run_id}")
     print(f"Hawkeye tracking-only visualization metadata: {metadata_path}")
@@ -857,6 +872,7 @@ def main() -> None:
         )
 
     component_export, component_metadata = load_hawkeye_component_run(component_dir)
+    require_model_pass_success(component_export, getattr(args, "show_model_pass_success", False))
     if mode in {"loc", "freeze"}:
         component_mode = component_metadata.get("inference_mode")
         if component_mode != mode:
@@ -1075,6 +1091,10 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available="model_pass_success" in component_export, output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye visualization run id: {visualization_run_id}")
     print(f"Hawkeye visualization metadata: {metadata_path}")

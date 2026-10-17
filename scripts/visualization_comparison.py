@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from models.inference_masks import flatten_mask_values, resolve_inference_mask_configurations
 from project_config import write_run_metadata
+from datatools.pass_success import model_pass_success_metadata
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument, metadata_differences
 
 MODEL_TASKS = ("action_intent", "pass_intent", "success_intent", "pass_success", "pass_height",
@@ -307,6 +308,10 @@ class ComparisonExport:
             self.metadata["aligned_predictions"] = str(path.resolve())
         self.policy.confirm()
         self.metadata.update(self.policy.metadata(), status="completed", aligned_export_available=self.export_aligned)
+        requested = bool(self.metadata["arguments"].get("show_model_pass_success", False))
+        self.metadata.update(model_pass_success_metadata(
+            requested=requested, available=requested, output_root=self.root,
+        ))
         write_run_metadata(self.root, self.metadata)
 
     def failed(self, exc):
@@ -404,13 +409,16 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
                             labels.append(variant_description(report.variants[index]) + "\nUnavailable for this scene/frame")
                         continue
                     table = scene["tables"][0][component]
-                    row = table.loc[scene["frame"]]
+                    row = (table.loc[scene["frame"]] if scene["frame"] in table.index
+                           else pd.Series(float("nan"), index=table.columns, dtype=float))
                     rows.append(row)
                     scene_geometries.append(repr(scene.get("geometry", {})))
                     if component in names:
-                        images.append(scene["render"](component, row))
+                        unavailable = component == "model_pass_success" and row.dropna().empty
+                        images.append(None if unavailable else scene["render"](component, row))
                         labels.append(variant_description(report.variants[index]) + "\n" + scene["title"] +
-                                      "\n" + geometry_description(scene))
+                                      "\n" + geometry_description(scene) +
+                                      ("\nUnavailable for this scene/frame" if unavailable else ""))
                 if len(set(scene_geometries)) > 1:
                     report.policy.add(f"Scene geometry/settings differ for {key}; each panel uses its own scene.")
                 report.record(key[0], key[1], component, rows)
@@ -478,7 +486,8 @@ def cached_prediction(cache, predict, scene, model, **kwargs):
     key = (id(model), inference_mask_metadata(model)["configuration_id"],
            id(scene), tuple(kwargs.get("event_indices") or ()), intent_signature,
            height_signature, auxiliary_signature, repr(sorted(model.args.items())),
-           bool(kwargs.get("post_action")), source_signature)
+           bool(kwargs.get("post_action")), source_signature,
+           bool(kwargs.get("return_model_pass_success")))
     if key not in cache:
         cache[key] = predict(scene, model, **kwargs)
     elif kwargs.get("precomputed_auxiliaries") is not None:

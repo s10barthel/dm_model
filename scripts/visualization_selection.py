@@ -41,6 +41,8 @@ class ComponentSelection:
     @property
     def required_component_groups(self) -> list[str]:
         required = set(self.requested_component_groups)
+        if "model_pass_success" in self.rendered_components:
+            required.add("pass_success")
         if "pass_score" in required:
             required.update(PASS_SCORE_DEPENDENCIES)
         if required & {"outcome_failure", "outcome_success"}:
@@ -49,6 +51,10 @@ class ComponentSelection:
 
 
 def add_component_selection_args(parser: argparse.ArgumentParser, *, include_intended_recipient: bool = False) -> None:
+    parser.add_argument(
+        "--show-model-pass-success", action="store_true",
+        help="Render checkpoint pass success after offside handling and before physical xPass blending.",
+    )
     groups = [*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS]
     if include_intended_recipient:
         groups.append(INTENDED_RECIPIENT_GROUP)
@@ -98,6 +104,8 @@ def resolve_component_selection(
         if group in selected
         for component in GROUP_TO_COMPONENTS[group]
     ]
+    if getattr(args, "show_model_pass_success", False):
+        rendered_components.append("model_pass_success")
     if not rendered_components:
         raise ValueError("No visualization components were selected after applying --only-* and --no-* flags.")
 

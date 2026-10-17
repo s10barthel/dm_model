@@ -727,6 +727,7 @@ Useful options:
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
 - `--show-physical-xpass` to render the cached physical xPass metric itself
+- `--show-model-pass-success` to render **Model Pass Success** separately: the selected checkpoint's probability after normal offside handling and before inference-time physical xPass blending. Physical inputs used inside a checkpoint remain part of its prediction. This flag works independently of `--show-physical-xpass`, with or without blending, and adds its plot even when `--only-*` or `--no-pass-success` hides ordinary pass success.
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
@@ -736,6 +737,21 @@ Useful options:
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
 - `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
 - all CSV filters are off by default, enabled filters are combined with AND logic, and unprocessed/problematic rows are skipped with warnings instead of stopping the whole batch
+
+The separate model view is available in all five visualization commands, including checkpoint/mask comparisons, Hawkeye `loc`/`freeze`, and supported PNG/GIF/MP4 exports. Its files use the name `model_pass_success` with the usual frame suffixes. For example:
+
+```powershell
+# Display blended pass success, cached physical xPass, and checkpoint pass success together.
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass --show-model-pass-success
+
+# Display only checkpoint pass success, with ordinary pass success hidden.
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --pass-success-model-id pass_success/<model_id> --only-pass-success --no-pass-success --show-model-pass-success
+
+# Render the separate checkpoint result from a newly generated saved component run.
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --show-model-pass-success
+```
+
+Component producers now save checkpoint probabilities whenever they run pass-success inference, including without blending. Older saved component runs must be regenerated before requesting this view; a blended value alone cannot recover the checkpoint probability. Missing predictions remain unavailable, and ordinary pass score continues to use the final pass-success result. A checkpoint that needs physical inputs internally still requires those inputs for its separate model view. Metadata records the definition, structural availability, and generated output paths.
 
 ### 8. Run frame-level inference on HawkEye data
 

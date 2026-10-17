@@ -49,6 +49,7 @@ from physical_pass_model import (
 import pc_xpass_versions as pc_versions
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
+from datatools.pass_success import model_pass_success_metadata
 from project_config import (
     checked_split_selector,
     add_split_arguments,
@@ -931,7 +932,7 @@ def main() -> None:
                 try:
                     components = infer_skillcorner_components(state, model_specs, device=device)
                     for name, prediction in components.items():
-                        if prediction is not None and not prediction.empty:
+                        if prediction is not None and (not prediction.empty or name == "model_pass_success"):
                             tables.setdefault(name, []).append(sportec_component_table(prediction, state))
                 except Exception as exc:
                     error = summarize_exception(exc)
@@ -970,6 +971,7 @@ def main() -> None:
             metadata["skipped_matches"].append({"match_id": match_id, "error": error_summary})
             print(f"  SKIP {match_id}: {error_summary}")
 
+    metadata.update(model_pass_success_metadata())
     write_run_metadata(output_dir, metadata)
     if not metadata["processed_match_ids"]:
         raise RuntimeError("No usable matches were available for component inference.")

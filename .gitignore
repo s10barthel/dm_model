@@ -64,6 +64,7 @@ tests/AS_viz/
 !tests/test_bundesliga_ranking.py
 !tests/test_visualization_versioning.py
 !tests/test_combined_outcome_visualization.py
+!tests/test_model_pass_success_visualization.py
 !tests/test_hawkeye_target_clamping.py
 !tests/test_hawkeye_goal_placement.py
 !tests/test_temporal_splits.py

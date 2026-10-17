@@ -55,6 +55,7 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
+from datatools.pass_success import require_model_pass_success, model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -142,7 +143,7 @@ def render_frame_image(
         ]
         component_probs = probs.loc[attack_targets].sort_values(ascending=False)
 
-    if not comparison:
+    if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
 
     visualizer = SnapshotVisualizer(
@@ -152,12 +153,14 @@ def render_frame_image(
         show_velocities=True,
         show_trajectories=show_trajectories,
         highlight_players={str(frame_info["possessor_object_id"]): "#ffd400"},
-        show_missing_annotations=comparison,
+        show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
     )
 
     title = f"{possession.match_id} | possession {possession.event_index} | frame {frame_id} | {component_name.replace('_', ' ').title()}"
+    if component_name == "model_pass_success" and component_probs.dropna().empty:
+        title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=False, anonymize=True, annot_type=component_name, show=False)
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
     if not comparison:
@@ -192,6 +195,9 @@ def _probs_for_component_frame(
     component_tables: dict[str, pd.DataFrame],
     frame_id: int,
 ) -> pd.Series:
+    if component_name == "model_pass_success":
+        row = _row_for_frame(component_tables[component_name], frame_id)
+        return build_visualization_probs(row, preserve_missing=True)
     validate_derived_inputs([component_name], component_tables)
     if component_name in {"outcome_failure", "outcome_success"}:
         case = component_name.removeprefix("outcome_")
@@ -261,7 +267,11 @@ def render_possession(
     component_names = list(rendered_components)
 
     for component_name in COMPONENT_COLUMNS:
+        if component_name not in possession_component_tables:
+            continue
         component_table = possession_component_tables[component_name]
+        if component_table.empty:
+            continue
         component_table = component_table.loc[component_table["index"] == int(possession_index)].copy()
         if not component_table.empty:
             component_table = component_table.sort_values("frame").drop_duplicates(subset=["frame"], keep="last")
@@ -348,6 +358,7 @@ def main() -> None:
 
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
+    require_model_pass_success(component_tables, getattr(args, "show_model_pass_success", False))
     component_metadata = load_run_metadata(component_dir, required=False) or {}
     physical_cache_dir = args.physical_cache_dir or str(
         pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
@@ -421,6 +432,10 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(model_pass_success_metadata(
+        requested=getattr(args, "show_model_pass_success", False),
+        available="model_pass_success" in component_tables, output_root=output_root,
+    ))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved SkillCorner {selected_output_mode} visualizations for {len(output_dirs)} possession(s).")
     print(f"SkillCorner visualization run id: {visualization_run_id}")

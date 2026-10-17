@@ -876,11 +876,14 @@ def inference_gnn(
     pass_height_probs: pd.DataFrame | None = None,
     auxiliary_prediction: bool = False,
     precomputed_auxiliaries: dict | None = None,
+    return_model_pass_success: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Predict options, recording/reusing auxiliaries within one collector invocation.
 
     A supplied precomputed_auxiliaries dictionary must be local to this input state
     and configuration. Original graphs and labels remain immutable during its use.
+    For pass_success, return_model_pass_success returns the checkpoint probabilities
+    after offside handling and before inference blending as the second table.
     """
     if (graph_override is None) != (label_override is None):
         raise ValueError("graph_override and label_override must be supplied together.")
@@ -907,14 +910,24 @@ def inference_gnn(
     )
     if graph_override is not None and not graphs:
         raise ValueError("No usable graphs remain for the selected inference actions.")
+    capture_model = return_model_pass_success and model.args["task"] == "pass_success"
+    # Checkpoints without mandatory physical inputs can predict states excluded by blending.
+    retain_unblended_states = (capture_model and inference_uses_physical_xpass(model.args)
+                              and not model_uses_physical_xpass(model.args)
+                              and not model_requires_lane_survival(model))
+    original_graphs, original_labels = (graphs, labels) if retain_unblended_states else (None, None)
     if requires_physical_xpass_for_inference(model.args):
-        graphs, labels = filter_missing_physical_xpass_rows_for_inference(
-            match,
-            graphs,
-            labels,
-            model,
-            post_action=post_action,
-        )
+        try:
+            graphs, labels = filter_missing_physical_xpass_rows_for_inference(
+                match, graphs, labels, model, post_action=post_action,
+            )
+        except PhysicalXPassNoUsableRowsError:
+            if not retain_unblended_states:
+                if capture_model:
+                    return pd.DataFrame(), pd.DataFrame()
+                raise
+            graphs, labels = [], labels[:0]
+    final_action_indices = set(labels[:, 0].tolist())
     if (model.args["task"] == "pass_success" and inference_uses_physical_xpass(model.args)
             and bool((labels[:, config.LABEL_INDEX["is_dribble"]] == 0).any())):
         from pc_xpass_auxiliary import predict_auxiliaries
@@ -929,8 +942,26 @@ def inference_gnn(
             raise ValueError(f"PC-xPass {version} requires explicit auxiliary pass_height predictions.")
         if version == "v5" and pass_intent_probs is None:
             raise ValueError("PC-xPass v5 requires explicit auxiliary pass_intent predictions.")
-    if requires_physical_xpass_for_inference(model.args):
+    if graphs and requires_physical_xpass_for_inference(model.args):
         graphs = attach_physical_xpass_for_inference(match, graphs, labels, model, post_action=post_action)
+    if retain_unblended_states:
+        attached = {int(label[0]): graph for graph, label in zip(graphs, labels)}
+        # PyG requires identical attribute sets across the batch. These placeholders
+        # are never model inputs or blended for an excluded state.
+        physical_attrs = (PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_LOGIT_ATTR,
+                          PHYSICAL_XPASS_DISTANCE_ATTR, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
+                          PHYSICAL_XPASS_BALL_Z_ATTR, PHYSICAL_XPASS_PASS_HEIGHT_ATTR)
+        templates = {name: getattr(graphs[0], name) for name in physical_attrs
+                     if graphs and getattr(graphs[0], name, None) is not None}
+        graphs = []
+        for graph, label in zip(original_graphs, original_labels):
+            if int(label[0]) in attached:
+                graph = attached[int(label[0])]
+            else:
+                for name, template in templates.items():
+                    setattr(graph, name, template.new_full((graph.num_nodes,), float("nan")))
+            graphs.append(graph)
+        labels = original_labels
     graphs = attach_lane_survival_for_inference(match, graphs, labels, model)
 
     selected_node_ids = []
@@ -1060,6 +1091,8 @@ def inference_gnn(
                     )
 
     players = set()
+    final_players = set()
+    model_probs = []
 
     for i in tqdm(range(graphs.num_graphs), desc=model.args["task"]):
         event_index = int(labels[i, 0].item())
@@ -1111,6 +1144,10 @@ def inference_gnn(
             offside_i = offside_i & pass_candidate_mask
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
+            if capture_model:
+                model_probs.append(dict(zip(player_indices_i, probs_i.tolist()), index=event_index))
+            if event_index not in final_action_indices:
+                continue
             is_carry = bool(labels[i, config.LABEL_INDEX["is_dribble"]].item())
             if inference_uses_physical_xpass(model.args) and not is_carry:
                 if physical_xpass_out is None or physical_distance_out is None:
@@ -1224,6 +1261,7 @@ def inference_gnn(
             if probs_i.shape[0] == offside_i.shape[0]:
                 probs_i[offside_i] = 0.0
 
+        final_players.update(player_indices_i)
         if model.args["task"] in two_case_tasks:
             probs_i0 = dict(zip(player_indices_i, probs_i[:, 0].tolist()))
             probs_i1 = dict(zip(player_indices_i, probs_i[:, 1].tolist()))
@@ -1240,7 +1278,9 @@ def inference_gnn(
         probs_1 = pd.DataFrame(probs_1).set_index("index")[players]
         return probs_0, probs_1
     else:
-        probabilities = pd.DataFrame(probs).set_index("index")[players]
+        final_columns = [player for player in players if player in final_players]
+        probabilities = (pd.DataFrame(probs).set_index("index").reindex(columns=final_columns)
+                         if probs else pd.DataFrame(columns=final_columns).rename_axis("index"))
         if precomputed_auxiliaries is not None and not auxiliary_prediction:
             from pc_xpass_auxiliary import record_component_prediction
             record_component_prediction(
@@ -1248,7 +1288,11 @@ def inference_gnn(
                 post_action=post_action, graph_override=match_graphs, label_override=source_labels,
                 feature_action_indices=feature_action_indices,
             )
-        return probabilities, None
+        checkpoint_probabilities = None
+        if capture_model:
+            checkpoint_probabilities = (pd.DataFrame(model_probs).set_index("index").reindex(columns=players)
+                                        if model_probs else pd.DataFrame(columns=players).rename_axis("index"))
+        return probabilities, checkpoint_probabilities
 
 
 def inference_gnn_posterior(

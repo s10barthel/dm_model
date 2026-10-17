@@ -79,6 +79,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_DEFAULT_TOP_N,
     resolve_physical_num_workers,
 )
+from datatools.pass_success import model_pass_success_metadata
 from project_config import (
     HAWKEYE_LOC_COMPONENT_RUNS_DIR,
     PROJECT_ROOT,
@@ -1014,6 +1015,7 @@ def _run_location(args: argparse.Namespace) -> None:
         "shared_model_context": shared_context,
         "status": "completed" if missing_report.empty else "completed_with_errors",
     }
+    metadata.update(model_pass_success_metadata())
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == HAWKEYE_LOC_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("hawkeye_loc_component", run_id)

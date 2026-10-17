@@ -19,6 +19,7 @@ COMPONENT_COLUMNS = [
     "action_intent",
     "pass_intent",
     "pass_success",
+    "model_pass_success",
     "pass_height",
     "outcome_scoring_success",
     "outcome_scoring_failure",
@@ -51,6 +52,7 @@ EXPORT_COLUMNS = [
     "action_intent",
     "pass_intent",
     "pass_success",
+    "model_pass_success",
     "pass_height",
     "outcome_scoring_success",
     "outcome_conceding_success",
@@ -611,16 +613,18 @@ def infer_benchmark_components(
     else:
         pass_height = pd.DataFrame()
     try:
-        pass_success, _ = inference_gnn(
+        pass_success, model_pass_success = inference_gnn(
             state,
             model_specs["pass_success"],
             device=device,
             post_action=False,
+            return_model_pass_success=True,
             pass_intent_probs=pass_intent,
             precomputed_auxiliaries=precomputed_auxiliaries,
         )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
+        model_pass_success = pd.DataFrame()
     scoring_failure, scoring_success = inference_gnn(
         state,
         model_specs["outcome_scoring"],
@@ -637,6 +641,7 @@ def infer_benchmark_components(
     components["action_intent"] = action_intent
     components["pass_intent"] = pass_intent
     components["pass_success"] = pass_success
+    components["model_pass_success"] = model_pass_success
     components["pass_height"] = pass_height
     components["outcome_scoring_success"] = scoring_success
     components["outcome_scoring_failure"] = scoring_failure
@@ -831,7 +836,10 @@ def build_benchmark_component_tables(
             component_tables[component_name] = pd.DataFrame()
             continue
 
-        component_rows = state_rows.loc[state_rows[component_name].notna()].copy()
+        available = state_rows[component_name].notna()
+        if component_name == "model_pass_success":
+            available |= state_rows["team"].eq(state.possessor_team)
+        component_rows = state_rows.loc[available].copy()
         if component_rows.empty:
             component_tables[component_name] = pd.DataFrame()
             continue
