@@ -83,7 +83,7 @@ def validate_with_snapshot(graphs, labels, weights, *, directory=None, context=N
     from models.node_selection import validate_graph_batch
     try:
         validate_graph_batch(graphs)
-    except ValueError as error:
+    except Exception as error:
         _save_failure_snapshot(error, graphs, labels, weights, directory=directory,
                                context=context, input_graphs=input_graphs)
         raise
@@ -133,7 +133,7 @@ class DiagnosticCollater:
         for index, graph in enumerate(graphs):
             try:
                 validate_graph_connectivity(graph, index)
-            except ValueError as error:
+            except Exception as error:
                 _save_failure_snapshot(error, graphs, labels, weights, directory=self.directory,
                                        context={**context, "stage": "before_collation",
                                                 "sample": _input_sample_description(graph, index)})

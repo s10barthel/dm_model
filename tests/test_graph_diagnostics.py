@@ -53,6 +53,133 @@ def test_invalid_batch(kind):
     with pytest.raises(ValueError): validate_graph_batch(graph)
 
 
+@pytest.mark.parametrize('name,row', [('x', 2), ('edge_attr', 2)])
+@pytest.mark.parametrize('invalid', [float('nan'), float('inf'), -float('inf')])
+def test_nonfinite_features_report_sample_and_save_batch(tmp_path, name, row, invalid):
+    graph = batch()
+    getattr(graph, name)[row, 0] = invalid
+    labels, weights = torch.zeros(2, 8), torch.ones(2)
+    with pytest.raises(ValueError, match=f'Nonfinite graph {name} at') as caught:
+        validate_with_snapshot(graph, labels, weights, directory=tmp_path,
+                               context={'epoch': 5, 'batch': 1901, 'phase': 'train'})
+    assert '[2, 0]' in str(caught.value)
+    assert 'm1' in str(caught.value) and "'source_row': 11" in str(caught.value)
+    if name == 'edge_attr':
+        assert "'edge': 2" in str(caught.value) and 'endpoints' in str(caught.value)
+    saved = snapshot(tmp_path)
+    torch.testing.assert_close(getattr(saved['graphs'], name), getattr(graph, name), equal_nan=True)
+    torch.testing.assert_close(saved['labels'], labels)
+    torch.testing.assert_close(saved['weights'], weights)
+    assert saved['context'] == {'epoch': 5, 'batch': 1901, 'phase': 'train'}
+    assert saved['error'] == str(caught.value)
+    assert 'saved to' in caught.value.__notes__[0]
+
+
+@pytest.mark.parametrize('empty_edges', [False, True])
+def test_absent_or_empty_edge_features_are_valid(tmp_path, empty_edges):
+    graph = batch()
+    if empty_edges:
+        graph.edge_index = torch.empty((2, 0), dtype=torch.long)
+        graph.edge_attr = torch.empty((0, 1))
+    else:
+        graph.edge_attr = None
+    validate_with_snapshot(graph, None, None, directory=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('name', ['x', 'edge_attr'])
+def test_nonfinite_validation_reuses_first_mask(monkeypatch, name):
+    graph = batch()
+    value = getattr(graph, name)
+    value[0, 0] = float('nan')
+    original = torch.isfinite
+    calls = 0
+    def changing_isfinite(tensor):
+        nonlocal calls
+        if tensor is value:
+            calls += 1
+            # A repeated calculation would hide the original invalid value.
+            if calls > 1:
+                return torch.ones_like(tensor, dtype=torch.bool)
+        return original(tensor)
+    monkeypatch.setattr(torch, 'isfinite', changing_isfinite)
+    with pytest.raises(ValueError, match=f'Nonfinite graph {name} at'):
+        validate_graph_batch(graph)
+    assert calls == 1
+
+
+@pytest.mark.parametrize('name', ['x', 'edge_attr'])
+def test_empty_nonfinite_locations_report_inconsistency_and_save(tmp_path, monkeypatch, name):
+    graph = batch()
+    value = getattr(graph, name)
+    value[0, 0] = float('nan')
+    monkeypatch.setattr(torch, 'nonzero', lambda mask: torch.empty((0, mask.ndim), dtype=torch.long))
+    with pytest.raises(ValueError, match=f'Inconsistent nonfinite graph {name} validation') as caught:
+        validate_with_snapshot(graph, None, None, directory=tmp_path)
+    for detail in (f'shape={tuple(value.shape)}', f'dtype={value.dtype}', f'device={value.device}'):
+        assert detail in str(caught.value)
+    saved = snapshot(tmp_path)
+    assert saved['error'] == str(caught.value)
+    torch.testing.assert_close(getattr(saved['graphs'], name), value, equal_nan=True)
+
+
+@pytest.mark.parametrize('before_collation', [False, True])
+@pytest.mark.parametrize('error_type', [IndexError, RuntimeError])
+@pytest.mark.parametrize('save_fails', [False, True])
+def test_unexpected_validation_error_preserved_with_snapshot(tmp_path, monkeypatch,
+                                                            before_collation, error_type, save_fails):
+    import models.graph_diagnostics as diagnostics
+    import models.node_selection as selection
+    error = error_type('unexpected validation failure')
+    def fail_validation(*args):
+        raise error
+    if save_fails:
+        def fail_save(*args, **kwargs): raise OSError('disk full')
+        monkeypatch.setattr(torch, 'save', fail_save)
+    if before_collation:
+        rows = samples()
+        monkeypatch.setattr(diagnostics, 'validate_graph_connectivity', fail_validation)
+        def forbidden(_): pytest.fail('Invalid input reached original collator')
+        collate = DiagnosticCollater(forbidden, tmp_path)
+        collate.start_epoch(5, 'train')
+        def validate(): collate(rows)
+    else:
+        graph = batch()
+        labels, weights = torch.zeros(2, 8), torch.ones(2)
+        monkeypatch.setattr(selection, 'validate_graph_batch', fail_validation)
+        def validate():
+            validate_with_snapshot(graph, labels, weights, directory=tmp_path,
+                                   context={'epoch': 5, 'phase': 'train', 'batch': 0})
+    with pytest.raises(error_type) as caught:
+        validate()
+    assert caught.value is error
+    traceback = error.__traceback__
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    assert traceback.tb_frame.f_code.co_name == 'fail_validation'
+    if save_fails:
+        assert 'disk full' in error.__notes__[0]
+        assert not list((tmp_path / 'batch_failures').iterdir())
+    else:
+        saved = snapshot(tmp_path)
+        assert saved['error'] == str(error)
+        assert saved['context']['epoch'] == 5 and saved['context']['phase'] == 'train'
+        assert saved['context']['batch'] == 0
+        if before_collation:
+            assert saved['context']['stage'] == 'before_collation'
+            assert saved['context']['sample'] == {'graph': 0, 'match_id': 'm0', 'source_row': 10}
+            for (graph, labels, weights), saved_graph, saved_labels, saved_weights in zip(
+                    rows, saved['graphs'], saved['labels'], saved['weights']):
+                torch.testing.assert_close(saved_graph.x, graph.x)
+                torch.testing.assert_close(saved_labels, labels)
+                torch.testing.assert_close(saved_weights, weights)
+        else:
+            torch.testing.assert_close(saved['graphs'].x, graph.x)
+            torch.testing.assert_close(saved['labels'], labels)
+            torch.testing.assert_close(saved['weights'], weights)
+        assert 'saved to' in error.__notes__[0]
+
+
 def test_snapshot_failure_preserves_validation_error(tmp_path, monkeypatch):
     graph = batch()
     graph.edge_index[1, 0] = 2

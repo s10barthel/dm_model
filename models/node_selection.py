@@ -27,9 +27,19 @@ def validate_graph_batch(graphs):
         raise ValueError(f"Edge crosses graph boundaries: {edge_description(graphs, edge)}")
     for name in ("x", "edge_attr"):
         value = getattr(graphs, name, None)
-        if value is not None and not bool(torch.isfinite(value).all()):
+        if value is None:
+            continue
+        nonfinite = ~torch.isfinite(value)
+        if bool(nonfinite.any()):
             from models.graph_diagnostics import sample_description
-            location = torch.nonzero(~torch.isfinite(value))[0].tolist()
+            locations = torch.nonzero(nonfinite)
+            if locations.shape[0] == 0:
+                raise ValueError(
+                    f"Inconsistent nonfinite graph {name} validation: mask reports invalid values "
+                    f"but no locations were found; shape={tuple(value.shape)}, "
+                    f"dtype={value.dtype}, device={value.device}"
+                )
+            location = locations[0].tolist()
             sample = (sample_description(graphs, int(graphs.batch[location[0]])) if name == "x"
                       else edge_description(graphs, location[0]))
             raise ValueError(f"Nonfinite graph {name} at {location}: {sample}")
