@@ -186,7 +186,9 @@ class VisualizationVersioningTests(unittest.TestCase):
             component_root = root / "components" / "loc-run"
             cache_root = root / "pc_xpass" / "hawkeye_loc" / "loc-cache"
             cache_root.mkdir(parents=True)
-            (cache_root / "metadata.json").write_text("{}", encoding="utf-8")
+            (cache_root / "metadata.json").write_text(json.dumps({
+                "source": "pc_xpass", "available_metrics": ["top25_xpass"],
+            }), encoding="utf-8")
             args = visualize_hawkeye.parse_args(
                 [
                     "--mode", "loc",
@@ -220,11 +222,14 @@ class VisualizationVersioningTests(unittest.TestCase):
             )
             overlays = OverlayData(pd.DataFrame(), pd.DataFrame(), {})
             with (
-                patch.object(visualize_hawkeye.pc_versions.config, "PC_XPASS_DIR", root / "pc_xpass"),
+                patch.object(project_config, "PC_XPASS_DIR", root / "pc_xpass"),
                 patch.object(visualize_hawkeye, "parse_args", return_value=args),
                 patch.object(visualize_hawkeye, "resolve_named_component_run_id", return_value="loc-run") as resolve_run,
                 patch.object(visualize_hawkeye, "get_hawkeye_loc_component_run_root", return_value=component_root),
-                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {"run_id": "loc-run", "inference_mode": "loc", "pc_xpass_id": "loc-cache"})),
+                patch.object(visualize_hawkeye, "load_hawkeye_component_run", return_value=(component_export, {
+                    "run_id": "loc-run", "inference_mode": "loc", "pc_xpass_id": "loc-cache",
+                    "pc_xpass_settings": {"x_pass_version": "top25"},
+                })),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=tracking),
                 patch.object(visualize_hawkeye, "clean_hawkeye_tracking", side_effect=lambda value: value),
                 patch.object(visualize_hawkeye, "load_hawkeye_ball", return_value=pd.DataFrame()),
@@ -264,7 +269,9 @@ class VisualizationVersioningTests(unittest.TestCase):
             metadata = json.loads((root / "visualizations" / "loc-viz" / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["visualization_mode"], "loc")
             self.assertEqual(metadata["pc_xpass_id"], "loc-cache")
-            self.assertEqual(Path(load_physical.call_args.args[0]), cache_root)
+            self.assertEqual(metadata["x_pass_version"], "top25")
+            self.assertEqual(load_physical.call_args.kwargs["metric"], "top25_xpass")
+            self.assertEqual(Path(load_physical.call_args.args[0]), cache_root.resolve())
             self.assertEqual(metadata["rendered_selection_row_ids"], [7])
 
     def test_location_visualization_rejects_component_mode_mismatch(self) -> None:
@@ -1095,8 +1102,9 @@ class VisualizationVersioningTests(unittest.TestCase):
                 rendered_components: list[str],
                 physical_cache_dir: str | Path | None = None,
                 physical_xpass_metric_name: str | None = None,
+                physical_xpass_version_name: str | None = None,
             ) -> tuple[Path, dict[str, object]]:
-                del context, component_tables, rendered_components, physical_cache_dir, physical_xpass_metric_name
+                del context, component_tables, rendered_components, physical_cache_dir, physical_xpass_metric_name, physical_xpass_version_name
                 output_dir = output_root / args.match_id / str(possession_index)
                 output_dir.mkdir(parents=True, exist_ok=True)
                 output_path = output_dir / "pass_score_first.png"

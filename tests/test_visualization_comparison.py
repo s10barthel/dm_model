@@ -552,6 +552,85 @@ def test_saved_hawkeye_synthetic_end_to_end(tmp_path, monkeypatch, saved_fixture
     assert table.loc[table.candidate_id.eq("home_2"), "prediction:b"].iloc[0] == pytest.approx(0.6)
 
 
+@pytest.mark.parametrize("override", [False, True])
+def test_saved_comparison_resolves_pc_xpass_per_variant(tmp_path, monkeypatch, saved_fixture, override):
+    from test_saved_visualization_xpass import component, write_cache
+    caches = {key: write_cache(tmp_path / key) for key in ("a", "b", "override")}
+    def load(path):
+        key = str(path)
+        return _raw_hawkeye(), component(run_id=key, status="completed", physical_cache_dir=str(caches[key]),
+                                        processed_situation_ids=["s"], freeze_ballreceipt=True,
+                                        x_pass_version="top10" if key == "a" else "top25")
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    def physical(cache, *a, **kw):
+        value = {caches["a"]: .2, caches["b"]: .8, caches["override"]: .5}[cache]
+        return pd.DataFrame({"home_1": [0.], "home_2": [value]}, index=[10])
+    loader = Mock(side_effect=physical)
+    monkeypatch.setattr(hv, "load_runtime_physical_xpass_visualization_table", loader)
+    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b",
+                          "--only-pass-intent", "--show-physical-xpass", "--output-dir", str(tmp_path),
+                          "--run-id", "comparison", *(["--physical-cache-dir", str(caches["override"]),
+                                                       "--xpass-version", "max"] if override else [])])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    table = pd.read_csv(tmp_path / "comparison/aligned_predictions.csv")
+    row = table.loc[table.component.eq("physical_xpass") & table.candidate_id.eq("home_2")].iloc[0]
+    assert row["prediction:a"] == pytest.approx(.5 if override else .2)
+    assert row["prediction:b"] == pytest.approx(.5 if override else .8)
+    assert loader.call_count == 2
+    assert [call.kwargs["x_pass_version"] for call in loader.call_args_list] == (
+        ["max", "max"] if override else ["top10", "top25"])
+    metadata = json.loads((tmp_path / "comparison/metadata.json").read_text())
+    for key, variant in zip(("a", "b"), metadata["variants"]):
+        provenance = variant["provenance"]
+        assert Path(provenance["physical_cache_dir"]) == caches["override" if override else key]
+        assert provenance["physical_xpass_resolution"]["inherited_fields"] == ([] if override else ["cache", "metric"])
+    # Settings remain CLI overrides only, rather than leaking the first variant into the second.
+    assert args.pc_xpass_id is None
+    assert args.physical_cache_dir == (str(caches["override"]) if override else None)
+
+
+def test_saved_comparison_rejects_unresolved_variant_before_rendering(tmp_path, monkeypatch, saved_fixture):
+    from test_saved_visualization_xpass import component, write_cache
+    cache = write_cache(tmp_path / "cache")
+    def load(path):
+        metadata = component(physical_cache_dir=str(cache)) if str(path) == "a" else {}
+        return _raw_hawkeye(), metadata
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    render = Mock()
+    monkeypatch.setattr(hv, "render_frame_image", render)
+    args = hv.parse_args(["--compare", "--component-run-id", "a", "--component-run-id", "b",
+                          "--only-pass-intent", "--show-physical-xpass", "--output-dir", str(tmp_path)])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    with pytest.raises(ValueError, match="Component run 'b'.*usage is unknown"):
+        hv.main()
+    render.assert_not_called()
+    saved_fixture[1].assert_not_called()
+
+
+@pytest.mark.parametrize("show_xpass", [False, True])
+def test_standalone_hawkeye_uses_saved_pc_settings_only_for_requested_panel(tmp_path, monkeypatch, saved_fixture, show_xpass):
+    from test_saved_visualization_xpass import component, write_cache
+    cache = write_cache(tmp_path / "cache")
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", lambda path: (
+        _raw_hawkeye(), component(physical_cache_dir=str(cache), processed_situation_ids=["s"])))
+    monkeypatch.setattr(hv, "load_overlay_data", lambda **kw: SimpleNamespace(metadata={}))
+    loader = Mock(return_value=pd.DataFrame({"home_1": [0.], "home_2": [.8]}, index=[10]))
+    monkeypatch.setattr(hv, "load_runtime_physical_xpass_visualization_table", loader)
+    args = hv.parse_args(["--component-dir", "a", "--only-pass-intent", "--output-dir", str(tmp_path),
+                          "--run-id", "standalone", *(["--show-physical-xpass"] if show_xpass else [])])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    metadata = json.loads((tmp_path / "standalone/metadata.json").read_text())
+    if show_xpass:
+        loader.assert_called_once_with(cache, "s", [10], metric="top25_xpass", x_pass_version="top25")
+        assert metadata["x_pass_version"] == "top25"
+        assert (tmp_path / "standalone/s/physical_xpass_0.png").exists()
+    else:
+        loader.assert_not_called()
+        assert metadata["physical_cache_dir"] is None
+
+
 @pytest.mark.parametrize("problem", ["duplicate", "missing", "incomplete", "definition", "different_scene"])
 def test_saved_comparison_fails_without_silent_cohort_changes(tmp_path, monkeypatch, saved_fixture, problem):
     def load(path):
@@ -654,33 +733,60 @@ def test_sportec_inference_end_to_end(tmp_path, monkeypatch, inference_fixture, 
         assert requested == [[], ["accel"], ["pos-node-features"]]
 
 
-def test_skillcorner_saved_comparison_preserves_shot_export(tmp_path, monkeypatch):
+@pytest.mark.parametrize("show_xpass", [False, True])
+@pytest.mark.parametrize("compare", [False, True])
+def test_skillcorner_saved_visualization_preserves_shot_export(tmp_path, monkeypatch, show_xpass, compare):
+    from test_saved_visualization_xpass import component, write_cache
+    cache = write_cache(tmp_path / "cache")
+    metadata = component(physical_cache_dir=str(cache)) if show_xpass else {}
     subject = _subject()
     subject.event_index, subject.fps = 1, 25
     monkeypatch.setattr(sv, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
-    monkeypatch.setattr(sv, "load_run_metadata", lambda *a, **kw: {"status": "completed"})
+    monkeypatch.setattr(sv, "load_run_metadata", lambda *a, **kw: {"status": "completed", **metadata})
+    physical = Mock(return_value=pd.DataFrame({"home_1": [0., 0.], "home_2": [.2, .2]}, index=[10, 11]))
+    monkeypatch.setattr(sv, "load_runtime_physical_xpass_visualization_table", physical)
+    selection = Mock(return_value=object())
+    monkeypatch.setattr(sv.match_cache, "selection_for", selection)
     def load(folder, match):
         value = 0.4 if str(folder) == "a" else 0.6
-        return {"action_intent": pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0., 0.],
+        return {"pass_success": pd.DataFrame(),
+                "action_intent": pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0., 0.],
                                                "2": [value, value], "shot": [0.2, 0.2]})}
     monkeypatch.setattr(sv, "load_skillcorner_component_tables", load)
     monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
     build = Mock(return_value=(subject, None))
     monkeypatch.setattr(sv, "build_skillcorner_possession", build)
-    args = sv.parse_args(["--accept-comparison-warnings", "--match-id", "m", "--index", "1", "--compare", "--component-run-id", "a",
-                          "--component-run-id", "b", "--only-action-intent", "--output-dir", str(tmp_path), "--run-id", "sc"])
+    selection_flags = ["--compare", "--component-run-id", "a", "--component-run-id", "b"] if compare else ["--component-dir", "a"]
+    args = sv.parse_args(["--accept-comparison-warnings", "--match-id", "m", "--index", "1", *selection_flags,
+                          "--only-action-intent", "--output-dir", str(tmp_path), "--run-id", "sc",
+                          *(["--show-physical-xpass"] if show_xpass else [])])
     monkeypatch.setattr(sv, "parse_args", lambda: args)
     sv.main()
-    assert build.call_count == 2
+    assert build.call_count == (2 if compare else 1)
     assert (tmp_path / "sc/m/1/action_intent_first.png").exists()
     assert (tmp_path / "sc/m/1/action_intent_last.png").exists()
-    table = pd.read_csv(tmp_path / "sc/aligned_predictions.csv")
-    assert "home_goal" in set(table.candidate_id)
-    assert table.loc[table.candidate_id.eq("home_goal"), "prediction:a"].iloc[0] == pytest.approx(0.2)
+    if compare:
+        table = pd.read_csv(tmp_path / "sc/aligned_predictions.csv")
+        assert "home_goal" in set(table.candidate_id)
+        assert table.loc[table.candidate_id.eq("home_goal"), "prediction:a"].iloc[0] == pytest.approx(0.2)
+    if show_xpass:
+        assert physical.call_count == selection.call_count == (2 if compare else 1)
+        assert physical.call_args.args[0] == cache
+        assert physical.call_args.kwargs["metric"] == "top25_xpass"
+        assert physical.call_args.kwargs["cache_selection"] is selection.return_value
+        assert (tmp_path / "sc/m/1/physical_xpass_first.png").exists()
+    else:
+        physical.assert_not_called()
+        selection.assert_not_called()
 
 
-def test_benchmark_saved_comparison_real_states(tmp_path, monkeypatch):
+@pytest.mark.parametrize("show_xpass", [False, True])
+@pytest.mark.parametrize("compare", [False, True])
+def test_benchmark_saved_visualization_real_states(tmp_path, monkeypatch, show_xpass, compare):
     from datatools.benchmark import build_benchmark_state
+    from test_saved_visualization_xpass import component, write_cache
+    cache = write_cache(tmp_path / "cache")
+    metadata = component(physical_cache_dir=str(cache)) if show_xpass else {}
     source = pd.DataFrame(dict(team=[0, 1, 1, 2], player=[0, 1, 2, 3], pos_x=[0., 0., 10., 20.],
         pos_y=[0., 0., 5., 10.], pos_z=[0., np.nan, np.nan, np.nan], smooth_x_speed=[0.] * 4,
         smooth_y_speed=[0.] * 4, event_player=[1] * 4, playing_direction_event=[True] * 4))
@@ -691,20 +797,32 @@ def test_benchmark_saved_comparison_real_states(tmp_path, monkeypatch):
         raw.append(export)
     export = pd.concat(raw, ignore_index=True)
     monkeypatch.setattr(bv, "get_benchmark_component_run_root", lambda identifier: Path(identifier))
-    monkeypatch.setattr(bv, "load_benchmark_component_run", lambda folder: (export.copy(), {"status": "completed"}))
+    monkeypatch.setattr(bv, "load_benchmark_component_run", lambda folder: (export.copy(), {"status": "completed", **metadata}))
+    physical = Mock(return_value=pd.DataFrame({"home_1": [0.], "home_2": [.2]}, index=[0]))
+    monkeypatch.setattr(bv, "load_runtime_physical_xpass_visualization_table", physical)
     monkeypatch.setattr(bv, "load_benchmark_modification_data", lambda *a: {"game_state_1": source, "game_state_2": source, "higher_state_id": 2})
     build = Mock(wraps=build_benchmark_state)
     monkeypatch.setattr(bv, "build_benchmark_state", build)
-    args = bv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-run-id", "c",
-                          "--only-pass-intent", "--output-dir", str(tmp_path), "--run-id", "benchmark"])
+    selection_flags = ["--compare", "--component-run-id", "a", "--component-run-id", "b", "--component-run-id", "c"] if compare else ["--component-dir", "a"]
+    args = bv.parse_args(["--accept-comparison-warnings", *selection_flags,
+                          "--only-pass-intent", "--output-dir", str(tmp_path), "--run-id", "benchmark",
+                          *(["--show-physical-xpass"] if show_xpass else [])])
     monkeypatch.setattr(bv, "parse_args", lambda: args)
     bv.main()
-    assert build.call_count == 6
+    assert build.call_count == (6 if compare else 2)
     image = Image.open(tmp_path / "benchmark/modification_1/pass_intent.png")
-    assert image.width > image.height
-    table = pd.read_csv(tmp_path / "benchmark/aligned_predictions.csv")
-    assert set(table.scene_id) == {"modification_1/game_state_1", "modification_1/game_state_2"}
-    assert len([name for name in table if name.startswith("prediction:")]) == 3
+    if compare:
+        assert image.width > image.height
+        table = pd.read_csv(tmp_path / "benchmark/aligned_predictions.csv")
+        assert set(table.scene_id) == {"modification_1/game_state_1", "modification_1/game_state_2"}
+        assert len([name for name in table if name.startswith("prediction:")]) == 3
+    if show_xpass:
+        assert physical.call_count == (6 if compare else 2)
+        assert physical.call_args.args[0] == cache
+        assert physical.call_args.kwargs["x_pass_version"] == "top25"
+        assert (tmp_path / "benchmark/modification_1/physical_xpass.png").exists()
+    else:
+        physical.assert_not_called()
 
 
 def test_hawkeye_geometry_conflict_and_explicit_unselected_data():

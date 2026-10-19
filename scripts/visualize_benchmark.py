@@ -33,23 +33,19 @@ from datatools.viz_helpers import (
 )
 from datatools.viz_snapshot import SnapshotVisualizer
 from models.membership import attach_membership_report
-from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+from scripts.saved_visualization_xpass import (
+    add_saved_xpass_arguments, resolve_saved_xpass_selectors, resolve_saved_xpass, saved_xpass_metadata,
+)
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
-    PHYSICAL_XPASS_SOURCE,
-    PC_XPASS_SOURCE,
     load_runtime_physical_xpass_visualization_table,
-    physical_xpass_metric,
 )
-import pc_xpass_versions as pc_versions
 
 from project_config import (
     BENCHMARK_VISUALIZATION_DIR,
     PROJECT_ROOT,
     generate_run_id,
     get_benchmark_component_run_root,
-    get_pc_xpass_dir,
-    get_runtime_physical_xpass_dir,
     resolve_named_component_run_id,
     write_run_metadata,
 )
@@ -67,17 +63,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--game-state", action="append", type=int, choices=[1, 2], help="Restrict visualization to one or more benchmark game states.")
     parser.add_argument("--component-run-id", action=RepeatableSelection, default=None, help="Optional versioned benchmark component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit benchmark component-run root override.")
-    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
-    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
-    parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Render pc-xPass cache values instead of runtime physical xPass.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to render: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
+    add_saved_xpass_arguments(parser)
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created benchmark visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(BENCHMARK_VISUALIZATION_DIR))
     parser.add_argument("--show-trajectories", action="store_true")
-    add_top_pass_selector(parser)
-    pc_versions.add_selection_argument(parser)
-    args = resolve_top_pass_selector(parser, parser.parse_args(argv))
+    args = parser.parse_args(argv)
+    resolve_saved_xpass_selectors(parser, args)
     return validate_comparison_args(parser, args)
 
 
@@ -231,10 +223,7 @@ def main() -> None:
         requested_game_states=args.game_state,
     )
 
-    physical_cache_dir = args.physical_cache_dir or str(
-        pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
-    )
-    selected_physical_xpass_metric = physical_xpass_metric(args)
+    xpass = resolve_saved_xpass(args, component_metadata, "benchmark", component_id=component_run_id)
     component_names = list(component_selection.rendered_components)
     if bool(args.show_physical_xpass):
         component_names.append("physical_xpass")
@@ -279,11 +268,11 @@ def main() -> None:
             if bool(args.show_physical_xpass):
                 frame_id = int(state.frame_meta.index.min())
                 state_contexts[game_state_id][1]["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
-                    physical_cache_dir,
+                    xpass.cache_dir,
                     str(state.match_id),
                     [frame_id],
-                    metric=selected_physical_xpass_metric,
-                    x_pass_version=getattr(args, "x_pass_version", "top10"),
+                    metric=xpass.metric,
+                    x_pass_version=xpass.x_pass_version,
                 )
 
         output_paths: list[str] = []
@@ -344,12 +333,7 @@ def main() -> None:
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
-        "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
-        "physical_xpass_metric": selected_physical_xpass_metric,
-        "x_pass_version": getattr(args, "x_pass_version", "top10"),
-        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
-        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
-        "physical_cache_dir": str(physical_cache_dir),
+        **saved_xpass_metadata(xpass),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }

@@ -33,15 +33,13 @@ from datatools.viz_helpers import (
 )
 from datatools.viz_snapshot import SnapshotVisualizer
 from models.membership import attach_membership_report
-from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+from scripts.saved_visualization_xpass import (
+    add_saved_xpass_arguments, resolve_saved_xpass_selectors, resolve_saved_xpass, saved_xpass_metadata,
+)
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
-    PHYSICAL_XPASS_SOURCE,
-    PC_XPASS_SOURCE,
     load_runtime_physical_xpass_visualization_table,
-    physical_xpass_metric,
 )
-import pc_xpass_versions as pc_versions
 import pc_xpass_match_cache as match_cache
 
 from project_config import (
@@ -49,9 +47,7 @@ from project_config import (
     PROJECT_ROOT,
     SKILLCORNER_VISUALIZATION_DIR,
     generate_run_id,
-    get_pc_xpass_dir,
     get_skillcorner_component_run_root,
-    get_runtime_physical_xpass_dir,
     load_run_metadata,
     resolve_named_component_run_id,
     write_run_metadata,
@@ -76,10 +72,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--component-run-id", action=RepeatableSelection, default=None, help="Optional versioned SkillCorner component run id.")
     parser.add_argument("--component-dir", default=None, help="Optional explicit component-run root override.")
-    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
-    parser.add_argument("--physical-cache-dir", help="Runtime physical xPass cache override.")
-    parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Render pc-xPass cache values instead of runtime physical xPass.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version to render: max, noise-kernel, top<N>, or pc-only top-pass<N> such as top10/top25/top50.")
+    add_saved_xpass_arguments(parser)
     add_component_selection_args(parser)
     parser.add_argument("--run-id", help="Pin the created SkillCorner visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SKILLCORNER_VISUALIZATION_DIR))
@@ -87,11 +80,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
     parser.add_argument("--only-first", action="store_true", help="In PNG mode, render only the first possession frame.")
     parser.add_argument("--only-last", action="store_true", help="In PNG mode, render only the last possession frame.")
-    add_top_pass_selector(parser)
-    pc_versions.add_selection_argument(parser)
     args = parser.parse_args(argv)
-    pc_versions.check_selectors(args)
-    resolve_top_pass_selector(parser, args)
+    resolve_saved_xpass_selectors(parser, args)
     if args.output != "png" and (args.only_first or args.only_last):
         parser.error("--only-first/--only-last are only valid with --output png.")
     if args.only_first and args.only_last:
@@ -256,6 +246,7 @@ def render_possession(
     rendered_components: list[str],
     physical_cache_dir: str | Path | None = None,
     physical_xpass_metric_name: str | None = None,
+    physical_xpass_version_name: str | None = None,
 ) -> tuple[Path, dict[str, object]]:
     output_dir = output_root / str(args.match_id) / str(possession_index)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -289,9 +280,9 @@ def render_possession(
             physical_cache_dir,
             str(possession.match_id),
             physical_frame_ids,
-            cache_selection=match_cache.selection_for(possession) if args.pc_xpass else None,
+            cache_selection=match_cache.selection_for(possession),
             metric=physical_xpass_metric_name,
-            x_pass_version=getattr(args, "x_pass_version", "top10"),
+            x_pass_version=physical_xpass_version_name,
         )
 
     selected_output_mode = output_mode(args)
@@ -357,14 +348,11 @@ def main() -> None:
             get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
         )
 
-    context = build_skillcorner_match_context(args.match_id, args.input_dir)
     component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
     require_model_pass_success(component_tables, getattr(args, "show_model_pass_success", False))
     component_metadata = load_run_metadata(component_dir, required=False) or {}
-    physical_cache_dir = args.physical_cache_dir or str(
-        pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
-    )
-    selected_physical_xpass_metric = physical_xpass_metric(args)
+    xpass = resolve_saved_xpass(args, component_metadata, "skillcorner", component_id=component_run_id)
+    context = build_skillcorner_match_context(args.match_id, args.input_dir)
     rendered_components = list(component_selection.rendered_components)
     if bool(args.show_physical_xpass):
         rendered_components.append("physical_xpass")
@@ -380,8 +368,9 @@ def main() -> None:
             possession_index=possession_index,
             output_root=output_root,
             rendered_components=rendered_components,
-            physical_cache_dir=physical_cache_dir,
-            physical_xpass_metric_name=selected_physical_xpass_metric,
+            physical_cache_dir=xpass.cache_dir if xpass else None,
+            physical_xpass_metric_name=xpass.metric if xpass else None,
+            physical_xpass_version_name=xpass.x_pass_version if xpass else None,
         )
         output_dirs.append(output_dir)
         rendered_possessions.append(
@@ -424,12 +413,7 @@ def main() -> None:
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
-        "physical_xpass_runtime_source": PC_XPASS_SOURCE if bool(getattr(args, "pc_xpass", False)) else PHYSICAL_XPASS_SOURCE,
-        "physical_xpass_metric": selected_physical_xpass_metric,
-        "x_pass_version": getattr(args, "x_pass_version", "top10"),
-        "pc_xpass_id": getattr(args, "pc_xpass_id", None),
-        "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),
-        "physical_cache_dir": str(physical_cache_dir),
+        **saved_xpass_metadata(xpass),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }

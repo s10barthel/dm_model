@@ -8,6 +8,7 @@ import pandas as pd
 
 from models.inference_masks import flatten_mask_values
 from datatools.pass_success import require_model_pass_success
+from scripts.saved_visualization_xpass import resolve_saved_xpass, saved_xpass_metadata
 from scripts.visualization_comparison import (
     ComparisonExport, ComparisonGroup, Variant, derive_components,
     require_row, require_same_selection, selection_list, source_components,
@@ -47,15 +48,13 @@ def strict_long_tables(raw, subject, components, kind, frames):
     return result
 
 
-def _physical(args, mod, subject, frames, *, dataset, cache_match=None):
-    cache = args.physical_cache_dir or str(mod.pc_versions.cache_dir(dataset, args)
-        if args.pc_xpass or dataset == "hawkeye_loc" else mod.get_runtime_physical_xpass_dir(dataset))
+def _physical(settings, mod, subject, frames, *, dataset, cache_match=None):
     kwargs = {}
-    if dataset == "skillcorner" and args.pc_xpass:
+    if dataset == "skillcorner":
         kwargs["cache_selection"] = mod.match_cache.selection_for(subject)
     return mod.load_runtime_physical_xpass_visualization_table(
-        cache, str(cache_match or subject.match_id), frames, metric=mod.physical_xpass_metric(args),
-        x_pass_version=args.x_pass_version, **kwargs,
+        settings.cache_dir, str(cache_match or subject.match_id), frames, metric=settings.metric,
+        x_pass_version=settings.x_pass_version, **kwargs,
     )
 
 
@@ -100,7 +99,10 @@ def validate_hawkeye_geometry(raw_frames):
             raise ValueError("Hawkeye component runs have different original scene geometry.") from exc
 
 
-def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False):
+def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass_settings=None):
+    if "physical_xpass" in names and xpass_settings is None:
+        dataset = "hawkeye_loc" if args.mode in {"loc", "freeze"} else "hawkeye"
+        xpass_settings = [resolve_saved_xpass(args, info, dataset) for info in metadata]
     tracking = mod.clean_hawkeye_tracking(mod.load_hawkeye_tracking(args.tracking_csv))
     ball = mod.clean_hawkeye_ball(mod.load_hawkeye_ball(args.ball_csv))
     overlay_data = mod.load_overlay_data(include_coach_ratings=args.coach_ratings, include_selections=args.selections)
@@ -163,9 +165,7 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False):
                 table = {name: table[name].reindex(frames) for name in source_components(names)}
                 selected_raw.append(rows.loc[rows.abs_time.isin(subject.frame_meta.loc[frames, "abs_time"])])
                 if "physical_xpass" in names:
-                    if location_rows is not None and not args.physical_cache_dir and not getattr(args, "pc_xpass_id", None):
-                        args.pc_xpass_id = metadata[index].get("pc_xpass_id")
-                    table["physical_xpass"] = _physical(args, mod, subject, frames,
+                    table["physical_xpass"] = _physical(xpass_settings[index], mod, subject, frames,
                         dataset="hawkeye_loc" if location_rows is not None else "hawkeye",
                         cache_match=str(location_rows[index]["loc_situation_id"]) if location_rows is not None else None)
                 tables.append(derive_components(table, names))
@@ -191,7 +191,9 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False):
             yield from group.load()
 
 
-def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False):
+def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False, xpass_settings=None):
+    if "physical_xpass" in names and xpass_settings is None:
+        xpass_settings = [resolve_saved_xpass(args, info, "benchmark") for info in metadata]
     selections = [mod.resolve_benchmark_component_states(raw, metadata=item,
                     requested_modifications=args.modification, requested_game_states=args.game_state)
                   for raw, item in zip(exports, metadata)]
@@ -208,12 +210,12 @@ def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False):
                     game_state_id=state_id, higher_state_id=int(data["higher_state_id"]), build_graphs=False)
                 frame = int(subject.frame_meta.index.min())
                 tables = []
-                for raw in exports:
+                for index, raw in enumerate(exports):
                     rows = raw.loc[raw.modification.eq(modification) & raw.game_state.eq(state_id)]
                     table = mod.build_benchmark_component_tables(rows, subject)
                     table = {name: table[name].reindex([frame]) for name in source_components(names)}
                     if "physical_xpass" in names:
-                        table["physical_xpass"] = _physical(args, mod, subject, [frame], dataset="benchmark")
+                        table["physical_xpass"] = _physical(xpass_settings[index], mod, subject, [frame], dataset="benchmark")
                     tables.append(derive_components(table, names))
                 group.append({"scene": f"modification_{modification}/game_state_{state_id}", "frame": frame,
                     "tables": tables, "folder": f"modification_{modification}", "suffix": "",
@@ -229,7 +231,9 @@ def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False):
             yield from group.load()
 
 
-def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False):
+def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False, xpass_settings=None):
+    if "physical_xpass" in names and xpass_settings is None:
+        xpass_settings = [resolve_saved_xpass(args, info, "skillcorner") for info in metadata]
     context = mod.build_skillcorner_match_context(args.match_id, args.input_dir)
     for index in mod.resolve_indices(args):
         def load_group(index=index):
@@ -239,7 +243,7 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False):
                 raise ValueError(f"No frames for SkillCorner possession {index}.")
             frames = [int(item["frame_id"]) for item in selected_frames]
             tables, scope_reference = [], {}
-            for raw_tables in exports:
+            for variant_index, raw_tables in enumerate(exports):
                 table = {}
                 for component in source_components(names):
                     raw = raw_tables.get(component)
@@ -273,7 +277,7 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False):
                             predictions[frame]["home_goal"] = float(rows.loc[frame, "shot"])
                     table[component] = pd.DataFrame.from_dict(predictions, orient="index")
                 if "physical_xpass" in names:
-                    table["physical_xpass"] = _physical(args, mod, subject, frames, dataset="skillcorner")
+                    table["physical_xpass"] = _physical(xpass_settings[variant_index], mod, subject, frames, dataset="skillcorner")
                 tables.append(derive_components(table, names))
             for selected in selected_frames:
                 frame = int(selected["frame_id"])
@@ -294,7 +298,7 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False):
 def run_comparison(args, mod):
     kind = Path(mod.__file__).stem.removeprefix("visualize_")
     identifiers = selection_list(args.component_run_id)
-    variants, exports, metadata = [], [], []
+    variants, exports, metadata, xpass_settings = [], [], [], []
     for identifier in identifiers:
         if kind == "hawkeye":
             getter = mod.get_hawkeye_loc_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_component_run_root
@@ -316,11 +320,16 @@ def run_comparison(args, mod):
             info = mod.load_run_metadata(folder, required=False) or {}
             raw = mod.load_skillcorner_component_tables(folder, args.match_id)
         require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
+        dataset = kind
+        if kind == "hawkeye" and info.get("inference_mode", args.mode) in {"loc", "freeze"}:
+            dataset = "hawkeye_loc"
+        xpass = resolve_saved_xpass(args, info, dataset, component_id=identifier)
+        xpass_settings.append(xpass)
         recorded_masks = info.get("inference_masks") or {}
         requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
         variants.append(Variant(identifier, identifier,
             {"component_run_id": identifier, "component_dir": str(folder), "metadata": info,
-             "inference_masks": recorded_masks}, requested_masks))
+             "inference_masks": recorded_masks, **saved_xpass_metadata(xpass)}, requested_masks))
         exports.append(raw)
         metadata.append(info)
     names = mod.resolve_component_selection(args).rendered_components
@@ -359,12 +368,13 @@ def run_comparison(args, mod):
         report.policy.confirm()
         report.start()
         variant_groups = []
-        for raw, info in zip(exports, metadata):
+        for raw, info, xpass in zip(exports, metadata, xpass_settings):
             variant_args = copy(args)
             variant_args._comparison_policy = report.policy
             if kind == "hawkeye" and info.get("inference_mode") in {"loc", "freeze", "standard"}:
                 variant_args.mode = info["inference_mode"]
-            variant_groups.append(adapters[kind](variant_args, mod, [raw], [info], names, deferred=True))
+            variant_groups.append(adapters[kind](variant_args, mod, [raw], [info], names,
+                                                 deferred=True, xpass_settings=[xpass]))
         render_comparison_groups(report, variant_groups, names, benchmark=kind == "benchmark")
         report.finish()
     except (Exception, KeyboardInterrupt) as exc:

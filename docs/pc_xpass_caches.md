@@ -27,7 +27,7 @@ omitted generation settings and rejects explicitly conflicting settings. The
 metadata records settings, physics/schema versions, invocation history, coverage,
 and completion status. Compatible missing rows can be added to a version.
 
-Normal consumers default to the ID in `data/pc_xpass/latest.json`. Successful
+Normal inference and training consumers default to the ID in `data/pc_xpass/latest.json`. Successful
 generation updates this global pointer; failed, incomplete, and dry runs do not.
 A deliberately limited successful run can become latest. If it lacks your dataset,
 select an appropriate ID explicitly; consumers do not search older versions.
@@ -52,8 +52,57 @@ warning, including deceleration and metric-generation settings. Input selections
 geometry, model selection, and execution controls still come from the invocation.
 Location runs never advance the normal latest pointer.
 
-Location visualization inherits the cache ID recorded in the selected component
-run. An explicit `--pc-xpass-id` or cache-directory override takes precedence.
+Saved-component visualization inherits the cache and metric recorded in the selected
+component run, as described below.
+
+## Visualizing saved component runs
+
+`visualize_hawkeye.py` (standard, location, and freeze), `visualize_benchmark.py`,
+and `visualize_skillcorner.py` support only pc-xPass for `--show-physical-xpass`.
+They inherit the selected component run's cache ID or recorded dataset cache
+directory and metric selector. They never default to latest or `top10`.
+
+```powershell
+# Display the same cached pc-xPass metric used by the saved component run.
+python scripts/visualize_hawkeye.py --component-run-id COMPONENT_RUN --show-physical-xpass
+
+# Change only the metric; retain the component's cache.
+python scripts/visualize_hawkeye.py --component-run-id COMPONENT_RUN --show-physical-xpass --top-pass 10
+
+# Explicitly select a cache and metric, including for a run that did not use pc-xPass.
+python scripts/visualize_hawkeye.py --component-run-id COMPONENT_RUN --show-physical-xpass --pc-xpass-id CACHE_ID --xpass-version top25
+
+# Select a legacy pc-xPass dataset directory explicitly.
+python scripts/visualize_hawkeye.py --component-run-id COMPONENT_RUN --show-physical-xpass --physical-cache-dir data/pc_xpass/hawkeye --xpass-version max
+```
+
+An explicit cache ID or directory replaces the inherited cache selection. A
+cache override retains the component's metric unless `--xpass-version` or
+`--top-pass` is also supplied. Explicit ID and directory overrides cannot be
+combined. `--pc-xpass` remains accepted for compatibility and is optional;
+`--top-pass` works without it. Supported metrics are `max`, `top<N>`, and
+`top-pass<N>`; ordinary physical xPass and `noise-kernel` are rejected.
+
+If the component did not use pc-xPass, used ordinary physical xPass, or has
+insufficient historical metadata to establish usage, provide both an explicit
+cache ID/directory and an explicit metric. Merely recording cache defaults or
+using a cache for lane-survival features does not establish pc-xPass usage.
+For known pc-xPass runs with incomplete settings, supply the missing settings.
+Structured historical settings and legacy recorded directories are supported;
+command strings and external model checkpoints are not used to guess settings.
+
+Recorded relative directories use the saved invocation working directory when
+available, otherwise the project root. Explicit relative directories use the
+current working directory. Missing caches, unsupported formats or metrics, and
+missing rows fail without selecting another cache or generating data.
+
+Saved-run comparisons resolve each variant's settings independently. CLI
+overrides apply to every variant. Console output and visualization metadata
+record the selected cache, metric, inherited fields, and explicit overrides.
+Overrides affect only the physical xPass panel; saved component predictions
+are not recomputed. Without `--show-physical-xpass`, these scripts do not access
+the physical-panel cache. Scripts that run inference retain their own selection
+behavior.
 
 ## Existing caches and directory overrides
 
