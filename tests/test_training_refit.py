@@ -61,6 +61,18 @@ def test_source_reconstruction_is_fresh_and_truncates_history(sources, tmp_path)
     assert json.loads((directory / "args.json").read_text()) == original
 
 
+@pytest.mark.parametrize("saved", ["missing", None, False, True])
+def test_refit_inherits_speed_setting(sources, saved):
+    create, _ = sources
+    directory, settings, _ = create("pass_intent/source")
+    if saved != "missing":
+        settings["speed_aware"] = saved
+        (directory / "args.json").write_text(json.dumps(settings))
+    payload = refit.prepare_refit("pass_intent/source", "new")
+    assert payload["args"]["speed_aware"] == (saved is not False)
+    assert json.loads((directory / "args.json").read_text()) == settings
+
+
 @pytest.mark.parametrize("changes", [
     {"status": "running"}, {"final_refit": True}, {"validation_match_ids": []},
     {"learning_rate_history_version": None}, {"best_epoch": None}, {"best_epoch": 6},

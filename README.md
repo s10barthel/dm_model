@@ -1041,6 +1041,7 @@ The existing low-level feature toggles on `train.py` are:
 - `--no-poss-geometry`
 - `--no-goal-features`
 - `--no-goal-nodes`
+- `--speed` / `--no-speed`
 - `--accel` / `--no-accel`
 - `--offside` / `--no-offside`
 - `--extend_features`
@@ -1093,7 +1094,15 @@ Use the source run's split selector when it differs from the default. This creat
 
 `--no-pos-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `x` and `y` for every node, including the possessor and goal nodes, at the encoder and decoder inputs. Positions are enabled by default. Graph width stays unchanged, and original coordinates remain available for graph processing, physical calculations, and destination features. Other spatial features remain independently controlled. The setting is saved with the checkpoint for evaluation and inference. Combining it with `--xy-only` (`--xy_only` in `train.py`) is rejected.
 
-`--no-vel-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `vx`, `vy`, `speed`, and `accel` for every node, including the possessor. It preserves graph width and cached features, overrides `--accel` and possessor velocity enablement, and is saved with the checkpoint for evaluation and inference. Relative velocity-angle node features and velocity-related edge features remain independently controlled. Without this flag, existing behavior is preserved.
+`--no-vel-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `vx`, `vy`, `speed`, and `accel` for every node, including the possessor. It preserves graph width and cached features, overrides `--speed`, `--accel`, and possessor velocity enablement, and is saved with the checkpoint for evaluation and inference. Relative velocity-angle node features and velocity-related edge features remain independently controlled. Without this flag, existing behavior is preserved.
+
+`--speed` / `--no-speed` is available on `scripts/train_relevant_models.py` and `train.py`, with speed enabled by default. `--no-speed` zeros only scalar node column `7 speed` for every node, including the possessor, while preserving graph width, `vx`, `vy`, acceleration, stored edge inputs, and the separate `success_intent` pass-trajectory speed input. The checkpoint saves `speed_aware` for evaluation, inference, resume, and refit; older checkpoints without a setting (or with a null setting) retain speed. Auxiliary/IPW models use their own saved setting. Masks are cumulative, so `--speed` does not restore values zeroed by `--xy-only`, `--no-vel-node-features`, or possessor velocity masking. Existing feature artifacts can be reused.
+
+For example, train `success_intent` without scalar player speed using:
+
+```powershell
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent --no-speed
+```
 
 `--poss-vel-aware` / `--no-poss-vel-aware` controls the ball possessor node's own velocity/speed/acceleration slots and is on by default in the wrappers. `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware` controls the relative velocity-angle columns `17:19` and is off by default in the wrappers. `--no-poss-geometry` zeros possessor-relative geometry columns `14:17` while keeping `13 is_possessor`. `--no-goal-features` zeros goal-relative geometry columns `9:12` while keeping `12 ball_z`. `--no-goal-nodes` removes goal nodes and their incident edges regardless of task defaults. `--no-offside` zeros the appended `is_offside` node-feature slot when present without changing graph width or model input dimension.
 
@@ -1124,6 +1133,7 @@ input dimensions and zero the specified learned inputs.
 | `--poss_rel_vel_aware`; `--poss-rel-vel-aware` | When off, zero all nodes' `17:19` possessor-relative velocity-angle components | Off | Off |
 | `--no-pos-node-features` | Zero all nodes' x/y at encoder and decoder inputs; preserve original geometry for other processing | Positions on | Positions on |
 | `--no-vel-node-features` | Zero all nodes' `5:9`, including the possessor | Velocity on | Velocity on |
+| `--speed` / `--no-speed` | When off, zero all nodes' `7 speed`; preserve graph width | On | On |
 | `--accel` / `--no-accel` | When off, zero all nodes' `8 accel` | On | On |
 | `--no-poss-geometry` | Zero all nodes' `14:17`; retain possessor indicator | Geometry on | Geometry on |
 | `--goal-poss-dist` | When off, zero only goal-node `14:17` (possessor distance **and direction**) | Off | Off |
@@ -1820,7 +1830,8 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--lane-survival [{max,top_N,top_pass_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects `max`, `--lane-survival top_25` selects top-25, and `--lane-survival top_pass_10` selects top-pass 10. The selected aggregation must be available in the cache.
 - `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches require `match_physical_states_v3` and a canonical action manifest; older caches must be regenerated into a new version.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the wrapper training defaults. Pass-lane mode retains only `nearest_opponent_to_pass` and `potential_interceptors`; full extended mode takes precedence.
-- `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--accel` and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
+- `--speed` / `--no-speed`: enable or zero scalar node speed (`7`) for every node, including the possessor, while preserving graph width. Default: enabled. Saved with the checkpoint; independent of acceleration, velocity components, edge movement features, and pass-trajectory speed.
+- `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--speed`, `--accel`, and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
 - `--no-pos-node-features`: zero `x` and `y` at the encoder and decoder inputs for every node, including the possessor and goal nodes, while preserving graph width. Original coordinates remain available for graph processing, physical calculations, and destination features. Incompatible with `--xy-only`. Default: off, so positional node features are used.
 - `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
 - `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.
@@ -1951,6 +1962,7 @@ Use a task prefix to select a component (`pass_success:accel`) or `all:` to sele
 |---|---|
 | `pos-node-features` | Node x and y |
 | `vel-node-features` | Node vx, vy, speed, and acceleration |
+| `speed` | Scalar node speed |
 | `accel` | Node acceleration |
 | `goal-features` | Goal distance and normalized goal-direction components |
 | `poss-geometry` | Possessor distance and normalized possessor-direction components |

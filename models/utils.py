@@ -30,7 +30,7 @@ from datatools.config import FIELD_SIZE, LABEL_INDEX
 from models.architecture import GNN_ARCHITECTURES, normalize_architecture, architecture_identity, resolve_architecture
 from models.self_loops import capture_self_attributes
 from models.gnn import GNN
-from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
+from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features, resolve_speed_aware
 from models.edge_schema import (edge_names, schema_for_names, selected_edge_names,
                                 project_graph_edges, mask_edge_inputs, CANONICAL_FEATURES, INTERACTION_GROUPS)
 from models.edge_feature_config import (
@@ -106,6 +106,7 @@ FEATURE_SIGNATURE_KEYS = (
     "goal_nodes_aware",
     "vel_node_features_aware",
     "pos_node_features_aware",
+    "speed_aware",
     "accel_aware",
     "offside_aware",
     "extend_features",
@@ -176,6 +177,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
         "goal_nodes_aware": bool(args.get("goal_nodes_aware", True)),
         "vel_node_features_aware": True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"]),
         "pos_node_features_aware": pos_node_features_aware,
+        "speed_aware": resolve_speed_aware(args),
         "accel_aware": True if args.get("accel_aware") is None else bool(args.get("accel_aware")),
         "offside_aware": True if args.get("offside_aware") is None else bool(args.get("offside_aware")),
         "extend_features": bool(args.get("extend_features", False)),
@@ -281,6 +283,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
     args["pos_node_features_aware"] = resolve_pos_node_features(args)
     args["goal_poss_dist"] = resolve_goal_poss_dist(args)
+    args["speed_aware"] = resolve_speed_aware(args)
     args.setdefault("accel_aware", True)
     args.setdefault("feature_run_id", None)
     enrich_model_args_from_metadata(args, metadata)
@@ -554,6 +557,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         args["vel_node_features_aware"] = True if args.get("vel_node_features_aware") is None else bool(args["vel_node_features_aware"])
         args["pos_node_features_aware"] = resolve_pos_node_features(args)
         args["goal_poss_dist"] = resolve_goal_poss_dist(args)
+        args["speed_aware"] = resolve_speed_aware(args)
         args.setdefault("accel_aware", True)
         args.setdefault("feature_run_id", None)
         args.setdefault("model_id", str(model_id))
@@ -1226,6 +1230,8 @@ def adapt_batch_graphs_for_model(
     capture_self_attributes(batch_graphs)
     if model_args.get("vel_node_features_aware") is not None and not model_args["vel_node_features_aware"]:
         batch_graphs.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
+    if not resolve_speed_aware(model_args):
+        batch_graphs.x[:, config.NODE_FEATURE_SPEED] = 0
 
     required_node_dim = int(model_args.get("node_in_dim", 0) or 0)
     actual_node_dim = int(batch_graphs.x.shape[1]) if getattr(batch_graphs, "x", None) is not None else 0

@@ -36,7 +36,7 @@ from training_refit import (HISTORY_VERSION, append_rate_history, apply_refit_ra
 from models.graph_diagnostics import install_collation_diagnostics
 from models.edge_schema import add_interaction_arguments, normalize_input_settings, INTERACTION_GROUPS
 from datatools import config
-from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features
+from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features, resolve_speed_aware
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
@@ -175,6 +175,20 @@ goal_candidates_group = parser.add_mutually_exclusive_group()
 goal_candidates_group.add_argument("--include-goals", dest="include_goals", action="store_true", help="Include shot candidates (action_intent only).")
 goal_candidates_group.add_argument("--no-include-goals", dest="include_goals", action="store_false", help="Exclude goal predictions and shot examples.")
 parser.set_defaults(include_goals=None)
+speed_group = parser.add_mutually_exclusive_group()
+speed_group.add_argument(
+    "--speed",
+    dest="speed_aware",
+    action="store_true",
+    help="Include scalar player-speed node features.",
+)
+speed_group.add_argument(
+    "--no-speed",
+    dest="speed_aware",
+    action="store_false",
+    help="Ignore scalar player-speed node features and zero that feature slot.",
+)
+parser.set_defaults(speed_aware=True)
 accel_group = parser.add_mutually_exclusive_group()
 accel_group.add_argument(
     "--accel",
@@ -555,6 +569,7 @@ except ValueError as exc:
     parser.error(str(exc))
 # Fresh parses explicitly default to False; saved configurations retain legacy True.
 args.goal_poss_dist = resolve_goal_poss_dist(args)
+args.speed_aware = resolve_speed_aware(args)
 restore_ipw_defaults(args)
 if not hasattr(args, "validation_protocol"):
     args.validation_protocol = "legacy"

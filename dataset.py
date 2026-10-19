@@ -297,6 +297,7 @@ class ActionDataset(Dataset):
         pass_distance_cache_dir=None,
         trajectory_speed_definition=None,
         evaluation_filter=None,
+        speed_aware=True,
     ):
         if evaluation_filter not in (None, "pass"):
             raise ValueError(f"Unknown evaluation filter: {evaluation_filter!r}.")
@@ -659,6 +660,9 @@ class ActionDataset(Dataset):
 
             if vel_node_features_aware is not None and not vel_node_features_aware:
                 graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
+
+            if speed_aware is not None and not speed_aware:
+                graph.x[:, config.NODE_FEATURE_SPEED] = 0
 
             if not accel_aware:  # Ignore player-acceleration features without changing graph width
                 graph.x[:, config.NODE_FEATURE_ACCEL] = 0

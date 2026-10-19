@@ -1341,9 +1341,10 @@ class BenchmarkNoAccelTests(unittest.TestCase):
         self.assertIn("--v-edge-features-no-poss", commands[0])
         self.assertNotIn("--no-v-edge-features", commands[0])
 
-    def test_wrapper_main_records_accel_flag_in_bundle_metadata(self) -> None:
+    def test_wrapper_main_records_speed_and_accel_flags_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            resume_id=None,
             split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1367,7 +1368,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                     train_wrapper,
                     "build_training_commands",
                     return_value=(
-                        [["--task", "pass_intent", "--no-accel"]],
+                        [["--task", "pass_intent", "--no-speed", "--no-accel"]],
                         {"pass_intent": "pass_intent/test"},
                         "angle_only",
                         "feature_run",
@@ -1377,11 +1378,13 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                             "keeper_aware": True,
                             "ball_z_aware": True,
                             "poss_vel_aware": True,
+                            "speed_aware": False,
                             "accel_aware": False,
                             "extend_features": False,
                         },
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
                 patch.object(
@@ -1396,6 +1399,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                 train_wrapper.main()
 
         self.assertIn("training_feature_flags", captured_metadata)
+        self.assertFalse(captured_metadata["training_feature_flags"]["speed_aware"])
         self.assertFalse(captured_metadata["training_feature_flags"]["accel_aware"])
         self.assertEqual(captured_metadata["model_ids"], {"pass_intent": "pass_intent/test"})
         self.assertEqual(captured_metadata["trained_tasks"], ["pass_intent"])
@@ -1403,6 +1407,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_forwards_runtime_flags_to_train(self) -> None:
         captured_command: list[str] = []
         cli_args = SimpleNamespace(
+            resume_id=None,
             split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1437,6 +1442,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         train_wrapper.WRAPPER_FEATURE_DEFAULTS,
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
                 patch.object(
@@ -1464,6 +1470,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_records_failed_metadata_for_access_violation(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            resume_id=None,
             split_manifest=self.split_manifest,
             bundle_id="bundle_under_test",
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1497,6 +1504,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         train_wrapper.WRAPPER_FEATURE_DEFAULTS,
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
                 patch.object(train_wrapper, "write_run_metadata", side_effect=capture_write_run_metadata),
@@ -1514,6 +1522,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_main_merges_existing_bundle_metadata_for_partial_outcome_rerun(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            resume_id=None,
             bundle_id="bundle_under_test",
             split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1570,6 +1579,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         },
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value=existing_bundle),
                 patch.object(
@@ -1615,6 +1625,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_main_records_external_pass_intent_source_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            resume_id=None,
             bundle_id="bundle_under_test",
             split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1654,6 +1665,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         },
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
                 patch.object(
@@ -1682,6 +1694,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
     def test_wrapper_main_records_effective_batch_sizes_in_bundle_metadata(self) -> None:
         captured_metadata: dict[str, object] = {}
         cli_args = SimpleNamespace(
+            resume_id=None,
             bundle_id="bundle_under_test",
             split_manifest=self.split_manifest,
             available_intended_receiver_modes=["original", "angle_only"],
@@ -1728,6 +1741,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
                         },
                     ),
                 ),
+                patch.object(train_wrapper, "_read_fold_summaries", return_value={}),
                 patch.object(train_wrapper, "get_model_bundle_root", return_value=bundle_root),
                 patch.object(train_wrapper, "load_model_bundle_metadata", return_value={}),
                 patch.object(
@@ -1751,6 +1765,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
     def test_derive_bundle_shared_context_ignores_pass_intent_target_metadata(self) -> None:
         cli_args = SimpleNamespace(
+            resume_id=None,
             return_type="disc_0.9",
             target_family="goal",
             intended_receiver_mode="angle_only",
@@ -1778,6 +1793,7 @@ class BenchmarkNoAccelTests(unittest.TestCase):
 
     def test_derive_bundle_shared_context_uses_existing_outcome_target_family_when_cli_omits_it(self) -> None:
         cli_args = SimpleNamespace(
+            resume_id=None,
             return_type="disc_0.9",
             target_family=None,
             intended_receiver_mode="angle_only",

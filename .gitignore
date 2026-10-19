@@ -44,6 +44,7 @@ tests/AS_viz/
 !tests/test_success_intent_mode_independent.py
 !tests/test_success_intent_visualization.py
 !tests/test_benchmark_no_accel.py
+!tests/test_speed_features.py
 !tests/test_pos_node_features.py
 !tests/test_goal_poss_dist.py
 !tests/test_evaluation_dataset_config.py

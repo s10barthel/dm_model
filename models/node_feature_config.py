@@ -1,8 +1,14 @@
-"""Shared configuration and masks for geometric node inputs."""
+"""Shared configuration and masks for node inputs."""
 
 from collections.abc import Mapping
 
 from datatools import config
+
+
+def resolve_speed_aware(args) -> bool:
+    """Keep scalar node speed enabled for saved settings predating the flag."""
+    value = args.get("speed_aware") if isinstance(args, Mapping) else getattr(args, "speed_aware", None)
+    return True if value is None else bool(value)
 
 
 def resolve_goal_poss_dist(args) -> bool:

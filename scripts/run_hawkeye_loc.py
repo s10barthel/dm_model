@@ -508,7 +508,7 @@ def compatibility_warnings(model_ids: dict[str, str], model_specs: dict[str, obj
         model_args = getattr(model, "args", {})
         signature = extract_model_feature_signature(model_args)
         incompatible: list[str] = []
-        for name in ["poss_vel_aware", "poss_rel_vel_aware", "accel_aware"]:
+        for name in ["poss_vel_aware", "poss_rel_vel_aware", "speed_aware", "accel_aware"]:
             if name != "poss_rel_vel_aware" and not signature["vel_node_features_aware"]:
                 continue
             if bool(signature.get(name, False)):
@@ -522,7 +522,7 @@ def compatibility_warnings(model_ids: dict[str, str], model_specs: dict[str, obj
                 "task": task,
                 "model_id": model_ids.get(task),
                 "incompatible_features": incompatible,
-                "message": "model may use possessor velocity/acceleration features in location inference",
+                "message": "model may use possessor velocity/speed/acceleration features in location inference",
             }
             records.append(record)
             warnings.warn(f"{record['model_id'] or task}: {record['message']}: {', '.join(incompatible)}")

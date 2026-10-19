@@ -15,7 +15,7 @@ from torch_geometric.data import Batch, Data
 from datatools import config
 from models.self_loops import capture_self_attributes
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target, node_index_invalid_reason
-from models.node_feature_config import mask_goal_poss_features
+from models.node_feature_config import mask_goal_poss_features, resolve_speed_aware
 from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODE,
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
@@ -1637,6 +1637,9 @@ def filter_features_and_labels(
 
         if args.get("vel_node_features_aware") is not None and not args["vel_node_features_aware"]:
             graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
+
+        if not resolve_speed_aware(args):
+            graph.x[:, config.NODE_FEATURE_SPEED] = 0
 
         if not args.get("accel_aware", True):
             graph.x[:, config.NODE_FEATURE_ACCEL] = 0

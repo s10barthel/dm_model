@@ -86,6 +86,29 @@ def test_equivalence_and_reuse(tmp_path, artifacts, task):
     assert reused.preparation["reused"] == 2
 
 
+def test_speed_mask_equivalence_and_cache_identity(tmp_path, artifacts):
+    source = artifacts["feature_dir"] / "m0.pt"
+    graphs = torch.load(source, weights_only=False)
+    for graph in graphs:
+        if graph is not None:
+            graph.x[:, config.NODE_FEATURE_SPEED] = 7
+            graph.x[:, config.NODE_FEATURE_ACCEL] = 8
+    torch.save(graphs, source)
+    cache_ids = []
+    for enabled in (True, False):
+        options = dict(artifacts, vel_node_features_aware=True, speed_aware=enabled)
+        eager = ActionDataset(["m0"], **options)
+        disk = make_disk(tmp_path, options, ["m0"])
+        cache_ids.append(disk.cache_id)
+        for i, sample in enumerate(disk):
+            assert_sample_equal(sample, eager[i])
+            assert torch.all(sample[0].x[:, config.NODE_FEATURE_SPEED] == (7 if enabled else 0))
+            assert torch.all(sample[0].x[:, config.NODE_FEATURE_ACCEL] == 8)
+    assert cache_ids[0] != cache_ids[1]
+    stored = torch.load(source, weights_only=False)[0]
+    assert torch.all(stored.x[:, config.NODE_FEATURE_SPEED] == 7)
+
+
 def identity(sample):
     graph, label, _ = sample
     return graph.evaluation_match_id, float(graph.x[0, config.NODE_FEATURE_X]), tuple(label.tolist())

@@ -227,7 +227,7 @@ def test_actual_stopping_and_caps(synthetic_training, flags, last_epoch, reducti
 @pytest.mark.parametrize("rollback", [True, False])
 def test_resume_after_reduction_preserves_optimizer_and_grace(synthetic_training, monkeypatch, rollback):
     run, _, epoch, utils, tmp_path = synthetic_training
-    flags = ["--lr-rollback" if rollback else "--no-lr-rollback"]
+    flags = ["--lr-rollback" if rollback else "--no-lr-rollback", "--no-speed"]
     baseline = run("baseline", flags)
     def interrupted(args, *a, **kw):
         if args._epoch == 6:
@@ -237,6 +237,7 @@ def test_resume_after_reduction_preserves_optimizer_and_grace(synthetic_training
     with pytest.raises(RuntimeError, match="interruption"):
         run("resumed", flags)
     saved = load_checkpoint(tmp_path / "saved/pass_intent/resumed" / CHECKPOINT_NAME)
+    assert saved["args"]["speed_aware"] is False
     assert saved["metadata"]["last_epoch"] == 5
     assert saved["metadata"]["last_lr_reduction_start_epoch"] == 5
     monkeypatch.setattr(utils, "run_epoch", epoch)
@@ -244,6 +245,8 @@ def test_resume_after_reduction_preserves_optimizer_and_grace(synthetic_training
     assert resumed["metadata"]["last_epoch"] == baseline["metadata"]["last_epoch"]
     assert resumed["metadata"]["last_lr_reduction_start_epoch"] == 5
     assert resumed["args"]["lr_rollback"] == rollback
+    assert resumed["args"]["speed_aware"] is False
+    assert resumed["metadata"]["feature_signature"]["speed_aware"] is False
     for name, tensor in baseline["model"].items():
         torch.testing.assert_close(tensor, resumed["model"][name], atol=0, rtol=0)
     for key, state in baseline["optimizer"]["state"].items():

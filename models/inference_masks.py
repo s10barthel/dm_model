@@ -18,6 +18,7 @@ import torch
 from datatools import config
 from models.edge_schema import EDGE_GROUPS, edge_names, group_mode
 from models.input_scaling import node_schema, NODE_FEATURE_NAMES, OPTIONAL_NODE_FEATURE_NAMES
+from models.node_feature_config import resolve_speed_aware
 from models.edge_feature_config import (
     normalize_relative_speed_edge_feature_mode,
     normalize_v_edge_feature_mode,
@@ -45,6 +46,7 @@ INFERENCE_MASK_GROUPS = {
     "goal-features": tuple((name, "all") for name in _GOAL),
     "poss-geometry": tuple((name, "all") for name in _POSS_GEOMETRY),
     "poss-rel-vel-aware": tuple((name, "all") for name in _POSS_ANGLES),
+    "speed": (("node.speed", "all"),),
     "accel": (("node.accel", "all"),),
     "ball-z-aware": (("node.ball_z", "all"),),
     "keeper-aware": (("node.is_keeper", "all"),),
@@ -213,6 +215,8 @@ def _disabled(args, feature: str, column: int, subset: str) -> str | None:
         return "disabled in checkpoint training configuration"
     if 5 <= column <= 8:
         if args.get("vel_node_features_aware") is False:
+            return "disabled in checkpoint training configuration"
+        if column == config.NODE_FEATURE_SPEED and not resolve_speed_aware(args):
             return "disabled in checkpoint training configuration"
         if column == 8 and args.get("accel_aware", True) is False:
             return "disabled in checkpoint training configuration"

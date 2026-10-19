@@ -137,6 +137,37 @@ def test_split_normalization_alignment_and_pass_height(setup):
     assert len(height_weights) == len(height) > 0
 
 
+@pytest.mark.parametrize("dependency_speed", [False, True])
+def test_speed_uses_dependency_inputs_and_distinct_cache(setup, monkeypatch, dependency_speed):
+    create, _, features, labels, options, _ = setup
+    path = features / "m0.pt"
+    graphs = torch.load(path, weights_only=False)
+    for graph in graphs:
+        graph.x[:, config.NODE_FEATURE_SPEED] = torch.arange(graph.num_nodes) + 1
+    torch.save(graphs, path)
+    target = ActionDataset(["m0"], feature_dir=features, label_dir=labels,
+                           **dict(options, speed_aware=not dependency_speed))
+    expected = [graph.x.clone() for graph in target.features]
+    preparer = create(options=dict(options, speed_aware=dependency_speed),
+                      model_args=dict(Predictor.args, speed_aware=dependency_speed))
+    opposite = create(options=dict(options, speed_aware=not dependency_speed),
+                      model_args=dict(Predictor.args, speed_aware=not dependency_speed))
+    assert preparer.cache_id != opposite.cache_id
+    seen = []
+    original = ipw.predict_probabilities
+    def capture(dataset, *args, **kwargs):
+        seen.extend(graph.x[:, config.NODE_FEATURE_SPEED].clone() for graph in dataset.features)
+        return original(dataset, *args, **kwargs)
+    monkeypatch.setattr(ipw, "predict_probabilities", capture)
+    weights, stats = preparer.prepare(target, ["m0"])
+    assert len(weights) == len(target) and stats["misses"] == 1
+    assert seen
+    for speeds in seen:
+        assert torch.all(speeds > 0) if dependency_speed else torch.all(speeds == 0)
+    for graph, before in zip(target.features, expected):
+        torch.testing.assert_close(graph.x, before)
+
+
 def test_cache_invalidation_corruption_and_interruption(setup, monkeypatch):
     create, main, features, labels, options, model = setup
     preparer = create()

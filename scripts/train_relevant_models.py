@@ -95,6 +95,7 @@ WRAPPER_FEATURE_DEFAULTS = {
     "goal_nodes_aware": True,
     "vel_node_features_aware": True,
     "pos_node_features_aware": True,
+    "speed_aware": True,
     "accel_aware": True,
     "offside_aware": True,
     "extend_features": False,
@@ -122,6 +123,7 @@ LOW_LEVEL_FALSE_FLAGS = {
 }
 
 LOW_LEVEL_BOOL_OVERRIDE_FLAGS = {
+    "speed_aware": ("--speed", "--no-speed"),
     "accel_aware": ("--accel", "--no-accel"),
     "offside_aware": ("--offside", "--no-offside"),
     "pass_lane_features": ("--pass-lane-features", "--no-pass-lane-features"),
@@ -1158,6 +1160,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     action_goal_group.add_argument("--action-intent-include-goals", dest="action_intent_include_goals", action="store_true")
     action_goal_group.add_argument("--no-action-intent-include-goals", dest="action_intent_include_goals", action="store_false")
     parser.set_defaults(action_intent_include_goals=None)
+    add_bool_override(
+        parser,
+        "speed",
+        "speed_aware",
+        "Include scalar player-speed node features during training.",
+        "Zero scalar player-speed node features during training while preserving graph width.",
+    )
     add_bool_override(
         parser,
         "accel",
