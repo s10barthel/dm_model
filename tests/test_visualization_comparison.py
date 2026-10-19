@@ -576,7 +576,12 @@ def test_saved_comparison_fails_without_silent_cohort_changes(tmp_path, monkeypa
     if problem == "different_scene":
         with pytest.raises((ValueError, KeyError)):
             hv.main()
-        assert not list(tmp_path.rglob("*.png"))
+        # The valid earlier scene remains available when a later scene fails.
+        image = tmp_path / "failed/s/pass_intent_0.png"
+        assert image.exists()
+        metadata = json.loads((tmp_path / "failed/metadata.json").read_text())
+        assert metadata["status"] == "failed"
+        assert str(image.resolve()) in metadata["output_paths"]
     else:
         hv.main()
         assert list(tmp_path.rglob("*.png"))
@@ -828,3 +833,127 @@ def test_candidate_membership_warning_is_exported_in_saved_comparison(tmp_path, 
     assert metadata["warnings"] and metadata["status"] == "completed"
     table = pd.read_csv(tmp_path / "candidates/aligned_predictions.csv", keep_default_na=False)
     assert table.loc[table.candidate_id.eq("home_1"), "prediction:b"].iloc[0] == "N/A"
+
+
+@pytest.mark.parametrize("mode", ["checkpoints", "masks", "independent"])
+@pytest.mark.parametrize("stop", [None, RuntimeError, KeyboardInterrupt])
+def test_sportec_saves_before_predicting_next_action(tmp_path, monkeypatch, inference_fixture, mode, stop):
+    subject, models, _, _ = inference_fixture
+    subject.actions = pd.DataFrame(dict(frame_id=[10, 11], object_id=["home_1"] * 2,
+        spadl_type=["pass"] * 2, action_type=["pass"] * 2), index=[10, 11])
+    load = Mock(side_effect=lambda *a, **kw: copy.copy(subject))
+    monkeypatch.setattr(av, "load_match", load)
+    monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
+        "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
+    monkeypatch.setattr(av, "resolve_action_indices", lambda *a: [(10, "42"), (11, "43")])
+    monkeypatch.setattr(av, "configure_lane_survival_runtime_cache", lambda *a: None)
+    if mode == "independent":
+        monkeypatch.setattr(inference_compare, "get_model_record", lambda identifier: {
+            **_record(identifier), "feature_run_id": identifier})
+    root = tmp_path / "progressive"
+    calls = []
+    def collect(match, selected_models, feature_root, device, action_index, *a, **kw):
+        calls.append(action_index)
+        metadata = json.loads((root / "metadata.json").read_text())
+        assert metadata["status"] == "running"
+        if action_index == 11:
+            path = root / "match/42/pass_success.png"
+            with Image.open(path) as image:
+                image.verify()
+            assert str(path.resolve()) in metadata["output_paths"]
+            assert not (root / "aligned_predictions.csv").exists()
+            if stop:
+                raise stop("later action failed")
+        return {"pass_success": pd.Series({"home_1": 0., "home_2": .6})}
+    monkeypatch.setattr(av, "collect_action_components", collect)
+    monkeypatch.setattr(av, "render_component", lambda *a, **kw: Image.new("RGB", (80, 60)))
+    flags = ["--inference-mask-1", "accel"] if mode == "masks" else [
+        "--compare", "--pass-success-model-id", "pass_success/b"]
+    args = av.parse_args(["--accept-comparison-warnings", "--match-id", "match", "--only-pass-success",
+        "--pass-success-model-id", "pass_success/a", "--output-dir", str(tmp_path), "--run-id", "progressive", *flags])
+    if stop:
+        with pytest.raises(stop, match="later action failed"):
+            inference_compare.run_comparison(args, av)
+    else:
+        inference_compare.run_comparison(args, av)
+    metadata = json.loads((root / "metadata.json").read_text())
+    assert metadata["status"] == ("completed" if stop is None else "cancelled" if stop is KeyboardInterrupt else "failed")
+    assert load.call_count == (2 if mode == "independent" else 1)
+    assert (root / "match/42/pass_success.png").exists()
+    assert (root / "match/43/pass_success.png").exists() == (stop is None)
+    assert calls[:2] == [10, 10]
+    assert all(model.inference_masks is None for model in models.values())
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_hawkeye_saves_before_building_next_situation(tmp_path, monkeypatch, inference_fixture, saved_fixture, saved):
+    subject, _, _, _ = inference_fixture
+    script = hv if saved else dv
+    root = tmp_path / "progressive"
+    tracking = pd.DataFrame({"id": ["s", "t"]})
+    monkeypatch.setattr(script, "load_hawkeye_tracking", lambda *a: tracking)
+    def build(rows, *a, **kw):
+        if rows.id.iloc[0] == "t":
+            component = "pass_intent" if saved else "pass_success"
+            assert (root / "s" / f"{component}_0.png").exists()
+            assert json.loads((root / "metadata.json").read_text())["status"] == "running"
+        return subject, None, None
+    monkeypatch.setattr(script, "build_hawkeye_situation", build)
+    monkeypatch.setattr(script, "render_frame_image", lambda *a, **kw: Image.new("RGB", (80, 60)))
+    if saved:
+        raw = pd.concat([_raw_hawkeye(), _raw_hawkeye().assign(id="t")], ignore_index=True)
+        monkeypatch.setattr(script, "load_hawkeye_component_run", lambda *a: (
+            raw, {"status": "completed", "processed_situation_ids": ["s", "t"]}))
+        flags = ["--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent"]
+    else:
+        monkeypatch.setattr(script, "resolve_hawkeye_situation_ids", lambda *a, **kw: ["s", "t"])
+        flags = ["--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b", "--only-pass-success"]
+    args = script.parse_args(["--accept-comparison-warnings", "--compare", *flags,
+                             "--output-dir", str(tmp_path), "--run-id", "progressive"])
+    (saved_compare if saved else inference_compare).run_comparison(args, script)
+    assert len(list(root.rglob("*.png"))) == 2
+
+
+def test_skillcorner_saves_before_building_next_possession(tmp_path, monkeypatch):
+    subject = _subject()
+    subject.event_index, subject.fps = 1, 25
+    root = tmp_path / "progressive"
+    monkeypatch.setattr(sv, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(sv, "load_run_metadata", lambda *a, **kw: {"status": "completed"})
+    raw = pd.DataFrame({"index": [1, 1, 2, 2], "frame": [10, 11, 10, 11], "1": [.2] * 4})
+    monkeypatch.setattr(sv, "load_skillcorner_component_tables", lambda *a: {"pass_intent": raw})
+    monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
+    def build(context, index):
+        if index == 2:
+            assert (root / "m/1/pass_intent_first.png").exists()
+            assert (root / "m/1/pass_intent_last.png").exists()
+        return subject, None
+    monkeypatch.setattr(sv, "build_skillcorner_possession", build)
+    monkeypatch.setattr(sv, "render_frame_image", lambda *a, **kw: Image.new("RGB", (80, 60)))
+    args = sv.parse_args(["--accept-comparison-warnings", "--match-id", "m", "--index", "1", "--index", "2",
+        "--compare", "--component-run-id", "a", "--component-run-id", "b", "--only-pass-intent",
+        "--output-dir", str(tmp_path), "--run-id", "progressive"])
+    saved_compare.run_comparison(args, sv)
+    assert len(list(root.rglob("*.png"))) == 4
+
+
+def test_benchmark_saves_both_states_before_loading_next_modification(tmp_path, monkeypatch):
+    root = tmp_path / "progressive"
+    raw = pd.DataFrame({"modification": [1, 1, 2, 2], "game_state": [1, 2, 1, 2]})
+    monkeypatch.setattr(bv, "get_benchmark_component_run_root", lambda identifier: Path(identifier))
+    monkeypatch.setattr(bv, "load_benchmark_component_run", lambda *a: (raw, {"status": "completed"}))
+    def load(modification, *a):
+        if modification == 2:
+            assert (root / "modification_1/pass_intent.png").exists()
+        return {"game_state_1": object(), "game_state_2": object(), "higher_state_id": 2}
+    monkeypatch.setattr(bv, "load_benchmark_modification_data", load)
+    monkeypatch.setattr(bv, "build_benchmark_state", lambda *a, **kw: (_subject(), None, None))
+    monkeypatch.setattr(bv, "build_benchmark_component_tables", lambda *a: {
+        "pass_intent": pd.DataFrame({"home_1": [.3]}, index=[10])})
+    monkeypatch.setattr(bv, "render_state_image", lambda *a, **kw: Image.new("RGB", (80, 60)))
+    args = bv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a",
+        "--component-run-id", "b", "--only-pass-intent", "--output-dir", str(tmp_path), "--run-id", "progressive"])
+    saved_compare.run_comparison(args, bv)
+    table = pd.read_csv(root / "aligned_predictions.csv")
+    assert len(set(table.scene_id)) == 4
+    assert len(list(root.rglob("*.png"))) == 2

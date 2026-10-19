@@ -2065,6 +2065,16 @@ Candidate ordering is aligned by semantic identity when possible, and missing va
 Ambiguous numerical exports do not prevent images: native predictions are retained instead.
 Standalone input/rendering failures still fail the affected variant.
 
+Comparison PNGs are saved progressively, after the required results for the current action,
+situation, or possession are available. Benchmark images wait for both game states of the current
+modification. The terminal prints the output directory at startup and progress after each group.
+New comparison warnings require acceptance before the affected images are saved; accepting an
+issue also covers later occurrences of the same issue between the same variants and component.
+Frame IDs and changing roster counts alone do not trigger another confirmation. Detailed occurrences
+remain in the metadata. Earlier images remain available if a later warning is declined, the run
+fails, or it is interrupted. Metadata is updated during the run; prediction tables are finalized
+when it completes.
+
 Each comparison run retains scene/component PNG paths and, where semantic alignment is possible, exports `aligned_predictions.csv`,
 separate `variants/variant_<hash>/predictions.parquet` files, and `metadata.json`. CSV columns use
 `prediction:<variant-id>`; tables retain full precision and candidates not displayed on the pitch.

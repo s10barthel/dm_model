@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable, Hashable, Iterable
+from uuid import uuid4
 import warnings
 
 import numpy as np
@@ -106,6 +109,44 @@ class Variant:
     provenance: dict = field(default_factory=dict)
     masks: list[str] = field(default_factory=list)
     models: dict = field(default_factory=dict)
+
+
+@dataclass
+class ComparisonGroup:
+    """A selected action/situation with results loaded only when it is exported."""
+    key: Hashable
+    load: Callable[[], Iterable]
+
+
+def render_comparison_groups(report, variant_groups, names, *, shared=False, benchmark=False):
+    """Index cheap selectors, then compute and publish one output group at a time."""
+    plans = []
+    order = {}
+    for groups in variant_groups:
+        plan = {}
+        for group in groups:
+            plan.setdefault(group.key, []).append(group)
+            order.setdefault(group.key, None)
+        plans.append(plan)
+    for key in order:
+        before = len(report.outputs)
+        loaded = [_load_comparison_group(plan.pop(key, [])) for plan in plans]
+        if shared:
+            loaded = [[{**scene, "tables": [scene["tables"][index]]} for scene in loaded[0]]
+                      for index in range(len(report.variants))]
+        render_independent_groups(report, loaded, names, benchmark=benchmark)
+        report.checkpoint()
+        print(f"Saved {len(report.outputs) - before} comparison image(s) to {report.root.resolve()}", flush=True)
+        # No prediction tables, render closures, or images survive into the next group.
+        del loaded
+
+
+def _load_comparison_group(groups):
+    scenes = []
+    for group in groups:
+        for scene in group.load():
+            scenes.extend(scene if isinstance(scene, list) else [scene])
+    return scenes
 
 
 def validate_metadata_definitions(metadata, policy=None, tasks=None):
@@ -244,6 +285,18 @@ class ComparisonExport:
                               "provenance": variant.provenance} for variant in variants], "warnings": self.warnings,
                          "scenes": self.scenes, "output_paths": self.outputs}
 
+    def warning_key(self, category, *details):
+        return json.dumps([category, [variant.identifier for variant in self.variants], *details], sort_keys=True)
+
+    def checkpoint(self):
+        self.metadata.update(self.policy.metadata(), aligned_export_available=self.export_aligned)
+        attach_comparison_membership(self.metadata)
+        write_run_metadata(self.root, self.metadata)
+
+    def start(self):
+        self.checkpoint()
+        print(f"Comparison output directory: {self.root.resolve()}", flush=True)
+
     def record(self, scene, frame_id, component, rows):
         if len(rows) != len(self.variants):
             raise ValueError("Every comparison variant must contribute a prediction row.")
@@ -263,11 +316,18 @@ class ComparisonExport:
                     f"{variant.label}={len(items)}" for variant, items in zip(self.variants, memberships))
                 if message not in self.warnings:
                     self.warnings.append(message)
-                    warnings.warn(message, UserWarning, stacklevel=2)
-                    self.policy.add(message)
+                    # Roster IDs/counts and frame IDs can change without changing the issue.
+                    pattern = [[i for i, other in enumerate(memberships) if other == items]
+                               for items in memberships]
+                    warning_key = self.warning_key("candidate_membership", component, pattern,
+                                                   [bool(items) for items in memberships])
+                    if warning_key not in self.policy.accepted:
+                        warnings.warn(message, UserWarning, stacklevel=2)
+                    self.policy.add(message, key=warning_key)
         except (TypeError, ValueError) as exc:
             self.export_aligned = False
-            self.policy.add(f"Aligned prediction export unavailable for {scene}/{component}: {exc}. Native predictions and images are retained.")
+            self.policy.add(f"Aligned prediction export unavailable for {scene}/{component}: {exc}. Native predictions and images are retained.",
+                            key=self.warning_key("invalid_predictions", component, str(exc)))
             aligned = native
         key = (str(scene), int(frame_id), component)
         if key in self.recorded:
@@ -317,9 +377,11 @@ class ComparisonExport:
         write_run_metadata(self.root, self.metadata)
 
     def failed(self, exc):
-        self.metadata.update(self.policy.metadata(), status="cancelled" if isinstance(exc, ComparisonCancelled) else "failed", error=f"{type(exc).__name__}: {exc}")
-        attach_comparison_membership(self.metadata)
-        write_run_metadata(self.root, self.metadata)
+        self.metadata.update(status="cancelled" if isinstance(exc, (ComparisonCancelled, KeyboardInterrupt)) else "failed",
+                             error=f"{type(exc).__name__}: {exc}")
+        if isinstance(exc, KeyboardInterrupt):
+            self.policy.cancelled = True
+        self.checkpoint()
 
 
 def complete_component(metadata, identifier):
@@ -369,7 +431,7 @@ def geometry_description(scene):
 
 
 def render_independent_groups(report, variant_groups, names, *, benchmark=False):
-    """Compose standalone scenes; missing correspondence never vetoes images."""
+    """Publish each component of the current action/situation as soon as it is ready."""
     import matplotlib
     matplotlib.use("Agg")
     maps = []
@@ -381,7 +443,8 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
             for scene in group if isinstance(group, list) else [group]:
                 key = (str(scene["scene"]), int(scene["frame"]))
                 if key in scenes:
-                    report.policy.add(f"Ambiguous scene identity {key} for {report.variants[index].label}; displayed separately.")
+                    report.policy.add(f"Ambiguous scene identity {key} for {report.variants[index].label}; displayed separately.",
+                                      key=report.warning_key("ambiguous_scene", index))
                     key = (key[0] + f"/variant_{index}_scene_{len(scenes)}", key[1])
                     report.export_aligned = False
                 scenes[key] = scene
@@ -392,12 +455,13 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
                     buckets[bucket].append(key)
         maps.append(scenes)
     if any(set(items) != set(maps[0]) for items in maps[1:]):
-        report.policy.add("Scene/frame membership differs. The union is displayed with unavailable panels; no correspondence is invented.")
-    prepared = []
+        pattern = [[i for i, other in enumerate(maps) if set(other) == set(items)] for items in maps]
+        report.policy.add(f"Scene/frame membership differs for {list(key_buckets)}. The union is displayed with unavailable panels; no correspondence is invented.",
+                          key=report.warning_key("scene_membership", pattern, [bool(items) for items in maps]))
     for (folder, suffix), keys in buckets.items():
         for component in dict.fromkeys([*names, *(name for key in keys for scenes in maps
                                                 if key in scenes for name in scenes[key]["tables"][0])]):
-            images, labels = [], []
+            panels, labels = [], []
             reference_scene = None
             for key in keys:
                 rows = []
@@ -408,41 +472,67 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
                     if scene is None or component not in scene["tables"][0]:
                         rows.append(None)
                         if component in names:
-                            images.append(None)
+                            panels.append(None)
                             labels.append(variant_description(report.variants[index]) + "\nUnavailable for this scene/frame")
                         continue
                     table = scene["tables"][0][component]
                     row = (table.loc[scene["frame"]] if scene["frame"] in table.index
                            else pd.Series(float("nan"), index=table.columns, dtype=float))
                     rows.append(row)
-                    scene_geometries.append(repr(scene.get("geometry", {})))
+                    scene_geometries.append((index, scene.get("geometry", {})))
                     if component in names:
                         unavailable = component in {"pass_success", "model_pass_success", "pass_score"} and row.dropna().empty
-                        images.append(None if unavailable else scene["render"](component, row))
+                        panels.append(None if unavailable else (scene, row))
                         labels.append(variant_description(report.variants[index]) + "\n" + scene["title"] +
                                       "\n" + geometry_description(scene) +
                                       ("\nUnavailable for this scene/frame" if unavailable else ""))
-                if len(set(scene_geometries)) > 1:
-                    report.policy.add(f"Scene geometry/settings differ for {key}; each panel uses its own scene.")
+                fields = sorted({field for _, geometry in scene_geometries for field in geometry})
+                differences = {field: [[index for index, geometry in scene_geometries
+                                       if repr(geometry.get(field)) == repr(reference.get(field))]
+                                      for _, reference in scene_geometries]
+                               for field in fields
+                               if len({repr(geometry.get(field)) for _, geometry in scene_geometries}) > 1}
+                if differences:
+                    report.policy.add(f"Scene geometry/settings differ for {key}; each panel uses its own scene.",
+                                      key=report.warning_key("geometry", differences))
                 report.record(key[0], key[1], component, rows)
             if component not in names:
                 continue
-            size = next((item.size for item in images if item is not None), (800, 500))
-            for index, item in enumerate(images):
-                if item is None:
-                    item = Image.new("RGB", size, "#eeeeee")
-                    ImageDraw.Draw(item).text((30, 30), "Unavailable for this scene/frame", fill="black", font=_font(20))
-                    images[index] = item
-            prepared.append((folder, suffix, component, images, labels, reference_scene, len(keys)))
-    report.policy.confirm()
-    for folder, suffix, component, images, labels, scene, count in prepared:
-        row_labels = ["Game state 1", "Game state 2"] if benchmark and count == 2 else None
-        image = compose_panels(images, labels, scene_title(scene, component),
-                               columns=len(report.variants) if benchmark else 2, row_labels=row_labels)
-        path = report.root / folder / f"{component}{suffix}.png"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(path)
-        report.outputs.append(str(path.resolve()))
+            images = []
+            try:
+                report.policy.confirm()
+                for panel in panels:
+                    images.append(None if panel is None else panel[0]["render"](component, panel[1]))
+                size = next((item.size for item in images if item is not None), (800, 500))
+                for index, item in enumerate(images):
+                    if item is None:
+                        item = Image.new("RGB", size, "#eeeeee")
+                        ImageDraw.Draw(item).text((30, 30), "Unavailable for this scene/frame", fill="black", font=_font(20))
+                        images[index] = item
+                row_labels = ["Game state 1", "Game state 2"] if benchmark and len(keys) == 2 else None
+                image = compose_panels(images, labels, scene_title(reference_scene, component),
+                                       columns=len(report.variants) if benchmark else 2, row_labels=row_labels)
+                try:
+                    path = report.root / folder / f"{component}{suffix}.png"
+                    save_comparison_png(image, path)
+                    report.outputs.append(str(path.resolve()))
+                finally:
+                    image.close()
+            finally:
+                for tile in images:
+                    if tile is not None:
+                        tile.close()
+
+
+def save_comparison_png(image, path):
+    """Only expose a PNG after the complete image has been written."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        image.save(temporary, format="PNG")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def source_components(names):
