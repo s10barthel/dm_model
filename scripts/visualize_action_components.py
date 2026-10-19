@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import copy
 import math
 import sys
 import warnings
@@ -277,6 +278,7 @@ def load_match(
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
+    match.sportec_canonical_source = events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
                                        add_relative_speed_edge_features=add_relative_speed_edge_features,
@@ -644,20 +646,21 @@ def render_component(
     plt.close(fig)
 
 
-def possession_state_for_action(match, action_index, feature_root):
+def possession_state_for_action(match, action_index, feature_root, states=None):
     """Resolve the exact canonical pre-action observation, including partial spells."""
     from datatools.sportec_possessions import build_sportec_possessions
 
     action = match.actions.loc[action_index]
     match_id = resolve_match_id(match)
-    states = list(build_sportec_possessions(match, match_id, feature_root, scope="actions",
-                                           **getattr(match, "runtime_graph_options", {})))
+    if states is None:
+        states = list(build_sportec_possessions(match, match_id, feature_root, scope="actions",
+                                               **getattr(match, "runtime_graph_options", {})))
     association = next((row for row in match.sportec_state_plan.actions if row["action_index"] == action_index), None)
     key = association["pre_state_id"] if association else None
     candidates = [state for state, _ in states if state.actions.state_id.eq(key).any()]
     if len(candidates) != 1:
         raise ValueError("Action has no valid possession state for pc-xPass visualization")
-    state = candidates[0]
+    state = copy(candidates[0])
     frame = int(action.frame_id)
     if frame not in state.actions.index:
         raise ValueError("Action frame was excluded by possession validity checks")
@@ -683,6 +686,7 @@ def collect_action_components(
     physical_xpass_version_name: str | None = None,
     rendered_components: list[str] | None = None,
     prediction_cache: dict | None = None,
+    possession_states: list | None = None,
 ) -> dict[str, pd.Series]:
     rendered_components = rendered_components or [
         "action_intent",
@@ -700,13 +704,14 @@ def collect_action_components(
     ]
     component_prob_rows: dict[str, pd.Series] = {}
 
-    cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json") if physical_cache_dir else {}
+    cache_memo = getattr(match, "_pc_match_cache", None)
+    cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json", memo=cache_memo) if physical_cache_dir else {}
     possession_cache = match_cache.is_match_format(cache_metadata.get("cache_format")) or cache_metadata.get("source") == "pc_xpass"
     pc_state, pc_frame = None, None
     if possession_cache or any(getattr(model, "args", {}).get("pc_xpass") for model in loaded_models.values()):
         if physical_cache_dir:
-            match_cache.require_format(physical_cache_dir)
-        pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root)
+            match_cache.require_format(physical_cache_dir, memo=cache_memo)
+        pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root, possession_states)
 
     precomputed_auxiliaries = {}
     # Prepare reusable component probabilities before pass-success, regardless of selection order.

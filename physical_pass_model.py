@@ -910,11 +910,11 @@ def validate_physical_xpass_cache_metadata(
     return metadata
 
 
-def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | None = None, x_pass_version: str, metric: str) -> dict[str, Any]:
+def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | None = None, x_pass_version: str, metric: str, memo: dict | None = None) -> dict[str, Any]:
     metadata_path = Path(cache_dir) / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"Physical xPass metadata not found at {metadata_path}.")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = match_cache.read_json(metadata_path, memo=memo)
     resolved_source = str(source or metadata.get("source") or metadata.get("metric_family") or PHYSICAL_XPASS_SOURCE)
     cache_source = str(metadata.get("source") or metadata.get("metric_family") or "")
     if cache_source and cache_source != resolved_source:
@@ -4212,6 +4212,7 @@ def load_runtime_physical_xpass_visualization_component(
             cache_dir,
             x_pass_version=x_pass_version,
             metric=selected_metric,
+            memo=cache_selection.memo if cache_selection else None,
         )
     try:
         series = load_physical_xpass_component(

@@ -166,6 +166,21 @@ and carry handling are unchanged. Sportec visualization resolves the exact canon
 pre-action observation, including partial spells, and fails when that state is
 invalid. It does not guess by frame proximity.
 
+Sportec v3 readers can reuse an existing physical partition across feature runs
+when the runtime descriptor matches the cached descriptor in every field except
+`feature_run_id`. This requires complete source/reconstruction fingerprints and
+matching physical-input/state contracts, match, partition, period, and possessor.
+Extension lineage alone does not establish compatibility. For example, an xT-only
+target refresh can reuse physical results when the state-defining content is
+unchanged. Ambiguous matches and changed or incomplete fingerprints are rejected.
+The shared lookup covers inference, visualization, and lane-control reads while
+retaining completion, checksum, and coverage checks. Returned rows keep their
+cached identities; `pc_xpass_cache_resolution` frame attributes record exact or
+equivalent resolution, both feature-run IDs, and requested/resolved provenance
+keys. Existing files, runtime state IDs, and manifests are not rewritten. Generation
+and resume publication remain strict: cross-run equivalence does not authorize
+appending to or changing an existing cache version.
+
 Component inference exports `possession_manifest.json`. Ranking resolves spell
 start/end/next roles through this manifest, never through a shift of filtered pass
 rows. Unknown successors stay missing; restart outcomes are retained and goals/period

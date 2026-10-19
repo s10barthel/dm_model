@@ -1,5 +1,6 @@
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -29,6 +30,136 @@ def save(root, *, lane=False):
         if lane:
             transaction.write_lane("one", [], rows().to_dict("records"))
         transaction.commit(export_lane=lane)
+
+
+@pytest.fixture
+def equivalent_cache(tmp_path):
+    from datatools.sportec_possessions import STATE_CONTRACT
+    from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
+
+    root = tmp_path / "sportec"
+    source = dict(match_id="match", possession_id=1, state_partition_id=1, period_id=1,
+        possessor_id="home_1", feature_run_id="september", state_contract=STATE_CONTRACT,
+        physical_input_contract=PHYSICAL_INPUT_CONTRACT, canonical_sha256="canonical",
+        control_sha256="control", resolved_actions_sha256="actions", tracking_sha256="tracking",
+        lineup_sha256="lineup")
+    cache.initialize(root)
+    with cache.MatchAccumulator(root, "match") as transaction:
+        transaction.register("cached", source)
+        values = rows("cached")
+        values["home_1__max_xpass"] = values.home_1
+        transaction.write("cached", values)
+        records = [dict(row, receiver_id="home_2", opponent_id="away_3")
+                   for row in values.to_dict("records")]
+        transaction.write_lane("cached", records, values.to_dict("records"))
+        transaction.commit(export_lane=True)
+    runtime = dict(source, feature_run_id="october")
+    return root, cache.Selection(1, "runtime", {}, runtime)
+
+
+def test_equivalent_run_preserves_cache_rows_and_files(equivalent_cache):
+    root, selection = equivalent_cache
+    before = {p: (cache.checksum(p), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+    source = cache.load_possession(root, "match", cache.Selection(1, "cached"))
+    result = physics.load_physical_xpass_match(root, "match", cache_selection=selection)
+    assert result.index.tolist() == [10, 20]
+    assert result.home_1.tolist() == [0.5, 0.5]
+    assert result.state_id.tolist() == source.state_id.tolist()
+    assert result.possession_provenance_id.tolist() == ["cached", "cached"]
+    assert result.attrs["pc_xpass_cache_resolution"] == dict(mode="equivalent",
+        runtime_feature_run_id="october", cache_feature_run_id="september",
+        requested_provenance_id="runtime", resolved_provenance_id="cached")
+    assert source.attrs["pc_xpass_cache_resolution"]["mode"] == "exact"
+    assert before == {p: (cache.checksum(p), p.stat().st_mtime_ns) for p in root.rglob("*") if p.is_file()}
+
+
+def test_selection_copies_runtime_descriptor(equivalent_cache):
+    _, selection = equivalent_cache
+    descriptor = dict(selection.descriptor, additional={"version": 1})
+    state = SimpleNamespace(pc_cache_match_id="runtime", event_index=1, pc_state_descriptor=descriptor)
+    selected = cache.selection_for(state)
+    descriptor["tracking_sha256"] = "changed"
+    descriptor["additional"]["version"] = 2
+    assert selected.descriptor["tracking_sha256"] == "tracking"
+    assert selected.descriptor["additional"] == {"version": 1}
+    assert selected.memo is state._pc_match_cache
+
+
+def test_equivalent_run_resolves_lane_coverage_and_visualization_frames(equivalent_cache):
+    root, selection = equivalent_cache
+    lane = cache.load_possession(root, "match", selection, lane=True, requested_frames=[20])
+    assert lane.receiver_id.tolist() == ["home_2", "home_2"]
+    assert lane.possession_provenance_id.tolist() == ["cached", "cached"]
+    table = physics.load_runtime_physical_xpass_visualization_table(root, "match", [20],
+        metric="max_xpass", cache_selection=selection)
+    assert table.index.tolist() == [20]
+    assert table.loc[20, "home_1"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("field", ["canonical_sha256", "control_sha256", "resolved_actions_sha256",
+    "tracking_sha256", "lineup_sha256", "state_contract", "physical_input_contract", "possessor_id",
+    "period_id", "possession_id", "state_partition_id", "match_id", "additional_rule"])
+def test_equivalent_run_rejects_changed_content(equivalent_cache, field):
+    root, selection = equivalent_cache
+    selection.descriptor[field] = "changed"
+    with pytest.raises(ValueError, match=field):
+        cache.load_possession(root, "match", selection)
+
+
+@pytest.mark.parametrize("field", ["canonical_sha256", "control_sha256", "resolved_actions_sha256",
+    "tracking_sha256", "lineup_sha256", "feature_run_id"])
+@pytest.mark.parametrize("side", ["runtime", "cached"])
+def test_equivalent_run_requires_complete_descriptors(equivalent_cache, field, side):
+    root, selection = equivalent_cache
+    _, _, record = cache.load_match(root, "match")
+    descriptors = {key: dict(value) for key, value in record["descriptors"].items()}
+    target = selection.descriptor if side == "runtime" else descriptors["cached"]
+    del target[field]
+    with pytest.raises(ValueError, match=field):
+        cache._resolve_possession(root, "match", selection, descriptors)
+
+
+def test_equivalent_run_rejects_ambiguous_descriptors(equivalent_cache):
+    root, selection = equivalent_cache
+    _, _, record = cache.load_match(root, "match")
+    descriptors = {**record["descriptors"], "duplicate": dict(record["descriptors"]["cached"])}
+    with pytest.raises(ValueError, match="ambiguous"):
+        cache._resolve_possession(root, "match", selection, descriptors)
+
+
+@pytest.mark.parametrize("lane", [False, True])
+def test_equivalent_run_requires_requested_frames(equivalent_cache, lane):
+    root, selection = equivalent_cache
+    with pytest.raises(ValueError, match="missing requested possession frames"):
+        cache.load_possession(root, "match", selection, lane=lane, requested_frames=[30])
+
+
+def test_equivalent_run_keeps_integrity_and_lane_coverage_checks(equivalent_cache):
+    root, selection = equivalent_cache
+    path = root / "completion/match.json"
+    record = cache.read_json(path)
+    record["lane_states"] = []
+    cache.atomic_json(path, record)
+    with pytest.raises(ValueError, match="lane-control coverage"):
+        cache.load_possession(root, "match", selection, lane=True)
+    with (root / "matches/match.parquet").open("ab") as stream:
+        stream.write(b"corrupt")
+    with pytest.raises(ValueError, match="Inconsistent"):
+        cache.load_possession(root, "match", selection)
+
+
+def test_equivalent_run_does_not_relax_generation_or_other_datasets(equivalent_cache):
+    root, selection = equivalent_cache
+    with cache.MatchAccumulator(root, "match") as transaction:
+        with pytest.raises(ValueError, match="provenance"):
+            transaction.register(selection.provenance_id, selection.descriptor)
+        with pytest.raises(ValueError, match="provenance"):
+            transaction.register("cached", selection.descriptor)
+    _, _, record = cache.load_match(root, "match")
+    with pytest.raises(ValueError, match="provenance"):
+        cache._resolve_possession(root.parent / "skillcorner", "match", selection, record["descriptors"])
+    with pytest.raises(ValueError, match="provenance"):
+        cache.load_possession(root, "match", cache.Selection(1, "runtime", {}))
 
 
 @pytest.mark.parametrize("dataset", ["sportec", "skillcorner"])
@@ -294,3 +425,60 @@ def test_corrupt_commit_and_missing_lane_coverage_are_rejected(tmp_path):
         stream.write(b"corrupt")
     with pytest.raises(ValueError, match="Inconsistent"):
         cache.load_match(tmp_path, "match")
+
+
+def test_comparison_adapter_reads_equivalent_cache_for_both_checkpoints(equivalent_cache, monkeypatch):
+    from scripts import inference_visualization_comparison as comparison, visualize_action_components as visualizer
+    from scripts.visualization_comparison import Variant
+    from test_visualization_comparison import TinyModel
+
+    root, selection = equivalent_cache
+    subject = SimpleNamespace(actions=pd.DataFrame(dict(frame_id=[20], object_id=["home_1"], spadl_type=["pass"])))
+    args = visualizer.parse_args(["--match-id", "match", "--feature-run-id", "october",
+        "--show-physical-xpass", "--physical-cache-dir", str(root)])
+    calls = []
+    monkeypatch.setattr(visualizer, "resolve_runtime_feature_run_context", lambda explicit, *a, **k: {
+        "feature_run_id": explicit, "feature_root": root.parent / explicit, "intended_receiver_mode": "model"})
+    monkeypatch.setattr(visualizer, "load_match", lambda *a, **k: subject)
+    monkeypatch.setattr(visualizer, "resolve_action_indices", lambda *a: [(0, "1")])
+
+    def collect(subject, models, feature_root, *a, **kwargs):
+        assert feature_root.name == "october"
+        values = physics.load_physical_xpass_match(root, "match", cache_selection=selection)
+        calls.append((models["pass_success"].identifier, values.attrs["pc_xpass_cache_resolution"]["mode"]))
+        return {"pass_success": pd.Series({"home_1": values.loc[20, "home_1"]})}
+
+    monkeypatch.setattr(visualizer, "collect_action_components", collect)
+    variants = [Variant(name, name, {}, [], {"pass_success": TinyModel("pass_success/" + name)})
+                for name in ("older", "newer")]
+    schema = {"node_in_dim": 26, "edge_in_dim": 5, "add_v_edge_features": True,
+              "add_relative_speed_edge_features": True}
+    groups = list(comparison.sportec_groups(args, visualizer, variants,
+        SimpleNamespace(rendered_components=["pass_success"]), {}, None, schema, "cpu"))
+    assert calls == [("pass_success/older", "equivalent"), ("pass_success/newer", "equivalent")]
+    assert [table["pass_success"].loc[20, "home_1"] for table in groups[0]["tables"]] == [0.5, 0.5]
+
+
+
+def test_version_validation_memo_rechecks_changed_metadata(equivalent_cache, monkeypatch):
+    root, _ = equivalent_cache
+    path = root / "metadata.json"
+    metadata = dict(cache.read_json(path), source="pc_xpass", available_x_pass_versions=["max"],
+                    available_metrics=["max_xpass"])
+    cache.atomic_json(path, metadata)
+    original = cache.json.loads
+    parses = []
+    def parse(value, **kwargs):
+        parses.append(True)
+        return original(value, **kwargs)
+    monkeypatch.setattr(cache.json, "loads", parse)
+    memo = {}
+    for _ in range(2):
+        physics.validate_x_pass_version_available(root, source="pc_xpass", x_pass_version="max",
+                                                 metric="max_xpass", memo=memo)
+    assert len(parses) == 1
+    cache.atomic_json(path, dict(metadata, source="physical_xpass"))
+    with pytest.raises(ValueError, match="has source"):
+        physics.validate_x_pass_version_available(root, source="pc_xpass", x_pass_version="max",
+                                                 metric="max_xpass", memo=memo)
+    assert len(parses) == 2

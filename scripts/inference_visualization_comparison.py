@@ -211,6 +211,14 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
     actions = mod.resolve_action_indices(subject, args)
     if not actions:
         raise ValueError("No matching modeled actions selected for comparison.")
+    possession_states = None
+    if args.pc_xpass or any(model.args.get("pc_xpass") or model.args.get("lane_survival")
+                            for variant in variants for model in variant.models.values()):
+        from datatools.sportec_possessions import build_sportec_possessions
+        # This subject is a fixed snapshot for the group; select independent frame
+        # views below instead of rebuilding every physical graph for every action.
+        possession_states = list(build_sportec_possessions(subject, args.match_id, feature_root,
+            scope="actions", **getattr(subject, "runtime_graph_options", {})))
     for variant in variants:
         variant.provenance["runtime_feature_context"] = {key: str(value) if isinstance(value, Path) else value for key, value in runtime.items()}
     for action_index, display_id in actions:
@@ -222,7 +230,8 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                 display_id, Path(args.output_dir), show_trajectories=args.show_trajectories,
                 show_physical_xpass=args.show_physical_xpass, physical_cache_dir=args.physical_cache_dir,
                 physical_xpass_metric_name=mod.physical_xpass_metric(args), physical_xpass_version_name=args.x_pass_version,
-                rendered_components=selection.rendered_components, prediction_cache=cache)
+                rendered_components=selection.rendered_components, prediction_cache=cache,
+                possession_states=possession_states)
             tables.append({component: pd.DataFrame([row], index=[frame]) for component, row in values.items()})
         action = subject.actions.loc[action_index]
         yield {"scene": f"{args.match_id}/action_{display_id}", "frame": frame, "tables": tables,

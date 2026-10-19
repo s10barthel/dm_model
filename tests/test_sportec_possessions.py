@@ -523,3 +523,64 @@ def test_ranking_corner_credit_and_opponent_perspective(tmp_path, monkeypatch):
     assert scored.loc[4, "carry_epv"] == pytest.approx(.1)
     assert scored.loc[4, "pass_epv"] == pytest.approx(-1.7)
     assert scored.loc[4, "action_epv"] == pytest.approx(-1.6)
+
+
+@pytest.mark.parametrize("use_carries", [False, True])
+def test_visualization_and_generator_loaders_share_canonical_provenance(tmp_path, monkeypatch, use_carries):
+    from scripts import run_relevant_models as runner, visualize_action_components as visualizer
+    from project_config import get_action_graph_dir
+
+    match, _ = fixture(monkeypatch)
+    events = match.events.copy()
+    lineup = pd.DataFrame({"stats_perform_match_id": ["match"]})
+    resolved = match.actions.copy()
+    resolved["xT"] = 0.9
+    graph_dir = get_action_graph_dir(tmp_path, use_carries=use_carries)
+    graph_dir.mkdir(parents=True)
+    (graph_dir / "match.pt").touch()
+
+    class LoadedMatch:
+        def __init__(self, events, tracking, lineup, **kwargs):
+            self.events, self.tracking, self.lineup = events.copy(), tracking.copy(), lineup.copy()
+
+        def construct_labels(self, *, resolved_actions, **kwargs):
+            # Both entrypoints must retain the unmodified source before constructing labels.
+            assert self.sportec_canonical_source is events
+            self.actions = resolved_actions.copy()
+            return torch.empty((0, 0))
+
+    def read_parquet(path):
+        if "tracking_processed" in str(path):
+            return match.tracking.copy()
+        if Path(path).name == "line_up.parquet":
+            return lineup.copy()
+        return resolved.copy()
+
+    for module in (runner, visualizer):
+        monkeypatch.setattr(module, "Match", LoadedMatch)
+    monkeypatch.setattr(pd, "read_csv", lambda *a, **k: events)
+    monkeypatch.setattr(pd, "read_parquet", read_parquet)
+    monkeypatch.setattr(torch, "load", lambda *a, **k: [])
+    monkeypatch.setattr(runner, "get_resolved_action_path", lambda *a, **k: graph_dir / "match.pt")
+    monkeypatch.setattr(visualizer, "get_resolved_action_path", lambda *a, **k: graph_dir / "match.pt")
+    generated = runner.load_match("match", feature_root=tmp_path, use_carries=use_carries, load_endpoint_graphs=False)
+    visualized = visualizer.load_match("match", feature_root=tmp_path, use_carries=use_carries)
+    assert reconstruct(generated).provenance == reconstruct(visualized).provenance
+
+
+
+def test_comparison_reuses_states_without_narrowing_the_cached_snapshot(monkeypatch):
+    from scripts.visualize_action_components import possession_state_for_action
+
+    match, _ = fixture(monkeypatch)
+    match.match_id = "match"
+    states = list(sp.build_sportec_possessions(match, "match", Path("feature")))
+    original = {state.pc_cache_match_id: state.actions.copy(deep=True) for state, _ in states}
+    monkeypatch.setattr(sp, "build_sportec_possessions", lambda *a, **k: pytest.fail("reconstructed twice"))
+    for action_index in (0, 1, 0):
+        state, frame = possession_state_for_action(match, action_index, Path("feature"), states)
+        assert state.actions.index.tolist() == [frame]
+        assert len(state.labels) == len(state.graph_features_0) == 1
+        state.actions.loc[frame, "state_id"] = "local change"
+    for state, _ in states:
+        pd.testing.assert_frame_equal(state.actions, original[state.pc_cache_match_id])

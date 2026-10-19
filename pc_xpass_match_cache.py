@@ -6,6 +6,7 @@ transaction translates them to explicit identities and publishes once per match.
 from __future__ import annotations
 
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -188,6 +189,7 @@ class Selection:
     possession_id: int
     provenance_id: str
     memo: dict | None = None
+    descriptor: dict | None = None
 
 
 def selection_for(state):
@@ -197,27 +199,74 @@ def selection_for(state):
     memo = getattr(state, "_pc_match_cache", None)
     if memo is None:
         memo = state._pc_match_cache = {}
-    return Selection(int(state.event_index), str(identity), memo)
+    return Selection(int(state.event_index), str(identity), memo,
+                     deepcopy(getattr(state, "pc_state_descriptor", None)))
+
+
+def _resolve_possession(root, match_id, selection, descriptors):
+    """Resolve equivalent Sportec inputs without changing stored or runtime IDs."""
+    descriptor = descriptors.get(selection.provenance_id)
+    if descriptor is not None:
+        if int(descriptor["possession_id"]) == selection.possession_id:
+            return selection.provenance_id, descriptor, "exact"
+        raise ValueError("pc-xPass possession provenance differs: possession_id; regenerate into a new cache version")
+
+    message = "pc-xPass possession provenance differs"
+    runtime = selection.descriptor
+    if Path(root).name != "sportec" or runtime is None:
+        raise ValueError(message + "; regenerate into a new cache version")
+
+    from datatools.sportec_possessions import STATE_CONTRACT as sportec_contract
+    from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
+
+    required = {"match_id", "possession_id", "state_partition_id", "period_id", "possessor_id",
+                "feature_run_id", "state_contract", "physical_input_contract", "canonical_sha256",
+                "control_sha256", "resolved_actions_sha256", "tracking_sha256", "lineup_sha256"}
+    missing = sorted(key for key in required if runtime.get(key) is None or runtime.get(key) == "")
+    if missing:
+        raise ValueError(message + f": incomplete runtime descriptor ({', '.join(missing)})")
+    if runtime["state_contract"] != sportec_contract or runtime["physical_input_contract"] != PHYSICAL_INPUT_CONTRACT:
+        raise ValueError(message + ": unsupported state_contract or physical_input_contract")
+    if (runtime["match_id"] != str(match_id) or runtime["possession_id"] != selection.possession_id
+            or runtime["state_partition_id"] != selection.possession_id):
+        raise ValueError(message + ": runtime match_id, possession_id or state_partition_id differs from selection")
+
+    matches, differences = [], []
+    for key, candidate in descriptors.items():
+        fields = (set(runtime) | set(candidate)) - {"feature_run_id"}
+        differing = {field for field in fields
+                     if field not in runtime or field not in candidate or runtime[field] != candidate[field]}
+        incomplete = {field for field in required if candidate.get(field) is None or candidate.get(field) == ""}
+        if not differing and not incomplete:
+            matches.append((key, candidate))
+        differences.append(differing | incomplete)
+    if len(matches) == 1:
+        return *matches[0], "equivalent"
+    if matches:
+        raise ValueError(message + ": ambiguous equivalent cached descriptors")
+    # Report the closest descriptor rather than unrelated players' differences.
+    nearest = min(differences, key=lambda fields: (len(fields), sorted(fields)), default=set())
+    detail = ", ".join(sorted(nearest)) or "no cached descriptors"
+    raise ValueError(message + f": differing fields: {detail}; generate a matching cache into a new version")
 
 
 def load_possession(root, match_id, selection, *, lane=False, requested_frames=None):
     frames, _, record = load_match(root, match_id, memo=selection.memo, include_lane=lane)
-    descriptor = record["descriptors"].get(selection.provenance_id)
-    if descriptor is None or int(descriptor["possession_id"]) != selection.possession_id:
-        raise ValueError("pc-xPass possession provenance differs; regenerate into a new cache version")
+    key, descriptor, resolution = _resolve_possession(root, match_id, selection, record["descriptors"])
+    possession_id = int(descriptor["possession_id"])
     name = "lane_control" if lane else "matches"
     if name not in frames:
         raise ValueError("Missing lane-control output; resume generation with lane-control export")
-    result = frames[name].loc[frames[name].possession_id.eq(selection.possession_id)].copy()
-    if not result.possession_provenance_id.eq(selection.provenance_id).all():
+    result = frames[name].loc[frames[name].possession_id.eq(possession_id)].copy()
+    if not result.possession_provenance_id.eq(key).all():
         raise ValueError("pc-xPass row provenance differs")
     if not result.possessor_id.astype(str).eq(str(descriptor["possessor_id"])).all():
         raise ValueError("pc-xPass row possessor differs from its provenance")
     if lane:
         covered = {int(row["state_frame_id"]): row for row in record.get("lane_states", [])
-                   if row["possession_provenance_id"] == selection.provenance_id}
+                   if row["possession_provenance_id"] == key}
         counts = result.groupby("state_frame_id").size().to_dict()
-        main = frames["matches"].loc[frames["matches"].possession_id.eq(selection.possession_id)]
+        main = frames["matches"].loc[frames["matches"].possession_id.eq(possession_id)]
         wanted = set(map(int, requested_frames)) if requested_frames is not None else set(main.state_frame_id)
         for row in main.to_dict("records"):
             frame_id = int(row["state_frame_id"])
@@ -230,9 +279,16 @@ def load_possession(root, match_id, selection, *, lane=False, requested_frames=N
         available = set(result.state_frame_id.astype(int))
         if lane:
             available = {int(row["state_frame_id"]) for row in record.get("lane_states", [])
-                         if row["possession_provenance_id"] == selection.provenance_id}
+                         if row["possession_provenance_id"] == key}
         if set(map(int, requested_frames)) - available:
             raise ValueError("pc-xPass cache is missing requested possession frames; resume generation")
+    result.attrs["pc_xpass_cache_resolution"] = {
+        "mode": resolution,
+        "runtime_feature_run_id": (selection.descriptor or descriptor).get("feature_run_id"),
+        "cache_feature_run_id": descriptor.get("feature_run_id"),
+        "requested_provenance_id": selection.provenance_id,
+        "resolved_provenance_id": key,
+    }
     return result
 
 

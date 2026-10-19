@@ -505,6 +505,7 @@ def attach_physical_xpass_for_inference(
             source=str(lookup_config["source"]),
             x_pass_version=str(lookup_config["x_pass_version"]),
             metric=str(lookup_config["metric"]),
+            memo=getattr(match, "_pc_match_cache", None),
         )
     else:
         validate_physical_xpass_cache_metadata(
@@ -665,6 +666,7 @@ def filter_missing_physical_xpass_rows_for_inference(
                 source=str(lookup_config["source"]),
                 x_pass_version=str(lookup_config["x_pass_version"]),
                 metric=str(lookup_config["metric"]),
+                memo=getattr(match, "_pc_match_cache", None),
             )
         physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope,
                                                    cache_selection=match_cache.selection_for(match))
