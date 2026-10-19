@@ -225,7 +225,8 @@ def _resolve_possession(root, match_id, selection, descriptors):
     missing = sorted(key for key in required if runtime.get(key) is None or runtime.get(key) == "")
     if missing:
         raise ValueError(message + f": incomplete runtime descriptor ({', '.join(missing)})")
-    if runtime["state_contract"] != sportec_contract or runtime["physical_input_contract"] != PHYSICAL_INPUT_CONTRACT:
+    from datatools.carry_policy import STATE_CONTRACT as validated_contract
+    if runtime["state_contract"] not in {sportec_contract, validated_contract} or runtime["physical_input_contract"] != PHYSICAL_INPUT_CONTRACT:
         raise ValueError(message + ": unsupported state_contract or physical_input_contract")
     if (runtime["match_id"] != str(match_id) or runtime["possession_id"] != selection.possession_id
             or runtime["state_partition_id"] != selection.possession_id):
@@ -497,7 +498,7 @@ class MatchAccumulator:
                     if int(row["action_index"]) in expected and _lane_control_state_key(row) not in completed:
                         raise ValueError("Incomplete match: missing lane-control coverage")
         outputs = dict(self.old_record.get("outputs", {}))
-        details = {"cache_format": expected_format(self.root), "state_contract": state_contract(self.root),
+        details = {"cache_format": expected_format(self.root), "state_contract": self.provenance.get("state_contract", state_contract(self.root)),
                    "dataset": self.root.name, "descriptors": self.descriptors, "provenance": self.provenance}
         if self.manifest is not None:
             details["manifest"] = self.manifest

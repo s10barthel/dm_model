@@ -5,7 +5,7 @@ import copy
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from datatools.trajectory_refresh import run_trajectory_refresh
 from datatools.pass_trajectory import PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
+from datatools.carry_policy import CarryPolicy
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
@@ -140,6 +141,10 @@ def parse_args() -> argparse.Namespace:
             "variant; use --in-place to update the existing run."
         ),
     )
+    parser.add_argument("--replace-carries", action="store_true",
+                        help="Create a derived run reusing canonical artifacts and completely rebuilding carries; supports --extend-feature-run-id latest.")
+    for name, value in asdict(CarryPolicy()).items():
+        parser.add_argument("--carry-" + name.replace("_", "-"), type=float, default=value)
     parser.add_argument(
         "--refresh-trajectory", "--refresh-trajectory-speed", dest="refresh_trajectory", action="store_true",
         help="Refresh success-intent speed/direction and all pass-duration labels; requires --extend-feature-run-id. "
@@ -274,6 +279,15 @@ def parse_args() -> argparse.Namespace:
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     args.refresh_trajectory_speed = args.refresh_trajectory  # Deprecated programmatic alias.
+    if args.replace_carries:
+        if not args.extend_feature_run_id or args.in_place:
+            parser.error("--replace-carries requires --extend-feature-run-id and creates a derived run; --in-place is unsupported.")
+        supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
+        allowed = {"--replace-carries", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
+                   "--num-workers", "--worker-thread-limit"}
+        allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
+        if supplied - allowed:
+            parser.error("--replace-carries inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.refresh_trajectory:
         if not args.extend_feature_run_id:
             parser.error("--refresh-trajectory requires --extend-feature-run-id.")
@@ -1463,6 +1477,8 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
             updated["graph_schema"] = final_schema
             updated["carry_variant"] = dict(available=True, definition=CARRY_DEFINITION_VERSION,
                                             artifact_suffix="_carries",
+                                            validation_parameters=asdict(CarryPolicy()),
+                                            sidecar_root="carry_sidecars",
                                             generated_at=datetime.now().isoformat(timespec="seconds"))
         return updated
 
@@ -1529,6 +1545,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         metadata["carry_variant"] = {
             "available": True,
             "definition": CARRY_DEFINITION_VERSION,
+            "validation_parameters": asdict(CarryPolicy()),
+            "sidecar_root": "carry_sidecars",
             "artifact_suffix": "_carries",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
         }
@@ -1539,7 +1557,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.refresh_trajectory:
+    if args.replace_carries:
+        from scripts.replace_carries import replace_carries
+        replace_carries(args)
+    elif args.refresh_trajectory:
         run_trajectory_refresh(args)
     elif args.extend_feature_run_id:
         if args.use_carries:

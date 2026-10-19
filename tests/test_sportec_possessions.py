@@ -241,7 +241,7 @@ def test_reconstruction_does_not_change_training_carries(monkeypatch):
     for left, right in zip(before, after):
         pd.testing.assert_frame_equal(left, right)
     pd.testing.assert_frame_equal(original, match.actions)
-    assert CARRY_DEFINITION_VERSION == "sportec_fernandez_1s_v2"
+    assert CARRY_DEFINITION_VERSION == "sportec_fernandez_1s_v3"
 
 
 def test_same_frame_receipt_precedes_its_release(monkeypatch):

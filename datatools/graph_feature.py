@@ -1620,11 +1620,18 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
     tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
     if args.use_carries:
-        carry_path = CARRY_SEGMENTS_DIR / f"{task.match_id}.parquet"
+        from datatools.ball_carries import derive_carry_segments
+        from datatools.carry_policy import run_policy
+        from project_config import CONTROL_EVENTS_SYNCED_DIR
+        local = feature_root / "carry_sidecars"
+        carry_path = local / "segments" / f"{task.match_id}.parquet"
         if not carry_path.exists():
-            raise FileNotFoundError(
-                f"Carry sidecar not found at {carry_path}. Run scripts/preprocess_sportec.py --carry-artifacts-only first."
-            )
+            controls = pd.read_parquet(CONTROL_EVENTS_SYNCED_DIR / f"{task.match_id}.parquet")
+            _, policy = run_policy(feature_root)
+            carries, audit = derive_carry_segments(controls, events, match.tracking, fps=match.fps, policy=policy)
+            atomic_parquet_save(controls, local / "control_events" / f"{task.match_id}.parquet")
+            atomic_parquet_save(audit, local / "audits" / f"{task.match_id}.parquet")
+            atomic_parquet_save(carries, carry_path)
         carries = pd.read_parquet(carry_path)
         validate_carry_artifact_version(carries)
         augment_match_actions_with_carries(match, carries)

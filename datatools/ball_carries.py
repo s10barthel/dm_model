@@ -8,8 +8,9 @@ import numpy as np
 import pandas as pd
 
 from datatools.endpoint_policy import sample_is_eligible, valid_interval
+from datatools.carry_policy import DEFINITION, LEGACY_DEFINITION, CarryPolicy, reconstruct_spells, tracking_table
 
-CARRY_DEFINITION_VERSION = "sportec_fernandez_1s_v2"
+CARRY_DEFINITION_VERSION = DEFINITION
 RESTART_TAGS = {"KickOff", "ThrowIn", "GoalKick", "CornerKick", "FreeKick", "Penalty", "RefereeBall"}
 
 
@@ -309,7 +310,7 @@ def _canonical_return_index(canonical: pd.DataFrame, period: int, terminal_frame
     return int(candidates.index[0]) if not candidates.empty else None
 
 
-def derive_carry_segments(
+def _derive_legacy_carry_segments(
     control_events: pd.DataFrame,
     canonical_events: pd.DataFrame,
     tracking: pd.DataFrame,
@@ -424,7 +425,7 @@ def derive_carry_segments(
                 segment_success = bool(success) if segment_id == count - 1 else True
                 segments.append(
                     {
-                        "carry_definition": CARRY_DEFINITION_VERSION,
+                        "carry_definition": LEGACY_DEFINITION,
                         "carry_id": int(current["carry_id"]),
                         "segment_id": segment_id,
                         "period_id": int(current["period_id"]),
@@ -554,16 +555,26 @@ def derive_carry_segments(
     audit_table = pd.DataFrame.from_records(spells)
     if audit_table.empty:
         audit_table = pd.DataFrame(columns=audit_columns)
-    segment_table.attrs["carry_definition"] = CARRY_DEFINITION_VERSION
-    audit_table.attrs["carry_definition"] = CARRY_DEFINITION_VERSION
+    segment_table.attrs["carry_definition"] = LEGACY_DEFINITION
+    audit_table.attrs["carry_definition"] = LEGACY_DEFINITION
     return segment_table, audit_table
+
+
+def derive_carry_segments(control_events, canonical_events, tracking, fps=25, *, policy=None,
+                          definition=CARRY_DEFINITION_VERSION):
+    if definition == LEGACY_DEFINITION:
+        return _derive_legacy_carry_segments(control_events, canonical_events, tracking, fps)
+    if definition != CARRY_DEFINITION_VERSION:
+        raise ValueError(f"Unsupported carry definition: {definition}")
+    from datatools.carry_segments_v3 import derive
+    return derive(control_events, canonical_events, tracking, fps, policy=policy)
 
 
 def validate_carry_artifact_version(carries: pd.DataFrame) -> None:
     versions = set(carries.get("carry_definition", pd.Series(dtype=str)).dropna())
     if carries.empty:
         versions = {carries.attrs.get("carry_definition")}
-    if versions != {CARRY_DEFINITION_VERSION}:
+    if versions not in ({CARRY_DEFINITION_VERSION}, {LEGACY_DEFINITION}):
         raise ValueError("Stale carry sidecar: rebuild synchronization and carry artifacts with "
                          "scripts/preprocess_sportec.py before generating new carry features.")
 

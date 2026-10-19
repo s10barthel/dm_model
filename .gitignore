@@ -124,3 +124,6 @@ _vendor/defcon/saved
 !tests/test_pass_trajectory.py
 !tests/test_success_intent_unknown_targets.py
 !tests/test_intended_receiver_comparison.py
+
+!tests/test_carry_policy.py
+!tests/test_replace_carries.py

@@ -1250,7 +1250,10 @@ class BallCarryRegressionTests(unittest.TestCase):
     @staticmethod
     def tracking() -> pd.DataFrame:
         index = pd.Index(range(251), name="frame_id")
-        return pd.DataFrame({"ball_x": index / 10.0, "ball_y": 20.0}, index=index)
+        return pd.DataFrame({"ball_x": index / 10.0, "ball_y": 20.0,
+                             "home_1_x": index / 10.0, "home_1_y": 20.0,
+                             "home_2_x": index / 10.0, "home_2_y": 20.0,
+                             "away_3_x": index / 10.0, "away_3_y": 20.0}, index=index)
 
     @staticmethod
     def canonical(next_frame: int = 170) -> pd.DataFrame:

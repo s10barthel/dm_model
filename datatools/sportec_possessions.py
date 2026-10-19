@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 import pandas as pd
@@ -16,6 +16,7 @@ import torch
 from datatools import config, preprocess, utils
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
 from project_config import CONTROL_EVENTS_SYNCED_DIR
+from datatools.carry_policy import DEFINITION, STATE_CONTRACT as VALIDATED_STATE_CONTRACT, run_policy
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 STATE_CONTRACT = "sportec_possession_states_v3"
@@ -31,6 +32,11 @@ STATE_METADATA_COLUMNS = [
     "original_start_frame", "original_end_frame", "start_event_id",
     "start_action_id", "start_original_event_id", "end_action_id", "end_original_event_id",
 ]
+
+
+def state_contract_for_run(feature_root):
+    definition, _ = run_policy(feature_root)
+    return VALIDATED_STATE_CONTRACT if definition == DEFINITION else STATE_CONTRACT
 
 
 def _digest(value):
@@ -68,7 +74,7 @@ def _event_id(value):
 
 
 def state_identity(match_id, period, frame, possessor, provenance):
-    return _digest([STATE_CONTRACT, str(match_id), int(period), int(frame), possessor, provenance])
+    return _digest([provenance.get("state_contract", STATE_CONTRACT), str(match_id), int(period), int(frame), possessor, provenance])
 
 
 def _table_fingerprint(table):
@@ -118,15 +124,19 @@ class SportecStatePlan:
         return key
 
     def manifest(self):
-        return dict(state_contract=STATE_CONTRACT, match_id=self.match_id, provenance=self.provenance,
+        return dict(state_contract=self.provenance["state_contract"], match_id=self.match_id, provenance=self.provenance,
                     spells=self.spells, actions=self.actions,
                     observations=list(self.observations.values()), diagnostics=self.diagnostics)
 
 
 def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=None, graph_options=None):
     """Reconstruct all spells and canonical observations before sampling or graph validation."""
+    definition, policy = run_policy(feature_root)
     if control_events is None:
         path = CONTROL_EVENTS_SYNCED_DIR / f"{match_id}.parquet"
+        local = Path(feature_root) / "carry_sidecars" / "control_events" / f"{match_id}.parquet"
+        if definition == DEFINITION:
+            path = local
         if not path.exists():
             raise FileNotFoundError(f"Missing synchronized control events {path}; run Sportec preprocessing.")
         control_events = pd.read_parquet(path)
@@ -139,12 +149,14 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
     actions = getattr(match, "actions", canonical).copy()
     if "spadl_type" in actions:
         actions = actions.loc[actions.spadl_type.ne("ball_carry")].copy()
-    provenance = dict(state_contract=STATE_CONTRACT, feature_run_id=Path(feature_root).name,
+    provenance = dict(state_contract=VALIDATED_STATE_CONTRACT if definition == DEFINITION else STATE_CONTRACT, feature_run_id=Path(feature_root).name,
         canonical_sha256=(_table_fingerprint(match.sportec_canonical_source) if hasattr(match, "sportec_canonical_source")
                           else _canonical_fingerprint(canonical)), control_sha256=_table_fingerprint(control_events),
         resolved_actions_sha256=_action_fingerprint(actions), tracking_sha256=_table_fingerprint(match.tracking),
         lineup_sha256=_table_fingerprint(getattr(match, "lineup", pd.DataFrame())),
         physical_input_contract=PHYSICAL_INPUT_CONTRACT)
+    if definition == DEFINITION:
+        provenance["carry_validation_parameters"] = asdict(policy)
     plan = SportecStatePlan(str(match_id), provenance)
     canonical["_event_key"] = canonical.original_event_id.map(_event_id)
     ambiguous_events = {event for event, rows in canonical.groupby("_event_key")
@@ -170,6 +182,9 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
             owner_id=action.get("object_id") if _player(action.get("object_id")) else None,
             pre_state_id=pre_id, post_state_id=post_id, spell_id=None,
             start_state_id=None, end_state_id=pre_id, next_state_id=None))
+    if definition == DEFINITION:
+        from datatools.carry_inference import populate
+        return populate(plan, match, control_events, canonical, policy)
     timeline = []
     raw_orders = control_events.event_id.map(_event_id).map(event_order)
     for source_index, (_, raw) in enumerate(control_events.iterrows()):
@@ -497,7 +512,7 @@ def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope
         tracking = match.tracking.loc[match.tracking.period_id == period]
         observations = sorted((row for key, row in plan.observations.items() if key in selected_ids
             and row["period_id"] == period and row["possessor_id"] == carrier), key=lambda row: row["state_frame_id"])
-        cache_key = f"{STATE_CONTRACT}_{_digest([str(match_id), period, carrier, plan.provenance])}"
+        cache_key = f"{plan.provenance['state_contract']}_{_digest([str(match_id), period, carrier, plan.provenance])}"
         actions, labels, graphs = [], [], []
         for observation in observations:
             frame = observation["state_frame_id"]
@@ -526,7 +541,7 @@ def build_sportec_possessions(match, match_id: str, feature_root: Path, *, scope
                 success=True, blocked=False, start_x=x, start_y=y, end_x=x, end_y=y,
                 stats_perform_match_id=str(match_id), action_id=observation["state_id"], original_event_id=None,
                 state_id=observation["state_id"], state_partition_id=partition_id, possessor_id=carrier,
-                state_frame_id=frame, frame_role="|".join(observation["roles"]), state_contract=STATE_CONTRACT,
+                state_frame_id=frame, frame_role="|".join(observation["roles"]), state_contract=plan.provenance["state_contract"],
                 pc_cache_match_id=cache_key)
             label = [0.0] * len(config.LABEL_COLUMNS)
             values = dict(action_index=frame, is_pass=1, n_players=len(attackers) + len(defenders),
@@ -565,7 +580,7 @@ def sportec_event_endpoint_view(component: pd.DataFrame, manifest=None) -> pd.Da
     """Resolve event roles; probabilities retain each physical state's team perspective."""
     if "state_id" not in component:
         return component
-    if manifest is None or manifest.get("state_contract") != STATE_CONTRACT:
+    if manifest is None or manifest.get("state_contract") not in {STATE_CONTRACT, VALIDATED_STATE_CONTRACT}:
         raise ValueError("Sportec state components require a matching possession manifest; regenerate the component run.")
     if component.state_id.duplicated().any():
         raise ValueError("Duplicate physical state predictions")

@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments
-from datatools.sportec_possessions import STATE_CONTRACT
+from datatools.sportec_possessions import STATE_CONTRACT, state_contract_for_run
 from datatools.sportec_possessions import build_sportec_possessions, sportec_component_table
 from datatools.skillcorner import infer_skillcorner_components
 
@@ -854,7 +854,7 @@ def main() -> None:
         "use_carries": use_carries,
         "scope": args.scope,
         "frames": args.frames,
-        "state_contract": STATE_CONTRACT,
+        "state_contract": state_contract_for_run(feature_root),
         "graph_schema": graph_schema,
         "models": {
             "action_intent": resolved_model_ids["action_intent"],

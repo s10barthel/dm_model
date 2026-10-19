@@ -434,6 +434,8 @@ def test_comparison_adapter_reads_equivalent_cache_for_both_checkpoints(equivale
 
     root, selection = equivalent_cache
     subject = SimpleNamespace(actions=pd.DataFrame(dict(frame_id=[20], object_id=["home_1"], spadl_type=["pass"])))
+    # This cache adapter fixture has no tracking/overlay inputs.
+    monkeypatch.setattr(visualizer, "prepare_action_overlays", lambda *a, **k: None)
     args = visualizer.parse_args(["--match-id", "match", "--feature-run-id", "october",
         "--show-physical-xpass", "--physical-cache-dir", str(root)])
     calls = []

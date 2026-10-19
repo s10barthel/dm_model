@@ -140,7 +140,8 @@ from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_f
 
 
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
-from datatools.sportec_possessions import STATE_CONTRACT as SPORTEC_STATE_CONTRACT
+from datatools.sportec_possessions import STATE_CONTRACT as SPORTEC_STATE_CONTRACT, state_contract_for_run
+from datatools.carry_policy import STATE_CONTRACT as VALIDATED_SPORTEC_STATE_CONTRACT
 from datatools.sportec_possessions import build_sportec_possessions
 from datatools.sportec_seasons import add_season_argument, select_season_match_ids
 
@@ -1620,8 +1621,8 @@ def write_runtime_dataset_metadata(
             storage="wide_parquet_one_row_per_match_possession_frame_player_id_columns",
             state_identity="match_id + possession_id + state_frame_id",
         )
-    elif source_inputs.get("state_contract") == SPORTEC_STATE_CONTRACT:
-        metadata.update(state_contract=SPORTEC_STATE_CONTRACT,
+    elif source_inputs.get("state_contract") in {SPORTEC_STATE_CONTRACT, VALIDATED_SPORTEC_STATE_CONTRACT}:
+        metadata.update(state_contract=source_inputs["state_contract"],
                         storage="wide_parquet_one_row_per_physical_state_player_id_columns",
                         state_identity="match_id + period_id + state_frame_id + possessor_id + provenance")
     if bool(getattr(args, "export_lane_control", False)):
@@ -1901,7 +1902,7 @@ def run_runtime_sportec_possessions(args: argparse.Namespace, *, compute_session
             match_cache.end(transaction)
     write_runtime_dataset_metadata("sportec", cache_dir, args, stats=stats,
         source_inputs={"feature_run_id": str(feature_run_id), "scope": args.scope, "frames": args.frames,
-                       "state_contract": SPORTEC_STATE_CONTRACT, "possession_reports": reports, "state_partitions": partitions,
+                       "state_contract": state_contract_for_run(feature_root), "possession_reports": reports, "state_partitions": partitions,
                        "frame_scopes": [PHYSICAL_XPASS_FRAME_SCOPE_ACTION]}, skipped=skipped, compute_session=compute_session)
     return {"dataset": "sportec", "cache_dir": str(cache_dir), "stats": stats, "skipped": skipped}
 

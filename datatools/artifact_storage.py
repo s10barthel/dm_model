@@ -53,7 +53,7 @@ def atomic_parquet_save(frame, destination, **kwargs):
         temporary.replace(destination)
 
 
-def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics=None):
+def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics=None, exclude=None, resume=False):
     """Clone without reading graph payloads; copy only independent control files."""
     source, destination = Path(source), Path(destination)
     if not source.is_dir():
@@ -62,7 +62,7 @@ def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics
         raise ValueError(f"Unknown artifact copy mode: {mode}")
     if source.resolve() == destination.resolve():
         raise ValueError("Source and destination must differ.")
-    if destination.exists() and any(p.name != "metadata.json" for p in destination.iterdir()):
+    if not resume and destination.exists() and any(p.name != "metadata.json" for p in destination.iterdir()):
         raise FileExistsError(f"Derived feature run directory is not empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
     stats = dict(mode=mode, linked_files=0, linked_bytes=0, copied_files=0, copied_bytes=0)
@@ -82,6 +82,8 @@ def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics
                               "Use --artifact-copy-mode copy to explicitly allow a full copy.") from error
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
+        if exclude is not None and exclude(relative):
+            continue
         if relative == Path("metadata.json"):
             continue
         if path.is_symlink():
@@ -91,6 +93,10 @@ def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics
             output.mkdir(parents=True, exist_ok=True)
             continue
         output.parent.mkdir(parents=True, exist_ok=True)
+        if resume and output.exists():
+            if output.stat().st_size != path.stat().st_size:
+                raise ValueError(f"Incomplete cloned artifact: {output}")
+            continue
         # Only data artifacts are shared. Logs, JSON and diagnostics stay independent.
         share = mode == "hardlink" and path.suffix in {".pt", ".parquet"}
         if share:
@@ -100,7 +106,9 @@ def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics
                 raise OSError(f"Cannot hard-link {path}; no copy fallback was performed. "
                               "Use a new output run and --artifact-copy-mode copy if desired.") from error
         else:
-            shutil.copy2(path, output)
+            with staged_path(output) as temporary:
+                shutil.copy2(path, temporary)
+                temporary.replace(output)
         kind = "linked" if share else "copied"
         stats[f"{kind}_files"] += 1
         stats[f"{kind}_bytes"] += path.stat().st_size
