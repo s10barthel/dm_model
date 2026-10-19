@@ -13,6 +13,8 @@ from shapely.geometry import Point, Polygon
 from torch_geometric.data import Batch, Data
 
 from datatools import config
+from datatools.pass_trajectory import (PassEndpointResolver, load_official_events, trajectory_samples,
+                                     PASS_DURATION)
 from models.self_loops import capture_self_attributes
 from models.goal_context import goal_policy, validate_source_goals, validate_observed_goal_target, node_index_invalid_reason
 from models.node_feature_config import mask_goal_poss_features, resolve_speed_aware
@@ -967,6 +969,11 @@ def label_intended_receivers(
         raise ValueError(f"Unsupported heuristic intended receiver mode: {intended_receiver_mode}")
 
     actions = actions.copy()
+    if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY:
+        if "pass_endpoint_definition" not in actions or not actions.pass_endpoint_definition.isin(["", PASS_DURATION]).all():
+            match_ids = actions.get("stats_perform_match_id", pd.Series(dtype=str)).dropna()
+            match_id = str(match_ids.iloc[0]) if len(match_ids) else None
+            actions = PassEndpointResolver(tracking, fps, load_official_events(match_id)).annotate(actions)
     actions["intent_id"] = pd.Series(index=actions.index, dtype="object")
     stats = {
         "mode": intended_receiver_mode,
@@ -974,7 +981,6 @@ def label_intended_receivers(
         "failed_passes_labeled": 0,
         "failed_passes_missing_endpoint": 0,
     }
-    trajectory_window_frames = max(int(round(float(fps) * 2.0)), 1)
 
     for i in actions.index:
         event_frame = actions.at[i, "frame_id"]
@@ -1024,20 +1030,15 @@ def label_intended_receivers(
         elif actions.at[i, "success"]:  # For successful passes
             actions.at[i, "intent_id"] = actions.at[i, "receiver_id"]
 
-        elif not pd.isna(receiver) and not pd.isna(receive_frame):  # For failed passes
+        elif (intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY
+              or (not pd.isna(receiver) and not pd.isna(receive_frame))):  # Failed passes
             stats["failed_passes_total"] += 1
-            receive_frame = int(receive_frame)
-            if receive_frame not in tracking.index:
+            effective_receive_frame = (actions.at[i, "trajectory_end_frame_id"]
+                                       if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY else receive_frame)
+            if pd.isna(effective_receive_frame) or effective_receive_frame not in tracking.index:
+                stats["failed_passes_missing_endpoint"] += 1
                 continue
-
-            effective_receive_frame = receive_frame
-            if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY and receiver == "out":
-                episode_end_frame = resolve_episode_end_frame(tracking, event_frame)
-                if episode_end_frame is not None:
-                    effective_receive_frame = episode_end_frame
-
-            if effective_receive_frame not in tracking.index:
-                continue
+            effective_receive_frame = int(effective_receive_frame)
 
             receive_snapshot: pd.Series = tracking.loc[effective_receive_frame]
 
@@ -1054,16 +1055,14 @@ def label_intended_receivers(
             if not teammates:
                 continue
 
-            start_x = snapshot.get(f"{possessor}_x", actions.at[i, "start_x"])
-            start_y = snapshot.get(f"{possessor}_y", actions.at[i, "start_y"])
-            if pd.isna(start_x) or pd.isna(start_y):
-                start_x = actions.at[i, "start_x"]
-                start_y = actions.at[i, "start_y"]
-
-            if pd.isna(start_x) or pd.isna(start_y):
-                continue
-
             if intended_receiver_mode == INTENDED_RECEIVER_MODE_ORIGINAL:
+                start_x = snapshot.get(f"{possessor}_x", actions.at[i, "start_x"])
+                start_y = snapshot.get(f"{possessor}_y", actions.at[i, "start_y"])
+                if pd.isna(start_x) or pd.isna(start_y):
+                    start_x = actions.at[i, "start_x"]
+                    start_y = actions.at[i, "start_y"]
+                if pd.isna(start_x) or pd.isna(start_y):
+                    continue
                 if receiver != "out":
                     end_x = receive_snapshot.get(f"{receiver}_x", actions.at[i, "end_x"])
                     end_y = receive_snapshot.get(f"{receiver}_y", actions.at[i, "end_y"])
@@ -1072,13 +1071,15 @@ def label_intended_receivers(
                     end_y = receive_snapshot.get("ball_y", actions.at[i, "end_y"])
                 trajectory_frame = effective_receive_frame
             else:
-                preferred_frame = min(event_frame + trajectory_window_frames, effective_receive_frame)
-                trajectory_frame, end_x, end_y = resolve_ball_endpoint(
-                    tracking,
-                    preferred_frame=preferred_frame,
-                    fallback_frame=effective_receive_frame,
-                    fallback_xy=(actions.at[i, "end_x"], actions.at[i, "end_y"]),
-                )
+                samples = trajectory_samples(tracking, actions.loc[i])
+                if samples is None:
+                    stats["failed_passes_missing_endpoint"] += 1
+                    continue
+                start_x, start_y = samples.iloc[0][["ball_x", "ball_y"]].to_numpy(dtype=float)
+                end_x, end_y = samples.iloc[-1][["ball_x", "ball_y"]].to_numpy(dtype=float)
+                if np.hypot(end_x - start_x, end_y - start_y) <= 1e-6:
+                    stats["failed_passes_missing_endpoint"] += 1
+                    continue
 
             if pd.isna(end_x) or pd.isna(end_y):
                 stats["failed_passes_missing_endpoint"] += 1

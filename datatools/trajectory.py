@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 
 LEGACY_TRAJECTORY_SPEED = "smoothed_mean_3d_speed_v1"
-TRAJECTORY_SPEED = "net_displacement_3d_speed_v2"
+PREVIOUS_TRAJECTORY_SPEED = "net_displacement_3d_speed_v2"
+TRAJECTORY_SPEED = "official_event_net_displacement_3d_1s_v3"
 TRAJECTORY_SPEED_KEY = "trajectory_speed_definition"
 
 
@@ -17,7 +18,7 @@ def speed_definition(value=None):
     if isinstance(value, dict):
         value = value.get(TRAJECTORY_SPEED_KEY)
     value = value or LEGACY_TRAJECTORY_SPEED
-    if value not in (LEGACY_TRAJECTORY_SPEED, TRAJECTORY_SPEED):
+    if value not in (LEGACY_TRAJECTORY_SPEED, PREVIOUS_TRAJECTORY_SPEED, TRAJECTORY_SPEED):
         raise ValueError(f"Unknown trajectory speed definition: {value!r}")
     return value
 
@@ -27,7 +28,7 @@ def require_speed_definition(actual, expected, *, context):
     if actual != expected:
         raise ValueError(
             f"{context}: trajectory speed definition mismatch: inputs={actual}, checkpoint/expected={expected}. "
-            "Refresh with --refresh-trajectory-speed and retrain success_intent, or select matching stored legacy graphs."
+            "Refresh with --refresh-trajectory and retrain success_intent, or select matching stored legacy graphs."
         )
     return actual
 

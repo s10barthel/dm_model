@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from datatools.utils import label_intended_receivers
+from datatools.pass_trajectory import ensure_pass_endpoints
 
 
 # Ring diameters are in display points, independent of pitch size or rotation.
@@ -32,30 +33,30 @@ def _finite_xy(x, y) -> tuple[float, float] | None:
     return coordinates if np.isfinite(coordinates).all() else None
 
 
-def resolve_pass_endpoint(match, action_index: int) -> tuple[float, float]:
+def resolve_pass_endpoint(match, action_index: int) -> tuple[float, float] | None:
+    resolver = ensure_pass_endpoints(match, annotate=False)
     action = match.actions.loc[action_index]
-    endpoint = _finite_xy(action.get("end_x"), action.get("end_y"))
-    if endpoint is not None:
-        return endpoint
-    receive_frame = action.get("receive_frame_id")
+    receive_frame = resolver.resolve(action).observed
     if pd.notna(receive_frame) and receive_frame in match.tracking.index:
         snapshot = match.tracking.loc[receive_frame]
         endpoint = _finite_xy(snapshot.get("ball_x"), snapshot.get("ball_y"))
         if endpoint is not None:
             return endpoint
-    raise ValueError(f"Missing actual pass endpoint for action {action_index}.")
+    return None
 
 
 def _heuristic_receivers(match, action_index: int) -> dict[str, str]:
+    resolver = ensure_pass_endpoints(match, annotate=False)
     cache = getattr(match, "_visualization_heuristic_receivers", None)
     if cache is None:
         cache = match._visualization_heuristic_receivers = {}
     if action_index not in cache:
         receivers = {}
+        actions = resolver.annotate(match.actions.loc[[action_index]])
         for mode in ("original", "angle_only"):
             # Restrict work to this action; the utility copies the rows before relabeling.
             labeled = label_intended_receivers(
-                match.actions.loc[[action_index]], match.tracking, action_type="pass",
+                actions, match.tracking, action_type="pass",
                 intended_receiver_mode=mode, fps=match.fps,
             )
             receivers[mode] = labeled.at[action_index, "intent_id"]

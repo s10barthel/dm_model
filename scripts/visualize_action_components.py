@@ -151,7 +151,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument(
         "--pass-endpoint", type=parse_bool, default=True,
-        help="Mark the actual pass end location with an x (true/false; default: true).",
+        help="Mark the observed pass end from tracking with an x (true/false; default: true).",
     )
     parser.add_argument(
         "--compare-intended-receiver", action="store_true",
@@ -667,7 +667,7 @@ def render_component(
     if overlays.endpoint_xy is not None:
         legend_handles.append(Line2D(
             [], [], marker="x", linestyle="none", color="black", markersize=9,
-            label="Actual pass end",
+            label="Observed pass end",
         ))
     fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.10 if legend_handles else 0.02)
     if legend_handles:

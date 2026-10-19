@@ -23,7 +23,8 @@ from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.xt_refresh import refresh_xt
 from datatools.trajectory import TRAJECTORY_SPEED
-from datatools.trajectory_refresh import run_trajectory_speed_refresh
+from datatools.trajectory_refresh import run_trajectory_refresh
+from datatools.pass_trajectory import PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
@@ -140,8 +141,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--refresh-trajectory-speed", action="store_true",
-        help="Refresh only success-intent net-displacement speed; requires --extend-feature-run-id.",
+        "--refresh-trajectory", "--refresh-trajectory-speed", dest="refresh_trajectory", action="store_true",
+        help="Refresh success-intent speed/direction and all pass-duration labels; requires --extend-feature-run-id. "
+             "--refresh-trajectory-speed is a deprecated alias. Saved receiver labels are preserved.",
     )
     parser.add_argument(
         "--refresh-target-family",
@@ -271,14 +273,15 @@ def parse_args() -> argparse.Namespace:
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
-    if args.refresh_trajectory_speed:
+    args.refresh_trajectory_speed = args.refresh_trajectory  # Deprecated programmatic alias.
+    if args.refresh_trajectory:
         if not args.extend_feature_run_id:
-            parser.error("--refresh-trajectory-speed requires --extend-feature-run-id.")
+            parser.error("--refresh-trajectory requires --extend-feature-run-id.")
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
-        allowed = {"--refresh-trajectory-speed", "--extend-feature-run-id", "--in-place", "--overwrite-feature-run",
+        allowed = {"--refresh-trajectory", "--refresh-trajectory-speed", "--extend-feature-run-id", "--in-place", "--overwrite-feature-run",
                    "--run-id", "--artifact-copy-mode", "--num-workers", "--worker-thread-limit"}
         if supplied - allowed:
-            parser.error("--refresh-trajectory-speed is dedicated; unsupported combined options: "
+            parser.error("--refresh-trajectory is dedicated; unsupported combined options: "
                          + ", ".join(sorted(supplied - allowed)))
         base = load_feature_run_metadata(args.extend_feature_run_id, required=True)
         vars(args).update(split_selector(base))
@@ -1506,6 +1509,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "intended_receiver_model_id": args.intended_receiver_model_id,
         "graph_schema": graph_schema_from_args(args),
         "trajectory_speed_definition": TRAJECTORY_SPEED,
+        PASS_DURATION_KEY: PASS_DURATION,
+        ANGLE_ONLY_KEY: ANGLE_ONLY,
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
         "endpoint_consumer_version": ENDPOINT_POLICY_VERSION,
         "pass_height_threshold_meters": pass_height_threshold_meters(args),
@@ -1534,8 +1539,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.refresh_trajectory_speed:
-        run_trajectory_speed_refresh(args)
+    if args.refresh_trajectory:
+        run_trajectory_refresh(args)
     elif args.extend_feature_run_id:
         if args.use_carries:
             run_carry_extension_generation(args)

@@ -15,7 +15,7 @@ from datatools import config, graph_feature
 from datatools.artifact_storage import atomic_torch_save
 from datatools.match import Match, clear_intended_receiver_model_cache
 from datatools.trajectory import (LEGACY_TRAJECTORY_SPEED, TRAJECTORY_SPEED,
-                                 resolve_training_speed, validate_trajectory_graphs)
+                                 PREVIOUS_TRAJECTORY_SPEED, resolve_training_speed, validate_trajectory_graphs)
 from datatools import trajectory_refresh as refresh
 from models.utils import extract_model_feature_signature
 from project_config import assert_feature_run_usable
@@ -77,25 +77,24 @@ def test_invalid_inputs_rejected(invalid):
     if invalid == "time":
         match.tracking["timestamp"] = 1
     elif invalid == "height":
-        match.tracking.at[35, "ball_z"] = np.nan
+        match.tracking.loc[:, "ball_z"] = np.nan
     elif invalid == "position":
-        match.tracking.at[35, "ball_x"] = np.inf
+        match.tracking.loc[:, "ball_x"] = np.inf
     else:
         match.actions.at[17, "receive_frame_id"] = 10
     assert graph_feature.summarize_ball_trajectory(match, 17) is None
 
 
-def test_coordinate_fallback_and_frame_rate_time_fallback():
+def test_no_coordinate_fallback_and_frame_rate_time_fallback():
     match = trajectory_match()
     match.tracking = match.tracking.drop(columns="timestamp")
     assert graph_feature.summarize_ball_trajectory(match, 17)[0] == pytest.approx(np.sqrt(113))
     match.tracking.loc[11:35, ["ball_x", "ball_y"]] = np.nan
     value = graph_feature.summarize_ball_trajectory(match, 17)
-    np.testing.assert_allclose(value, graph_feature.fallback_pass_trajectory_features(match, 17))
-    assert value[0] == pytest.approx(np.sqrt(113))
+    assert value is None
 
 
-def test_only_speed_changes_and_matches_fresh_generation():
+def test_refresh_preserves_unrelated_features_and_matches_fresh_generation():
     match = trajectory_match()
     graph = stored_graph(match)
     before = graph.clone()
@@ -117,14 +116,30 @@ def test_only_speed_changes_and_matches_fresh_generation():
     torch.testing.assert_close(graph.x[:, 19], graph.x.new_full((3,), construct.call_args.kwargs["extra_node_features"][0]))
 
 
-@pytest.mark.parametrize("invalid", ["direction", "width", "action", "length", "duplicate"])
+def test_refresh_replaces_direction_and_handles_availability_changes():
+    match = trajectory_match()
+    graph = stored_graph(match, definition=PREVIOUS_TRAJECTORY_SPEED)
+    before = graph.clone()
+    graph.x[:, 20:23] = -1
+    labels = torch.tensor([[17.]])
+    refreshed = refresh.refresh_match_graphs([graph], labels, match, context="directions")[0]
+    torch.testing.assert_close(refreshed.x[:, 19:23],
+                               refreshed.x.new_tensor(graph_feature.summarize_ball_trajectory(match, 17)).expand(3, -1))
+    torch.testing.assert_close(refreshed.x[:, :19], before.x[:, :19], rtol=0, atol=0)
+    torch.testing.assert_close(refreshed.x[:, 23:], before.x[:, 23:], rtol=0, atol=0)
+    with patch.object(refresh, "construct_graph_for_action", return_value=refreshed) as construct:
+        assert refresh.refresh_match_graphs([None], labels, match, context="new")[0] is refreshed
+        construct.assert_called_once()
+    match.tracking[["ball_x", "ball_y"]] = np.nan
+    assert refresh.refresh_match_graphs([graph], labels, match, context="unavailable") == [None]
+
+
+@pytest.mark.parametrize("invalid", ["width", "action", "length", "duplicate"])
 def test_refresh_rejects_inconsistent_artifacts(invalid):
     match = trajectory_match()
     graph, labels = stored_graph(match), torch.tensor([[17.]])
     graphs = [graph]
-    if invalid == "direction":
-        graph.x[0, 20] = -1
-    elif invalid == "width":
+    if invalid == "width":
         graph.x = graph.x[:, :23]
     elif invalid == "action":
         labels[0, 0] = 99
@@ -147,7 +162,11 @@ def feature_runs(tmp_path):
     (base / "metadata.json").write_text(json.dumps(metadata))
     for match_id in ("a", "b"):
         torch.save([stored_graph(trajectory_match()), None], base / "action_graphs_success_intent" / f"{match_id}.pt")
-        torch.save(torch.tensor([[17.], [99.]]), base / "success_intent_labels" / f"{match_id}.pt")
+        labels = torch.zeros((2, len(config.LABEL_COLUMNS)))
+        labels[:, 0] = torch.tensor([17., 99.])
+        labels[0, config.LABEL_INDEX["is_pass"]] = 1
+        labels[0, config.LABEL_INDEX["duration"]] = 12
+        torch.save(labels, base / "success_intent_labels" / f"{match_id}.pt")
     torch.save(["unchanged"], base / "action_graphs" / "a.pt")
     args = SimpleNamespace(extend_feature_run_id="base", run_id="derived", in_place=False,
                            num_workers="1", worker_thread_limit=1, artifact_copy_mode="hardlink")
@@ -166,7 +185,9 @@ def test_derived_hardlinks_preserve_base_and_noop(feature_runs):
     derived = runs / "derived"
     assert (base / "action_graphs_success_intent/a.pt").read_bytes() == old_graph_bytes
     assert (base / "action_graphs/a.pt").stat().st_ino == (derived / "action_graphs/a.pt").stat().st_ino
-    assert (base / "success_intent_labels/a.pt").stat().st_ino == (derived / "success_intent_labels/a.pt").stat().st_ino
+    assert (base / "success_intent_labels/a.pt").stat().st_ino != (derived / "success_intent_labels/a.pt").stat().st_ino
+    assert torch.load(base / "success_intent_labels/a.pt", weights_only=False)[0, 7] == 12
+    assert torch.load(derived / "success_intent_labels/a.pt", weights_only=False)[0, 7] == 1
     assert (base / "action_graphs_success_intent/a.pt").stat().st_ino != (derived / "action_graphs_success_intent/a.pt").stat().st_ino
     metadata = json.loads((derived / "metadata.json").read_text())
     assert metadata["trajectory_speed_definition"] == TRAJECTORY_SPEED
@@ -180,6 +201,14 @@ def test_derived_hardlinks_preserve_base_and_noop(feature_runs):
 def test_in_place_failure_rejection_and_recovery(feature_runs):
     runs, base, args, latest = feature_runs
     args.in_place, args.run_id = True, None
+    (base / "action_labels_next_3_angle_only").mkdir()
+    labels_path = base / "action_labels_next_3_angle_only/a.pt"
+    torch.save(torch.load(base / "success_intent_labels/a.pt", weights_only=False), labels_path)
+    (base / "resolved_actions_angle_only").mkdir()
+    actions_path = base / "resolved_actions_angle_only/a.parquet"
+    actions = trajectory_match().actions
+    actions["intent_id"] = "home_9"
+    actions.to_parquet(actions_path)
     original_replace = Path.replace
     count = 0
     def interrupted_replace(source, target):
@@ -196,6 +225,9 @@ def test_in_place_failure_rejection_and_recovery(feature_runs):
     refresh.run_trajectory_speed_refresh(args)
     assert_feature_run_usable(base)
     assert json.loads((base / "metadata.json").read_text())["trajectory_speed_definition"] == TRAJECTORY_SPEED
+    assert torch.load(labels_path, weights_only=False)[0, 7] == 1
+    assert pd.read_parquet(actions_path).at[17, "observed_end_frame_id"] == 35
+    assert pd.read_parquet(actions_path).at[17, "intent_id"] == "home_9"
     latest.assert_not_called()
 
 
@@ -226,6 +258,42 @@ def test_staging_failure_changes_no_graphs_and_can_retry(feature_runs):
     assert_feature_run_usable(base)
 
 
+def test_refresh_all_label_variants_and_endpoint_metadata_preserves_receivers(feature_runs):
+    runs, base, args, latest = feature_runs
+    labels = torch.randn(3, len(config.LABEL_COLUMNS))
+    labels[:, 0] = 17
+    labels[:, config.LABEL_INDEX["is_pass"]] = 1
+    labels[:, config.LABEL_INDEX["duration"]] = 12
+    labels[1, config.LABEL_INDEX["is_real"]] = 0
+    directories = ["action_labels_next_3", "action_labels_next_10_angle_only_carries",
+                   "action_labels_intent_train_next_3_model", "augmented_labels_angle_only"]
+    for directory in directories:
+        (base / directory).mkdir()
+        torch.save(labels, base / directory / "a.pt")
+    actions = trajectory_match().actions
+    actions["intent_id"] = "home_9"
+    (base / "resolved_actions_angle_only_carries").mkdir()
+    resolved = base / "resolved_actions_angle_only_carries/a.parquet"
+    actions.to_parquet(resolved)
+    before = resolved.read_bytes()
+    refresh.run_trajectory_refresh(args)
+    derived = runs / "derived"
+    for directory in directories:
+        saved = torch.load(derived / directory / "a.pt", weights_only=False)
+        torch.testing.assert_close(saved[:, 7], torch.ones(3))
+        saved[:, 7] = labels[:, 7]
+        torch.testing.assert_close(saved, labels, rtol=0, atol=0)
+        torch.testing.assert_close(torch.load(base / directory / "a.pt", weights_only=False), labels)
+    updated = pd.read_parquet(derived / resolved.relative_to(base))
+    pd.testing.assert_frame_equal(updated[actions.columns], actions)
+    assert updated.at[17, "observed_end_frame_id"] == 35
+    assert updated.at[17, "pass_duration"] == 1
+    assert resolved.read_bytes() == before
+    metadata = json.loads((derived / "metadata.json").read_text())
+    assert metadata["angle_only_definition"] == "legacy_2s_reception_positions_v1"
+    assert metadata["pass_duration_definition"] == "official_event_observed_end_v1"
+
+
 def test_failed_repair_stays_unusable(feature_runs):
     runs, base, args, latest = feature_runs
     metadata = json.loads((base / "metadata.json").read_text())
@@ -240,8 +308,9 @@ def test_failed_repair_stays_unusable(feature_runs):
 
 
 @pytest.mark.parametrize("alias", ["--in-place", "--overwrite-feature-run"])
-def test_cli_destination_aliases(alias):
-    with (patch("sys.argv", ["generate", "--extend-feature-run-id", "base", "--refresh-trajectory-speed", alias]),
+@pytest.mark.parametrize("flag", ["--refresh-trajectory", "--refresh-trajectory-speed"])
+def test_cli_destination_aliases(alias, flag):
+    with (patch("sys.argv", ["generate", "--extend-feature-run-id", "base", flag, alias]),
           patch.object(wrapper, "load_feature_run_metadata", return_value={"next_action_conditions_enabled": False})):
         args = wrapper.parse_args()
     assert args.in_place and args.refresh_trajectory_speed

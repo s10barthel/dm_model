@@ -25,13 +25,13 @@ from tqdm import tqdm
 import datatools.preprocess as proc
 from datatools import config, utils
 from models.edge_schema import generation_edge_names, interaction_values, schema_for_names, add_interaction_arguments, INTERACTION_GROUPS
-from datatools.endpoint_policy import valid_interval
 from datatools.config import LABEL_INDEX
 from models.pass_height import positive_height
 from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
 from datatools.trajectory import TRAJECTORY_SPEED
+from datatools.pass_trajectory import ensure_pass_endpoints, trajectory_samples
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -67,7 +67,6 @@ BASE_EDGE_FEATURE_DIM = 2
 VELOCITY_EDGE_FEATURE_EXTRA_DIM = 2
 RELATIVE_SPEED_EDGE_FEATURE_EXTRA_DIM = 1
 SUCCESS_INTENT_EXTRA_DIM = 4
-SUCCESS_INTENT_WINDOW_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -420,43 +419,6 @@ def append_node_level_globals(graph: Data, global_features: np.ndarray | list[fl
     return graph
 
 
-def fallback_pass_trajectory_features(match: Match, action_index: int, rotate_to_ltr: bool = True) -> np.ndarray | None:
-    action = match.actions.loc[action_index]
-    if not valid_interval(match.tracking, action.get("frame_id"), action.get("receive_frame_id"), period=action.get("period_id")):
-        return None
-    start_x = float(action.get("start_x", np.nan))
-    start_y = float(action.get("start_y", np.nan))
-    end_x = float(action.get("end_x", np.nan))
-    end_y = float(action.get("end_y", np.nan))
-    start_z = float(action.get("start_z", 0.0))
-
-    end_z = start_z
-    receive_frame = action.get("receive_frame_id", np.nan)
-    if not pd.isna(receive_frame) and int(receive_frame) in match.tracking.index:
-        end_z = float(match.tracking.at[int(receive_frame), "ball_z"]) if "ball_z" in match.tracking.columns else start_z
-
-    if not np.isfinite([start_x, start_y, end_x, end_y, start_z, end_z]).all():
-        return None
-
-    dx = end_x - start_x
-    dy = end_y - start_y
-    dz = end_z - start_z
-    if rotate_to_ltr and str(action["object_id"]).startswith("away"):
-        dx = -dx
-        dy = -dy
-
-    disp = np.array([dx, dy, dz], dtype=float)
-    disp_norm = float(np.linalg.norm(disp))
-    direction = disp / disp_norm if disp_norm > 1e-6 else np.zeros(3, dtype=float)
-
-    frame = action.get("frame_id", np.nan)
-    duration = (float(receive_frame) - float(frame)) / match.fps
-    if not np.isfinite(duration) or duration <= 0:
-        return None
-    mean_speed = disp_norm / duration
-    return np.array([mean_speed, *direction], dtype=float)
-
-
 def summarize_ball_trajectory(
     match: Match,
     action_index: int,
@@ -466,32 +428,14 @@ def summarize_ball_trajectory(
     """Early-pass net 3D displacement speed and unit direction, not launch velocity."""
     fps = fps or match.fps
     action = match.actions.loc[action_index]
-    frame = action.get("frame_id", np.nan)
-    receive_frame = action.get("receive_frame_id", np.nan)
-
-    if not valid_interval(match.tracking, frame, receive_frame, period=action.get("period_id")):
+    resolver = ensure_pass_endpoints(match, annotate=False)
+    endpoint = resolver.resolve(action)
+    action = action.copy()
+    action["trajectory_end_frame_id"] = endpoint.trajectory
+    trajectory = trajectory_samples(match.tracking, action)
+    if trajectory is None:
         return None
-
-    frame = int(frame)
-    end_frame = frame + max(int(round(fps * SUCCESS_INTENT_WINDOW_SECONDS)), 1)
-    if action.get("receiver_id") == "out":
-        episode_end_frame = utils.resolve_episode_end_frame(match.tracking, frame)
-        if episode_end_frame is not None:
-            receive_frame = episode_end_frame
-    if not pd.isna(receive_frame):
-        end_frame = min(end_frame, int(receive_frame))
-    if not valid_interval(match.tracking, frame, end_frame, period=action.get("period_id")):
-        return None
-
-    available_cols = [col for col in ["ball_x", "ball_y", "ball_z", "timestamp"] if col in match.tracking.columns]
-    trajectory = match.tracking.loc[frame:end_frame, available_cols].copy()
-    if trajectory.empty or not {"ball_x", "ball_y"}.issubset(set(trajectory.columns)):
-        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
-
-    trajectory["ball_z"] = trajectory.get("ball_z", 0.0)
-    spatial = trajectory[["ball_x", "ball_y", "ball_z"]].dropna(subset=["ball_x", "ball_y"])
-    if spatial.shape[0] < 2:
-        return fallback_pass_trajectory_features(match, action_index, rotate_to_ltr=rotate_to_ltr)
+    spatial = trajectory[["ball_x", "ball_y", "ball_z"]]
 
     start_xyz = spatial.iloc[0].to_numpy(dtype=float)
     end_xyz = spatial.iloc[-1].to_numpy(dtype=float)

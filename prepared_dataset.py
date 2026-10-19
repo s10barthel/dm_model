@@ -43,6 +43,7 @@ BASE_PREPARATION_FILES = (
     "datatools/config.py",
     "datatools/utils.py",
     "datatools/trajectory.py",
+    "datatools/pass_trajectory.py",
 )
 PHYSICAL_PREPARATION_FILES = (
     "physical_pass_model.py",

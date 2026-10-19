@@ -96,18 +96,18 @@ def test_period_boundary_restart_overlap_and_known_receiver():
 
 
 @pytest.mark.parametrize("start,end", [(10, 10), (12, 10), (None, 12), (10, None), (9, 12), (10, 15)])
-def test_invalid_height_and_trajectory_do_not_fabricate_supervision(start, end):
+def test_invalid_legacy_reception_does_not_override_official_live_boundary(start, end):
     match = Match.__new__(Match)
     match.tracking = tracking()
     match.fps = 25
     match.actions = pd.DataFrame([dict(frame_id=start, receive_frame_id=end, period_id=1,
                                      receiver_id="out", object_id="home_1", start_x=0., start_y=0., end_x=5., end_y=0.)])
     assert all(np.isnan(v) for v in match.pass_height_labels(start, end))
-    assert graph_feature.summarize_ball_trajectory(match, 0) is None
-    assert graph_feature.fallback_pass_trajectory_features(match, 0) is None
-    with patch.object(graph_feature, "resolve_action_graph_context", return_value=(10, "home_1", match.tracking)):
-        graphs = graph_feature.construct_graph_features(match, feature_variant="success_intent", action_indices=[0], verbose=False)
-    assert graphs == [None]
+    summary = graph_feature.summarize_ball_trajectory(match, 0)
+    if start in (10, 12):
+        assert summary is not None  # Official last-live frame 13 ends the segment.
+    else:
+        assert summary is None
 
 
 def test_valid_height_and_trajectory_unchanged():

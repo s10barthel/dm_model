@@ -29,11 +29,15 @@ def receiver_match():
         for axis, value in (("x", x), ("y", y), ("vx", 0.), ("vy", 0.)):
             tracking[f"{player}_{axis}"] = [value] * 3
     actions = pd.DataFrame([dict(
-        action_id=123, action_type="pass", spadl_type="pass", frame_id=10, receive_frame_id=60,
+        action_id=123, original_event_id="pass", action_type="pass", spadl_type="pass", frame_id=10, receive_frame_id=60,
         object_id="home_1", receiver_id="away_5", intent_id="home_4", success=False,
         start_x=10., start_y=20., end_x=58., end_y=35.,
     )], index=[7])
-    return SimpleNamespace(match_id="match", actions=actions, tracking=pd.DataFrame(tracking, index=[10, 20, 60]), fps=25)
+    tracking = pd.DataFrame(tracking, index=[10, 20, 60]).reindex(range(10, 61)).interpolate()
+    official = pd.DataFrame(dict(event_id=["pass", "block"],
+                                 utc_timestamp=["2023-01-01T00:00:00Z", "2023-01-01T00:00:02Z"],
+                                 raw_tag=["Play", "OtherBallAction"]))
+    return SimpleNamespace(match_id="match", actions=actions, tracking=tracking, fps=25, official_pass_events=official)
 
 
 def probabilities(best="home_3"):
@@ -68,8 +72,7 @@ def test_endpoint_pair_fallback_disable_and_nonpass(receiver_match):
     receiver_match.actions.at[7, "end_y"] = 999.
     assert receivers.resolve_pass_endpoint(receiver_match, 7) == (58., 35.)  # Use a complete tracking pair.
     receiver_match.tracking.at[60, "ball_x"] = np.nan
-    with pytest.raises(ValueError, match="endpoint"):
-        receivers.prepare_action_overlays(receiver_match, 7)
+    assert receivers.prepare_action_overlays(receiver_match, 7).endpoint_xy is None
     assert receivers.prepare_action_overlays(receiver_match, 7, pass_endpoint=False).endpoint_xy is None
     receiver_match.actions.at[7, "action_type"] = "dribble"
     assert receivers.prepare_action_overlays(receiver_match, 7, compare_intended_receiver=True) == receivers.ActionOverlays()
@@ -147,7 +150,7 @@ def test_render_keeps_all_rings_and_runtime_probabilities(receiver_match, monkey
         assert line.get_xdata()[0] == receiver_match.tracking.at[10, f"{player}_x"]
     assert "0.800" in [text.get_text() for text in ax.texts]
     assert [text.get_text() for text in ax.get_legend().get_texts()] == [
-        "original", "angle_only", "model", "Actual pass end"]
+        "original", "angle_only", "model", "Observed pass end"]
     # The runtime receiver's old green outline must not act as a fourth mode.
     highlights = viz.resolve_highlight_players(receiver_match.tracking, receiver_match.actions.loc[7], "success_intent", True)
     assert highlights == {"home_1": "#ffd400"}
@@ -207,27 +210,23 @@ def configure_batch(monkeypatch, tmp_path, match, flags=()):
 
 
 @pytest.mark.parametrize("all_missing", [False, True])
-def test_batch_skips_missing_action_and_writes_metadata(receiver_match, monkeypatch, tmp_path, all_missing, capsys):
+def test_batch_omits_missing_endpoint_and_still_renders(receiver_match, monkeypatch, tmp_path, all_missing, capsys):
     receiver_match.actions.loc[12] = receiver_match.actions.loc[7]
-    receiver_match.actions.loc[7, ["end_x", "end_y", "receive_frame_id"]] = [np.nan, np.nan, 999]
+    receiver_match.actions.at[7, "original_event_id"] = "absent"
     if all_missing:
-        receiver_match.actions.loc[12, ["end_x", "end_y", "receive_frame_id"]] = [np.nan, np.nan, 999]
+        receiver_match.actions.at[12, "original_event_id"] = "absent"
     configure_batch(monkeypatch, tmp_path, receiver_match)
-    if all_missing:
-        with pytest.raises(RuntimeError, match="All selected actions"):
-            viz.main()
-    else:
-        viz.main()
-    assert "endpoint" in capsys.readouterr().err
+    viz.main()
+    assert capsys.readouterr().err == ""
     root = tmp_path / "batch"
     metadata = json.loads((root / "metadata.json").read_text())
-    assert metadata["status"] == ("failed" if all_missing else "completed")
+    assert metadata["status"] == "completed"
     assert metadata["model_ids"] == {"success_intent": "success_intent/current"}
     assert metadata["rendered_components"] == ["success_intent"]
     assert metadata["pass_endpoint"] is True
-    assert len(metadata["skipped_actions"]) == (2 if all_missing else 1)
-    assert not (root / "match/7/success_intent.png").exists()
-    assert (root / "match/12/success_intent.png").exists() == (not all_missing)
+    assert metadata["skipped_actions"] == []
+    assert (root / "match/7/success_intent.png").exists()
+    assert (root / "match/12/success_intent.png").exists()
 
 
 @pytest.mark.parametrize("compare_receivers", [False, True])
@@ -249,10 +248,11 @@ def test_comparison_panels_use_their_current_prediction_and_skip_missing_action(
     subject, models, _, _ = inference_fixture
     subject.actions = receiver_match.actions.copy()
     subject.actions.loc[12] = subject.actions.loc[7]
-    subject.actions.loc[7, ["end_x", "end_y", "receive_frame_id"]] = [np.nan, np.nan, 999]
+    subject.actions.at[7, "object_id"] = "invalid"
     if all_missing:
-        subject.actions.loc[12, ["end_x", "end_y", "receive_frame_id"]] = [np.nan, np.nan, 999]
+        subject.actions.at[12, "object_id"] = "invalid"
     subject.tracking, subject.fps = receiver_match.tracking, receiver_match.fps
+    subject.official_pass_events = receiver_match.official_pass_events
     monkeypatch.setattr(viz, "load_match", lambda *a, **kw: subject)
     monkeypatch.setattr(viz, "resolve_action_indices", lambda *a: [(7, "7"), (12, "12")])
     monkeypatch.setattr(viz, "resolve_runtime_feature_run_context", lambda *a, **kw: dict(
@@ -279,7 +279,7 @@ def test_comparison_panels_use_their_current_prediction_and_skip_missing_action(
         "--compare-intended-receiver", "--success-intent-model-id", "success_intent/a",
         "--output-dir", str(tmp_path), "--run-id", "panels", *flags,
     ])
-    with pytest.warns(UserWarning, match="endpoint"):
+    with pytest.warns(UserWarning, match="Missing"):
         if all_missing:
             with pytest.raises(RuntimeError, match="All selected actions"):
                 comparisons.run_comparison(args, viz)

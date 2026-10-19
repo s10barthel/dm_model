@@ -15,6 +15,7 @@ import datatools.preprocess as proc
 from models.edge_schema import generation_kwargs
 from datatools import config, utils
 from datatools.endpoint_policy import sample_is_eligible, valid_interval
+from datatools.pass_trajectory import ensure_pass_endpoints
 from datatools.epv import merge_epv_annotations
 from datatools.goal_distance import merge_goal_distance_annotations
 from datatools.xt import merge_xt_annotations
@@ -146,6 +147,7 @@ class Match(ABC):
             self.actions = actions.dropna(subset=["next_type"]).copy()
 
         self.actions = self.filter_valid_action_snapshots(self.actions)
+        ensure_pass_endpoints(self)
         self.include_keepers = include_keepers
         self.include_goals = include_goals
         self.max_players = 20 + int(include_keepers) * 2 + int(include_goals) * 2
@@ -638,7 +640,8 @@ class Match(ABC):
             self.actions = resolved_actions.copy()
             if "training_sample_eligible" in self.actions:
                 self.actions = self.actions[self.actions["training_sample_eligible"].map(sample_is_eligible)].copy()
-        elif relabel_intended_receivers:
+        ensure_pass_endpoints(self)
+        if resolved_actions is None and relabel_intended_receivers:
             heuristic_mode = (
                 INTENDED_RECEIVER_MODE_ANGLE_ONLY
                 if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL
@@ -720,6 +723,8 @@ class Match(ABC):
             receiver_id: str = self.actions.at[i, "receiver_id"]
             receive_frame: float = self.actions.at[i, "receive_frame_id"]
             duration = 0.0 if pd.isna(receive_frame) else round((receive_frame - frame) / self.fps, 2)
+            if self.actions.at[i, "action_type"] == "pass":
+                duration = self.actions.at[i, "pass_duration"]
 
             start_x = start_y = end_x = end_y = intent_x = intent_y = np.nan
             pass_max_ball_z = pass_high = np.nan
