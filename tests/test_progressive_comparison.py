@@ -5,6 +5,11 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 from PIL import Image
+from unittest.mock import Mock
+
+from models import membership, utils
+from test_model_membership import record
+
 
 from scripts.comparison_warnings import ComparisonCancelled
 from scripts.visualization_comparison import (
@@ -116,3 +121,41 @@ def test_incomplete_png_never_published_and_temporary_file_cleaned(tmp_path, err
         save_comparison_png(SimpleNamespace(save=partial_save), path)
     assert path.read_bytes() == original
     assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("kind", ["sportec_known", "sportec_missing", "hawkeye"])
+def test_membership_reporter_is_shared_across_checkpoints_and_publication(tmp_path, monkeypatch, capsys, kind):
+    lookup = Mock(return_value=record())
+    if kind == "sportec_missing":
+        lookup.side_effect = FileNotFoundError("archived")
+    if kind == "hawkeye":
+        lookup.side_effect = AssertionError("Native IDs must not load membership evidence")
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    variants = [Variant(name, name, {"metadata": {"models": {"pass_success": "pass_success/a"}}})
+                for name in ("a", "b")]
+    report = ComparisonExport(tmp_path, variants, SimpleNamespace(accept_comparison_warnings=True), "checkpoints")
+    report.metadata["script"] = "run_and_visualize_hawkeye.py" if kind == "hawkeye" else "visualize_action_components.py"
+    report.metadata["rendered_components"] = ["pass_success"]
+    report.start()
+    for number in range(3):
+        report.scenes.extend({"scene_id": str(number), "match_id": "test", "variant_id": name} for name in ("a", "b"))
+        report.checkpoint()
+    report.finish()
+    output = capsys.readouterr().out
+    saved = json.loads((tmp_path / "metadata.json").read_text())
+    result = saved["model_membership"]
+    assert saved["status"] == "completed"
+    assert result["version"] == 2
+    assert {item["variant_id"] for item in result["models"]} == {"a", "b"}
+    if kind == "hawkeye":
+        lookup.assert_not_called()
+        assert output.count(membership.SKIPPED_MESSAGE) == 1
+        assert "Model membership |" not in output
+        assert result["check_status"] == "not_checked" and result["entries"] == []
+    else:
+        lookup.assert_called_once_with("pass_success/a")
+        expected = "held_out" if kind == "sportec_known" else "unknown"
+        assert len(result["entries"]) == 6
+        assert {item["status"] for item in result["entries"]} == {expected}
+        assert {item["variant_id"] for item in result["entries"]} == {"a", "b"}
+        assert output.count("Model membership |") == (2 if kind == "sportec_known" else 1)

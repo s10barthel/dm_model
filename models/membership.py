@@ -14,6 +14,26 @@ from project_config import (
     split_selector,
 )
 
+REPORT_VERSION = 2
+NO_VERIFIED_ID = "no_verified_sportec_match_id"
+SKIPPED_MESSAGE = "Training membership check skipped: no verified mapping to Sportec match IDs."
+
+
+def comparable_identity(dataset, match_id):
+    # Provider-native IDs are never treated as Sportec IDs without a mapping.
+    return dataset == "sportec" and match_id is not None and bool(str(match_id).strip())
+
+
+def _new_report(dataset, identities):
+    comparable = [comparable_identity(dataset, match_id) for _, match_id in identities]
+    status = ("checked" if comparable and all(comparable) else
+              "partially_checked" if any(comparable) else "not_checked")
+    result = {"version": REPORT_VERSION, "dataset": dataset, "check_status": status,
+              "models": [], "entries": []}
+    if status != "checked":
+        result["reason"] = NO_VERIFIED_ID
+    return result
+
 
 def _object(value, name):
     if value is None:
@@ -140,8 +160,14 @@ def resolve_membership_evidence(record, *, strict=False, manifest_loader=None, f
 
 
 def describe_match_membership(evidence, dataset, match_id):
-    # Native provider IDs and synthetic situation/state IDs are not Sportec IDs.
-    comparable = dataset == "sportec" and match_id is not None
+    comparable = comparable_identity(dataset, match_id)
+    if not comparable:
+        return {"canonical_match_id": None, "status": "not_checked", "check_status": "not_checked",
+                "reason": NO_VERIFIED_ID,
+                "membership": dict.fromkeys(("training", "validation", "development")),
+                "contributing": dict.fromkeys(("training", "validation")),
+                "evidence_sources": {},
+                "reasons": ["No verified mapping from the displayed identity to recorded Sportec match IDs."]}
     flags = {name: (str(match_id) in ids if comparable else None)
              for name, ids in evidence["memberships"].items()}
     flags = {name: flags.get(name) for name in ("training", "validation", "development")}
@@ -151,9 +177,7 @@ def describe_match_membership(evidence, dataset, match_id):
     positive = next((name for name in ("training", "validation", "development") if flags[name]), None)
     status = positive or ("held_out" if comparable and evidence["complete"] and not evidence["errors"] else "unknown")
     reasons = list(evidence["errors"])
-    if not comparable:
-        reasons.insert(0, "No verified mapping from the displayed identity to recorded Sportec match IDs.")
-    return {"canonical_match_id": str(match_id) if comparable else None, "status": status,
+    return {"canonical_match_id": str(match_id), "status": status, "check_status": "checked",
             "membership": flags, "contributing": contributed,
             "evidence_sources": evidence["sources"], "reasons": reasons}
 
@@ -186,6 +210,8 @@ class MembershipReport:
         self.evidence = {}
         self.manifests = {}
         self.printed = set()
+        self.warned_models = set()
+        self.printed_skip = False
 
     def _manifest(self, identifier):
         if identifier not in self.manifests:
@@ -210,13 +236,21 @@ class MembershipReport:
                 ids[name] = auxiliary.get("model_id")
                 embedded = {**embedded, name: auxiliary.get("model_record") or {}}
         snapshot = source.get("model_membership") or {}
-        if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
+        if not isinstance(snapshot, dict) or snapshot.get("version") not in (1, REPORT_VERSION):
             snapshot = {}
         if not ids:
             ids = {item["role"]: item["model_id"] for item in snapshot.get("models", [])
-                   if roles is None or item["role"] in roles}
-        result = {"version": 1, "models": [], "entries": []}
+                   if roles is None or item["role"] in roles
+                   or ("pass_success" in roles and item["role"].startswith("xpass_"))}
+        elif "xpass_auxiliaries" not in source and "pass_success" in ids:
+            # Older saved visualizations recorded auxiliary roles only in the
+            # membership snapshot. Explicit current auxiliary settings win.
+            for item in snapshot.get("models", []):
+                if item["role"].startswith("xpass_"):
+                    ids.setdefault(item["role"], item["model_id"])
         identities = list(dict.fromkeys(identities))
+        result = _new_report(dataset, identities)
+        entry_identities = identities if dataset == "sportec" else []
         for role, model_id in ids.items():
             if not isinstance(model_id, str) or not model_id:
                 continue
@@ -227,14 +261,21 @@ class MembershipReport:
             saved_model = next((item for item in snapshot.get("models", [])
                                 if item.get("role") == role and item.get("model_id") == model_id), None)
             entries = []
-            for scene_id, match_id in identities:
+            # Native-provider reports retain model provenance but never resolve
+            # checkpoint evidence or expand one entry per scene/model pair.
+            for scene_id, match_id in entry_identities:
                 saved = next((item for item in snapshot.get("entries", [])
                               if item.get("dataset") == dataset and item.get("role") == role
                               and item.get("model_id") == model_id
                               and ((match_id is not None and item.get("match_id") == str(match_id))
                                    or (match_id is None and item.get("scene_id") == str(scene_id)))), None)
-                if saved is not None:
-                    entry = {**saved, "scene_id": str(scene_id), "variant_id": variant_id}
+                if not comparable_identity(dataset, match_id):
+                    entry = {"dataset": dataset, "scene_id": str(scene_id), "match_id": match_id,
+                             "variant_id": variant_id, "role": role, "model_id": model_id,
+                             **describe_match_membership(None, dataset, match_id)}
+                elif saved is not None and saved.get("status") != "not_checked":
+                    entry = {**saved, "scene_id": str(scene_id), "variant_id": variant_id,
+                             "check_status": "checked"}
                 else:
                     if model_id not in self.evidence:
                         # A full embedded checkpoint record is authoritative. Older
@@ -276,22 +317,34 @@ class MembershipReport:
         return result
 
     def print(self, report):
+        unchecked = report.get("check_status") in {"not_checked", "partially_checked"}
+        missing_identity = any(entry.get("check_status") == "not_checked" for entry in report["entries"])
+        if (unchecked and report["models"] and (report.get("dataset") != "sportec" or missing_identity)
+                and not self.printed_skip):
+            print(SKIPPED_MESSAGE)
+            self.printed_skip = True
         for entry in report["entries"]:
+            if entry.get("check_status") == "not_checked":
+                continue
             identity = entry["match_id"] or entry["scene_id"]
-            key = (entry["dataset"], identity, entry["role"], entry["model_id"], entry["variant_id"])
+            key = (("unknown", entry["model_id"]) if entry["status"] == "unknown" else
+                   (entry["dataset"], identity, entry["role"], entry["model_id"], entry["variant_id"]))
             if key in self.printed:
                 continue
             self.printed.add(key)
             actual = entry["contributing"].get("training")
             contributed = "unknown" if actual is None else ("yes" if actual else "no")
             variant = f" | variant={entry['variant_id']}" if entry["variant_id"] is not None else ""
-            reason = f" | {'; '.join(entry['reasons'])}" if entry["reasons"] else ""
+            reasons = entry["reasons"] if entry["model_id"] not in self.warned_models else []
+            reason = f" | {'; '.join(reasons)}" if reasons else ""
+            if reasons:
+                self.warned_models.add(entry["model_id"])
             print(f"Model membership | {entry['dataset']}/{identity} | {entry['role']}={entry['model_id']}"
                   f" | {entry['status']} (recorded membership) | training contributed={contributed}{variant}{reason}")
 
 
-def attach_membership_report(metadata, dataset, *, source=None, records=None, identities=None):
-    reporter = MembershipReport()
+def attach_membership_report(metadata, dataset, *, source=None, records=None, identities=None, reporter=None):
+    reporter = reporter if reporter is not None else MembershipReport()
     source = metadata if source is None else source
     roles = participating_roles(metadata)
     if metadata.get("selected_model_ids"):
@@ -320,12 +373,13 @@ def participating_roles(metadata):
     return roles
 
 
-def attach_comparison_membership(metadata):
+def attach_comparison_membership(metadata, *, reporter=None):
     dataset = {"visualize_action_components.py": "sportec", "run_and_visualize_hawkeye.py": "hawkeye",
                "visualize_hawkeye.py": "hawkeye", "visualize_benchmark.py": "benchmark",
                "visualize_skillcorner.py": "skillcorner"}.get(metadata.get("script"), "unknown")
-    reporter = MembershipReport()
-    combined = {"version": 1, "models": [], "entries": []}
+    reporter = reporter if reporter is not None else MembershipReport()
+    combined = _new_report(dataset, [])
+    check_statuses = set()
     arguments = metadata.get("arguments") or {}
     for variant in metadata.get("variants", []):
         provenance = variant.get("provenance") or {}
@@ -337,9 +391,15 @@ def attach_comparison_membership(metadata):
         # Native comparison scene IDs can contain possession/action suffixes.
         report = reporter.build(dataset, identities, source, variant_id=variant["id"],
                                 roles=participating_roles(metadata))
+        check_statuses.add(report["check_status"])
         provenance["model_membership"] = report
         combined["models"].extend({**item, "variant_id": variant["id"]} for item in report["models"])
         combined["entries"].extend(report["entries"])
         reporter.print(report)
+    if check_statuses == {"checked"}:
+        combined["check_status"] = "checked"
+        combined.pop("reason", None)
+    elif check_statuses.intersection({"checked", "partially_checked"}):
+        combined["check_status"] = "partially_checked"
     metadata["model_membership"] = combined
     return combined

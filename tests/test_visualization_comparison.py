@@ -244,7 +244,7 @@ def _subject():
     return SimpleNamespace(situation_id="s", match_id="s", tracking=pd.DataFrame(tracking, index=frames),
         frame_meta=pd.DataFrame(dict(abs_time=[0., 0.1], possession_team=["A", "A"],
             possession_prefix=["home", "home"], possessor_object_id=["home_1", "home_1"]), index=pd.Index(frames, name="frame_id")),
-        labels=torch.ones((2, 3)), graph_features_0=[Data(x=torch.zeros((1, 26)))], team_map={"A": "home", "B": "away"})
+        labels=torch.ones((2, 3)), graph_features_0=[Data(x=torch.zeros((1, 26)))], team_map={"A": "home", "B": "away"}, fps=25)
 
 
 @pytest.fixture
@@ -299,9 +299,10 @@ def test_hawkeye_numbered_masks_synthetic_end_to_end(tmp_path, monkeypatch, infe
     assert (root / "s/pass_success_0.png").exists()
     metadata = json.loads((root / "metadata.json").read_text())
     assert [variant["id"] for variant in metadata["variants"]] == ["unmasked", "mask_1", "mask_2"]
-    membership = metadata["model_membership"]["entries"]
-    assert {item["variant_id"] for item in membership} == {"unmasked", "mask_1", "mask_2"}
-    assert all(item["status"] == "unknown" and item["dataset"] == "hawkeye" for item in membership)
+    membership = metadata["model_membership"]
+    assert membership["check_status"] == "not_checked"
+    assert membership["entries"] == []
+    assert {item["variant_id"] for item in membership["models"]} == {"unmasked", "mask_1", "mask_2"}
     aligned = pd.read_csv(root / "aligned_predictions.csv")
     assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:unmasked"].iloc[0] == pytest.approx(0.7)
     assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:mask_1"].iloc[0] == pytest.approx(0.5)
@@ -329,7 +330,7 @@ def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatc
     assert not any(item[0] == "pass_success/support" for item in calls)
     metadata = json.loads((tmp_path / "checkpoints/metadata.json").read_text())
     assert [item["id"] for item in metadata["variants"]] == ["pass_success/a", "pass_success/b"]
-    assert {item["role"] for item in metadata["model_membership"]["entries"]} == {
+    assert {item["role"] for item in metadata["model_membership"]["models"]} == {
         "pass_success", "outcome_scoring", "outcome_conceding"}
     assert (tmp_path / "checkpoints/s/pass_score_0.png").exists()
 

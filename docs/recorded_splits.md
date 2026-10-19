@@ -46,15 +46,35 @@ allow checkpoints with different training selectors and manifests. They retain
 each model's provenance rather than choosing one component's split for the rest.
 Jobs that use a shared split to select their input data retain strict agreement.
 
-Visualization console output and the versioned `model_membership` metadata block
-report recorded training, validation, or development membership, verified holdout,
-or unknown status for each participating checkpoint, including learned PC-xPass
-auxiliaries. Allocation and contributing-match membership are reported separately;
+For Sportec identities, visualization console output and the version-2
+`model_membership` metadata block report recorded training, validation, or
+development membership, verified holdout, or unknown status for each participating
+checkpoint, including learned PC-xPass auxiliaries. Allocation and
+contributing-match membership are reported separately;
 allocation alone does not establish that a match supplied usable training rows.
 Missing or conflicting evidence prevents a verified-holdout claim but does not
 prevent visualization. Saved reports can be reused without the original weights.
-Native Hawkeye, SkillCorner, and synthetic benchmark IDs are not compared to
-Sportec training IDs without a verified mapping, so their membership is unknown.
+Native Hawkeye, SkillCorner, synthetic benchmark, and unknown-provider identities
+are not compared to Sportec training IDs. Their reports store
+`check_status: "not_checked"`, reason `no_verified_sportec_match_id`, the
+participating model IDs/roles, and an empty `entries` list. Membership-specific
+checkpoint and manifest lookups are skipped. A single informational notice is
+printed per run; tracking-only runs with no participating models remain silent.
+No cross-provider identity mappings are inferred, and unchecked identities are
+never described as held out.
+
+Sportec reports with known identities have `check_status: "checked"`; absent
+checkpoint evidence still produces an entry with `status: "unknown"`. Missing
+Sportec identities have explicit `not_checked` entries. A report containing both
+known and missing identities has `check_status: "partially_checked"`.
+Missing-membership/checkpoint diagnostics print once per model per run, while
+metadata retains details for every identity and comparison variant. Comparisons
+share reporter caches and console deduplication across incremental saves and
+final publication.
+
+Saved version-1 and version-2 Sportec reports remain reusable after checkpoints
+are archived. Old non-Sportec reports are normalized to the unchecked form when
+producing a new report. Existing exports are not rewritten.
 
 Evaluation still checks its selected cohort against every participating model's
 recorded development membership. Training sets may differ; the evaluation cohort

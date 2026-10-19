@@ -17,7 +17,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 from models.inference_masks import flatten_mask_values, resolve_inference_mask_configurations
-from models.membership import attach_comparison_membership
+from models.membership import MembershipReport, attach_comparison_membership
 from project_config import write_run_metadata
 from datatools.pass_success import model_pass_success_metadata
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument, metadata_differences
@@ -289,6 +289,7 @@ class ComparisonExport:
         self.scenes = []
         self.outputs = []
         self.recorded = set()
+        self.membership_reporter = MembershipReport()
         identities = [variant.identifier for variant in variants]
         if len(identities) != len(set(identities)):
             raise ValueError("Duplicate comparison variant identities.")
@@ -303,7 +304,7 @@ class ComparisonExport:
 
     def checkpoint(self):
         self.metadata.update(self.policy.metadata(), aligned_export_available=self.export_aligned)
-        attach_comparison_membership(self.metadata)
+        attach_comparison_membership(self.metadata, reporter=self.membership_reporter)
         write_run_metadata(self.root, self.metadata)
 
     def start(self):
@@ -386,7 +387,7 @@ class ComparisonExport:
         self.metadata.update(model_pass_success_metadata(
             requested=requested, available=requested, output_root=self.root,
         ))
-        attach_comparison_membership(self.metadata)
+        attach_comparison_membership(self.metadata, reporter=self.membership_reporter)
         write_run_metadata(self.root, self.metadata)
 
     def failed(self, exc):

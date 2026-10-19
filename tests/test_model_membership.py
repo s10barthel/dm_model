@@ -39,7 +39,8 @@ def test_native_provider_ids_are_not_canonical(dataset):
     # Even a coincidentally equal string has no verified correspondence.
     for identifier in ("train", "test"):
         result = membership.describe_match_membership(evidence, dataset, identifier)
-        assert result["status"] == "unknown"
+        assert result["status"] == "not_checked"
+        assert result["check_status"] == "not_checked"
         assert result["canonical_match_id"] is None
         assert all(value is None for value in result["membership"].values())
 
@@ -167,16 +168,24 @@ def test_manifest_evidence_is_cached_across_models(monkeypatch):
     loader.assert_called_once_with("shared")
 
 
-def test_archived_snapshot_is_reused_without_checkpoint(monkeypatch):
+@pytest.mark.parametrize("version", [1, 2])
+def test_archived_snapshot_is_reused_without_checkpoint(monkeypatch, version):
     reporter = membership.MembershipReport()
     source = {"models": {"pass_success": "pass_success/a"}, "model_records": {"pass_success": record()}}
     snapshot = reporter.build("sportec", [("original", "test")], source)
+    snapshot["version"] = version
+    if version == 1:
+        snapshot.pop("check_status")
+        snapshot.pop("dataset")
+        for entry in snapshot["entries"]:
+            entry.pop("check_status")
     unavailable = Mock(side_effect=AssertionError("No checkpoint lookup for a saved snapshot"))
     monkeypatch.setattr(utils, "get_model_record", unavailable)
     archived = {"models": source["models"], "model_membership": snapshot}
     result = membership.MembershipReport().build("sportec", [("new_action", "test")], archived)
     assert result["entries"][0]["status"] == "held_out"
     assert result["entries"][0]["scene_id"] == "new_action"
+    assert result["version"] == 2 and result["check_status"] == "checked"
     unavailable.assert_not_called()
 
 
@@ -200,10 +209,12 @@ def test_derived_components_recipient_and_auxiliary_roles(monkeypatch):
     assert all(item["status"] == "held_out" for item in report["entries"])
 
 
-def test_tracking_only_report_is_empty():
+def test_tracking_only_report_is_empty(capsys):
     metadata = {"rendered_situation_ids": ["s"], "source_models": {}, "rendered_components": []}
     report = membership.attach_membership_report(metadata, "hawkeye")
-    assert report == {"version": 1, "models": [], "entries": []}
+    assert report == {"version": 2, "dataset": "hawkeye", "check_status": "not_checked",
+                      "reason": "no_verified_sportec_match_id", "models": [], "entries": []}
+    assert capsys.readouterr().out == ""
 
 
 @pytest.mark.parametrize("dataset,metadata,expected", [
@@ -230,3 +241,108 @@ def test_comparison_reports_each_variant_and_keeps_sources_unchanged(monkeypatch
     assert {item["variant_id"] for item in report["entries"]} == {"a", "b"}
     assert all(item["status"] == "held_out" for item in report["entries"])
     assert source == original
+
+
+@pytest.mark.parametrize("dataset", ["hawkeye", "skillcorner", "benchmark", "unknown"])
+@pytest.mark.parametrize("snapshot_version", [None, 1, 2])
+def test_native_reports_skip_evidence_and_normalize_saved_reports(monkeypatch, capsys, dataset, snapshot_version):
+    unavailable = Mock(side_effect=AssertionError("No membership lookup for native IDs"))
+    monkeypatch.setattr(utils, "get_model_record", unavailable)
+    monkeypatch.setattr(membership, "load_recorded_split_manifest", unavailable)
+    monkeypatch.setattr(membership, "load_feature_run_metadata", unavailable)
+    source = {"models": {"pass_success": "pass_success/a", "pass_intent": "pass_intent/b"},
+              "xpass_auxiliaries": {"pass_height": {"model_id": "pass_height/c"}}}
+    if snapshot_version is not None:
+        source["model_membership"] = {
+            "version": snapshot_version, "models": [{"role": "pass_success", "model_id": "pass_success/a"}],
+            "entries": [{"dataset": dataset, "scene_id": "train", "match_id": "train",
+                         "role": "pass_success", "model_id": "pass_success/a", "status": "unknown"}]}
+    original = deepcopy(source)
+    reporter = membership.MembershipReport()
+    report = reporter.build(dataset, [("train", "train"), ("another", None)], source)
+    assert report["version"] == 2
+    assert report["check_status"] == "not_checked"
+    assert report["reason"] == "no_verified_sportec_match_id"
+    assert report["entries"] == []
+    assert {item["role"] for item in report["models"]} == {"pass_success", "pass_intent", "xpass_pass_height"}
+    reporter.print(report)
+    reporter.print(report)
+    assert capsys.readouterr().out.strip() == membership.SKIPPED_MESSAGE
+    unavailable.assert_not_called()
+    assert source == original
+
+
+@pytest.mark.parametrize("identifier", [None, "", " "])
+def test_sportec_missing_identity_is_unchecked_without_evidence_lookup(monkeypatch, identifier):
+    lookup = Mock(side_effect=AssertionError("Missing identity needs no checkpoint"))
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    result = membership.MembershipReport().build("sportec", [("scene", identifier)],
+                                                {"models": {"pass_success": "pass_success/a"}})
+    assert result["check_status"] == "not_checked"
+    assert result["entries"][0]["status"] == "not_checked"
+    assert result["entries"][0]["canonical_match_id"] is None
+    lookup.assert_not_called()
+
+
+def test_sportec_mixed_identities_preserve_checked_entries_and_skip_notice(monkeypatch, capsys):
+    lookup = Mock(return_value=record())
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    reporter = membership.MembershipReport()
+    result = reporter.build("sportec", [("first", None), ("second", "test")],
+                            {"models": {"pass_success": "pass_success/a"}})
+    assert result["check_status"] == "partially_checked"
+    assert [item["status"] for item in result["entries"]] == ["not_checked", "held_out"]
+    reporter.print(result)
+    reporter.print(result)
+    output = capsys.readouterr().out
+    assert output.count(membership.SKIPPED_MESSAGE) == 1
+    assert output.count("Model membership |") == 1
+    lookup.assert_called_once_with("pass_success/a")
+
+
+def test_missing_evidence_prints_once_per_model_across_scenes_roles_and_variants(monkeypatch, capsys):
+    lookup = Mock(side_effect=FileNotFoundError("archived"))
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    reporter = membership.MembershipReport()
+    source = {"models": {"pass_success": "pass_success/a", "pass_height": "pass_success/a",
+                         "outcome_scoring": "outcome_scoring/b"},
+              "xpass_auxiliaries": {"pass_height": {"model_id": "pass_success/a"}}}
+    reports = [reporter.build("sportec", [(name, name) for name in ("one", "two", "three")], source,
+                              variant_id=variant) for variant in ("a", "b")]
+    for report in reports + reports:
+        reporter.print(report)
+    output = capsys.readouterr().out
+    assert output.count("Model membership |") == 2
+    assert output.count("missing recorded membership") == 2
+    assert output.count("Checkpoint unavailable") == 2
+    assert lookup.call_count == 2
+    assert all(item["status"] == "unknown" and len(item["reasons"]) == 2
+               for report in reports for item in report["entries"])
+
+
+def test_saved_report_only_preserves_model_roles_for_native_dataset(monkeypatch):
+    lookup = Mock(side_effect=AssertionError("Archived report must not load weights"))
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    source = {"model_membership": {"version": 1,
+              "models": [{"role": "pass_success", "model_id": "pass_success/a"}], "entries": []}}
+    report = membership.MembershipReport().build("hawkeye", [("native", None)], source)
+    assert report["models"] == source["model_membership"]["models"]
+    assert report["entries"] == [] and report["check_status"] == "not_checked"
+    lookup.assert_not_called()
+
+
+@pytest.mark.parametrize("explicit_auxiliaries", [False, True])
+def test_archived_auxiliary_roles_are_preserved_unless_current_settings_override(monkeypatch, explicit_auxiliaries):
+    lookup = Mock(side_effect=AssertionError("Native membership must not load checkpoints"))
+    monkeypatch.setattr(utils, "get_model_record", lookup)
+    saved_models = [{"role": "pass_success", "model_id": "pass_success/a"},
+                    {"role": "xpass_pass_intent", "model_id": "pass_intent/old"}]
+    source = {"source_models": {"pass_success": "pass_success/a"},
+              "model_membership": {"version": 1, "models": saved_models, "entries": []}}
+    if explicit_auxiliaries:
+        source["xpass_auxiliaries"] = {"pass_intent": {"model_id": "pass_intent/current"}}
+    report = membership.MembershipReport().build("hawkeye", [("native", None)], source, roles={"pass_success"})
+    expected = "pass_intent/current" if explicit_auxiliaries else "pass_intent/old"
+    assert {item["role"]: item["model_id"] for item in report["models"]} == {
+        "pass_success": "pass_success/a", "xpass_pass_intent": expected}
+    lookup.assert_not_called()
