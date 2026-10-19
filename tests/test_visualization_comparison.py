@@ -299,6 +299,9 @@ def test_hawkeye_numbered_masks_synthetic_end_to_end(tmp_path, monkeypatch, infe
     assert (root / "s/pass_success_0.png").exists()
     metadata = json.loads((root / "metadata.json").read_text())
     assert [variant["id"] for variant in metadata["variants"]] == ["unmasked", "mask_1", "mask_2"]
+    membership = metadata["model_membership"]["entries"]
+    assert {item["variant_id"] for item in membership} == {"unmasked", "mask_1", "mask_2"}
+    assert all(item["status"] == "unknown" and item["dataset"] == "hawkeye" for item in membership)
     aligned = pd.read_csv(root / "aligned_predictions.csv")
     assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:unmasked"].iloc[0] == pytest.approx(0.7)
     assert aligned.loc[aligned.candidate_id.eq("home_2"), "prediction:mask_1"].iloc[0] == pytest.approx(0.5)
@@ -306,6 +309,12 @@ def test_hawkeye_numbered_masks_synthetic_end_to_end(tmp_path, monkeypatch, infe
 
 def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatch, inference_fixture):
     subject, models, calls, build = inference_fixture
+    def different_training_splits(identifier):
+        item = _record(identifier)
+        item.update(train_count=20 if identifier.endswith("/b") else 10,
+                    split_manifest_id="split_b" if identifier.endswith("/b") else "split_a")
+        return item
+    monkeypatch.setattr(inference_compare, "get_model_record", different_training_splits)
     bundle = {"model_ids": {task: f"{task}/support" for task in ("pass_success", "outcome_scoring", "outcome_conceding")}}
     monkeypatch.setattr(inference_compare, "load_bundle_record", lambda identifier: bundle)
     args = dv.parse_args(["--accept-comparison-warnings", "--compare", "--bundle-id", "fixed", "--pass-success-model-id", "pass_success/a",
@@ -320,6 +329,8 @@ def test_hawkeye_checkpoints_common_mask_bundle_and_derived(tmp_path, monkeypatc
     assert not any(item[0] == "pass_success/support" for item in calls)
     metadata = json.loads((tmp_path / "checkpoints/metadata.json").read_text())
     assert [item["id"] for item in metadata["variants"]] == ["pass_success/a", "pass_success/b"]
+    assert {item["role"] for item in metadata["model_membership"]["entries"]} == {
+        "pass_success", "outcome_scoring", "outcome_conceding"}
     assert (tmp_path / "checkpoints/s/pass_score_0.png").exists()
 
 

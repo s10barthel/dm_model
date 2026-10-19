@@ -404,6 +404,9 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["model_ids"]["intended_recipient"], "success_intent/1")
             self.assertEqual(metadata["feature_run_id"], "feature_1")
             self.assertEqual(metadata["filters"], {"spadl_type": ["pass"]})
+            membership = metadata["model_membership"]
+            self.assertEqual({item["role"] for item in membership["entries"]}, set(metadata["selected_model_ids"]))
+            self.assertTrue(all(item["canonical_match_id"] == "DFL-MAT-1" for item in membership["entries"]))
 
     def test_action_visualization_only_pass_success_requires_only_pass_success_model_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -420,6 +423,7 @@ class VisualizationVersioningTests(unittest.TestCase):
             }
 
             def fake_resolve_model_selection(required_tasks: list[str], **_kwargs: object):
+                self.assertIs(_kwargs["require_shared_split"], False)
                 self.assertEqual(required_tasks, ["pass_success"])
                 return (
                     {"pass_success": "pass_success/selected"},
@@ -774,6 +778,9 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["source_models"]["pass_success"], "pass_success/1")
             self.assertEqual(metadata["output"], "png")
             self.assertEqual(metadata["time_norm"], [0.0])
+            entries = metadata["model_membership"]["entries"]
+            self.assertTrue(entries)
+            self.assertTrue(all(item["status"] == "unknown" and item["dataset"] == "hawkeye" for item in entries))
 
     def test_hawkeye_component_visualization_only_flag_limits_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -909,6 +916,10 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(rendered_modification["game_states"], [1, 2])
             self.assertEqual(rendered_modification["output_dir"], str(output_path.parent.resolve()))
             self.assertIn(str(output_path.resolve()), rendered_modification["output_paths"])
+            entries = metadata["model_membership"]["entries"]
+            self.assertEqual({item["scene_id"] for item in entries}, {
+                "modification_1_game_state_1", "modification_1_game_state_2"})
+            self.assertTrue(all(item["status"] == "unknown" for item in entries))
 
     def test_benchmark_visualization_combines_state_images_vertically(self) -> None:
         top = Image.new("RGB", (4, 3), "red")
@@ -1123,6 +1134,9 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["rendered_possessions"][0]["selected_frames"], [{"label": "first", "frame_id": 10}])
             self.assertEqual(metadata["output"], "png")
             self.assertEqual(metadata["source_models"]["pass_intent"], "pass_intent/1")
+            entries = metadata["model_membership"]["entries"]
+            self.assertTrue(entries)
+            self.assertTrue(all(item["status"] == "unknown" and item["dataset"] == "skillcorner" for item in entries))
 
     def test_direct_hawkeye_visualization_records_model_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

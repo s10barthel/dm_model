@@ -30,6 +30,7 @@ from datatools.skillcorner import (
 )
 from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
+from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -262,6 +263,7 @@ def main() -> None:
         require_intended_receiver_mode=False,
         require_return_type=False,
         require_target_family=False,
+        require_shared_split=False,
     )
     pass_height_model_id = resolve_optional_model_id("pass_height", getattr(args, "pass_height_model_id", None), bundle)
     if pass_height_model_id:
@@ -579,6 +581,7 @@ def main() -> None:
     if not processed_matches:
         raise RuntimeError("No usable SkillCorner matches were processed.")
     metadata.update(model_pass_success_metadata())
+    attach_membership_report(metadata, "skillcorner")
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == SKILLCORNER_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("skillcorner_component", component_run_id)

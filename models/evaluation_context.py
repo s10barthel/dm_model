@@ -7,6 +7,7 @@ import math
 from project_config import (INTENDED_RECEIVER_MODES, load_recorded_split_manifest, parse_return_type,
                             load_feature_run_metadata, LEGACY_FEATURE_SPLIT_MANIFESTS)
 from datatools.sportec_seasons import add_season_argument, heldout_season_match_ids
+from models.membership import recorded_manifest_id as _recorded_manifest_id, resolve_membership_evidence
 
 
 def nonnegative_duration(value):
@@ -49,35 +50,12 @@ def evaluation_selection(args):
 
 
 def recorded_manifest_id(record):
-    metadata, arguments = record.get("metadata") or {}, record.get("args") or {}
-    manifest_id = record.get("split_manifest_id") or metadata.get("split_manifest_id") or arguments.get("split_manifest_id")
-    if manifest_id:
-        return manifest_id
-    feature_id = record.get("feature_run_id") or metadata.get("feature_run_id") or arguments.get("feature_run_id")
-    if feature_id:
-        feature = load_feature_run_metadata(feature_id, required=False) or {}
-        return feature.get("split_manifest_id") or LEGACY_FEATURE_SPLIT_MANIFESTS.get(feature_id)
-    return None
+    return _recorded_manifest_id(record, feature_loader=load_feature_run_metadata)
 
 
 def excluded_membership(record):
-    metadata = record.get("metadata") or {}
-    result = {}
-    datasets = metadata.get("split_datasets") or {}
-    for category, key in (("training", "train_match_ids"), ("validation", "validation_match_ids")):
-        dataset = datasets.get("train" if category == "training" else "validation") or {}
-        ids = metadata.get(key)
-        if ids is None:
-            ids = dataset.get("requested_match_ids", dataset.get("contributing_match_ids"))
-        if ids is not None:
-            result[category] = set(map(str, ids))
-    manifest_id = recorded_manifest_id(record)
-    if manifest_id:
-        # The development pool includes validation and any earlier folds/refits.
-        result["development"] = set(load_recorded_split_manifest(manifest_id)["train"])
-    if "development" not in result and not {"training", "validation"}.issubset(result):
-        raise ValueError(f"Cannot verify training/validation exclusion for {record.get('model_id', 'checkpoint')}: missing recorded membership.")
-    return result
+    return resolve_membership_evidence(record, strict=True, manifest_loader=load_recorded_split_manifest,
+                                       feature_loader=load_feature_run_metadata)["memberships"]
 
 
 def check_heldout(record, match_ids):

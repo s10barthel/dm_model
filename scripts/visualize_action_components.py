@@ -45,6 +45,7 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
+from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
@@ -975,6 +976,7 @@ def main() -> None:
             require_return_type=False,
             require_target_family=False,
             allow_pass_only_success=True,
+            require_shared_split=False,
         )
     else:
         resolved_model_ids = {}
@@ -1229,6 +1231,7 @@ def main() -> None:
         requested=getattr(args, "show_model_pass_success", False),
         available=getattr(args, "show_model_pass_success", False), output_root=output_root,
     ))
+    attach_membership_report(metadata, "sportec", records=shared_context.get("model_records", {}))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

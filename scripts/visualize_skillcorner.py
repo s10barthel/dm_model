@@ -32,6 +32,7 @@ from datatools.viz_helpers import (
     validate_derived_inputs,
 )
 from datatools.viz_snapshot import SnapshotVisualizer
+from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -436,6 +437,7 @@ def main() -> None:
         requested=getattr(args, "show_model_pass_success", False),
         available="model_pass_success" in component_tables, output_root=output_root,
     ))
+    attach_membership_report(metadata, "skillcorner", source=component_metadata)
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved SkillCorner {selected_output_mode} visualizations for {len(output_dirs)} possession(s).")
     print(f"SkillCorner visualization run id: {visualization_run_id}")

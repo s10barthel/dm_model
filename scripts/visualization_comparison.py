@@ -14,6 +14,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
 from models.inference_masks import flatten_mask_values, resolve_inference_mask_configurations
+from models.membership import attach_comparison_membership
 from project_config import write_run_metadata
 from datatools.pass_success import model_pass_success_metadata
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument, metadata_differences
@@ -312,10 +313,12 @@ class ComparisonExport:
         self.metadata.update(model_pass_success_metadata(
             requested=requested, available=requested, output_root=self.root,
         ))
+        attach_comparison_membership(self.metadata)
         write_run_metadata(self.root, self.metadata)
 
     def failed(self, exc):
         self.metadata.update(self.policy.metadata(), status="cancelled" if isinstance(exc, ComparisonCancelled) else "failed", error=f"{type(exc).__name__}: {exc}")
+        attach_comparison_membership(self.metadata)
         write_run_metadata(self.root, self.metadata)
 
 

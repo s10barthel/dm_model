@@ -32,6 +32,7 @@ from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.edge_schema import generation_kwargs
 from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
+from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -626,6 +627,7 @@ def main() -> None:
         require_return_type=False,
         require_target_family=False,
         allow_pass_only_success=True,
+        require_shared_split=False,
     )
     carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
     for message in carry_warnings:
@@ -826,6 +828,7 @@ def main() -> None:
         requested=getattr(args, "show_model_pass_success", False),
         available=getattr(args, "show_model_pass_success", False), output_root=output_root,
     ))
+    attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

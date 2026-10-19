@@ -41,6 +41,7 @@ from models.utils import (
     resolve_model_selection,
     validate_model_graph_schemas,
 )
+from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
@@ -585,6 +586,7 @@ def _configure_models(args: argparse.Namespace):
         require_intended_receiver_mode=False,
         require_return_type=False,
         require_target_family=False,
+        require_shared_split=False,
     )
     pass_height_id = resolve_optional_model_id("pass_height", args.pass_height_model_id, bundle)
     if pass_height_id:
@@ -1016,6 +1018,8 @@ def _run_location(args: argparse.Namespace) -> None:
         "status": "completed" if missing_report.empty else "completed_with_errors",
     }
     metadata.update(model_pass_success_metadata())
+    attach_membership_report(metadata, "hawkeye",
+                             identities=[(str(value), None) for value in hawkeye_table["loc_situation_id"].unique()])
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == HAWKEYE_LOC_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("hawkeye_loc_component", run_id)

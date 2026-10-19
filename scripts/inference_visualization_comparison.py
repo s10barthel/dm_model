@@ -9,6 +9,7 @@ import torch
 from models.inference_masks import configure_inference_masks, flatten_mask_values, resolve_inference_mask_configurations
 from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
 from models.edge_schema import generation_kwargs
+from models.membership import explicit_split_provenance
 from models.utils import (
     get_model_record, load_bundle_record, load_model,
     validate_model_record_consistency, validate_model_graph_schemas,
@@ -102,6 +103,7 @@ def resolve_variants(args, mod, sportec):
             models[f"auxiliary:{identifier}:{role}"] = auxiliary
         variant_schema = validate_model_graph_schemas(pipeline_models)
         variants.append(Variant(identifier, label, {"model_ids": ids, "models": pipeline_records,
+            "source_splits": {task: explicit_split_provenance(record) for task, record in pipeline_records.items()},
             "source_context": context, "graph_schema": variant_schema}, masks, pipeline_models))
     shared = {key: value if all(item.get(key) == value for item in contexts) else None
               for key, value in contexts[0].items()}
@@ -258,7 +260,7 @@ def run_comparison(args, mod):
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(dataset + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
-                           source_context=shared, bundle_id=args.bundle_id)
+                           source_context=shared, bundle_id=args.bundle_id, rendered_components=names)
     try:
         validate_metadata_definitions([variant.provenance for variant in variants], report.policy, tasks=required_tasks(selection))
         for variant in variants:

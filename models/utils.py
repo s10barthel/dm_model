@@ -865,7 +865,9 @@ def resolve_model_selection(
     require_return_type: bool = True,
     require_target_family: bool = True,
     allow_pass_only_success: bool = False,
+    require_shared_split: bool = True,
 ) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
+    """Resolve checkpoints; require a shared split when it selects runtime data."""
     explicit_model_ids = explicit_model_ids or {}
 
     if bundle_id:
@@ -888,10 +890,12 @@ def resolve_model_selection(
         allow_pass_only_success=allow_pass_only_success,
     )
     shared["model_records"] = model_records
+    from models.membership import explicit_split_provenance
+    shared["source_splits"] = {task: explicit_split_provenance(record) for task, record in model_records.items()}
     split_values = {tuple(split_selector(record).values()) for record in model_records.values()}
-    if len(split_values) > 1:
+    if require_shared_split and len(split_values) > 1:
         raise ValueError("Selected model checkpoints do not agree on train_split_percent/train_count.")
-    if split_values:
+    if require_shared_split and split_values:
         percent, count = next(iter(split_values))
         shared.update(train_split_percent=percent, train_count=count)
     split_manifest_ids = {
@@ -899,12 +903,18 @@ def resolve_model_selection(
         for record in model_records.values()
         if record.get("split_manifest_id")
     }
-    if len(split_manifest_ids) > 1:
+    if require_shared_split and len(split_manifest_ids) > 1:
         raise ValueError(
             f"Selected model checkpoints do not agree on split_manifest_id: {sorted(split_manifest_ids)}."
         )
-    if split_manifest_ids:
+    if require_shared_split and split_manifest_ids:
         shared["split_manifest_id"] = next(iter(split_manifest_ids))
+    if not require_shared_split:
+        provenance = list(shared["source_splits"].values())
+        if provenance and all(item == provenance[0] for item in provenance) and provenance[0].get("split_manifest_id") and any(
+            provenance[0].get(key) is not None for key in ("train_split_percent", "train_count")
+        ):
+            shared.update(provenance[0])
 
     if bundle is not None:
         if "use_carries" in bundle:
@@ -943,16 +953,18 @@ def resolve_model_selection(
         shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or bundle.get("intended_receiver_mode")
         shared["return_type"] = shared.get("return_type") or bundle.get("return_type")
         shared["target_family"] = shared.get("target_family") or bundle.get("target_family")
-        if any(bundle.get(key) is not None for key in ("train_split_percent", "train_count")):
+        if require_shared_split and any(bundle.get(key) is not None for key in ("train_split_percent", "train_count")):
             if split_selector(bundle) != split_selector(shared):
                 raise ValueError("Bundle split selector does not match selected model checkpoints.")
-        shared.update(split_metadata(shared))
-        if bundle.get("split_manifest_id") and shared.get("split_manifest_id") and bundle["split_manifest_id"] != shared["split_manifest_id"]:
+        if require_shared_split:
+            shared.update(split_metadata(shared))
+        if require_shared_split and bundle.get("split_manifest_id") and shared.get("split_manifest_id") and bundle["split_manifest_id"] != shared["split_manifest_id"]:
             raise ValueError(
                 f"Bundle {bundle_id!r} split_manifest_id={bundle['split_manifest_id']!r} does not match selected "
                 f"model checkpoints ({shared['split_manifest_id']!r})."
             )
-        shared["split_manifest_id"] = shared.get("split_manifest_id") or bundle.get("split_manifest_id")
+        if require_shared_split:
+            shared["split_manifest_id"] = shared.get("split_manifest_id") or bundle.get("split_manifest_id")
 
     return resolved_model_ids, shared, bundle
 

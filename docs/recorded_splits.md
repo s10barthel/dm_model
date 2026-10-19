@@ -39,6 +39,28 @@ Training records `split_manifest`, `split_resolution_source`, and `split_dataset
 with the equivalent information. Loaded matches can have no contributing rows
 after action-level filtering; these counts are intentionally distinct.
 
+## Visualization and independently trained components
+
+Visualizers and their Hawkeye, SkillCorner, and benchmark component producers
+allow checkpoints with different training selectors and manifests. They retain
+each model's provenance rather than choosing one component's split for the rest.
+Jobs that use a shared split to select their input data retain strict agreement.
+
+Visualization console output and the versioned `model_membership` metadata block
+report recorded training, validation, or development membership, verified holdout,
+or unknown status for each participating checkpoint, including learned PC-xPass
+auxiliaries. Allocation and contributing-match membership are reported separately;
+allocation alone does not establish that a match supplied usable training rows.
+Missing or conflicting evidence prevents a verified-holdout claim but does not
+prevent visualization. Saved reports can be reused without the original weights.
+Native Hawkeye, SkillCorner, and synthetic benchmark IDs are not compared to
+Sportec training IDs without a verified mapping, so their membership is unknown.
+
+Evaluation still checks its selected cohort against every participating model's
+recorded development membership. Training sets may differ; the evaluation cohort
+must be held out for every component. Paired comparisons also require identical
+evaluated action populations.
+
 ## Earlier 459-match evaluations
 
 The expanded-universe fallback previously assigned 153 matches from the original
