@@ -1943,8 +1943,14 @@ python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-du
 - `--xpass-pass-intent-model-id pass_intent/<id>`: required for active PC-xPass v5, including with its discount disabled. Unused auxiliary selectors are rejected.
 - `--v5-intent-threshold <float>`: positive finite pass-intent threshold for combined-v5 evaluation. Default: `0.01`; requires the explicit height and intent auxiliary selectors.
 - `--v5-discount <true|false>`: apply the pass-intent discount during combined-v5 evaluation. Default: `true`; `false` uses `w = pass_height`. Both v5 options are valid only with `--evaluate-combined-success --xpass-weight v5`.
-- `--pc-xpass-cache-dir <path>`: optional physical pc-xPass cache directory for weighted pass-success evaluation;
-  physical-xPass evaluation, or combined pass-success evaluation; default: the Sportec pc-xPass cache.
+- `--pc-xpass-cache-dir <path>`: pc-xPass dataset directory for lane-survival inputs, weighted pass-success evaluation,
+  physical-xPass evaluation, or combined pass-success evaluation. Use the Sportec directory containing `metadata.json`,
+  for example `C:\dm_model\data\pc_xpass_\sportec`. The wrapper forwards this selection to every checkpoint evaluator,
+  including model comparisons, mask evaluations, and learning curves. Lane-survival caches must match the checkpoint's
+  recorded fingerprint.
+- `--pc-xpass-id <id>`: select a versioned pc-xPass cache instead of a directory override; the two selectors cannot be
+  combined. When a cache is required and neither selector is supplied, the wrapper resolves the latest Sportec version
+  once and passes that ID to each evaluator.
 - `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
   weighted pass-success evaluation (defaults: `true`, `4`, and `0.7`) or required explicit settings for combined-v4
   evaluation.

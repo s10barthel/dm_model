@@ -101,7 +101,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-observed-pass-height-stratification", action="store_true")
     parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)
-    parser.add_argument("--pc-xpass-cache-dir", default=None)
+    parser.add_argument("--pc-xpass-cache-dir", default=None,
+                        help="Sportec pc-xPass dataset directory for lane-survival inputs and xPass evaluation.")
     parser.add_argument("--discount", type=parse_bool_text, default=None)
     parser.add_argument("--v4-power", type=float, default=None)
     parser.add_argument("--v4-zero", type=float, default=None)
@@ -145,6 +146,24 @@ def validate_pass_success_predictor_args(args: argparse.Namespace) -> None:
         raise ValueError("v4 options require --xpass-weight v4 or --weighted-pass-success-metrics.")
 
 
+def resolve_pc_xpass_cache(args: argparse.Namespace, *, requires_lane_survival: bool) -> None:
+    """Pin the selected version once before launching evaluations."""
+    if not args.pc_xpass_cache_dir and (
+        args.pc_xpass_id or requires_lane_survival or args.weighted_pass_success_metrics
+        or args.evaluate_xpass or args.evaluate_combined_success
+    ):
+        pc_versions.cache_dir("sportec", args)
+
+
+def add_pc_xpass_options(command: list[str], args: argparse.Namespace) -> list[str]:
+    """Forward the shared cache selection to every checkpoint evaluator."""
+    if getattr(args, "pc_xpass_id", None):
+        command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
+    if args.pc_xpass_cache_dir:
+        command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
+    return command
+
+
 def add_weighted_pass_success_options(command: list[str], args: argparse.Namespace) -> list[str]:
     """Append the evaluation-only v4 options to a pass-success test command."""
     command.extend(
@@ -158,10 +177,6 @@ def add_weighted_pass_success_options(command: list[str], args: argparse.Namespa
             str(0.7 if args.v4_zero is None else args.v4_zero),
         ]
     )
-    if getattr(args, "pc_xpass_id", None):
-        command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
-    if args.pc_xpass_cache_dir:
-        command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
     return command
 
 
@@ -253,10 +268,6 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
         if args.evaluate_combined_success:
             command.append("--evaluate-combined-success")
         command.extend(["--xpass-version", str(args.xpass_version)])
-        if getattr(args, "pc_xpass_id", None):
-            command.extend(["--pc-xpass-id", str(args.pc_xpass_id)])
-        if args.pc_xpass_cache_dir:
-            command.extend(["--pc-xpass-cache-dir", str(args.pc_xpass_cache_dir)])
         if args.evaluate_combined_success:
             command.extend(["--xpass-weight", str(args.xpass_weight)])
             if args.xpass_weight == "v4":
@@ -371,6 +382,10 @@ def run_learning_curve(args: argparse.Namespace) -> None:
             skipped[task] = str(exc)
     if not series:
         raise ValueError(f"No comparable checkpoint series found; skipped: {skipped}")
+    resolve_pc_xpass_cache(args, requires_lane_survival=any(
+        ((record.get("comparison_config") or {}).get("feature_signature") or {}).get("lane_survival", False)
+        for records in series.values() for record in records
+    ))
     output_root.mkdir(parents=True)
     report = {"evaluation_timestamp": timestamp, "bundle_id": args.bundle_id,
               "evaluation_pass_height_threshold_meters": args.pass_height_threshold,
@@ -378,6 +393,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
               "bootstrap_seed": args.learning_curve_bootstrap_seed,
               "classification_threshold": args.classification_threshold,
               "f1_outcome_threshold": args.f1_outcome_threshold,
+              "pc_xpass_id": args.pc_xpass_id, "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
               "series": series, "skipped": skipped}
     manifest_path = output_root / "experiment_manifest.json"
     manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -388,6 +404,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
             command = [sys.executable, "test.py", "--model_id", record["model_id"], "--device", args.device,
                        "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
                        "--learning-curve-rows"]
+            add_pc_xpass_options(command, args)
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
                 command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
             if args.pass_height_threshold is not None:
@@ -545,11 +562,9 @@ def _main(args, policy) -> None:
             names = configuration["scoped_masks"].get(entry["task"], [])
             if names:
                 resolve_model_masks(entry["checkpoint_record"]["args"], names)
-    if not args.pc_xpass_cache_dir and (args.pc_xpass_id or args.weighted_pass_success_metrics or args.evaluate_xpass or args.evaluate_combined_success):
-        pc_versions.cache_dir("sportec", args)
-    if not args.pc_xpass_cache_dir and not getattr(args, "_pc_version_root", None):
-        if any(entry["checkpoint_record"]["args"].get("lane_survival", False) for entry in entries):
-            pc_versions.cache_dir("sportec", args)
+    resolve_pc_xpass_cache(args, requires_lane_survival=any(
+        entry["checkpoint_record"]["args"].get("lane_survival", False) for entry in entries
+    ))
     timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     base_dir = Path(args.evaluation_output_dir) if args.evaluation_output_dir else EVALUATION_RUNS_DIR
     mode = "mask_comparison" if mask_mode else "model_comparison" if checkpoint_mode else "evaluation"
@@ -615,6 +630,7 @@ def _main(args, policy) -> None:
                       "output_dir": str(output_dir), "label": variant["id"] if mask_mode else model_id}
             command = [sys.executable, "test.py", "--model_id", model_id, "--device", args.device,
                        "--evaluation-output-dir", str(output_dir), "--evaluation-timestamp", timestamp]
+            add_pc_xpass_options(command, args)
             if grouped_output:
                 command.extend(["--inference-configuration-id", variant["id"]])
             if mask_mode or checkpoint_mode:

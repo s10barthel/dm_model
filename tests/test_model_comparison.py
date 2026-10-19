@@ -113,7 +113,7 @@ class ComparisonEngineTests(unittest.TestCase):
 
 
 class EvaluationWrapperTests(unittest.TestCase):
-    def run_wrapper(self, argv, output_root):
+    def run_wrapper(self, argv, output_root, *, checkpoint_fn=checkpoint):
         commands = []
         def fake_run(command, **kwargs):
             commands.append(command)
@@ -123,13 +123,142 @@ class EvaluationWrapperTests(unittest.TestCase):
             frame = binary_frame()
             if "--inference-mask" in command:
                 frame["prediction"] = [.3, .7, .3, .7]
+            if command[command.index("--model_id") + 1].startswith("pass_intent/"):
+                frame = frame.assign(prediction=frame.target, target_id=["p0", "p1"] * 2,
+                                     prediction_id=["p0", "p1"] * 2, candidate_ids='["p0","p1"]',
+                                     target_probability=.8, reciprocal_rank=1.)
             frame.to_csv(output / "learning_curve_predictions.csv", index=False)
         args = wrapper.parse_args(["--accept-comparison-warnings", *argv, "--evaluation-output-dir", str(output_root), "--comparison-bootstrap-resamples", "0"])
         with patch.object(wrapper, "parse_args", return_value=args), \
-             patch.object(model_comparison, "checkpoint", side_effect=checkpoint), \
+             patch.object(model_comparison, "checkpoint", side_effect=checkpoint_fn), \
              patch.object(wrapper.subprocess, "run", side_effect=fake_run):
             wrapper.main()
         return commands
+
+    def test_lane_survival_cache_reaches_comparison_and_mask_subprocesses(self):
+        def with_lane_survival(model_id, **kwargs):
+            record = checkpoint(model_id, **kwargs)
+            record["checkpoint_record"]["args"]["lane_survival"] = model_id.endswith("/b")
+            return record
+
+        for mode in ("comparison", "masks"):
+            for selection in ("directory", "id", "latest"):
+                with self.subTest(mode=mode, selection=selection), tempfile.TemporaryDirectory() as folder:
+                    cache_dir = str(Path(folder) / "compatible cache" / "sportec")
+                    selected_id = "pc_xpass_selected" if selection == "id" else "pc_xpass_pinned_latest"
+                    selector = (["--pc-xpass-cache-dir", cache_dir] if selection == "directory" else
+                                ["--pc-xpass-id", selected_id] if selection == "id" else [])
+
+                    def resolve_cache(source, args):
+                        self.assertEqual(source, "sportec")
+                        if selection == "id":
+                            self.assertEqual(args.pc_xpass_id, selected_id)
+                        else:
+                            self.assertIsNone(args.pc_xpass_id)
+                        args.pc_xpass_id = selected_id
+                        args._pc_version_root = str(Path(folder) / selected_id)
+                        return Path(args._pc_version_root) / source
+
+                    flags = ["--compare"] if mode == "comparison" else ["--inference-mask", "accel"]
+                    with patch.object(wrapper.pc_versions, "cache_dir", side_effect=resolve_cache) as resolve, \
+                         patch.object(model_comparison, "save_plot"):
+                        commands = self.run_wrapper([
+                            *flags, "--pass-intent-model-id", "pass_intent/a",
+                            "--pass-intent-model-id", "pass_intent/b", *selector,
+                        ], Path(folder) / "reports", checkpoint_fn=with_lane_survival)
+
+                    self.assertEqual(len(commands), 2 if mode == "comparison" else 4)
+                    if selection == "directory":
+                        resolve.assert_not_called()
+                        option, value, absent = "--pc-xpass-cache-dir", cache_dir, "--pc-xpass-id"
+                    else:
+                        self.assertEqual(resolve.call_count, 1)
+                        option, value, absent = "--pc-xpass-id", selected_id, "--pc-xpass-cache-dir"
+                    for command in commands:
+                        self.assertEqual(command.count(option), 1)
+                        self.assertEqual(command[command.index(option) + 1], value)
+                        self.assertNotIn(absent, command)
+                    manifest = next((Path(folder) / "reports").glob("*/experiment_manifest.json"))
+                    options = json.loads(manifest.read_text(encoding="utf-8"))["evaluation_options"]
+                    self.assertEqual(options["pc_xpass_cache_dir"] if selection == "directory" else
+                                     options["pc_xpass_id"], value)
+
+    def test_pass_success_cache_selector_is_forwarded_only_once(self):
+        for selection in ("directory", "id"):
+            for predictor in ([], ["--evaluate-xpass", "--xpass-version", "max"],
+                              ["--evaluate-combined-success", "--xpass-version", "max", "--xpass-weight", "v4",
+                               "--discount", "true", "--v4-power", "4", "--v4-zero", "0.7"]):
+                with self.subTest(selection=selection, predictor=predictor), tempfile.TemporaryDirectory() as folder:
+                    option = "--pc-xpass-cache-dir" if selection == "directory" else "--pc-xpass-id"
+                    value = str(Path(folder) / "cache" / "sportec") if selection == "directory" else "pc_xpass_selected"
+                    with patch.object(wrapper.pc_versions, "cache_dir", return_value=Path(folder)), \
+                         patch.object(model_comparison, "save_plot"):
+                        commands = self.run_wrapper([
+                            "--pass-success-model-id", "pass_success/a", "--weighted-pass-success-metrics",
+                            "--xpass-pass-height-model-id", "pass_height/aux",
+                            option, value, *predictor,
+                        ], Path(folder) / "reports")
+                    self.assertEqual(len(commands), 1)
+                    self.assertEqual(commands[0].count(option), 1)
+                    self.assertEqual(commands[0][commands[0].index(option) + 1], value)
+
+    def test_cache_selection_reaches_every_learning_curve_subprocess(self):
+        records = [{"model_id": f"pass_intent/{size}", "task": "pass_intent", "train_matches": size,
+                    "test_match_ids": ["test"],
+                    "comparison_config": {"feature_signature": {"lane_survival": True}}}
+                   for size in (1, 2)]
+        for selection in ("directory", "id", "latest"):
+            with self.subTest(selection=selection), tempfile.TemporaryDirectory() as folder:
+                cache_dir = str(Path(folder) / "compatible cache" / "sportec")
+                selected_id = "pc_xpass_selected" if selection == "id" else "pc_xpass_pinned_latest"
+                selector = (["--pc-xpass-cache-dir", cache_dir] if selection == "directory" else
+                            ["--pc-xpass-id", selected_id] if selection == "id" else [])
+                args = wrapper.parse_args([
+                    "--learning-curve", "--pass-intent-model-id", "pass_intent/anchor",
+                    "--evaluation-output-dir", str(Path(folder) / "reports"),
+                    "--learning-curve-bootstrap-resamples", "0", *selector,
+                ])
+
+                def resolve_cache(source, selection_args):
+                    self.assertEqual(source, "sportec")
+                    selection_args.pc_xpass_id = selected_id
+                    return Path(folder) / selected_id / source
+
+                def fake_run(command, **kwargs):
+                    output = Path(command[command.index("--evaluation-output-dir") + 1])
+                    output.mkdir(parents=True)
+                    frame = pd.DataFrame({"match_id": ["test", "test"], "source_index": [0, 1],
+                                          "target": [0, 1], "prediction": [0, 1],
+                                          "target_probability": [.8, .9], "reciprocal_rank": [1., 1.]})
+                    frame.to_csv(output / "learning_curve_predictions.csv", index=False)
+
+                with patch.object(wrapper.learning_curve, "discover", return_value=[r["model_id"] for r in records]), \
+                     patch.object(wrapper.learning_curve, "validate_series", return_value=records), \
+                     patch.object(wrapper.pc_versions, "cache_dir", side_effect=resolve_cache) as resolve, \
+                     patch.object(wrapper.subprocess, "run", side_effect=fake_run) as run, \
+                     patch.object(wrapper.learning_curve, "save_plot"):
+                    wrapper.run_learning_curve(args)
+
+                self.assertEqual(run.call_count, 2)
+                if selection == "directory":
+                    resolve.assert_not_called()
+                    option, value, absent = "--pc-xpass-cache-dir", cache_dir, "--pc-xpass-id"
+                else:
+                    self.assertEqual(resolve.call_count, 1)
+                    option, value, absent = "--pc-xpass-id", selected_id, "--pc-xpass-cache-dir"
+                for call in run.call_args_list:
+                    command = call.args[0]
+                    self.assertEqual(command.count(option), 1)
+                    self.assertEqual(command[command.index(option) + 1], value)
+                    self.assertNotIn(absent, command)
+                manifest = next((Path(folder) / "reports").glob("*/experiment_manifest.json"))
+                metadata = json.loads(manifest.read_text(encoding="utf-8"))
+                self.assertEqual(metadata["pc_xpass_cache_dir"] if selection == "directory" else
+                                 metadata["pc_xpass_id"], value)
+
+    def test_cache_directory_and_id_cannot_be_combined(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            wrapper.parse_args(["--pc-xpass-id", "pc_xpass_selected", "--pc-xpass-cache-dir", "cache/sportec"])
 
     def test_normal_repeated_selectors_and_shared_run_multi_task(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -138,6 +267,8 @@ class EvaluationWrapperTests(unittest.TestCase):
                                          "--pass-height-model-id", "pass_height/a"], Path(folder))
             self.assertEqual(len(commands), 3)
             self.assertTrue(all("--learning-curve-rows" not in command for command in commands))
+            self.assertTrue(all("--pc-xpass-id" not in command and "--pc-xpass-cache-dir" not in command
+                                for command in commands))
             self.assertEqual(len(set(command[command.index("--evaluation-output-dir") + 1] for command in commands)), 3)
 
     def test_mask_configs_compare_only_within_each_checkpoint_and_include_unmasked_once(self):

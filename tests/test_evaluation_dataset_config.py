@@ -686,6 +686,7 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         command = evaluate_relevant_models.add_weighted_pass_success_options(
             ["python", "test.py", "--model_id", "pass_success/run_1"], args
         )
+        evaluate_relevant_models.add_pc_xpass_options(command, args)
         self.assertEqual(
             command[-9:],
             [
