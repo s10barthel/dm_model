@@ -1951,6 +1951,16 @@ python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-du
 - `--pc-xpass-id <id>`: select a versioned pc-xPass cache instead of a directory override; the two selectors cannot be
   combined. When a cache is required and neither selector is supplied, the wrapper resolves the latest Sportec version
   once and passes that ID to each evaluator.
+- Historical checkpoints missing training/validation membership can be evaluated after an interactive `yes` confirmation.
+  When no recorded default test cohort exists, select one with `--season` (and optionally `--season-half`). The wrapper
+  checks all primary and auxiliary models, asks once, and passes the recorded approval to its evaluators. Direct `test.py`
+  evaluations offer the same confirmation. Known overlap, invalid/conflicting provenance, broken recorded manifests,
+  missing feature artifacts, and incompatible caches remain errors. `--accept-comparison-warnings` does not authorize
+  unverified membership, and no public unattended-acceptance flag is provided.
+  Accepted results retain `evaluation_membership` metadata; comparison CSVs include `evaluation_membership_status`,
+  and plots identify unverified evaluation membership. These results are exploratory assessments, not verified held-out
+  measurements. Refusal, EOF, interrupted input, or noninteractive execution cancels with exit status 1; standalone
+  cancellations are recorded in `membership_cancellation.json` when an output directory was requested.
 - `--discount {true,false}`, `--v4-power <float>`, and `--v4-zero <float>`: v4 production-weight settings for
   weighted pass-success evaluation (defaults: `true`, `4`, and `0.7`) or required explicit settings for combined-v4
   evaluation.

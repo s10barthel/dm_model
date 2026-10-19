@@ -7,7 +7,8 @@ import math
 from project_config import (INTENDED_RECEIVER_MODES, load_recorded_split_manifest, parse_return_type,
                             load_feature_run_metadata, LEGACY_FEATURE_SPLIT_MANIFESTS)
 from datatools.sportec_seasons import add_season_argument, heldout_season_match_ids
-from models.membership import recorded_manifest_id as _recorded_manifest_id, resolve_membership_evidence
+from models.membership import (recorded_manifest_id as _recorded_manifest_id, resolve_membership_evidence,
+                               MissingMembershipError)
 
 
 def nonnegative_duration(value):
@@ -60,13 +61,24 @@ def excluded_membership(record):
 
 def check_heldout(record, match_ids):
     requested = set(map(str, match_ids))
-    exclusions = excluded_membership(record)
+    evidence = resolve_membership_evidence(record, strict=True, require_complete=False,
+        manifest_loader=load_recorded_split_manifest, feature_loader=load_feature_run_metadata)
+    exclusions = evidence["memberships"]
     overlaps = {name: sorted(requested & ids) for name, ids in exclusions.items() if requested & ids}
     if overlaps:
         details = "; ".join(f"{name}: {len(ids)} matches ({', '.join(ids)})" for name, ids in overlaps.items())
         raise ValueError(f"Held-out selection overlaps {record.get('model_id', 'checkpoint')}: {details}.")
-    return {"model_id": record.get("model_id"), "requested_match_count": len(requested),
-            "exclusion_sources": {name: len(ids) for name, ids in exclusions.items()}, "overlap_count": 0}
+    check = {"model_id": record.get("model_id"), "requested_match_count": len(requested),
+             "requested_match_ids": sorted(requested),
+             "exclusion_sources": {name: len(ids) for name, ids in exclusions.items()},
+             "status": "verified" if evidence["complete"] else "unverified",
+             "overlap_count": 0 if evidence["complete"] else None}
+    if not evidence["complete"]:
+        check["reason"] = "missing_recorded_membership"
+        raise MissingMembershipError(
+            f"Cannot verify training/validation exclusion for {record.get('model_id', 'checkpoint')}: missing recorded membership.",
+            check=check)
+    return check
 
 
 def diagnostic_name(return_type):

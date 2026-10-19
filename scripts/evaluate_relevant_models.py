@@ -17,7 +17,9 @@ if str(ROOT) not in sys.path:
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from scripts import learning_curve, model_comparison
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument
-from models.evaluation_context import add_evaluation_arguments, evaluation_selection, check_heldout
+from models.evaluation_context import add_evaluation_arguments, evaluation_selection
+from models.evaluation_membership import (collect_evaluation_membership, confirm_evaluation_membership,
+    membership_for_models, EvaluationMembershipCancelled)
 from models.utils import load_bundle_record
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
 from models.inference_masks import (
@@ -538,20 +540,24 @@ def _main(args, policy) -> None:
             raise ValueError("--compare requires at least two distinct checkpoints of the same task.")
         entries = subjects
     selected_matches = evaluation_selection(args)
-    exclusion_checks = []
+    record_cohorts = []
     for entry in entries:
+        entry["checkpoint_record"] = {"model_id": entry["model_id"], **entry["checkpoint_record"]}
         population = selected_matches if selected_matches is not None else entry["test_match_ids"]
         if population is None:
-            raise ValueError(f"No verified held-out population for {entry['model_id']}.")
-        exclusion_checks.append(check_heldout(entry["checkpoint_record"], population))
+            raise ValueError(f"No recorded default test cohort for {entry['model_id']}; select an evaluation population with --season.")
+        record_cohorts.append((entry["checkpoint_record"], population))
         entry["test_match_ids"] = list(population)
         if args.intended_receiver_mode is not None:
             entry["target_definitions"]["intended_receiver_mode"] = args.intended_receiver_mode
     auxiliary_ids = [getattr(args, "xpass_" + role + "_model_id", None) for role in ("pass_height", "pass_intent")]
     for model_id in filter(None, auxiliary_ids):
         auxiliary = model_comparison.checkpoint(model_id)
+        auxiliary["checkpoint_record"] = {"model_id": model_id, **auxiliary["checkpoint_record"]}
         for entry in entries:
-            exclusion_checks.append(check_heldout(auxiliary["checkpoint_record"], entry["test_match_ids"]))
+            record_cohorts.append((auxiliary["checkpoint_record"], entry["test_match_ids"]))
+    evaluation_membership = collect_evaluation_membership(record_cohorts)
+    exclusion_checks = evaluation_membership["checks"]
     if checkpoint_mode:
         model_comparison.add_definition_warnings(policy, entries)
     participating_tasks = {entry["task"] for entry in entries}
@@ -596,6 +602,7 @@ def _main(args, policy) -> None:
         "comparison_interval_method": "paired_match_percentile",
         "comparison_confidence_level": 0.95,
         "comparison_interval_scope": "pointwise",
+        "evaluation_membership": evaluation_membership,
         "evaluation_context": {"intended_receiver_mode": args.intended_receiver_mode,
             "filter": args.evaluation_filter,
             "diagnostic_target_family": "goal", "diagnostic_return_type": args.diagnostic_return_type or "next_10",
@@ -606,6 +613,10 @@ def _main(args, policy) -> None:
     report = {**wrapper_context, **policy.metadata(), "entries": [], "comparisons": [], "skipped_configurations": []}
     args._comparison_manifest_path = manifest_path
     _write_manifest(manifest_path, report)
+    try:
+        confirm_evaluation_membership(evaluation_membership)
+    finally:
+        _write_manifest(manifest_path, report)
     policy.confirm()
     print(f"Evaluation artifacts will be saved below {base_dir}", flush=True)
     compare_records = []
@@ -628,8 +639,12 @@ def _main(args, policy) -> None:
             output_dir = model_dir / variant["id"] if grouped_output else legacy_dirs[task]
             record = {**entry, "configuration_id": variant["id"], "masks": variant["masks"],
                       "output_dir": str(output_dir), "label": variant["id"] if mask_mode else model_id}
+            record["evaluation_membership"] = membership_for_models(
+                evaluation_membership, [model_id, *filter(None, auxiliary_ids)], entry["test_match_ids"])
             command = [sys.executable, "test.py", "--model_id", model_id, "--device", args.device,
                        "--evaluation-output-dir", str(output_dir), "--evaluation-timestamp", timestamp]
+            if record["evaluation_membership"]["status"] == "unverified":
+                command.extend(["--membership-acceptance-manifest", str(manifest_path.resolve())])
             add_pc_xpass_options(command, args)
             if grouped_output:
                 command.extend(["--inference-configuration-id", variant["id"]])
@@ -649,6 +664,7 @@ def _main(args, policy) -> None:
             artifact_metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
             record["inference_masks"] = artifact_metadata.get("inference_masks", {})
             record["evaluation_context"] = artifact_metadata.get("evaluation_context", {})
+            record["evaluation_membership"] = artifact_metadata.get("evaluation_membership", record["evaluation_membership"])
             records.append(record)
             report["entries"].append(record)
             _write_manifest(manifest_path, report)
@@ -685,8 +701,11 @@ def main() -> None:
         path = getattr(args, "_comparison_manifest_path", None)
         if path is not None:
             report = json.loads(path.read_text(encoding="utf-8"))
-            report.update(policy.metadata(), status="cancelled" if isinstance(exc, ComparisonCancelled) else "failed", error=str(exc))
+            report.update(policy.metadata(), status="cancelled" if isinstance(exc, (ComparisonCancelled, EvaluationMembershipCancelled)) else "failed", error=str(exc))
             _write_manifest(path, report)
+        if isinstance(exc, EvaluationMembershipCancelled):
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from None
         raise
 
 

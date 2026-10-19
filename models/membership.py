@@ -19,6 +19,14 @@ NO_VERIFIED_ID = "no_verified_sportec_match_id"
 SKIPPED_MESSAGE = "Training membership check skipped: no verified mapping to Sportec match IDs."
 
 
+class MissingMembershipError(ValueError):
+    """Absent historical evidence, distinct from invalid or conflicting records."""
+
+    def __init__(self, message, *, check=None):
+        super().__init__(message)
+        self.check = check
+
+
 def comparable_identity(dataset, match_id):
     # Provider-native IDs are never treated as Sportec IDs without a mapping.
     return dataset == "sportec" and match_id is not None and bool(str(match_id).strip())
@@ -71,7 +79,7 @@ def explicit_split_provenance(record):
             "split_manifest_id": record.get("split_manifest_id") or metadata.get("split_manifest_id") or arguments.get("split_manifest_id")}
 
 
-def resolve_membership_evidence(record, *, strict=False, manifest_loader=None, feature_loader=None):
+def resolve_membership_evidence(record, *, strict=False, require_complete=True, manifest_loader=None, feature_loader=None):
     manifest_loader = manifest_loader or load_recorded_split_manifest
     memberships, contributing, sources, errors = {}, {}, {}, []
 
@@ -149,11 +157,13 @@ def resolve_membership_evidence(record, *, strict=False, manifest_loader=None, f
         if strict:
             raise
         errors.append(f"Cannot load development provenance: {exc}")
+    if strict and errors:
+        raise ValueError(" ".join(errors))
     complete = "development" in memberships or {"training", "validation"}.issubset(memberships)
     if not complete:
         message = f"Cannot verify training/validation exclusion for {record.get('model_id', 'checkpoint')}: missing recorded membership."
-        if strict:
-            raise ValueError(message)
+        if strict and require_complete:
+            raise MissingMembershipError(message)
         errors.append(message)
     return {"memberships": memberships, "contributing": contributing, "sources": sources,
             "split_manifest_id": manifest_id, "complete": complete, "errors": errors}

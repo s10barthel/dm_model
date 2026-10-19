@@ -16,7 +16,9 @@ from models.utils import get_model_record, parse_model_id
 from project_config import load_recorded_split_manifest
 from scripts.comparison_utils import INTENT_TASKS, paired_bootstrap, comparison_identity_columns
 from scripts.comparison_warnings import ComparisonWarnings, metadata_differences
-from models.evaluation_context import check_heldout, recorded_manifest_id
+from models.evaluation_context import recorded_manifest_id
+from models.evaluation_membership import (combine_evaluation_membership, collect_evaluation_membership,
+                                          accept_recorded_membership)
 
 
 TARGET_DEFINITION_KEYS = ("target_family", "return_type", "intended_receiver_mode", "label_source",
@@ -164,7 +166,12 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
         if set(frame["match_id"]).intersection(record.get("train_match_ids") or []):
             raise ValueError(f"Predictions include recorded training matches in {path}.")
         if record.get("checkpoint_record", {}).get("model_id"):
-            check_heldout(record["checkpoint_record"], frame["match_id"].unique())
+            cohort = record.get("test_match_ids")
+            if cohort is None:
+                cohort = frame["match_id"].unique()
+            checked = collect_evaluation_membership([(record["checkpoint_record"], cohort)])
+            if checked["status"] == "unverified":
+                accept_recorded_membership(checked, record.get("evaluation_membership"))
         target_name = "target_id" if intent else "target"
         if intent and (frame["target_id"].eq("").any() or frame["prediction_id"].eq("").any()):
             raise ValueError(f"Missing semantic intent identities in {path}.")
@@ -210,6 +217,11 @@ def load_aligned_predictions(records: list[dict]) -> tuple[list[pd.DataFrame], l
     return frames, messages
 
 
+def evaluation_membership_status(records):
+    statuses = [(record.get("evaluation_membership") or {}).get("status", "unknown") for record in records]
+    return "unverified" if "unverified" in statuses else "verified" if all(s == "verified" for s in statuses) else "unknown"
+
+
 def compare(task: str, records: list[dict], frames: list[pd.DataFrame], *, resamples: int, seed: int,
             threshold: float | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     points, intervals, pair_intervals = paired_bootstrap(
@@ -224,6 +236,7 @@ def compare(task: str, records: list[dict], frames: list[pd.DataFrame], *, resam
                          "configuration_id": record.get("configuration_id", "unmasked"),
                          "label": record.get("label", record["model_id"]), "metric": metric,
                          "estimate": estimate, "lower": low, "upper": high,
+                         "evaluation_membership_status": evaluation_membership_status([record]),
                          "valid_resamples": valid, "status": status})
     for (a, b, metric), (low, high, valid, status) in pair_intervals.items():
         differences.append({
@@ -232,6 +245,7 @@ def compare(task: str, records: list[dict], frames: list[pd.DataFrame], *, resam
             "configuration_b": records[b].get("configuration_id", "unmasked"),
             "direction": f"{records[b].get('label', records[b]['model_id'])} - {records[a].get('label', records[a]['model_id'])}",
             "metric": metric, "difference": points[b][metric] - points[a][metric],
+            "evaluation_membership_status": evaluation_membership_status([records[a], records[b]]),
             "lower": low, "upper": high, "valid_resamples": valid, "status": status,
         })
     return pd.DataFrame(rows), pd.DataFrame(differences)
@@ -251,7 +265,10 @@ def save_plot(summary: pd.DataFrame, output_path: Path, task: str) -> None:
         axis.set_xticks(x, data.label.tolist(), rotation=20, ha="right")
         axis.set_ylabel(name)
         axis.grid(alpha=0.25)
-    fig.suptitle(f"{task}: identical evaluated rows")
+    qualification = ("\nEvaluation membership unverified" if
+                     "evaluation_membership_status" in summary and
+                     summary.evaluation_membership_status.eq("unverified").any() else "")
+    fig.suptitle(f"{task}: identical evaluated rows{qualification}")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
@@ -292,7 +309,11 @@ def write_report(records: list[dict], output_dir: Path, *, resamples: int, seed:
                 aligned[f"{name}_{index}"] = frame[name].to_numpy()
     aligned.to_csv(output_dir / "aligned_predictions.csv", index=False)
     save_plot(summary, output_dir / "comparison.png", task)
+    membership = combine_evaluation_membership(record["evaluation_membership"] for record in records
+                                              if record.get("evaluation_membership"))
+    membership["status"] = evaluation_membership_status(records)
     report = {"task": task, "variants": records, **policy.metadata(), "reference_differences": messages,
+              "evaluation_membership": membership,
               "identity_columns": comparison_identity_columns(frames),
               "soft_target_tolerance": {"rtol": SOFT_TARGET_RTOL, "atol": SOFT_TARGET_ATOL},
               "example_count": len(frames[0]), "contributing_match_ids": sorted(frames[0].match_id.unique().tolist()),

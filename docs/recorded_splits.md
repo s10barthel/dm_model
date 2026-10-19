@@ -78,8 +78,33 @@ producing a new report. Existing exports are not rewritten.
 
 Evaluation still checks its selected cohort against every participating model's
 recorded development membership. Training sets may differ; the evaluation cohort
-must be held out for every component. Paired comparisons also require identical
-evaluated action populations.
+must be held out for every component to claim verified evaluation membership.
+Paired comparisons also require identical evaluated action populations.
+
+For historical checkpoints with absent membership evidence, the evaluation wrapper
+and direct `test.py` allow an exploratory evaluation only after an interactive
+`yes`/`y`. The warning lists all affected primary and auxiliary models. The wrapper
+asks once and records cohort-scoped approval before launching child evaluators;
+children independently check membership and validate the saved approval. No public
+flag permits unattended acceptance, and `--accept-comparison-warnings` is independent.
+Empty or invalid answers reprompt; refusal, EOF, interruption, and noninteractive
+input cancel with exit status 1. A requested output directory retains cancellation
+metadata without producing metrics (standalone runs use `membership_cancellation.json`).
+
+Known overlap remains an error even when other membership is missing. Malformed or
+conflicting records and missing/corrupt explicitly referenced manifests also remain
+errors. This exception does not relax feature, cache, or example-alignment checks.
+When no historical split identifies a default test cohort, an explicit `--season`
+selection is required; no current split or default training percentage is substituted.
+Historical split fields remain null when unavailable. Learning curves still require
+recorded training sizes and split provenance.
+
+Successful outputs include `evaluation_membership` with verified/unverified status,
+per-model checks and requested cohorts, affected model IDs, and the confirmation
+decision and method. Unknown exclusion is not reported as zero verified overlap.
+Comparison metric and difference CSVs carry `evaluation_membership_status`; a pair
+is unverified if either side depends on an unverified primary or auxiliary model.
+Comparison plots explicitly label these results as "Evaluation membership unverified".
 
 ## Earlier 459-match evaluations
 

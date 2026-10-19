@@ -16,7 +16,7 @@ import project_config
 from datatools import config
 from dataset import ActionDataset
 from models.gnn import GNN
-from models import utils
+from models import evaluation_context, utils
 from models.utils import run_epoch
 from scripts import evaluate_relevant_models as wrapper, model_comparison
 from scripts.comparison_warnings import ComparisonWarnings
@@ -135,7 +135,9 @@ def test_evaluator_cli_selection_and_metadata(action_artifacts, tmp_path, monkey
     monkeypatch.setattr(utils, "load_model", lambda *args: model)
     monkeypatch.setattr(utils, "get_model_record", lambda *args: {
         "model_id": "outcome_scoring/test", "args": arguments,
-        "metadata": {"train_match_ids": ["train"], "validation_match_ids": ["valid"]}})
+        "metadata": {"split_manifest_id": "fixture", "train_match_ids": ["train"], "validation_match_ids": ["valid"]}})
+    monkeypatch.setattr(evaluation_context, "load_recorded_split_manifest",
+                        lambda _: {"train": ["train", "valid"], "test": ["match"]})
     monkeypatch.setattr(project_config, "resolve_artifact_split", lambda *args, **kwargs: (
         dict(manifest_id="fixture", test=["match"], metadata={"universe_fingerprint": "fixture"}), "fixture"))
     monkeypatch.setattr(project_config, "EVALUATION_RUNS_DIR", tmp_path / "summary")

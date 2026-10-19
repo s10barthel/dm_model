@@ -25,8 +25,11 @@ from models.inference_masks import (
     resolve_inference_mask_configurations,
 )
 from models.prediction_identity import ensure_dataset_node_identities
-from models.evaluation_context import (add_evaluation_arguments, evaluation_selection, check_heldout,
+from models.evaluation_context import (add_evaluation_arguments, evaluation_selection,
                                        diagnostic_name)
+from models.membership import recorded_manifest_id
+from models.evaluation_membership import (collect_evaluation_membership, confirm_direct_evaluation_membership,
+                                          EvaluationMembershipCancelled)
 from models.utils import (
     calc_binary_metrics,
     calc_binary_diagnostic_rows,
@@ -99,6 +102,13 @@ def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_i
     original_id = checkpoint_record.get("feature_run_id")
     feature_metadata = (load_feature_run_metadata(original_id, required=False) or {}) if original_id else {}
     checkpoint_provenance = {**checkpoint_record["args"], **checkpoint_record.get("metadata", {})}
+    manifest_id = recorded_manifest_id(checkpoint_record, feature_loader=lambda *args, **kwargs: feature_metadata)
+    if not manifest_id:
+        if evaluation_selection(cli_args) is None:
+            raise ValueError("No recorded default test cohort; select an evaluation population with --season.")
+        if selected_feature_run_id != original_id:
+            load_feature_run_metadata(selected_feature_run_id, required=True)
+        return None, "explicit season selection; historical split unavailable"
     manifest, source = resolve_artifact_split(
         cli_args, feature_metadata, feature_run_id=original_id, checkpoint=checkpoint_provenance,
     )
@@ -108,6 +118,32 @@ def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_i
             feature_run_id=selected_feature_run_id, checkpoint={"split_manifest_id": manifest["manifest_id"]},
         )
     return manifest, source
+
+
+def prepare_evaluation_population(args, checkpoint_record, selected_feature_run_id, auxiliary_models):
+    """Select a cohort and verify all participants before constructing test datasets."""
+    manifest, source = resolve_evaluation_split(args, checkpoint_record, selected_feature_run_id)
+    selected = evaluation_selection(args)
+    match_ids = np.asarray(selected if selected is not None else manifest["test"])
+    record_cohorts = [(checkpoint_record, match_ids)]
+    for auxiliary in auxiliary_models.values():
+        auxiliary_id = auxiliary.args.get("model_id")
+        if auxiliary_id is None:
+            auxiliary_id = next((getattr(args, name, None) for name in (
+                "xpass_pass_height_model_id", "xpass_pass_intent_model_id")
+                if getattr(args, name, None) and getattr(args, name).split("/", 1)[0] == auxiliary.args.get("task")), None)
+        if not auxiliary_id:
+            raise ValueError("Cannot verify held-out membership of a participating auxiliary checkpoint.")
+        record_cohorts.append((utils.get_model_record(auxiliary_id), match_ids))
+    membership = collect_evaluation_membership(record_cohorts)
+    confirm_direct_evaluation_membership(membership, args)
+    return manifest, source, match_ids, membership
+
+
+def evaluation_split_metadata(manifest):
+    selector = split_selector(manifest or {}, default=None)
+    return {"train_split_percent": selector["train_split"], "train_count": selector["train_count"],
+            "split_manifest_id": (manifest or {}).get("manifest_id")}
 
 
 def print_skipped_matches(name: str, dataset: ActionDataset, max_items: int = 10) -> None:
@@ -586,8 +622,8 @@ def write_outcome_evaluation_artifacts(
     _save_binned_relationship_plot(
         binned,
         evaluation_target="xt_training_target",
-        title=f"Direct held-out xT-target calibration: {model_id}",
-        y_label="Mean held-out xT-derived target",
+        title=f"Direct xT-target calibration: {model_id}",
+        y_label="Mean xT-derived target",
         output_path=output_dir / "xt_target_calibration.png",
         show_identity=True,
     )
@@ -773,6 +809,7 @@ def write_model_evaluation_artifacts(
     test_metrics: dict,
     outcome_metrics: pd.DataFrame | None = None,
     split_provenance: dict | None = None,
+    evaluation_membership: dict | None = None,
     pass_height_diagnostic_feature_run_id: str | None = None,
     pass_height_diagnostic_label_dir: str | None = None,
     observed_pass_height_threshold_meters: float | None = None,
@@ -800,6 +837,8 @@ def write_model_evaluation_artifacts(
         metadata["outcome_bootstrap"] = outcome_metrics.attrs["outcome_bootstrap"]
     if split_provenance is not None:
         metadata["split_provenance"] = split_provenance
+    if evaluation_membership is not None:
+        metadata["evaluation_membership"] = evaluation_membership
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
     metric_record = {
         "evaluation_timestamp": timestamp,
@@ -810,6 +849,8 @@ def write_model_evaluation_artifacts(
         "metrics": _json_compatible(test_metrics),
         "configuration_id": evaluation_options.get("configuration_id", "unmasked"),
     }
+    if evaluation_membership is not None:
+        metric_record["evaluation_membership_status"] = evaluation_membership["status"]
     (artifact_dir / "metrics.json").write_text(json.dumps(metric_record, indent=2, allow_nan=False), encoding="utf-8")
 
     flat_record = {
@@ -849,7 +890,7 @@ def write_model_evaluation_artifacts(
     )
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     add_pass_height_argument(parser)
     add_evaluation_arguments(parser)
@@ -861,6 +902,7 @@ if __name__ == "__main__":
     add_split_arguments(parser)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
+    parser.add_argument("--membership-acceptance-manifest", help=argparse.SUPPRESS)
     parser.add_argument("--learning-curve-rows", action="store_true")
     parser.add_argument("--comparison-rows", action="store_true", help="Export semantic prediction rows and retain diagnostic artifacts.")
     parser.add_argument("--inference-configuration-id", default=None, help="Artifact identity supplied by the evaluation wrapper.")
@@ -1006,23 +1048,11 @@ if __name__ == "__main__":
     model_schema = validate_checkpoint_edge_schema(feature_schema, model_args)
 
     checkpoint_record = utils.get_model_record(args.model_id)
-    evaluation_manifest, split_source = resolve_evaluation_split(args, checkpoint_record, resolved_feature_run_id)
-    checkpoint_selector = split_selector(evaluation_manifest)
-    test_match_ids = np.asarray(evaluation_manifest["test"])
-    selected_population = evaluation_selection(args)
-    if selected_population is not None:
-        test_match_ids = np.asarray(selected_population)
-    exclusion_checks = [check_heldout(checkpoint_record, test_match_ids)]
-    for auxiliary in auxiliary_models.values():
-        auxiliary_id = auxiliary.args.get("model_id")
-        if auxiliary_id is None:
-            auxiliary_id = next((getattr(args, name, None) for name in (
-                "xpass_pass_height_model_id", "xpass_pass_intent_model_id")
-                if getattr(args, name, None) and getattr(args, name).split("/", 1)[0] == auxiliary.args.get("task")), None)
-        if not auxiliary_id:
-            raise ValueError("Cannot verify held-out membership of a participating auxiliary checkpoint.")
-        exclusion_checks.append(check_heldout(utils.get_model_record(auxiliary_id), test_match_ids))
-    print(f"Using split {evaluation_manifest['manifest_id']} ({split_source}): "
+    evaluation_manifest, split_source, test_match_ids, evaluation_membership = prepare_evaluation_population(
+        args, checkpoint_record, resolved_feature_run_id, auxiliary_models)
+    exclusion_checks = evaluation_membership["checks"]
+    evaluation_manifest = evaluation_manifest or {}
+    print(f"Using {split_source} (manifest={evaluation_manifest.get('manifest_id')}): "
           f"{len(test_match_ids)} requested test matches.")
 
     dataset_args = build_action_dataset_kwargs(
@@ -1210,8 +1240,8 @@ if __name__ == "__main__":
                 "inference_masks": mask_metadata,
                 **height_context,
                 **height_export,
-                **split_metadata(checkpoint_selector),
-                "split_manifest_id": evaluation_manifest["manifest_id"],
+                **evaluation_split_metadata(evaluation_manifest),
+                "evaluation_membership_status": evaluation_membership["status"],
                 "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
                 "evaluate_xpass": bool(args.evaluate_xpass),
                 "evaluate_combined_success": bool(args.evaluate_combined_success),
@@ -1245,8 +1275,9 @@ if __name__ == "__main__":
             },
             test_metrics=test_metrics,
             outcome_metrics=outcome_metrics,
-            split_provenance={"manifest_id": evaluation_manifest["manifest_id"],
-                              "universe_fingerprint": evaluation_manifest["metadata"]["universe_fingerprint"],
+            evaluation_membership=evaluation_membership,
+            split_provenance={"manifest_id": evaluation_manifest.get("manifest_id"),
+                              "universe_fingerprint": (evaluation_manifest.get("metadata") or {}).get("universe_fingerprint"),
                               "resolution_source": split_source, "test": test_split_provenance},
             pass_height_diagnostic_feature_run_id=pass_height_diagnostic_feature_run_id,
             pass_height_diagnostic_label_dir=pass_height_diagnostic_label_dir,
@@ -1268,3 +1299,11 @@ if __name__ == "__main__":
             "artifact_coverage": test_split_provenance}
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("Test:\t" + get_losses_str(test_metrics))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except EvaluationMembershipCancelled as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None

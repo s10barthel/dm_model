@@ -38,6 +38,7 @@ tests/*.py
 !tests/test_inference_masks.py
 !tests/test_inference_mask_integration.py
 !tests/test_model_comparison.py
+!tests/test_evaluation_membership_confirmation.py
 !tests/test_prediction_identity.py
 !tests/test_masked_evaluation_smoke.py
 tests/AS_viz/
