@@ -14,7 +14,7 @@ COMPONENT_GROUPS = (
     "outcome_success",
 )
 OPTIONAL_COMPONENT_GROUPS = ("pass_height",)
-INTENDED_RECIPIENT_GROUP = "intended_recipient"
+SUCCESS_INTENT_GROUP = "success_intent"
 PASS_SCORE_DEPENDENCIES = {"pass_success", "outcome_scoring", "outcome_conceding"}
 
 GROUP_TO_COMPONENTS = {
@@ -27,7 +27,7 @@ GROUP_TO_COMPONENTS = {
     "pass_score": ("pass_score",),
     "outcome_failure": ("outcome_failure",),
     "outcome_success": ("outcome_success",),
-    "intended_recipient": ("intended_recipient",),
+    "success_intent": ("success_intent",),
 }
 
 
@@ -50,14 +50,18 @@ class ComponentSelection:
         return [group for group in GROUP_TO_COMPONENTS if group in required]
 
 
-def add_component_selection_args(parser: argparse.ArgumentParser, *, include_intended_recipient: bool = False) -> None:
+def add_component_selection_args(parser: argparse.ArgumentParser, *, include_success_intent: bool = False) -> None:
     parser.add_argument(
         "--show-model-pass-success", action="store_true",
         help="Render checkpoint pass success after offside handling and before physical xPass blending.",
     )
     groups = [*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS]
-    if include_intended_recipient:
-        groups.append(INTENDED_RECIPIENT_GROUP)
+    if include_success_intent:
+        groups.append(SUCCESS_INTENT_GROUP)
+        parser.add_argument(
+            "--success-intent", action="store_true",
+            help="Include success-intent visualizations alongside selected components.",
+        )
 
     for group in groups:
         option = group.replace("_", "-")
@@ -82,20 +86,25 @@ def add_component_selection_args(parser: argparse.ArgumentParser, *, include_int
 def resolve_component_selection(
     args: argparse.Namespace,
     *,
-    include_intended_recipient: bool = False,
+    include_success_intent: bool = False,
 ) -> ComponentSelection:
     groups = [*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS]
-    if include_intended_recipient:
-        groups.append(INTENDED_RECIPIENT_GROUP)
+    if include_success_intent:
+        groups.append(SUCCESS_INTENT_GROUP)
 
     only_groups = {group for group in groups if getattr(args, f"only_{group}", False)}
     no_groups = {group for group in groups if getattr(args, f"no_{group}", False)}
 
     default_groups = [*COMPONENT_GROUPS]
-    if include_intended_recipient:
-        default_groups.append(INTENDED_RECIPIENT_GROUP)
+    if include_success_intent:
+        default_groups.append(SUCCESS_INTENT_GROUP)
     selected = set(only_groups) if only_groups else set(default_groups)
     selected.update(group for group in OPTIONAL_COMPONENT_GROUPS if getattr(args, f"show_{group}", False))
+    compare_receivers = getattr(args, "compare_intended_receiver", False)
+    if compare_receivers and getattr(args, "no_success_intent", False):
+        raise ValueError("--compare-intended-receiver cannot be combined with --no-success-intent.")
+    if include_success_intent and (getattr(args, "success_intent", False) or compare_receivers):
+        selected.add(SUCCESS_INTENT_GROUP)
     selected -= no_groups
 
     rendered_components = [

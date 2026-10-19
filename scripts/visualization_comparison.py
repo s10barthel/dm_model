@@ -118,7 +118,7 @@ class ComparisonGroup:
     load: Callable[[], Iterable]
 
 
-def render_comparison_groups(report, variant_groups, names, *, shared=False, benchmark=False):
+def render_comparison_groups(report, variant_groups, names, *, shared=False, benchmark=False, skip_failed_groups=False):
     """Index cheap selectors, then compute and publish one output group at a time."""
     plans = []
     order = {}
@@ -130,15 +130,28 @@ def render_comparison_groups(report, variant_groups, names, *, shared=False, ben
         plans.append(plan)
     for key in order:
         before = len(report.outputs)
-        loaded = [_load_comparison_group(plan.pop(key, [])) for plan in plans]
-        if shared:
-            loaded = [[{**scene, "tables": [scene["tables"][index]]} for scene in loaded[0]]
-                      for index in range(len(report.variants))]
-        render_independent_groups(report, loaded, names, benchmark=benchmark)
+        groups_for_key = [plan.pop(key, []) for plan in plans]
+        loaded = []
+        try:
+            loaded = [_load_comparison_group(groups) for groups in groups_for_key]
+            if shared:
+                loaded = [[{**scene, "tables": [scene["tables"][index]]} for scene in loaded[0]]
+                          for index in range(len(report.variants))]
+            render_independent_groups(report, loaded, names, benchmark=benchmark)
+        except ComparisonCancelled:
+            raise
+        except Exception as exc:
+            if not skip_failed_groups:
+                raise
+            report.metadata.setdefault("skipped_actions", []).append({
+                "match_id": str(key[1]), "action_id": str(key[2]),
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            warnings.warn(f"Skipping action {key[2]} in match {key[1]}: {exc}", UserWarning, stacklevel=2)
         report.checkpoint()
         print(f"Saved {len(report.outputs) - before} comparison image(s) to {report.root.resolve()}", flush=True)
         # No prediction tables, render closures, or images survive into the next group.
-        del loaded
+        del loaded, groups_for_key
 
 
 def _load_comparison_group(groups):

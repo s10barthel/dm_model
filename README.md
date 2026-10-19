@@ -681,6 +681,7 @@ python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-outcome-scoring
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --success-intent-model-id success_intent/<model_run_id>
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --only-success-intent --success-intent-model-id success_intent/<model_run_id> --compare-intended-receiver --pass-endpoint true
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --player-id DFL-OBJ-... --spadl-type pass --success false --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --start-x-gt 50 --end-x-lt 105 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --spadl-type pass --first 100 --bundle-id <bundle_id>
@@ -708,18 +709,28 @@ Outputs:
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_failure.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_success.png`
-- optionally `intended_recipient.png` when a `success_intent` checkpoint is supplied
+- optionally `success_intent.png` when a `success_intent` checkpoint is supplied
 - `data/visualizations/sportec/<visualization_run_id>/metadata.json`
+
+Pass images mark the actual endpoint with a black x by default. Use `--pass-endpoint false` to hide it. The endpoint uses a finite action `end_x/end_y` pair, falling back to tracked ball coordinates at `receive_frame_id`.
+
+Add `--compare-intended-receiver` to include the success-intent image with three intended-receiver rings: teal for `original` (inner), orange for `angle_only` (middle), and purple for `model` (outer). Fixed ring sizes keep all three visible when they agree. The existing probability annotations remain visible. Heuristic choices are recomputed for selected failed passes; the model ring uses the current displayed prediction, independently of saved receiver labels. Successful passes use the actual receiver for all three modes. `--intended-receiver-mode` continues to select runtime labels.
+
+Missing required action data is logged in `skipped_actions` in run metadata, and processing continues. If every action is skipped, metadata is still written before the command reports failure.
+
 
 Useful options:
 
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--run-id <visualization_run_id>` to pin the created visualization run id instead of auto-generating one
-- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
+- `--success-intent` adds the success-intent image alongside selected component groups; `--only-success-intent` selects it alone and `--no-success-intent` suppresses it. These replace the old intended-recipient options, which are no longer accepted. A success-intent checkpoint must be selected explicitly or through the bundle.
+- `--compare-intended-receiver` adds receiver rings only to the success-intent image and automatically includes that image, even alongside another `--only-*` selection. It conflicts with `--no-success-intent` and also works in checkpoint/mask comparison panels.
+- `--pass-endpoint true/false` controls the actual pass-end marker on every pass image; default: `true`.
+- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-success-intent` to render only selected component groups; repeated `--only-*` flags are additive
 - `--show-pass-height` to include the optional pass-height component when a `pass_height` checkpoint is selected
-- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-intended-recipient` to render only selected component groups; repeated `--only-*` flags are additive
-- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-intended-recipient` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
+- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-success-intent` to render only selected component groups; repeated `--only-*` flags are additive
+- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-success-intent` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
 - `outcome_failure` and `outcome_success` are rendered by default across Sportec, Benchmark, SkillCorner, Hawkeye, and the combined Hawkeye inference/visualization command, in each command's supported output formats. They subtract conceding from scoring for the corresponding failure/success case, using three-decimal numerical annotations (including negatives and zero), without value-based colour coding.
 - `--no-outcome-failure` and `--no-outcome-success` remove the new plots; `--only-outcome-failure` and `--only-outcome-success` select them alone or together. There are no `--show-outcome-*` flags. Existing `--only-*` selections do not implicitly add the new plots.
 - `--only-pass-score` automatically loads its required pass-success, scoring, and conceding inputs without displaying their plots. Combined outcome plots likewise load their inputs independently; `--no-*` suppresses plots, not dependency computation.
@@ -2321,14 +2332,17 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--no-physical-cache`, `--refresh-physical-cache`, `--physical-num-workers`, `--physical-worker-thread-limit`, and `--physical-batch-size`: compatibility flags shared with inference; visualization does not compute xPass rows.
 - `--action-intent-model-id <model_id>`: explicit `action_intent` checkpoint id.
 - `--pass-intent-model-id <model_id>`: explicit `pass_intent` checkpoint id.
-- `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for intended-recipient overlays.
+- `--success-intent-model-id <model_id>`: optional explicit `success_intent` checkpoint id used for success-intent visualizations.
+- `--success-intent`: add success-intent rendering alongside selected component groups.
+- `--compare-intended-receiver`: include success-intent rendering with `original`, `angle_only`, and current `model` receiver rings. Incompatible with `--no-success-intent`.
+- `--pass-endpoint true/false`: show the actual endpoint on every pass image. Default: `true`.
 - `--pass-success-model-id <model_id>`: explicit `pass_success` checkpoint id.
 - `--pass-height-model-id <model_id>`: optional explicit `pass_height` checkpoint id.
 - `--outcome-scoring-model-id <model_id>`: explicit `outcome_scoring` checkpoint id.
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/sportec`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `intended-recipient`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `success-intent`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -2609,7 +2623,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_score.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_failure.png`
   - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_success.png`
-  - optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/intended_recipient.png`
+  - optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/success_intent.png`
   - `data/visualizations/sportec/<visualization_run_id>/metadata.json`
 
 ### `scripts/run_hawkeye.py`

@@ -470,7 +470,8 @@ def test_skillcorner_model_view_renders(tmp_path, monkeypatch, compare):
 
 def test_sportec_model_comparison_renders(tmp_path, monkeypatch, inference_fixture):
     subject, _, _, _ = inference_fixture
-    subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"], spadl_type=["pass"], action_type=["pass"]), index=[10])
+    subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"], spadl_type=["pass"],
+        action_type=["pass"], end_x=[40.], end_y=[25.]), index=[10])
     monkeypatch.setattr(sportec, "resolve_runtime_feature_run_context", lambda *a, **kw: {
         "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
     monkeypatch.setattr(sportec, "load_match", lambda *a, **kw: subject)

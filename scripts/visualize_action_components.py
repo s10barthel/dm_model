@@ -17,6 +17,7 @@ import matplotlib
 # Render exports without a GUI or Tcl/Tk installation.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import torch
@@ -81,6 +82,9 @@ from project_config import (
 from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
+from scripts.visualization_receivers import (
+    ActionOverlays, INTENDED_RECEIVER_STYLES, prepare_action_overlays,
+)
 
 
 from scripts.visualization_comparison import RepeatableSelection, add_compare_argument, validate_comparison_args, cached_prediction
@@ -146,6 +150,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--return-type", "--return_type", dest="return_type", help="Runtime return type used for label construction.")
     parser.add_argument("--show-trajectories", action="store_true")
     parser.add_argument(
+        "--pass-endpoint", type=parse_bool, default=True,
+        help="Mark the actual pass end location with an x (true/false; default: true).",
+    )
+    parser.add_argument(
+        "--compare-intended-receiver", action="store_true",
+        help="Include success-intent and compare original, angle_only, and current model receivers with rings.",
+    )
+    parser.add_argument(
         "--show-physical-xpass",
         action="store_true",
         help="Render max_player_cum_prob.png from physical xPass sidecars.",
@@ -174,13 +186,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pass-height-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
     parser.add_argument("--outcome-scoring-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
     parser.add_argument("--outcome-conceding-model-id", action=RepeatableSelection, help="Task-qualified checkpoint; repeat only with --compare.")
-    add_component_selection_args(parser, include_intended_recipient=True)
+    add_component_selection_args(parser, include_success_intent=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
     pc_versions.add_selection_argument(parser)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
+    if args.compare_intended_receiver and args.no_success_intent:
+        parser.error("--compare-intended-receiver cannot be combined with --no-success-intent.")
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
     if args.first is not None and args.first < 1:
@@ -545,13 +559,14 @@ def resolve_highlight_players(
     snapshot: pd.DataFrame,
     action: pd.Series,
     component_name: str,
+    compare_intended_receiver: bool = False,
 ) -> dict[str, str] | None:
     highlight_players: dict[str, str] = {}
     object_id = action.get("object_id")
     if isinstance(object_id, str):
         highlight_players[object_id] = "#ffd400"
 
-    if component_name == "intended_recipient":
+    if component_name == "success_intent" and not compare_intended_receiver:
         intent_id = action.get("intent_id")
         if (
             isinstance(intent_id, str)
@@ -569,11 +584,11 @@ def resolve_highlight_players(
 
 def resolve_ball_velocity_xy(match: Match, action_index: int, component_name: str) -> tuple[float, float] | None:
     action = match.actions.loc[action_index]
-    if component_name != "intended_recipient" or action.get("action_type") != "pass":
+    if component_name != "success_intent" or action.get("action_type") != "pass":
         return None
 
     summary = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=False)
-    if summary.shape[0] < 3:
+    if summary is None or summary.shape[0] < 3:
         return None
 
     ball_velocity_xy = np.asarray([summary[0] * summary[1], summary[0] * summary[2]], dtype=float)
@@ -592,6 +607,9 @@ def render_component(
     output_path: Path,
     show_trajectories: bool = False,
     comparison: bool = False,
+    pass_endpoint: bool = True,
+    compare_intended_receiver: bool = False,
+    overlays: ActionOverlays | None = None,
 ) -> Image.Image | None:
     action = match.actions.loc[action_index]
     frame_id = int(action["frame_id"])
@@ -602,8 +620,18 @@ def render_component(
     attack_targets = [player_id for player_id in probs.index if player_id.startswith(attacking_prefix)]
     component_probs = probs.loc[attack_targets].sort_values(ascending=False)
     player_annots = component_probs if not component_probs.empty else None
-    highlight_players = resolve_highlight_players(snapshot, action, component_name)
+    show_receiver_rings = compare_intended_receiver and component_name == "success_intent"
+    if overlays is None:
+        overlays = prepare_action_overlays(
+            match, action_index, probs, pass_endpoint=pass_endpoint,
+            compare_intended_receiver=show_receiver_rings,
+        )
+    highlight_players = resolve_highlight_players(snapshot, action, component_name, show_receiver_rings)
     ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name)
+    player_rings = {}
+    if show_receiver_rings:
+        for mode, player in overlays.receivers.items():
+            player_rings.setdefault(player, []).append(INTENDED_RECEIVER_STYLES[mode])
 
     if not comparison and component_name != "model_pass_success":
         component_probs = component_probs.dropna()
@@ -619,6 +647,8 @@ def render_component(
         show_missing_annotations=comparison or component_name == "model_pass_success",
         style="pitchcontrol",
         attacking_team_prefix=attacking_prefix,
+        player_rings=player_rings,
+        pass_endpoint_xy=overlays.endpoint_xy,
     )
 
     rotate_pitch = attacking_prefix == "away"
@@ -626,7 +656,23 @@ def render_component(
     if component_name in {"pass_success", "model_pass_success", "pass_score"} and component_probs.dropna().empty:
         title += " | Unavailable for this scene/frame"
     fig, ax = visualizer.plot(rotate_pitch=rotate_pitch, anonymize=False, annot_type=component_name, show=False)
-    fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.02)
+    legend_handles = []
+    if player_rings:
+        for mode, (color, diameter) in INTENDED_RECEIVER_STYLES.items():
+            legend_handles.append(Line2D(
+                [], [], marker="o", linestyle="none", markerfacecolor="none",
+                markeredgecolor=color, markeredgewidth=1.5, markersize=diameter,
+                label=mode,
+            ))
+    if overlays.endpoint_xy is not None:
+        legend_handles.append(Line2D(
+            [], [], marker="x", linestyle="none", color="black", markersize=9,
+            label="Actual pass end",
+        ))
+    fig.subplots_adjust(top=0.92, left=0.02, right=0.98, bottom=0.10 if legend_handles else 0.02)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, -0.025),
+                  ncol=len(legend_handles), frameon=False, fontsize=10, handletextpad=1.0)
     if not comparison:
         ax.text(
             0.5,
@@ -692,7 +738,7 @@ def collect_action_components(
     rendered_components = rendered_components or [
         "action_intent",
         "pass_intent",
-        "intended_recipient",
+        "success_intent",
         "pass_success",
         "pass_height",
         "outcome_scoring_success",
@@ -740,7 +786,7 @@ def collect_action_components(
             for outcome_case, probs in (("success", success_probs), ("failure", failure_probs)):
                 component_prob_rows[f"{component_name}_{outcome_case}"] = probs.loc[model_index]
         else:
-            if component_name == "intended_recipient":
+            if component_name == "success_intent":
                 component_prob_rows[component_name] = run_success_intent_component(
                     match,
                     model,
@@ -824,6 +870,8 @@ def render_action_components(
     physical_xpass_metric_name: str | None = None,
     physical_xpass_version_name: str | None = None,
     rendered_components: list[str] | None = None,
+    pass_endpoint: bool = True,
+    compare_intended_receiver: bool = False,
 ) -> None:
     component_prob_rows = collect_action_components(
         match, loaded_models, feature_root, device, action_index, display_action_id, output_dir,
@@ -833,7 +881,7 @@ def render_action_components(
     rendered_components = rendered_components or [
         "action_intent",
         "pass_intent",
-        "intended_recipient",
+        "success_intent",
         "pass_success",
         "pass_height",
         "outcome_scoring_success",
@@ -847,6 +895,10 @@ def render_action_components(
     component_order = list(rendered_components)
     if show_physical_xpass:
         component_order.append("physical_xpass")
+    overlays = prepare_action_overlays(
+        match, action_index, component_prob_rows.get("success_intent"),
+        pass_endpoint=pass_endpoint, compare_intended_receiver=compare_intended_receiver,
+    )
     for component_name in component_order:
         if component_name not in component_prob_rows:
             continue
@@ -858,6 +910,9 @@ def render_action_components(
             probs=component_prob_rows[component_name],
             output_path=output_dir / f"{component_name}.png",
             show_trajectories=show_trajectories,
+            pass_endpoint=pass_endpoint,
+            compare_intended_receiver=compare_intended_receiver,
+            overlays=overlays,
         )
 
 
@@ -889,31 +944,31 @@ def merge_success_intent_context(shared_context: dict[str, object], model_id: st
     shared = dict(shared_context)
     record = get_model_record(model_id)
     records = dict(shared.get("model_records", {}))
-    records["intended_recipient"] = record
+    records["success_intent"] = record
     shared["model_records"] = records
 
     source_feature_run_ids = dict(shared.get("source_feature_run_ids", {}))
     if record.get("feature_run_id"):
-        source_feature_run_ids["intended_recipient"] = record["feature_run_id"]
+        source_feature_run_ids["success_intent"] = record["feature_run_id"]
     shared["source_feature_run_ids"] = source_feature_run_ids
     shared["feature_run_id"] = shared.get("feature_run_id") or record.get("feature_run_id")
 
     intended_receiver_mode = record.get("intended_receiver_mode")
     source_intended_receiver_modes = dict(shared.get("source_intended_receiver_modes", {}))
     if intended_receiver_mode not in (None, "unknown"):
-        source_intended_receiver_modes["intended_recipient"] = intended_receiver_mode
+        source_intended_receiver_modes["success_intent"] = intended_receiver_mode
         shared["intended_receiver_mode"] = shared.get("intended_receiver_mode") or intended_receiver_mode
     shared["source_intended_receiver_modes"] = source_intended_receiver_modes
 
     source_return_types = dict(shared.get("source_return_types", {}))
     if record.get("return_type"):
-        source_return_types["intended_recipient"] = record["return_type"]
+        source_return_types["success_intent"] = record["return_type"]
     shared["source_return_types"] = source_return_types
     shared["return_type"] = shared.get("return_type") or record.get("return_type")
 
     source_target_families = dict(shared.get("source_target_families", {}))
     if record.get("target_family"):
-        source_target_families["intended_recipient"] = record["target_family"]
+        source_target_families["success_intent"] = record["target_family"]
     shared["source_target_families"] = source_target_families
     shared["target_family"] = shared.get("target_family") or record.get("target_family")
 
@@ -940,10 +995,12 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     initial_component_selection = resolve_component_selection(
         args,
-        include_intended_recipient=bool(
+        include_success_intent=bool(
             args.success_intent_model_id
-            or getattr(args, "only_intended_recipient", False)
-            or getattr(args, "no_intended_recipient", False)
+            or getattr(args, "only_success_intent", False)
+            or getattr(args, "no_success_intent", False)
+            or getattr(args, "success_intent", False)
+            or getattr(args, "compare_intended_receiver", False)
         ),
     )
     explicit_model_ids = {
@@ -986,10 +1043,8 @@ def main() -> None:
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
-    if not success_intent_model_id and (
-        getattr(args, "only_intended_recipient", False) or getattr(args, "no_intended_recipient", False)
-    ):
-        raise ValueError("--only-intended-recipient/--no-intended-recipient require a selected success_intent model.")
+    if not success_intent_model_id and "success_intent" in initial_component_selection.rendered_components:
+        raise ValueError("Success-intent visualization requires --success-intent-model-id or a bundle success_intent checkpoint.")
     if success_intent_model_id:
         shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
     carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
@@ -997,12 +1052,12 @@ def main() -> None:
         warnings.warn(message, UserWarning, stacklevel=2)
     component_selection = resolve_component_selection(
         args,
-        include_intended_recipient=bool(success_intent_model_id),
+        include_success_intent=bool(success_intent_model_id),
     )
 
     model_ids = dict(resolved_model_ids)
     if success_intent_model_id:
-        model_ids["intended_recipient"] = str(success_intent_model_id)
+        model_ids["success_intent"] = str(success_intent_model_id)
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
@@ -1106,6 +1161,8 @@ def main() -> None:
                 physical_xpass_metric_name=selected_physical_xpass_metric,
                 physical_xpass_version_name=getattr(args, "x_pass_version", "top10"),
                 rendered_components=component_selection.rendered_components,
+                pass_endpoint=getattr(args, "pass_endpoint", True),
+                compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
             )
         except Exception as exc:
             skipped_actions.append(
@@ -1136,8 +1193,6 @@ def main() -> None:
         )
         print(f"Saved component plots to {output_dir}")
 
-    if not saved_dirs:
-        raise RuntimeError("All selected actions were skipped or failed during rendering.")
     metadata = {
         "xpass_auxiliaries": auxiliary_metadata(loaded_models),
         "run_id": visualization_run_id,
@@ -1146,7 +1201,7 @@ def main() -> None:
         "script": Path(__file__).name,
         "output_parent": str(output_parent),
         "output_dir": str(output_root.resolve()),
-        "status": "completed",
+        "status": "completed" if saved_dirs else "failed",
         "match_id": args.match_id,
         "requested_action_ids": [int(value) for value in (args.action_id or [])],
         "requested_row_indexes": [int(value) for value in (args.row_index or [])],
@@ -1173,6 +1228,8 @@ def main() -> None:
         "warnings": carry_warnings,
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
+        "pass_endpoint": bool(getattr(args, "pass_endpoint", True)),
+        "compare_intended_receiver": bool(getattr(args, "compare_intended_receiver", False)),
         "show_physical_xpass": bool(args.show_physical_xpass),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
@@ -1250,6 +1307,8 @@ def main() -> None:
     print(f"Visualization run id: {visualization_run_id}")
     print(f"Visualization metadata: {metadata_path}")
     print(format_physical_xpass_cache_summary(physical_xpass_cache_summary))
+    if not saved_dirs:
+        raise RuntimeError("All selected actions were skipped or failed during rendering.")
 
 
 if __name__ == "__main__":

@@ -125,8 +125,10 @@ def test_sportec_derives_without_rendering_sources(tmp_path, component, expected
         return source[f"{model}_failure"], source[f"{model}_success"]
     models = {name: SimpleNamespace(args={"task": name, "use_carries": True})
               for name in ["pass_success", "outcome_scoring", "outcome_conceding"]}
+    match = SimpleNamespace(actions=pd.DataFrame(
+        {"action_type": ["pass"], "end_x": [40.], "end_y": [25.]}, index=[10]))
     with patch.object(sportec, "inference_gnn", side_effect=infer), patch.object(sportec, "render_component") as render:
-        sportec.render_action_components(object(), models, tmp_path, "cpu", 10, "10", tmp_path, rendered_components=[component])
+        sportec.render_action_components(match, models, tmp_path, "cpu", 10, "10", tmp_path, rendered_components=[component])
     render.assert_called_once()
     assert render.call_args.kwargs["probs"].iloc[0] == pytest.approx(expected)
     assert render.call_args.kwargs["output_path"].name == f"{component}.png"

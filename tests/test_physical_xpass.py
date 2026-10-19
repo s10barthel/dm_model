@@ -2750,7 +2750,8 @@ class PhysicalXPassTests(unittest.TestCase):
                 )
 
     def test_visualize_action_components_uses_runtime_xpass_cache_by_default(self) -> None:
-        match = SimpleNamespace(match_id="match_1")
+        match = SimpleNamespace(match_id="match_1", actions=pd.DataFrame(
+            {"action_type": ["pass"], "end_x": [40.], "end_y": [25.]}, index=[5]))
         loaded_models: dict[str, object] = {}
         with patch.object(visualize_action_components, "get_runtime_physical_xpass_dir", return_value=Path("runtime_cache")):
             with patch.object(

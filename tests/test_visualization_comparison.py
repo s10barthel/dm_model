@@ -342,7 +342,7 @@ def outcome_pipeline(request, tmp_path, monkeypatch, inference_fixture):
     if script is av:
         required = ["--match-id", "match"]
         subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"],
-            spadl_type=["pass"], action_type=["pass"]), index=[10])
+            spadl_type=["pass"], action_type=["pass"], end_x=[40.], end_y=[25.]), index=[10])
         monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
             "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
         build = Mock(return_value=subject)
@@ -629,7 +629,8 @@ def test_incomplete_checkpoint_and_invalid_scope_fail_before_inference(tmp_path,
 @pytest.mark.parametrize("mode", ["checkpoints", "masks"])
 def test_sportec_inference_end_to_end(tmp_path, monkeypatch, inference_fixture, mode):
     subject, models, calls, _ = inference_fixture
-    subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"], spadl_type=["pass"], action_type=["pass"]), index=[10])
+    subject.actions = pd.DataFrame(dict(frame_id=[10], object_id=["home_1"], spadl_type=["pass"],
+        action_type=["pass"], end_x=[40.], end_y=[25.]), index=[10])
     monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
         "feature_root": tmp_path, "feature_run_id": "feature", "intended_receiver_mode": "predict"})
     load = Mock(return_value=subject)
@@ -840,7 +841,7 @@ def test_candidate_membership_warning_is_exported_in_saved_comparison(tmp_path, 
 def test_sportec_saves_before_predicting_next_action(tmp_path, monkeypatch, inference_fixture, mode, stop):
     subject, models, _, _ = inference_fixture
     subject.actions = pd.DataFrame(dict(frame_id=[10, 11], object_id=["home_1"] * 2,
-        spadl_type=["pass"] * 2, action_type=["pass"] * 2), index=[10, 11])
+        spadl_type=["pass"] * 2, action_type=["pass"] * 2, end_x=[40.] * 2, end_y=[25.] * 2), index=[10, 11])
     load = Mock(side_effect=lambda *a, **kw: copy.copy(subject))
     monkeypatch.setattr(av, "load_match", load)
     monkeypatch.setattr(av, "resolve_runtime_feature_run_context", lambda *a, **kw: {
@@ -871,13 +872,18 @@ def test_sportec_saves_before_predicting_next_action(tmp_path, monkeypatch, infe
         "--compare", "--pass-success-model-id", "pass_success/b"]
     args = av.parse_args(["--accept-comparison-warnings", "--match-id", "match", "--only-pass-success",
         "--pass-success-model-id", "pass_success/a", "--output-dir", str(tmp_path), "--run-id", "progressive", *flags])
-    if stop:
+    if stop is KeyboardInterrupt:
         with pytest.raises(stop, match="later action failed"):
+            inference_compare.run_comparison(args, av)
+    elif stop is RuntimeError:
+        with pytest.warns(UserWarning, match="later action failed"):
             inference_compare.run_comparison(args, av)
     else:
         inference_compare.run_comparison(args, av)
     metadata = json.loads((root / "metadata.json").read_text())
-    assert metadata["status"] == ("completed" if stop is None else "cancelled" if stop is KeyboardInterrupt else "failed")
+    assert metadata["status"] == ("cancelled" if stop is KeyboardInterrupt else "completed")
+    if stop is RuntimeError:
+        assert metadata["skipped_actions"][0]["action_id"] == "43"
     assert load.call_count == (2 if mode == "independent" else 1)
     assert (root / "match/42/pass_success.png").exists()
     assert (root / "match/43/pass_success.png").exists() == (stop is None)

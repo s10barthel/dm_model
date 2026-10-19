@@ -30,12 +30,12 @@ def resolve_variants(args, mod, sportec):
     bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
     bundle_ids = dict((bundle or {}).get("model_ids") or {})
     explicit = {task: selection_list(getattr(args, f"{task}_model_id", None)) for task in MODEL_TASKS}
-    selection = mod.resolve_component_selection(args, **({"include_intended_recipient": bool(
-        explicit["success_intent"] or bundle_ids.get("success_intent") or getattr(args, "only_intended_recipient", False)
+    selection = mod.resolve_component_selection(args, **({"include_success_intent": bool(
+        explicit["success_intent"] or bundle_ids.get("success_intent")
+        or getattr(args, "only_success_intent", False) or getattr(args, "success_intent", False)
+        or getattr(args, "compare_intended_receiver", False)
     )} if sportec else {}))
-    required = ["success_intent" if task == "intended_recipient" else task
-                for task in selection.required_component_groups
-                if task in MODEL_TASKS or task == "intended_recipient"]
+    required = [task for task in selection.required_component_groups if task in MODEL_TASKS]
     varied = [task for task, ids in explicit.items() if len(ids) > 1]
     paired = set(varied) == set(OUTCOME_TASKS)
     for task in varied:
@@ -93,7 +93,7 @@ def resolve_variants(args, mod, sportec):
                 model.eval()
                 models[model_id] = model
             pipeline_records[task] = records[model_id]
-            pipeline_models["intended_recipient" if task == "success_intent" else task] = models[model_id]
+            pipeline_models[task] = models[model_id]
         context = validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
             require_intended_receiver_mode=False, require_return_type=False, require_target_family=False,
             allow_pass_only_success=True)
@@ -242,6 +242,11 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                     physical_xpass_metric_name=mod.physical_xpass_metric(args), physical_xpass_version_name=args.x_pass_version,
                     rendered_components=selection.rendered_components, prediction_cache=cache,
                     possession_states=possession_states)
+                mod.prepare_action_overlays(
+                    subject, action_index, values.get("success_intent"),
+                    pass_endpoint=getattr(args, "pass_endpoint", True),
+                    compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
+                )
                 tables.append({component: pd.DataFrame([row], index=[frame]) for component, row in values.items()})
             action = subject.actions.loc[action_index]
             yield {"scene": f"{args.match_id}/action_{display_id}", "frame": frame, "tables": tables,
@@ -250,7 +255,9 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                    "geometry": {"match_id": str(args.match_id), "action_id": str(display_id), "action_index": int(action_index)},
                    "render": lambda component, row, action_index=action_index, display_id=display_id:
                        mod.render_component(subject, action_index, display_id, component, row, Path(args.output_dir),
-                                            show_trajectories=args.show_trajectories, comparison=True)}
+                                            show_trajectories=args.show_trajectories, comparison=True,
+                                            pass_endpoint=getattr(args, "pass_endpoint", True),
+                                            compare_intended_receiver=getattr(args, "compare_intended_receiver", False))}
 
         group = ComparisonGroup(('sportec', str(args.match_id), str(display_id)), load_group)
         if deferred:
@@ -275,6 +282,10 @@ def run_comparison(args, mod):
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names)
+    if sportec:
+        report.metadata.update(pass_endpoint=getattr(args, "pass_endpoint", True),
+                               compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
+                               skipped_actions=[])
     try:
         validate_metadata_definitions([variant.provenance for variant in variants], report.policy, tasks=required_tasks(selection))
         for variant in variants:
@@ -298,7 +309,10 @@ def run_comparison(args, mod):
             variant_groups = [sportec_groups(args, mod, [variant], selection, variant.provenance["source_context"], bundle,
                               variant.provenance["graph_schema"], device, deferred=True) if sportec else hawkeye_groups(
                               args, mod, [variant], selection, variant.provenance["graph_schema"], device, deferred=True) for variant in variants]
-        render_comparison_groups(report, variant_groups, names, shared=same_schema and (not sportec or same_context))
+        render_comparison_groups(report, variant_groups, names, shared=same_schema and (not sportec or same_context),
+                                 skip_failed_groups=sportec)
+        if sportec and not report.outputs:
+            raise RuntimeError("All selected actions were skipped or failed during rendering.")
         report.finish()
     except (Exception, KeyboardInterrupt) as exc:
         report.failed(exc)
@@ -311,4 +325,4 @@ def run_comparison(args, mod):
 
 
 def required_tasks(selection):
-    return ["success_intent" if task == "intended_recipient" else task for task in selection.required_component_groups]
+    return list(selection.required_component_groups)

@@ -22,7 +22,7 @@ COMPONENT_CMAP = mpl.colors.LinearSegmentedColormap.from_list(
 COMPONENT_ANNOT_TYPES = (
     "action_intent",
     "pass_intent",
-    "intended_recipient",
+    "success_intent",
     "pass_success",
     "outcome_scoring",
     "outcome_conceding",
@@ -67,6 +67,8 @@ class SnapshotVisualizer:
         attacking_team_prefix: str = None,
         show_player_numbers: bool | None = None,
         show_missing_annotations: bool = False,
+        player_rings: Dict[str, List[Tuple[str, float]]] = None,
+        pass_endpoint_xy: Tuple[float, float] = None,
     ):
         self.snapshot = snapshot.copy()
         self.sizes = player_sizes
@@ -87,6 +89,8 @@ class SnapshotVisualizer:
         self.attacking_team_prefix = attacking_team_prefix if attacking_team_prefix in {"home", "away"} else None
         self.show_player_numbers = show_player_numbers
         self.show_missing_annotations = show_missing_annotations
+        self.player_rings = player_rings or {}
+        self.pass_endpoint_xy = pass_endpoint_xy
 
         if unnormalize:
             x_cols = [c for c in self.snapshot.columns if c.endswith("_x")]
@@ -630,7 +634,8 @@ class SnapshotVisualizer:
                 text_xy = snapshot[[f"{p}_x", f"{p}_y"]].values[-1]
                 annot_kwargs = dict(annot_args)
                 if not p.endswith("_goal"):
-                    annot_kwargs.update({"xytext": (0, 8), "textcoords": "offset points"})
+                    diameter = max((diameter for _, diameter in self.player_rings.get(p, [])), default=0)
+                    annot_kwargs.update({"xytext": (0, max(8, diameter / 2 + 6)), "textcoords": "offset points"})
                 else:
                     # Place labels inside the pitch using the displayed goal position.
                     text_xy[0] += 3 if text_xy[0] < config.FIELD_SIZE[0] / 2 else -3
@@ -768,6 +773,20 @@ class SnapshotVisualizer:
                 headaxislength=profile["velocity_headaxislength"],
                 zorder=6,
             )
+
+        for player, rings in self.player_rings.items():
+            player_xy = snapshot[[f"{player}_x", f"{player}_y"]].values[-1]
+            for color, diameter in rings:
+                ax.plot(
+                    *player_xy, marker="o", markersize=diameter, markerfacecolor="none",
+                    markeredgecolor=color, markeredgewidth=1.5, linestyle="none", zorder=4,
+                )
+        if self.pass_endpoint_xy is not None:
+            endpoint = np.asarray(self.pass_endpoint_xy, dtype=float)
+            if rotate_pitch:
+                endpoint = np.asarray(config.FIELD_SIZE) - endpoint
+            ax.plot(*endpoint, marker="x", markersize=9, markeredgewidth=1.5,
+                    color="black", linestyle="none", zorder=6)
 
         if show:
             plt.show()

@@ -121,3 +121,4 @@ _vendor/defcon/saved
 !tests/test_xt_refresh.py
 !tests/test_trajectory_speed_refresh.py
 !tests/test_success_intent_unknown_targets.py
+!tests/test_intended_receiver_comparison.py

@@ -401,7 +401,7 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertTrue((output_root / "DFL-MAT-1" / "123" / "pass_score.png").exists())
             self.assertEqual(metadata["run_id"], "visualization_explicit")
             self.assertEqual(metadata["model_ids"]["pass_success"], "pass_success/1")
-            self.assertEqual(metadata["model_ids"]["intended_recipient"], "success_intent/1")
+            self.assertEqual(metadata["model_ids"]["success_intent"], "success_intent/1")
             self.assertEqual(metadata["feature_run_id"], "feature_1")
             self.assertEqual(metadata["filters"], {"spadl_type": ["pass"]})
             membership = metadata["model_membership"]
@@ -478,12 +478,12 @@ class VisualizationVersioningTests(unittest.TestCase):
             self.assertEqual(metadata["selected_model_ids"], {"pass_success": "pass_success/selected"})
             self.assertEqual(metadata["rendered_components"], ["pass_success"])
 
-    def test_action_visualization_only_intended_recipient_uses_explicit_success_intent_without_core_models(self) -> None:
+    def test_action_visualization_only_success_intent_uses_explicit_success_intent_without_core_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             args = make_action_args(root)
             args.bundle_id = None
-            args.only_intended_recipient = True
+            args.only_success_intent = True
             args.success_intent_model_id = "success_intent/selected"
             runtime_context = {
                 "feature_run_id": "feature_success",
@@ -502,15 +502,15 @@ class VisualizationVersioningTests(unittest.TestCase):
                 self.assertIsNone(bundle)
                 self.assertEqual(
                     shared_context["source_feature_run_ids"],
-                    {"intended_recipient": "feature_success"},
+                    {"success_intent": "feature_success"},
                 )
                 return runtime_context
 
             def fake_render_action_components(**kwargs: object) -> None:
-                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                self.assertEqual(kwargs["rendered_components"], ["success_intent"])
                 output_dir = Path(kwargs["output_dir"])
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+                (output_dir / "success_intent.png").write_text("plot", encoding="utf-8")
 
             with (
                 patch.object(visualize_action_components, "parse_args", return_value=args),
@@ -549,15 +549,15 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             resolve_model_selection_mock.assert_not_called()
             metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["model_ids"], {"intended_recipient": "success_intent/selected"})
-            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/selected"})
-            self.assertEqual(metadata["rendered_components"], ["intended_recipient"])
+            self.assertEqual(metadata["model_ids"], {"success_intent": "success_intent/selected"})
+            self.assertEqual(metadata["selected_model_ids"], {"success_intent": "success_intent/selected"})
+            self.assertEqual(metadata["rendered_components"], ["success_intent"])
 
-    def test_action_visualization_only_intended_recipient_keeps_bundle_context_with_explicit_success_intent(self) -> None:
+    def test_action_visualization_only_success_intent_keeps_bundle_context_with_explicit_success_intent(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             args = make_action_args(root)
-            args.only_intended_recipient = True
+            args.only_success_intent = True
             args.success_intent_model_id = "success_intent/explicit"
             bundle = {
                 "bundle_id": "bundle_1",
@@ -584,15 +584,15 @@ class VisualizationVersioningTests(unittest.TestCase):
                 self.assertEqual(shared_context["bundle_feature_run_id"], "feature_bundle")
                 self.assertEqual(
                     shared_context["source_feature_run_ids"],
-                    {"pass_success": "feature_bundle", "intended_recipient": "feature_success"},
+                    {"pass_success": "feature_bundle", "success_intent": "feature_success"},
                 )
                 return runtime_context
 
             def fake_render_action_components(**kwargs: object) -> None:
-                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                self.assertEqual(kwargs["rendered_components"], ["success_intent"])
                 output_dir = Path(kwargs["output_dir"])
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+                (output_dir / "success_intent.png").write_text("plot", encoding="utf-8")
 
             with (
                 patch.object(visualize_action_components, "parse_args", return_value=args),
@@ -632,14 +632,14 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             resolve_model_selection_mock.assert_not_called()
             metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["model_ids"], {"intended_recipient": "success_intent/explicit"})
-            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/explicit"})
+            self.assertEqual(metadata["model_ids"], {"success_intent": "success_intent/explicit"})
+            self.assertEqual(metadata["selected_model_ids"], {"success_intent": "success_intent/explicit"})
 
-    def test_action_visualization_only_intended_recipient_uses_bundle_success_intent_when_not_explicit(self) -> None:
+    def test_action_visualization_only_success_intent_uses_bundle_success_intent_when_not_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             args = make_action_args(root)
-            args.only_intended_recipient = True
+            args.only_success_intent = True
             bundle = {
                 "bundle_id": "bundle_1",
                 "feature_run_id": "feature_bundle",
@@ -653,10 +653,10 @@ class VisualizationVersioningTests(unittest.TestCase):
             }
 
             def fake_render_action_components(**kwargs: object) -> None:
-                self.assertEqual(kwargs["rendered_components"], ["intended_recipient"])
+                self.assertEqual(kwargs["rendered_components"], ["success_intent"])
                 output_dir = Path(kwargs["output_dir"])
                 output_dir.mkdir(parents=True, exist_ok=True)
-                (output_dir / "intended_recipient.png").write_text("plot", encoding="utf-8")
+                (output_dir / "success_intent.png").write_text("plot", encoding="utf-8")
 
             with (
                 patch.object(visualize_action_components, "parse_args", return_value=args),
@@ -697,7 +697,7 @@ class VisualizationVersioningTests(unittest.TestCase):
             resolve_model_selection_mock.assert_not_called()
             metadata = json.loads((root / "visualization_explicit" / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["success_intent_model_id"], "success_intent/bundle")
-            self.assertEqual(metadata["selected_model_ids"], {"intended_recipient": "success_intent/bundle"})
+            self.assertEqual(metadata["selected_model_ids"], {"success_intent": "success_intent/bundle"})
 
     def test_hawkeye_component_visualization_generates_run_id_and_records_component_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
