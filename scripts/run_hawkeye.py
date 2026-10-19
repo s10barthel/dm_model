@@ -31,6 +31,7 @@ from datatools.hawkeye import (
 from scripts.visualize_hawkeye import (
     requested_time_norm_range,
     resolve_ballreceipt,
+    resolve_hawkeye_png_frames,
     resolve_hawkeye_time_norm_range,
 )
 from models.edge_schema import generation_kwargs
@@ -83,6 +84,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--freeze-ballreceipt", dest="freeze_ballreceipt", action="store_true")
     parser.add_argument("--no-freeze-ballreceipt", dest="freeze_ballreceipt", action="store_false")
     parser.add_argument(
+        "--time-norm",
+        "--time_norm",
+        dest="time_norm",
+        action="append",
+        type=float,
+        help="BallReceipt-relative Hawkeye frame time for inference. Repeat to select multiple frames.",
+    )
+    parser.add_argument(
         "--time-norm-start",
         "--time_norm_start",
         dest="time_norm_start",
@@ -130,6 +139,11 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     pc_versions.check_selectors(args)
     resolve_top_pass_selector(parser, args)
+    if args.time_norm is not None:
+        if args.time_norm_start is not None or args.time_norm_end is not None:
+            parser.error("--time-norm cannot be combined with --time-norm-start or --time-norm-end.")
+        if not all(math.isfinite(value) for value in args.time_norm):
+            parser.error("--time-norm values must be finite.")
     try:
         resolve_physical_num_workers(args.physical_num_workers)
     except ValueError as exc:
@@ -213,22 +227,35 @@ def _prewarm_hawkeye_physical_xpass(
     )
 
 
-def filter_hawkeye_situation_by_time_norm_range(
+def filter_hawkeye_situation_by_time_norm(
     situation,
     attacking_rows: pd.DataFrame,
     situation_tracking: pd.DataFrame,
     args: argparse.Namespace,
-) -> tuple[pd.DataFrame, dict[str, object] | None]:
+) -> tuple[pd.DataFrame, list[dict[str, object]], dict[str, object] | None]:
+    time_norms = getattr(args, "time_norm", None)
     time_norm_start, time_norm_end = requested_time_norm_range(args)
-    if time_norm_start is None and time_norm_end is None:
-        return attacking_rows, None
+    if time_norms is None and time_norm_start is None and time_norm_end is None:
+        return attacking_rows, [], None
 
-    frame_ids, range_metadata = resolve_hawkeye_time_norm_range(
-        situation,
-        resolve_ballreceipt(situation_tracking),
-        time_norm_start,
-        time_norm_end,
-    )
+    ballreceipt = resolve_ballreceipt(situation_tracking)
+    frame_selections: list[dict[str, object]] = []
+    range_metadata = None
+    if time_norms is not None:
+        frame_selections = resolve_hawkeye_png_frames(situation, ballreceipt, time_norms)
+        frame_ids = [int(selection["frame_id"]) for selection in frame_selections]
+        selection_description = f"time_norm frames {time_norms}"
+    else:
+        frame_ids, range_metadata = resolve_hawkeye_time_norm_range(
+            situation,
+            ballreceipt,
+            time_norm_start,
+            time_norm_end,
+        )
+        selection_description = (
+            f"time_norm range [{range_metadata['effective_time_norm_start']:g}, "
+            f"{range_metadata['effective_time_norm_end']:g}]"
+        )
 
     selected_frame_ids = set(int(frame_id) for frame_id in frame_ids)
     kept_graphs = []
@@ -250,18 +277,18 @@ def filter_hawkeye_situation_by_time_norm_range(
         situation.actions = situation.actions.loc[situation.actions.index.astype(int).isin(selected_frame_ids)].copy()
 
     filtered_attacking_rows = attacking_rows.loc[attacking_rows["frame_id"].astype("Int64").isin(selected_frame_ids)].copy()
-    range_metadata = dict(range_metadata)
-    range_metadata["valid_frame_ids"] = [
-        int(label[LABEL_INDEX["action_index"]].item())
-        for label in situation.labels
-    ]
-    range_metadata["valid_frame_count"] = int(situation.labels.shape[0])
+    if range_metadata is not None:
+        range_metadata = dict(range_metadata)
+        range_metadata["valid_frame_ids"] = [
+            int(label[LABEL_INDEX["action_index"]].item())
+            for label in situation.labels
+        ]
+        range_metadata["valid_frame_count"] = int(situation.labels.shape[0])
     if situation.labels.numel() == 0 or not situation.graph_features_0:
         raise ValueError(
-            f"Hawkeye situation {situation.situation_id} has no valid graph frames in selected time_norm range "
-            f"[{range_metadata['effective_time_norm_start']:g}, {range_metadata['effective_time_norm_end']:g}]."
+            f"Hawkeye situation {situation.situation_id} has no valid graph frames in selected {selection_description}."
         )
-    return filtered_attacking_rows, range_metadata
+    return filtered_attacking_rows, frame_selections, range_metadata
 
 
 def main() -> None:
@@ -358,6 +385,7 @@ def main() -> None:
     physical_xpass_runtime_stats: dict[str, dict[str, object]] = {}
     physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     physical_xpass_prewarm_stats: dict[str, dict[str, object]] = {}
+    resolved_time_norms: dict[str, list[dict[str, object]]] = {}
     resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     skipped_situations: list[dict[str, str]] = []
 
@@ -373,7 +401,7 @@ def main() -> None:
                 add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                 **generation_kwargs(graph_schema),
             )
-            attacking_rows, range_metadata = filter_hawkeye_situation_by_time_norm_range(
+            attacking_rows, frame_selections, range_metadata = filter_hawkeye_situation_by_time_norm(
                 situation,
                 attacking_rows,
                 situation_tracking,
@@ -382,6 +410,8 @@ def main() -> None:
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export_tables.append(build_hawkeye_export(attacking_rows, situation, components))
             stats_by_situation[situation_id] = stats
+            if frame_selections:
+                resolved_time_norms[str(situation_id)] = frame_selections
             if range_metadata is not None:
                 resolved_time_norm_ranges[str(situation_id)] = range_metadata
             runtime_physical_stats = getattr(situation, "physical_xpass_runtime_stats", None)
@@ -458,6 +488,8 @@ def main() -> None:
         "physical_batch_size": physical_batch_size,
         "requested_situation_ids": args.situation_id or [],
         "limit": args.limit,
+        "time_norm": list(getattr(args, "time_norm", None) or []),
+        "resolved_time_norms": resolved_time_norms,
         "time_norm_start": requested_time_norm_range(args)[0],
         "time_norm_end": requested_time_norm_range(args)[1],
         "resolved_time_norm_ranges": resolved_time_norm_ranges,

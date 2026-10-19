@@ -8,7 +8,7 @@ import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import pc_xpass_versions
@@ -2946,19 +2946,16 @@ class PhysicalXPassTests(unittest.TestCase):
             graph_features_0=[object()] * len(frame_ids),
         )
         model_specs = {
-            "action_intent": "action_intent",
-            "pass_intent": "pass_intent",
-            "pass_success": "pass_success",
-            "pass_height": "pass_height",
-            "outcome_scoring": "outcome_scoring",
-            "outcome_conceding": "outcome_conceding",
+            task: SimpleNamespace(args={"task": task, "use_carries": True})
+            for task in ["action_intent", "pass_intent", "pass_success", "pass_height", "outcome_scoring", "outcome_conceding"]
         }
         inference_calls: list[tuple[str, list[int], object | None]] = []
         pass_intent_probs = pd.DataFrame({"home_1": [0.75]}, index=[frame_ids[0]])
 
         def fake_inference(_situation, model, **kwargs):
-            inference_calls.append((str(model), list(kwargs["event_indices"]), kwargs.get("pass_intent_probs")))
-            if model == "pass_intent":
+            task = model.args["task"]
+            inference_calls.append((task, list(kwargs["event_indices"]), kwargs.get("pass_intent_probs")))
+            if task == "pass_intent":
                 return pass_intent_probs, pd.DataFrame()
             empty = pd.DataFrame()
             return empty, empty
@@ -7742,6 +7739,137 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(args.time_norm_start, 0.1)
         self.assertEqual(args.time_norm_end, 0.7)
 
+    def test_run_hawkeye_cli_accepts_individual_time_norms(self) -> None:
+        for flags, expected in [
+            ([], None),
+            (["--time-norm", "0"], [0.0]),
+            (["--time_norm", "-0.25"], [-0.25]),
+            (["--time-norm", "1", "--time_norm", "0", "--time-norm", "1"], [1.0, 0.0, 1.0]),
+        ]:
+            with self.subTest(flags=flags), patch.object(sys, "argv", ["run_hawkeye.py", *flags]):
+                args = run_hawkeye.parse_args()
+                self.assertEqual(args.time_norm, expected)
+                self.assertIsNone(args.time_norm_start)
+                self.assertIsNone(args.time_norm_end)
+
+    def test_run_hawkeye_cli_rejects_time_norm_combined_with_range(self) -> None:
+        for bound in ["--time-norm-start", "--time_norm_start", "--time-norm-end", "--time_norm_end"]:
+            with self.subTest(bound=bound), patch.object(
+                sys, "argv", ["run_hawkeye.py", "--time-norm", "0", bound, "0"]
+            ):
+                with self.assertRaisesRegex(SystemExit, "2"):
+                    run_hawkeye.parse_args()
+
+    def test_run_hawkeye_cli_rejects_nonfinite_time_norms(self) -> None:
+        for value in ["nan", "inf", "-inf"]:
+            with self.subTest(value=value), patch.object(
+                sys, "argv", ["run_hawkeye.py", "--time-norm", "0", f"--time_norm={value}"]
+            ), patch.object(sys, "stderr") as stderr:
+                with self.assertRaises(SystemExit):
+                    run_hawkeye.parse_args()
+                self.assertIn("--time-norm values must be finite", "".join(call.args[0] for call in stderr.write.call_args_list))
+
+    def _hawkeye_time_norm_inputs(self, situation_id="s1", ballreceipt=10.0, graph_frame_ids=None):
+        frame_ids = [0, 10, 20, 30]
+        graph_frame_ids = frame_ids if graph_frame_ids is None else graph_frame_ids
+        graphs = [f"g{frame_id}" for frame_id in graph_frame_ids]
+        situation = SimpleNamespace(
+            situation_id=situation_id,
+            frame_meta=pd.DataFrame(
+                {"abs_time": [ballreceipt - 0.25, ballreceipt, ballreceipt + 0.5, ballreceipt + 1.0]},
+                index=pd.Index(frame_ids, name="frame_id"),
+            ),
+            labels=torch.stack([make_label(action_index=frame_id) for frame_id in graph_frame_ids]),
+            graph_features_0=graphs,
+            graph_features_by_dir={"action_graphs": graphs},
+            actions=pd.DataFrame({"frame_id": graph_frame_ids}, index=pd.Index(graph_frame_ids, name="frame_id")),
+        )
+        attacking_rows = pd.DataFrame({
+            "frame_id": frame_ids,
+            "abs_time": situation.frame_meta["abs_time"].tolist(),
+            "id": situation_id,
+            "object_id": "home_2",
+            "team": 1,
+            "uefa_player_id": 2,
+        })
+        tracking = pd.DataFrame({"id": [situation_id], "BallReceipt": [ballreceipt]})
+        return situation, attacking_rows, tracking
+
+    def test_run_hawkeye_time_norm_filters_and_deduplicates_individual_frames(self) -> None:
+        situation, rows, tracking = self._hawkeye_time_norm_inputs(graph_frame_ids=[30, 20, 10, 0])
+        requests = [0.0, 1.0, 0.1, 0.0]
+        filtered_rows, selections, range_metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm(
+            situation, rows, tracking, SimpleNamespace(time_norm=requests)
+        )
+
+        self.assertEqual(situation.graph_features_0, ["g30", "g10"])
+        self.assertIs(situation.graph_features_by_dir["action_graphs"], situation.graph_features_0)
+        self.assertEqual(situation.labels[:, LABEL_INDEX["action_index"]].tolist(), [30.0, 10.0])
+        self.assertEqual(situation.actions.index.tolist(), [30, 10])
+        self.assertEqual(filtered_rows["frame_id"].tolist(), [10, 30])
+        self.assertEqual([entry["requested_time_norm"] for entry in selections], requests)
+        self.assertEqual([entry["frame_id"] for entry in selections], [10, 30, 10, 10])
+        self.assertEqual([entry["resolved_time_norm"] for entry in selections], [0.0, 1.0, 0.0, 0.0])
+        self.assertEqual([entry["abs_time"] for entry in selections], [10.0, 11.0, 10.0, 10.0])
+        self.assertIsNone(range_metadata)
+        self.assertEqual(situation.frame_meta.index.tolist(), [0, 10, 20, 30])
+        self.assertEqual(rows["frame_id"].tolist(), [0, 10, 20, 30])
+
+    def test_run_hawkeye_time_norm_uses_stable_nearest_frame_selection(self) -> None:
+        for requested, expected in [(-0.25, 0), (0.0, 10), (0.25, 10), (0.3, 20), (1.0, 30)]:
+            with self.subTest(requested=requested):
+                situation, rows, tracking = self._hawkeye_time_norm_inputs()
+                filtered_rows, selections, _ = run_hawkeye.filter_hawkeye_situation_by_time_norm(
+                    situation, rows, tracking, SimpleNamespace(time_norm=[requested])
+                )
+                self.assertEqual(situation.labels[:, LABEL_INDEX["action_index"]].tolist(), [float(expected)])
+                self.assertEqual(filtered_rows["frame_id"].tolist(), [expected])
+                self.assertEqual(selections[0]["frame_id"], expected)
+
+    def test_run_hawkeye_without_time_selection_keeps_all_frames(self) -> None:
+        situation, rows, _ = self._hawkeye_time_norm_inputs()
+        original_labels = situation.labels
+        original_graphs = situation.graph_features_0
+        original_actions = situation.actions
+        filtered_rows, selections, range_metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm(
+            situation, rows, pd.DataFrame(), SimpleNamespace()
+        )
+        self.assertIs(filtered_rows, rows)
+        self.assertIs(situation.labels, original_labels)
+        self.assertIs(situation.graph_features_0, original_graphs)
+        self.assertIs(situation.actions, original_actions)
+        self.assertEqual(selections, [])
+        self.assertIsNone(range_metadata)
+
+    def test_run_hawkeye_time_norm_rejects_invalid_selection(self) -> None:
+        for requested, missing_ballreceipt, error, message in [
+            (-0.5, False, ValueError, "outside available range"),
+            (2.0, False, ValueError, "outside available range"),
+            (0.0, True, KeyError, "missing BallReceipt"),
+        ]:
+            with self.subTest(requested=requested, missing_ballreceipt=missing_ballreceipt):
+                situation, rows, tracking = self._hawkeye_time_norm_inputs()
+                if missing_ballreceipt:
+                    tracking = tracking.drop(columns="BallReceipt")
+                with self.assertRaisesRegex(error, message):
+                    run_hawkeye.filter_hawkeye_situation_by_time_norm(
+                        situation, rows, tracking, SimpleNamespace(time_norm=[requested])
+                    )
+
+    def test_run_hawkeye_time_norm_handles_missing_graph_frames(self) -> None:
+        situation, rows, tracking = self._hawkeye_time_norm_inputs(graph_frame_ids=[10])
+        _, selections, _ = run_hawkeye.filter_hawkeye_situation_by_time_norm(
+            situation, rows, tracking, SimpleNamespace(time_norm=[0.0, 1.0])
+        )
+        self.assertEqual(situation.graph_features_0, ["g10"])
+        self.assertEqual([entry["frame_id"] for entry in selections], [10, 30])
+
+        situation, rows, tracking = self._hawkeye_time_norm_inputs(graph_frame_ids=[10])
+        with self.assertRaisesRegex(ValueError, "no valid graph frames"):
+            run_hawkeye.filter_hawkeye_situation_by_time_norm(
+                situation, rows, tracking, SimpleNamespace(time_norm=[1.0])
+            )
+
     def test_run_hawkeye_time_norm_range_filters_situation_frames(self) -> None:
         labels = torch.stack(
             [
@@ -7776,7 +7904,7 @@ class PhysicalXPassTests(unittest.TestCase):
         situation_tracking = pd.DataFrame({"id": ["s1"], "BallReceipt": [10.0]})
         args = SimpleNamespace(time_norm_start=0.1, time_norm_end=0.7)
 
-        filtered_rows, metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm_range(
+        filtered_rows, selections, metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm(
             situation,
             attacking_rows,
             situation_tracking,
@@ -7791,6 +7919,108 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(metadata["frame_ids"], [10, 20])
         self.assertEqual(metadata["valid_frame_ids"], [10, 20])
         self.assertEqual(metadata["valid_frame_count"], 2)
+        self.assertEqual(selections, [])
+
+    def test_run_hawkeye_time_norm_range_supports_open_ended_bounds(self) -> None:
+        for start, end, expected in [(0.1, None, [10, 20, 30]), (None, 0.2, [0, 10])]:
+            with self.subTest(start=start, end=end):
+                situation, rows, tracking = self._hawkeye_time_norm_inputs()
+                filtered_rows, selections, metadata = run_hawkeye.filter_hawkeye_situation_by_time_norm(
+                    situation, rows, tracking, SimpleNamespace(time_norm_start=start, time_norm_end=end)
+                )
+                self.assertEqual(filtered_rows["frame_id"].tolist(), expected)
+                self.assertEqual(metadata["valid_frame_ids"], expected)
+                self.assertEqual(metadata["requested_time_norm_start"], start)
+                self.assertEqual(metadata["requested_time_norm_end"], end)
+                self.assertEqual(selections, [])
+
+    def test_run_hawkeye_main_filters_inference_exports_and_records_time_selection(self) -> None:
+        for flags, expected_frame_ids, requested_times in [
+            (["--time-norm", "1", "--time-norm", "0", "--time-norm", "0.1", "--time-norm", "0"], [10, 30], [1.0, 0.0, 0.1, 0.0]),
+            (["--time-norm-start", "0.1", "--time-norm-end", "0.7"], [10, 20], []),
+            ([], [0, 10, 20, 30], []),
+        ]:
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmpdir:
+                inputs = [self._hawkeye_time_norm_inputs("s1", 10.0), self._hawkeye_time_norm_inputs("s2", 20.0)]
+                if requested_times:
+                    outside = self._hawkeye_time_norm_inputs("outside", 30.0)
+                    outside[0].frame_meta["abs_time"] -= 2.0
+                    inputs.append(outside)
+                tracking = pd.concat([item[2] for item in inputs], ignore_index=True)
+                builds = {item[0].situation_id: item[:2] for item in inputs}
+                inferred_ids = []
+
+                def build_situation(situation_tracking, _ball, **kwargs):
+                    self.assertTrue(kwargs["freeze_ballreceipt"])
+                    situation, rows = builds[situation_tracking["id"].iloc[0]]
+                    return situation, rows, {"total_frames": 4, "valid_frames": 4}
+
+                def infer_components(situation, _models, device):
+                    self.assertEqual(device, "cpu")
+                    frame_ids = situation.labels[:, LABEL_INDEX["action_index"]].int().tolist()
+                    self.assertEqual(frame_ids, expected_frame_ids)
+                    self.assertEqual(situation.graph_features_0, [f"g{frame_id}" for frame_id in expected_frame_ids])
+                    self.assertEqual(situation.actions.index.tolist(), expected_frame_ids)
+                    inferred_ids.append(situation.situation_id)
+                    return {"pass_success": pd.DataFrame({"home_2": [0.8] * len(frame_ids)}, index=frame_ids)}
+
+                model_ids = {task: f"{task}/fake" for task in [
+                    "action_intent", "pass_intent", "pass_success", "outcome_scoring", "outcome_conceding"
+                ]}
+                argv = [
+                    "run_hawkeye.py", "--device", "cpu", "--bundle-id", "bundle", "--run-id", "selection_test",
+                    "--output-dir", tmpdir, "--physical-cache-dir", str(Path(tmpdir) / "cache"), *flags,
+                ]
+                with patch.object(sys, "argv", argv), patch.multiple(
+                    run_hawkeye,
+                    resolve_model_selection=Mock(return_value=(model_ids, {
+                        "intended_receiver_mode": "angle_only", "return_type": "disc_0.9", "target_family": "goal",
+                    }, None)),
+                    load_hawkeye_tracking=Mock(return_value=tracking),
+                    clean_hawkeye_tracking=Mock(side_effect=lambda frame: frame),
+                    load_hawkeye_ball=Mock(return_value=pd.DataFrame()),
+                    clean_hawkeye_ball=Mock(side_effect=lambda frame: frame),
+                    load_hawkeye_models=Mock(return_value={}),
+                    validate_model_graph_schemas=Mock(return_value={"add_v_edge_features": False}),
+                    get_model_provenance=Mock(return_value={"feature_signature": "sig"}),
+                    build_hawkeye_situation=Mock(side_effect=build_situation),
+                    infer_hawkeye_components=Mock(side_effect=infer_components),
+                    attach_membership_report=Mock(),
+                ):
+                    run_hawkeye.main()
+
+                self.assertEqual(inferred_ids, ["s1", "s2"])
+                output_dir = Path(tmpdir) / "selection_test"
+                exported = pd.read_parquet(output_dir / "hawkeye_data.parquet")
+                csv_exported = pd.read_csv(output_dir / "hawkeye_data.csv")
+                pd.testing.assert_frame_equal(exported, csv_exported)
+                self.assertEqual(exported.columns.tolist(), csv_exported.columns.tolist())
+                self.assertNotIn("frame_id", exported.columns)
+                self.assertNotIn("object_id", exported.columns)
+                self.assertTrue(exported["pass_success"].eq(0.8).all())
+                metadata = json.loads((output_dir / "metadata.json").read_text(encoding="utf-8"))
+                self.assertEqual(metadata["time_norm"], requested_times)
+                self.assertEqual(metadata["processed_situation_ids"], ["s1", "s2"])
+                for situation, rows, _ in inputs[:2]:
+                    expected_times = rows.loc[rows["frame_id"].isin(expected_frame_ids), "abs_time"].tolist()
+                    self.assertEqual(exported.loc[exported["id"] == situation.situation_id, "abs_time"].tolist(), expected_times)
+                    if requested_times:
+                        selections = metadata["resolved_time_norms"][situation.situation_id]
+                        self.assertEqual([entry["requested_time_norm"] for entry in selections], requested_times)
+                        self.assertEqual([entry["frame_id"] for entry in selections], [30, 10, 10, 10])
+                        self.assertEqual([entry["resolved_time_norm"] for entry in selections], [1.0, 0.0, 0.0, 0.0])
+                    elif flags:
+                        self.assertEqual(metadata["resolved_time_norm_ranges"][situation.situation_id]["valid_frame_ids"], expected_frame_ids)
+                if requested_times:
+                    self.assertEqual(metadata["resolved_time_norm_ranges"], {})
+                    self.assertEqual(len(metadata["skipped_situations"]), 1)
+                    self.assertEqual(metadata["skipped_situations"][0]["situation_id"], "outside")
+                    self.assertIn("outside available range", metadata["skipped_situations"][0]["error"])
+                else:
+                    self.assertEqual(metadata["resolved_time_norms"], {})
+                    self.assertEqual(metadata["skipped_situations"], [])
+                    if not flags:
+                        self.assertEqual(metadata["resolved_time_norm_ranges"], {})
 
     def test_generate_epv_cli_accepts_physical_xpass_flags(self) -> None:
         args = generate_epv.parse_args(

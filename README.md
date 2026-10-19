@@ -768,6 +768,7 @@ Component producers now save checkpoint probabilities whenever they run pass-suc
 
 ```powershell
 python scripts/run_hawkeye.py --bundle-id <bundle_id>
+python scripts/run_hawkeye.py --bundle-id <bundle_id> --time-norm 0 --time-norm 1
 python scripts/run_hawkeye.py --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_hawkeye.py --bundle-id <bundle_id> --run-id hawkeye_component_20260414T123456_abcdef12
 ```
@@ -2204,6 +2205,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--limit <N>`: process only the first `N` selected situations. Default: no limit.
 - `--freeze-ballreceipt`: freeze possessor and ball state after `BallReceipt`. Default: on.
 - `--no-freeze-ballreceipt`: disable BallReceipt freezing. Default: off.
+- `--time-norm <seconds>` / `--time_norm <seconds>`: restrict HawkEye inference to the frame nearest to `abs_time - BallReceipt`; repeat to select multiple individual frames. Cannot be combined with `--time-norm-start` or `--time-norm-end`. Default: process all frames.
 - `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: restrict HawkEye inference to the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: process all frames.
 - `--device <device>`: inference device. Default: `cuda:0`.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
