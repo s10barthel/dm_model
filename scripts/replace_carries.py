@@ -97,6 +97,10 @@ def rebuild_match(task):
     if pinned.exists():
         control_path = pinned
     events = pd.read_csv(event_path, parse_dates=["utc_timestamp"])
+    from datatools.reception_policy import RETIRED, apply_run_policy, policy_version
+    canonical_root = Path(metadata.get("_canonical_root", source))
+    if policy_version(metadata) == RETIRED:
+        events = apply_run_policy(events, canonical_root, match_id)
     controls = pd.read_parquet(control_path)
     tracking_path = DATA_ROOT / "tracking_processed" / f"{match_id}.parquet"
     tracking = pd.read_parquet(tracking_path)
@@ -104,9 +108,10 @@ def rebuild_match(task):
     lineup = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     lineup = lineup.loc[lineup.stats_perform_match_id.eq(match_id)].copy()
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
-        action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True)))
+        action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
+        reception_policy=policy_version(metadata)))
     primary = metadata["intended_receiver_modes"][0]
-    canonical_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=primary, root=source))
+    canonical_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=primary, root=canonical_root))
     match.actions = canonical_actions.copy()
     augment_match_actions_with_carries(match, segments)
     carry_actions = match.actions.loc[match.actions.spadl_type.eq("ball_carry")].copy()
@@ -122,7 +127,7 @@ def rebuild_match(task):
     for post in [False, True]:
         graphs = construct_graph_features(match, extend=True, post_action=post, action_indices=carry_ids,
                                           verbose=False, **options) if carry_ids else []
-        base_dir = get_post_action_graph_dir(source) if post else get_action_graph_dir(source)
+        base_dir = get_post_action_graph_dir(canonical_root) if post else get_action_graph_dir(canonical_root)
         target_dir = get_post_action_graph_dir(output, use_carries=True) if post else get_action_graph_dir(output, use_carries=True)
         base_graphs = torch.load(Path(base_dir) / f"{match_id}.pt", map_location="cpu", weights_only=False)
         if len(graphs) != len(carry_ids):
@@ -130,7 +135,7 @@ def rebuild_match(task):
         generated[Path(target_dir) / f"{match_id}.pt"] = base_graphs + graphs
     expected_rows = len(base_graphs) + len(carry_ids)
     for mode in metadata["intended_receiver_modes"]:
-        base_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=mode, root=source))
+        base_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=mode, root=canonical_root))
         resolved = pd.concat([base_actions, carry_actions], sort=False)
         # Sportec IDs can be numeric in base artifacts; synthetic IDs are strings.
         resolved["original_event_id"] = resolved.original_event_id.astype("string")
@@ -142,7 +147,7 @@ def rebuild_match(task):
             threshold = metadata.get("pass_height_threshold_meters")
             if threshold is not None:
                 config.PASS_HEIGHT_THRESHOLD_METERS = float(threshold)
-            base_path = Path(get_action_label_dir(ret, intended_receiver_mode=mode, root=source)) / f"{match_id}.pt"
+            base_path = Path(get_action_label_dir(ret, intended_receiver_mode=mode, root=canonical_root)) / f"{match_id}.pt"
             base_labels = torch.load(base_path, map_location="cpu", weights_only=False)
             match.actions = carry_actions.copy()
             extra = match.construct_labels(resolved_actions=carry_actions.copy(), relabel_intended_receivers=False,

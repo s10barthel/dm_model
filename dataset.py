@@ -478,6 +478,8 @@ class ActionDataset(Dataset):
             return
 
         condition: torch.Tensor = torch.ones(labels.shape[0]).bool()
+        if task == "pass_success" or task.startswith(("outcome_", "success", "failure", "overall_")):
+            condition &= torch.isfinite(labels[:, LABEL_INDEX["success"]])
         self.selection_counts["loaded_samples"] = int(labels.shape[0])
 
         if not TASK_CONFIG.at[task, "pass"]:
@@ -568,6 +570,13 @@ class ActionDataset(Dataset):
 
             if graph is None:
                 _increment_count(self.skipped_rows, "graph_none")
+                continue
+            from datatools.endpoint_policy import requires_intended_receiver
+            detailed_validation = task in {"pass_success", "pass_height"} or (task == "failure_receiver" and policy.version == 2)
+            if not detailed_validation and requires_intended_receiver(task) and node_index_invalid_reason(
+                graph_labels[LABEL_INDEX["intent_index"]], graph.num_nodes
+            ) is not None:
+                _increment_count(self.skipped_rows, "invalid_intended_receiver_target")
                 continue
             if policy.version == 2 and task == "failure_receiver":
                 reason = failure_receiver_target_invalid_reason(graph, graph_labels, allow_out=not inplay_only)

@@ -143,6 +143,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--replace-carries", action="store_true",
                         help="Create a derived run reusing canonical artifacts and completely rebuilding carries; supports --extend-feature-run-id latest.")
+    parser.add_argument("--retire-elastic", action="store_true",
+                        help="Retire Elastic reception fallback (not launch timing); refresh height/receiver targets and post-action states. Combine with --replace-carries for carry-enabled sources.")
     for name, value in asdict(CarryPolicy()).items():
         parser.add_argument("--carry-" + name.replace("_", "-"), type=float, default=value)
     parser.add_argument(
@@ -273,17 +275,28 @@ def parse_args() -> argparse.Namespace:
         help="Thread limit passed to each graph_feature worker process.",
     )
     args = parser.parse_args()
+    args.explicit_carry_parameters = {key for key in asdict(CarryPolicy())
+        if any(token.split("=", 1)[0] == "--carry-" + key.replace("_", "-") for token in sys.argv[1:])}
     vars(args).update(split_selector(args))
     args.requested_return_types = resolve_requested_return_types(args.return_type) if args.return_type else []
     args.return_types = args.requested_return_types or resolve_requested_return_types(None)
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     args.refresh_trajectory_speed = args.refresh_trajectory  # Deprecated programmatic alias.
+    if args.retire_elastic and args.extend_feature_run_id:
+        if args.in_place:
+            parser.error("--retire-elastic creates a derived run; --in-place is unsupported.")
+        supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
+        allowed = {"--retire-elastic", "--replace-carries", "--extend-feature-run-id", "--run-id",
+                   "--artifact-copy-mode", "--num-workers", "--worker-thread-limit"}
+        allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
+        if supplied - allowed:
+            parser.error("Reception retirement inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.replace_carries:
         if not args.extend_feature_run_id or args.in_place:
             parser.error("--replace-carries requires --extend-feature-run-id and creates a derived run; --in-place is unsupported.")
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
-        allowed = {"--replace-carries", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
+        allowed = {"--replace-carries", "--retire-elastic", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
                    "--num-workers", "--worker-thread-limit"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
         if supplied - allowed:
@@ -1550,6 +1563,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
             "artifact_suffix": "_carries",
             "generated_at": datetime.now().isoformat(timespec="seconds"),
         }
+    from datatools.reception_policy import KEY, RETIRED
+    metadata[KEY] = RETIRED
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
     print(f"Feature run id: {args.run_id}")
@@ -1557,7 +1572,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.replace_carries:
+    if args.retire_elastic and args.extend_feature_run_id:
+        from datatools.reception_refresh import run_retirement
+        run_retirement(args)
+    elif args.replace_carries:
         from scripts.replace_carries import replace_carries
         replace_carries(args)
     elif args.refresh_trajectory:

@@ -674,6 +674,7 @@ def build_match_for_feature_generation(
         args.action_type,
         include_goals=True,
         next_action_conditions_enabled=args.next_action_conditions_enabled,
+        **({"reception_policy": args.reception_policy} if hasattr(args, "reception_policy") else {}),
     )
 
 
@@ -1168,6 +1169,8 @@ def augment_blocked_actions(
         frame = match.actions.at[action_index, "frame_id"]
         possessor = match.actions.at[action_index, "object_id"]
         real_intent = match.actions.at[action_index, "intent_id"]
+        if pd.isna(real_intent):
+            continue  # Keep the real observation; do not derive hypothetical targets from a missing intent.
         snapshot: pd.Series = match.tracking.loc[frame]
 
         teammates = [c[:-2] for c in snapshot.dropna().index if re.match(rf"{possessor[:4]}_.*_x", c)]
@@ -1617,6 +1620,19 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
         config.PASS_HEIGHT_THRESHOLD_METERS = float(args.pass_height_threshold)
     feature_root = Path(task.feature_root)
     events = pd.read_csv(f"data/event_synced/{task.match_id}.csv", header=0, parse_dates=["utc_timestamp"])
+    from datatools.reception_policy import RETIRED, apply_policy, run_version, retirement_records
+    from project_config import atomic_write_json
+    args.reception_policy = run_version(feature_root) if (feature_root / "metadata.json").exists() else RETIRED
+    records = None
+    if args.reception_policy == RETIRED:
+        import json
+        record_path = feature_root / "reception_retirement" / f"{task.match_id}.json"
+        manifest = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else {}
+        records = list({r["event_id"]: r for r in [*manifest.get("receptions", []),
+                                                 *retirement_records(events)]}.values())
+        manifest["receptions"] = records
+        atomic_write_json(record_path, manifest)
+    events = apply_policy(events, args.reception_policy, records=records)
     tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
     if args.use_carries:

@@ -406,7 +406,7 @@ class MatchAccumulator:
     def set_provenance(self, report):
         provenance = {key: report[key] for key in ("feature_run_id", "carry_definition", "spell_artifact_sha256",
                       "state_contract", "canonical_sha256", "control_sha256", "resolved_actions_sha256",
-                      "tracking_sha256", "lineup_sha256", "physical_input_contract")
+                      "tracking_sha256", "lineup_sha256", "physical_input_contract", "reception_policy")
                       if key in report}
         if self.provenance and self.provenance != provenance:
             raise ValueError("Changed match provenance; create a new pc-xPass version")

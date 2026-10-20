@@ -248,8 +248,12 @@ def load_match(
     lineups = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     match_lineup = lineups.loc[lineups["stats_perform_match_id"] == match_id].copy()
 
-    match = Match(events, tracking, match_lineup, action_type="all", include_goals=True)
-    match.sportec_canonical_source = events
+    from datatools.reception_policy import apply_run_policy, run_version
+    raw_events = events
+    events = apply_run_policy(events, feature_root, match_id) if feature_root is not None else events
+    match = Match(events, tracking, match_lineup, action_type="all", include_goals=True,
+                  reception_policy=run_version(feature_root))
+    match.sportec_canonical_source = raw_events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
                                        add_relative_speed_edge_features=add_relative_speed_edge_features,

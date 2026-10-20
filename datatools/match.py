@@ -47,8 +47,12 @@ class Match(ABC):
         include_keepers: bool = True,
         include_goals: bool = False,
         next_action_conditions_enabled: bool = True,
+        reception_policy: str = "legacy_elastic_v1",
     ):
-        self.events = events.copy()
+        from datatools.reception_policy import apply_policy
+        self.reception_policy = reception_policy
+        self.events = apply_policy(events, reception_policy)
+        events = self.events
         self.tracking = tracking.copy()
         self.lineup = lineup.copy()
         self.match_id = None
@@ -294,8 +298,7 @@ class Match(ABC):
         failed_pass_indices = actions.index[
             (actions["action_type"] == "pass")
             & (~actions["success"])
-            & actions["receive_frame_id"].notna()
-            & actions["receiver_id"].notna()
+            & actions.get("frame_id", pd.Series(0, index=actions.index)).notna()
         ].tolist()
         stats = dict(actions.attrs.get("intended_receiver_stats", {}))
         stats["intended_receiver_model_id"] = intended_receiver_model_id
@@ -450,9 +453,10 @@ class Match(ABC):
         self.events["y"] = self.tracking.loc[self.events["frame_id"], "ball_y"].values
 
     def filter_passes(self, failure_only=False) -> pd.DataFrame:
-        pass_mask = self.events["spadl_type"].isin(config.PASS) & self.events[
-            ["frame_id", "receive_frame_id"]
-        ].notna().all(axis=1)
+        from datatools.reception_policy import RETIRED
+        retired = getattr(self, "reception_policy", "legacy_elastic_v1") == RETIRED
+        required = ["frame_id"] if retired else ["frame_id", "receive_frame_id"]
+        pass_mask = self.events["spadl_type"].isin(config.PASS) & self.events[required].notna().all(axis=1)
         if "training_sample_eligible" in self.events:
             pass_mask &= self.events["training_sample_eligible"].map(sample_is_eligible)
         if self.next_action_conditions_enabled:
@@ -471,9 +475,20 @@ class Match(ABC):
         pass_team = passes["object_id"].str[:4]
         receive_team = passes["receiver_id"].str[:4]
         passes.loc[(pass_team == receive_team) & ~passes["offside"], "success"] = True
+        if retired:
+            known = self.events.get("source_event_success", pd.Series(index=self.events.index, dtype="object"))
+            explicit = known.map(lambda x: str(x).lower() if pd.notna(x) else "")
+            values = explicit.map({"true": True, "1": True, "1.0": True, "false": False, "0": False, "0.0": False})
+            observed = passes.receiver_id.notna()
+            passes["success"] = passes["success"].where(observed, np.nan)
+            mask = values.reindex(passes.index).notna()
+            passes.loc[mask, "success"] = values.reindex(passes.index)[mask] & ~passes.loc[mask, "offside"]
+            passes["success_known"] = passes.success.notna()
+            passes["success"] = passes.success.fillna(False).astype(bool)
 
         if failure_only:
-            return passes[~passes["success"]].astype({"frame_id": int}).copy()
+            known_mask = passes.get("success_known", pd.Series(True, index=passes.index))
+            return passes[~passes["success"] & known_mask].astype({"frame_id": int}).copy()
         else:
             return passes.astype({"frame_id": int})
 
@@ -541,7 +556,8 @@ class Match(ABC):
 
     def label_post_actions(self, actions: pd.DataFrame) -> pd.DataFrame:
         # To accurately estimate expected returns after actions
-        actions = actions.copy()
+        from datatools.reception_policy import apply_policy
+        actions = apply_policy(actions, getattr(self, "reception_policy", "legacy_elastic_v1"))
 
         actions["end_player_id"] = actions["receiver_id"]
         actions["end_frame_id"] = actions["receive_frame_id"]
@@ -637,7 +653,8 @@ class Match(ABC):
         return_kind, return_value, skip_first = parse_return_type(return_type)
 
         if resolved_actions is not None:
-            self.actions = resolved_actions.copy()
+            from datatools.reception_policy import apply_policy
+            self.actions = apply_policy(resolved_actions, getattr(self, "reception_policy", "legacy_elastic_v1"), mode=intended_receiver_mode)
             if "training_sample_eligible" in self.actions:
                 self.actions = self.actions[self.actions["training_sample_eligible"].map(sample_is_eligible)].copy()
         ensure_pass_endpoints(self)
@@ -732,7 +749,7 @@ class Match(ABC):
             if self.actions.at[i, "action_type"] == "pass" and not self.action_type.startswith("shot"):
                 # For shot feature generation, selected passes are regarded as potentially failed shots
                 try:
-                    if receiver_id == "out":
+                    if pd.isna(receiver_id) or receiver_id == "out":
                         receiver_index = -1
                     elif self.actions.at[i, "object_id"].startswith("home"):
                         receiver_index = (home_players + away_players).index(receiver_id)
@@ -823,7 +840,7 @@ class Match(ABC):
                     intent_y if not pd.isna(intent_y) else -config.FIELD_SIZE[1],
                     is_real,  # Whether this label is for a real or an augmented event
                     int(self.actions.at[i, "blocked"]),
-                    int(self.actions.at[i, "success"]),
+                    int(self.actions.at[i, "success"]) if self.actions.loc[i].get("success_known", True) else float("nan"),
                     self.actions.at[i, "scores"],
                     self.actions.at[i, "scores_xg"],
                     self.actions.at[i, "concedes"],

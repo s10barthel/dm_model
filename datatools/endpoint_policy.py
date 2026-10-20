@@ -8,6 +8,10 @@ import pandas as pd
 ENDPOINT_POLICY_VERSION = "selective_reception_v1"
 
 
+def requires_intended_receiver(task):
+    return task in {"action_intent", "pass_intent", "pass_success", "pass_height", "failure_receiver", "intent_return"} or task.startswith(("outcome_", "success_", "failure_"))
+
+
 def sample_is_eligible(value=True) -> bool:
     # Missing provenance in legacy artifacts is not evidence for exclusion.
     return pd.isna(value) or str(value).lower() not in {"false", "0"}

@@ -34,7 +34,8 @@ def load_refresh_match(match_id, metadata):
     lineup = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     lineup = lineup.loc[lineup.stats_perform_match_id.astype(str).eq(str(match_id))].copy()
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
-        action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True)))
+        action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
+        reception_policy=metadata.get("reception_policy", "legacy_elastic_v1")))
     match.actions = build_success_intent_resolved_actions(match.actions)
     return match
 

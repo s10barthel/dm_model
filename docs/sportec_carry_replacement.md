@@ -14,7 +14,8 @@ Missing-frame events create uncertainty barriers.
 Defaults: acquisition distance <=3 m; separation >5 m sustained for >=1 s,
 excluding the final 0.2 s. Missing tracking, invalid chronology, period crossings
 and dead-ball frames reject the whole training spell. Terminal distance and ball
-height are diagnostics. Provider and fallback boundaries receive identical checks.
+height are diagnostics. Legacy reception policies validate provider and fallback
+boundaries identically; the retired policy removes Elastic receipts first.
 One-second segmentation and canonical action-count return horizons are preserved.
 
 ## Create a corrected derivative
@@ -72,3 +73,51 @@ deduplicating overlaps. At most three individual match rebuild benchmarks are
 allowed. This never creates a full feature run. Reports include exclusions by
 source, start/end, reason, diagnostics and a serial runtime estimate. Conservative
 thresholds identify uncertain examples, not proven data errors.
+
+
+## Retire Elastic reception timing
+
+New full feature generations default to `provider_receptions_only_v1`. Legacy
+runs retain their recorded behaviour. Launch synchronization is unaffected.
+The synchronized CSV files are not modified. Provider receiver identities and
+known outcomes remain available when reception timing is missing.
+
+Refresh a completed carry-enabled source into a new derived run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\generate_relevant_features.py `
+  --extend-feature-run-id latest `
+  --retire-elastic `
+  --replace-carries `
+  --num-workers 4 `
+  --worker-thread-limit 1
+```
+
+`--retire-elastic` alone supports sources without carries. A carry-enabled source
+requires `--replace-carries`. In-place retirement and unrelated combined refreshes
+are rejected. Source settings are inherited. The canonical refresh runs before
+carry assembly so corrected labels and post-action states are reused.
+
+Unavailable receptions invalidate height labels, reception-time position metadata,
+and failed-pass original-mode intended-receiver targets. Model/angle-only targets
+and successful-pass receiver targets are retained. Dependent original-mode synthetic
+augmentations become unavailable. Valid pass launch graphs and independent restart
+states survive. Every tensor/graph slot stays aligned with its source action.
+
+Pinned per-match records live under `reception_retirement/`; runtime loading and
+physical-cache provenance respect the run policy. Old caches are not overwritten.
+Completion markers are written last. Resume with the explicit source and output
+IDs printed by the command, plus the same options and validation parameters.
+Already retired runs are a no-op unless carry rebuilding is requested.
+
+Bounded integration audit (four matches; never updates the latest pointer):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\audit_reception_retirement.py `
+  --source-run-id latest `
+  --output tmp\reception_retirement_audit
+```
+
+Use a new audit directory for each attempt. If production hard linking is unavailable,
+select `--artifact-copy-mode copy` explicitly; this copies reusable artifacts and
+requires the corresponding disk space.

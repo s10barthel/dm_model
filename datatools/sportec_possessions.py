@@ -145,8 +145,11 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
         raise ValueError(f"Invalid synchronized control events: missing {sorted(required - set(control_events))}")
     if control_events.event_id.map(_event_id).duplicated().any():
         raise ValueError("Duplicate synchronized control event IDs")
-    canonical = match.events.copy().reset_index(drop=True)
+    from datatools.reception_policy import apply_run_policy, run_version
+    match.reception_policy = run_version(feature_root)
+    canonical = apply_run_policy(match.events, feature_root, match_id).reset_index(drop=True)
     actions = getattr(match, "actions", canonical).copy()
+    actions = apply_run_policy(actions, feature_root, match_id)
     if "spadl_type" in actions:
         actions = actions.loc[actions.spadl_type.ne("ball_carry")].copy()
     provenance = dict(state_contract=VALIDATED_STATE_CONTRACT if definition == DEFINITION else STATE_CONTRACT, feature_run_id=Path(feature_root).name,
@@ -157,6 +160,7 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
         physical_input_contract=PHYSICAL_INPUT_CONTRACT)
     if definition == DEFINITION:
         provenance["carry_validation_parameters"] = asdict(policy)
+    provenance["reception_policy"] = match.reception_policy
     plan = SportecStatePlan(str(match_id), provenance)
     canonical["_event_key"] = canonical.original_event_id.map(_event_id)
     ambiguous_events = {event for event, rows in canonical.groupby("_event_key")
