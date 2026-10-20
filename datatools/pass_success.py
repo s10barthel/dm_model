@@ -16,7 +16,7 @@ def require_model_pass_success(components, requested=True):
         raise ValueError(
             "This component run does not contain model_pass_success predictions. "
             "Regenerate the source component run with the updated inference scripts "
-            "before using --show-model-pass-success."
+            "before using --show-model-pass-success or --compare-pass-success."
         )
 
 

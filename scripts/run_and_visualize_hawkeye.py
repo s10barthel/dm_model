@@ -75,6 +75,11 @@ from scripts.hawkeye_visualization_overlays import (
 )
 from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
+from scripts.saved_visualization_xpass import resolve_saved_xpass
+from scripts.visualization_pass_success import (
+    compare_pass_success_requested, comparison_metadata, input_components,
+    needs_model_pass_success, needs_physical_xpass, save_component_pngs,
+)
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 from scripts.visualize_hawkeye import (
     output_mode,
@@ -306,6 +311,7 @@ def render_frame_image(
 
 def collect_situation_components(situation, model_specs, device, inference_frame_ids,
                                  rendered_components, prediction_cache=None):
+    rendered_components = input_components(rendered_components)
     components: dict[str, pd.DataFrame] = {}
     precomputed_auxiliaries = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
@@ -481,22 +487,26 @@ def render_situation(
         component_names.append("physical_xpass")
     output_paths: list[str] = []
 
-    if bool(getattr(args, "show_physical_xpass", False)):
+    if needs_physical_xpass(args):
+        xpass = getattr(args, "_pass_success_comparison_xpass", None)
+        if compare_pass_success_requested(args) and xpass is None:
+            xpass = resolve_saved_xpass(args, {}, "hawkeye")
         component_frames["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
-            args.physical_cache_dir,
+            xpass.cache_dir if xpass else args.physical_cache_dir,
             str(situation.match_id),
             inference_frame_ids,
-            metric=physical_xpass_metric(args),
-            x_pass_version=getattr(args, "x_pass_version", "top10"),
+            metric=xpass.metric if xpass else physical_xpass_metric(args),
+            x_pass_version=xpass.x_pass_version if xpass else getattr(args, "x_pass_version", "top10"),
         )
 
     if selected_output_mode == "png":
-        for component_name in component_names:
-            component_table = component_frames.get(component_name)
-            for frame_selection in selected_frames:
-                frame_id = int(frame_selection["frame_id"])
+        for frame_selection in selected_frames:
+            frame_id = int(frame_selection["frame_id"])
+
+            def render_selected_component(component_name):
+                component_table = component_frames.get(component_name)
                 frame_probs = component_table.loc[frame_id] if component_table is not None and frame_id in component_table.index else None
-                image = render_frame_image(
+                return render_frame_image(
                     situation,
                     frame_id,
                     component_name,
@@ -507,9 +517,9 @@ def render_situation(
                     selections_enabled=bool(getattr(args, "selections", False)),
                     selection_denominators=overlay_stats["selection_denominators"],
                 )
-                output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
-                image.save(output_path)
-                output_paths.append(str(output_path.resolve()))
+            output_paths.extend(save_component_pngs(
+                component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
+            ))
     else:
         for component_name in component_names:
             component_table = component_frames.get(component_name)
@@ -551,6 +561,9 @@ def main() -> None:
         from scripts.inference_visualization_comparison import run_comparison
         run_comparison(args, sys.modules[__name__])
         return
+    comparison_xpass = (resolve_saved_xpass(args, {}, "hawkeye")
+                        if compare_pass_success_requested(args) else None)
+    args._pass_success_comparison_xpass = comparison_xpass
     component_selection = resolve_component_selection(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
@@ -826,8 +839,11 @@ def main() -> None:
     }
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
-        available=getattr(args, "show_model_pass_success", False), output_root=output_root,
+        available=needs_model_pass_success(args), output_root=output_root,
     ))
+    metadata.update(comparison_metadata(args, output_root))
+    if comparison_xpass:
+        metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (

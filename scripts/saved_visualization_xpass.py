@@ -17,6 +17,7 @@ from physical_pass_model import (
 )
 from project_config import PROJECT_ROOT
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+from scripts.visualization_pass_success import compare_pass_success_requested, needs_physical_xpass
 
 
 def add_saved_xpass_arguments(parser: ArgumentParser) -> None:
@@ -117,7 +118,7 @@ def resolve_saved_xpass(
     component_id: str | None = None,
 ) -> SavedXpassSettings | None:
     """Resolve and preflight a panel once, leaving CLI arguments unmodified."""
-    if not getattr(args, "show_physical_xpass", False):
+    if not needs_physical_xpass(args):
         return None
     identifier = component_id or metadata.get("run_id") or "<unidentified>"
     try:
@@ -138,8 +139,9 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
     if explicit_id and explicit_dir:
         raise ValueError("--pc-xpass-id cannot be combined with --physical-cache-dir.")
     if usage != "pc_xpass" and not ((explicit_dir or explicit_id) and explicit_version):
+        option = "--compare-pass-success" if compare_pass_success_requested(args) else "--show-physical-xpass"
         raise ValueError(
-            f"pc-xPass usage is {usage}. --show-physical-xpass requires both an explicit "
+            f"pc-xPass usage is {usage}. {option} requires both an explicit "
             "--pc-xpass-id or --physical-cache-dir and --xpass-version (or --top-pass)."
         )
 
@@ -202,7 +204,7 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
         raise ValueError(f"Cache at {cache_dir} must identify itself as pc_xpass; found {source!r}.")
     validate_x_pass_version_available(cache_dir, source=PC_XPASS_SOURCE,
                                      x_pass_version=version, metric=metric)
-    if dataset == "skillcorner":
+    if dataset in {"skillcorner", "sportec"}:
         match_cache.require_format(cache_dir)
     run_id = run_id or cache_metadata.get("pc_xpass_id")
     overrides = {key: str(value) for key, value in (

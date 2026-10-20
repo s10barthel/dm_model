@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
+from scripts.visualization_pass_success import COMPARISON_COMPONENT, compare_pass_success_requested
+
 COMPONENT_GROUPS = (
     "action_intent",
     "pass_intent",
@@ -41,7 +43,7 @@ class ComponentSelection:
     @property
     def required_component_groups(self) -> list[str]:
         required = set(self.requested_component_groups)
-        if "model_pass_success" in self.rendered_components:
+        if {"model_pass_success", COMPARISON_COMPONENT}.intersection(self.rendered_components):
             required.add("pass_success")
         if "pass_score" in required:
             required.update(PASS_SCORE_DEPENDENCIES)
@@ -51,6 +53,14 @@ class ComponentSelection:
 
 
 def add_component_selection_args(parser: argparse.ArgumentParser, *, include_success_intent: bool = False) -> None:
+    parser.add_argument(
+        "--compare-pass-success", action="store_true",
+        help="Stack model pass success, cached pc-xPass, and final pass success in one PNG.",
+    )
+    parser.add_argument(
+        "--only-compare-pass-success", action="store_true",
+        help="Select only the pass-success comparison PNG; combine with other --only-* selections to add outputs.",
+    )
     parser.add_argument(
         "--show-model-pass-success", action="store_true",
         help="Render checkpoint pass success after offside handling and before physical xPass blending.",
@@ -98,7 +108,8 @@ def resolve_component_selection(
     default_groups = [*COMPONENT_GROUPS]
     if include_success_intent:
         default_groups.append(SUCCESS_INTENT_GROUP)
-    selected = set(only_groups) if only_groups else set(default_groups)
+    has_only_selection = bool(only_groups or getattr(args, "only_compare_pass_success", False))
+    selected = set(only_groups) if has_only_selection else set(default_groups)
     selected.update(group for group in OPTIONAL_COMPONENT_GROUPS if getattr(args, f"show_{group}", False))
     compare_receivers = getattr(args, "compare_intended_receiver", False)
     if compare_receivers and getattr(args, "no_success_intent", False):
@@ -115,6 +126,8 @@ def resolve_component_selection(
     ]
     if getattr(args, "show_model_pass_success", False):
         rendered_components.append("model_pass_success")
+    if compare_pass_success_requested(args):
+        rendered_components.append(COMPARISON_COMPONENT)
     if not rendered_components:
         raise ValueError("No visualization components were selected after applying --only-* and --no-* flags.")
 
@@ -124,8 +137,11 @@ def resolve_component_selection(
         for group in disabled_groups
         for component in GROUP_TO_COMPONENTS[group]
     ]
+    requested_groups = [group for group in groups if group in selected]
+    if compare_pass_success_requested(args):
+        requested_groups.append(COMPARISON_COMPONENT)
     return ComponentSelection(
-        requested_component_groups=[group for group in groups if group in selected],
+        requested_component_groups=requested_groups,
         disabled_component_groups=disabled_groups,
         rendered_components=rendered_components,
         disabled_components=disabled_components,

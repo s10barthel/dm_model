@@ -764,6 +764,23 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --show
 
 Component producers now save checkpoint probabilities whenever they run pass-success inference, including without blending. Older saved component runs must be regenerated before requesting this view; a blended value alone cannot recover the checkpoint probability. Missing predictions remain unavailable, and ordinary pass score continues to use the final pass-success result. A checkpoint that needs physical inputs internally still requires those inputs for its separate model view. Metadata records the definition, structural availability, and generated output paths.
 
+All five visualization commands also support `--compare-pass-success` to add one PNG containing the existing **Model Pass Success**, **Physical xPass**, and final **Pass Success** images, stacked vertically in that order. The images retain their titles, annotations, and resolution. Files use `compare_pass_success` with the command's usual frame suffixes. Benchmark stacks its three paired-state images, so the result contains six pitch panels.
+
+Use `--only-compare-pass-success` to select just this combined output. As with other `--only-*` options, additional explicit component selections can add outputs. Neither `--show-model-pass-success` nor `--show-physical-xpass` is required: the inputs are rendered automatically, and standalone files are saved only when selected through the existing options. `--no-pass-success` hides its standalone output without removing it from the combined image.
+
+This mode requires an existing pc-xPass cache, selected explicitly with `--pc-xpass-id` or `--physical-cache-dir`, or inherited from a saved component run together with its metric. It never falls back to the latest cache. Existing metric selection rules apply. Saved component runs must contain `model_pass_success`. The mode preserves the existing final prediction and blending settings; when blending is disabled, the first and third views can show the same probabilities. It supports PNG only and rejects `--compare`, numbered inference masks, and Hawkeye `--only-tracking`; ordinary unnumbered inference masks remain supported.
+
+```powershell
+# Add the combined image while retaining normally selected component outputs.
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --pc-xpass-id <cache_id> --pc-xpass --use-physical-xpass --compare-pass-success
+
+# Save only the combined image, inheriting the saved run's pc-xPass cache and metric.
+python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --only-compare-pass-success
+
+# Select a pc-xPass cache and metric explicitly for a saved run.
+python scripts/visualize_skillcorner.py --match-id <match_id> --index 1 --component-run-id <component_run_id> --pc-xpass-id <cache_id> --xpass-version top25 --only-compare-pass-success
+```
+
 ### 8. Run frame-level inference on HawkEye data
 
 ```powershell

@@ -1,0 +1,74 @@
+"""Compose existing pass-success views without changing their predictions."""
+from pathlib import Path
+
+from datatools.viz_helpers import stack_images_vertically
+
+
+COMPARISON_COMPONENT = "compare_pass_success"
+COMPARISON_INPUTS = ("model_pass_success", "physical_xpass", "pass_success")
+
+
+def compare_pass_success_requested(args):
+    return bool(getattr(args, "compare_pass_success", False) or
+                getattr(args, "only_compare_pass_success", False))
+
+
+def needs_physical_xpass(args):
+    return bool(getattr(args, "show_physical_xpass", False) or compare_pass_success_requested(args))
+
+
+def needs_model_pass_success(args):
+    return bool(getattr(args, "show_model_pass_success", False) or compare_pass_success_requested(args))
+
+
+def input_components(components):
+    """Expand a composite output into its inputs, preserving standalone selections."""
+    names = [name for name in components if name != COMPARISON_COMPONENT]
+    if COMPARISON_COMPONENT in components:
+        names.extend(name for name in COMPARISON_INPUTS if name not in names)
+    return names
+
+
+def save_component_pngs(components, render, output_dir, suffix=""):
+    """Render each input once and save only selected standalone/composite PNGs."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if COMPARISON_COMPONENT not in components:
+        paths = []
+        for name in components:
+            path = output_dir / f"{name}{suffix}.png"
+            render(name).save(path)
+            paths.append(str(path.resolve()))
+        return paths
+    images = {}
+    paths = []
+
+    def get_image(name):
+        if name not in images:
+            images[name] = render(name)
+        return images[name]
+
+    try:
+        for name in components:
+            path = output_dir / f"{name}{suffix}.png"
+            if name == COMPARISON_COMPONENT:
+                with stack_images_vertically([get_image(source) for source in COMPARISON_INPUTS]) as image:
+                    image.save(path)
+            else:
+                get_image(name).save(path)
+            paths.append(str(path.resolve()))
+    finally:
+        for image in images.values():
+            image.close()
+    return paths
+
+
+def comparison_metadata(args, output_root):
+    return {
+        "compare_pass_success": compare_pass_success_requested(args),
+        "only_compare_pass_success": bool(getattr(args, "only_compare_pass_success", False)),
+        "compare_pass_success_components": list(COMPARISON_INPUTS) if compare_pass_success_requested(args) else [],
+        "compare_pass_success_output_paths": [
+            str(path.resolve()) for path in sorted(Path(output_root).rglob("compare_pass_success*.png"))
+        ],
+    }

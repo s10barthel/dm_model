@@ -64,6 +64,9 @@ from scripts.hawkeye_visualization_overlays import (
     load_overlay_data,
 )
 from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
+from scripts.visualization_pass_success import (
+    comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
+)
 from scripts.visualization_selection import (
     COMPONENT_GROUPS,
     OPTIONAL_COMPONENT_GROUPS,
@@ -589,7 +592,7 @@ def run_location_visualization(
             situation,
             selection_format=args.selection_format,
         )
-        if bool(args.show_physical_xpass):
+        if needs_physical_xpass(args):
             component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
                 xpass.cache_dir,
                 str(location_row["loc_situation_id"]),
@@ -601,9 +604,9 @@ def run_location_visualization(
         output_dir = output_root / f"{action_id}_{row_id}"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_paths: list[str] = []
-        for component_name in component_names:
+        def render_selected_component(component_name):
             probs = _probs_for_component_frame(component_name, component_tables, frame_id)
-            image = render_frame_image(
+            return render_frame_image(
                 situation,
                 frame_id,
                 component_name,
@@ -614,9 +617,7 @@ def run_location_visualization(
                 selections_enabled=bool(args.selections),
                 selection_denominators=overlay_stats["selection_denominators"],
             )
-            output_path = output_dir / f"{component_name}.png"
-            image.save(output_path)
-            output_paths.append(str(output_path.resolve()))
+        output_paths.extend(save_component_pngs(component_names, render_selected_component, output_dir))
         print(f"Saved Hawkeye {mode} PNG visualizations to {output_dir}")
         rendered_situations.append(
             {
@@ -666,6 +667,7 @@ def run_location_visualization(
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
         available="model_pass_success" in component_export, output_root=output_root,
@@ -819,6 +821,7 @@ def run_tracking_only_visualization(
         "rendered_components": [],
         "disabled_components": list(COMPONENT_COLUMNS),
     }
+    metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
         available=False, output_root=output_root,
@@ -858,7 +861,7 @@ def main() -> None:
         )
 
     component_export, component_metadata = load_hawkeye_component_run(component_dir)
-    require_model_pass_success(component_export, getattr(args, "show_model_pass_success", False))
+    require_model_pass_success(component_export, needs_model_pass_success(args))
     if mode in {"loc", "freeze"}:
         component_mode = component_metadata.get("inference_mode")
         if component_mode != mode:
@@ -965,7 +968,7 @@ def main() -> None:
             if selected_range is not None:
                 resolved_time_norm_ranges[str(situation_id)] = selected_range
 
-        if bool(args.show_physical_xpass):
+        if needs_physical_xpass(args):
             component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
                 xpass.cache_dir,
                 str(situation.match_id),
@@ -975,11 +978,12 @@ def main() -> None:
             )
 
         if selected_output_mode == "png":
-            for component_name in component_names:
-                for frame_selection in selected_frames:
-                    frame_id = int(frame_selection["frame_id"])
+            for frame_selection in selected_frames:
+                frame_id = int(frame_selection["frame_id"])
+
+                def render_selected_component(component_name):
                     probs = _probs_for_component_frame(component_name, component_tables, frame_id)
-                    image = render_frame_image(
+                    return render_frame_image(
                         situation,
                         frame_id,
                         component_name,
@@ -990,9 +994,9 @@ def main() -> None:
                         selections_enabled=bool(getattr(args, "selections", False)),
                         selection_denominators=overlay_stats["selection_denominators"],
                     )
-                    output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
-                    image.save(output_path)
-                    output_paths.append(str(output_path.resolve()))
+                output_paths.extend(save_component_pngs(
+                    component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
+                ))
         else:
             for component_name in component_names:
                 def iter_component_images():
@@ -1069,6 +1073,7 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
         available="model_pass_success" in component_export, output_root=output_root,

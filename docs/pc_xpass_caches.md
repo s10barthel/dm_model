@@ -100,9 +100,24 @@ Saved-run comparisons resolve each variant's settings independently. CLI
 overrides apply to every variant. Console output and visualization metadata
 record the selected cache, metric, inherited fields, and explicit overrides.
 Overrides affect only the physical xPass panel; saved component predictions
-are not recomputed. Without `--show-physical-xpass`, these scripts do not access
-the physical-panel cache. Scripts that run inference retain their own selection
-behavior.
+are not recomputed. Without `--show-physical-xpass`, `--compare-pass-success`, or
+`--only-compare-pass-success`, these scripts do not access the physical-panel cache.
+Scripts that run inference retain their own selection behavior.
+
+All five visualization commands support `--compare-pass-success`, which stacks
+the existing model pass-success, pc-xPass, and final pass-success images into one
+PNG. `--only-compare-pass-success` selects only that combined output. Both modes
+load pc-xPass automatically without `--show-physical-xpass`, using an explicit
+cache ID/directory or the saved component run's provenance. No latest-cache
+fallback is allowed. Saved-run metric inheritance and overrides work as above;
+inference commands retain their existing metric defaults. Blending settings and
+saved final predictions are unchanged. These modes reject `--compare`, numbered
+inference masks, and GIF/MP4 output.
+
+```powershell
+python scripts/visualize_hawkeye.py --component-run-id COMPONENT_RUN --only-compare-pass-success
+python scripts/visualize_benchmark.py --component-run-id COMPONENT_RUN --pc-xpass-id CACHE_ID --xpass-version top25 --compare-pass-success
+```
 
 ## Existing caches and directory overrides
 

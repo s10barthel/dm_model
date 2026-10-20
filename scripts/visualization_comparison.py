@@ -46,11 +46,22 @@ def add_compare_argument(parser):
 
 
 def validate_comparison_args(parser, args, *, inference=False):
+    from scripts.visualization_pass_success import compare_pass_success_requested
     try:
+        pass_success_comparison = compare_pass_success_requested(args)
+        if pass_success_comparison:
+            if args.compare:
+                raise ValueError("--compare-pass-success/--only-compare-pass-success cannot be combined with --compare.")
+            if getattr(args, "output", "png") != "png":
+                raise ValueError("--compare-pass-success/--only-compare-pass-success support PNG output only.")
+            if getattr(args, "only_tracking", False):
+                raise ValueError("--compare-pass-success/--only-compare-pass-success cannot be combined with --only-tracking.")
         mode = None
         if inference:
             configurations = resolve_inference_mask_configurations(args)
             numbered = any(entry["id"] != "mask" for entry in configurations)
+            if pass_success_comparison and numbered:
+                raise ValueError("--compare-pass-success/--only-compare-pass-success cannot be combined with numbered inference masks.")
             selections = {task: selection_list(getattr(args, f"{task}_model_id", None)) for task in MODEL_TASKS}
             repeated = [task for task, ids in selections.items() if len(ids) > 1]
             paired = args.compare and not numbered and set(repeated) == set(OUTCOME_TASKS)

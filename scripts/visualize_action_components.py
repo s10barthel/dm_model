@@ -82,6 +82,11 @@ from project_config import (
     write_run_metadata,
 )
 from datatools.pass_success import model_pass_success_metadata
+from scripts.saved_visualization_xpass import resolve_saved_xpass
+from scripts.visualization_pass_success import (
+    COMPARISON_COMPONENT, compare_pass_success_requested, comparison_metadata,
+    input_components, needs_model_pass_success, save_component_pngs,
+)
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 from scripts.visualization_receivers import (
@@ -635,6 +640,7 @@ def render_component(
     pass_endpoint: bool = True,
     compare_intended_receiver: bool = False,
     overlays: ActionOverlays | None = None,
+    return_image: bool = False,
 ) -> Image.Image | None:
     action = match.actions.loc[action_index]
     frame_id = int(action["frame_id"])
@@ -709,8 +715,8 @@ def render_component(
             fontsize=12,
             color="black",
         )
-    if comparison:
-        image = figure_to_rgb_image(fig, dpi=200, tight=False)
+    if comparison or return_image:
+        image = figure_to_rgb_image(fig, dpi=200, tight=not comparison)
         plt.close(fig)
         return image
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -759,6 +765,7 @@ def collect_action_components(
     rendered_components: list[str] | None = None,
     prediction_cache: dict | None = None,
     possession_states: list | None = None,
+    comparison_xpass=None,
 ) -> dict[str, pd.Series]:
     rendered_components = rendered_components or [
         "action_intent",
@@ -774,15 +781,17 @@ def collect_action_components(
         "outcome_failure",
         "outcome_success",
     ]
+    rendered_components = input_components(rendered_components)
     component_prob_rows: dict[str, pd.Series] = {}
 
     cache_memo = getattr(match, "_pc_match_cache", None)
-    cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json", memo=cache_memo) if physical_cache_dir else {}
+    panel_cache_dir = comparison_xpass.cache_dir if comparison_xpass else physical_cache_dir
+    cache_metadata = match_cache.read_json(Path(panel_cache_dir) / "metadata.json", memo=cache_memo) if panel_cache_dir else {}
     possession_cache = match_cache.is_match_format(cache_metadata.get("cache_format")) or cache_metadata.get("source") == "pc_xpass"
     pc_state, pc_frame = None, None
     if possession_cache or any(getattr(model, "args", {}).get("pc_xpass") for model in loaded_models.values()):
-        if physical_cache_dir:
-            match_cache.require_format(physical_cache_dir, memo=cache_memo)
+        if panel_cache_dir:
+            match_cache.require_format(panel_cache_dir, memo=cache_memo)
         pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root, possession_states)
 
     precomputed_auxiliaries = {}
@@ -846,14 +855,14 @@ def collect_action_components(
                         else pd.Series(float("nan"), index=probs.columns, dtype=float)
                     )
 
-    if show_physical_xpass:
-        cache_dir = Path(physical_cache_dir) if physical_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
+    if show_physical_xpass or comparison_xpass:
+        cache_dir = Path(panel_cache_dir) if panel_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
         component_prob_rows["physical_xpass"] = load_runtime_physical_xpass_visualization_component(
             cache_dir,
             resolve_match_id(match),
             pc_frame if pc_state is not None else action_index,
-            metric=physical_xpass_metric_name,
-            x_pass_version=physical_xpass_version_name,
+            metric=comparison_xpass.metric if comparison_xpass else physical_xpass_metric_name,
+            x_pass_version=comparison_xpass.x_pass_version if comparison_xpass else physical_xpass_version_name,
             frame_scope=PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
             **({"cache_selection": match_cache.selection_for(pc_state)} if pc_state is not None else {}),
         )
@@ -897,11 +906,13 @@ def render_action_components(
     rendered_components: list[str] | None = None,
     pass_endpoint: bool = True,
     compare_intended_receiver: bool = False,
+    comparison_xpass=None,
 ) -> None:
     component_prob_rows = collect_action_components(
         match, loaded_models, feature_root, device, action_index, display_action_id, output_dir,
         show_trajectories, show_physical_xpass, physical_cache_dir, physical_xpass_metric_name,
         physical_xpass_version_name, rendered_components,
+        comparison_xpass=comparison_xpass,
     )
     rendered_components = rendered_components or [
         "action_intent",
@@ -924,6 +935,17 @@ def render_action_components(
         match, action_index, component_prob_rows.get("success_intent"),
         pass_endpoint=pass_endpoint, compare_intended_receiver=compare_intended_receiver,
     )
+    if COMPARISON_COMPONENT in component_order:
+        def render_selected_component(component_name):
+            return render_component(
+                match=match, action_index=action_index, display_action_id=display_action_id,
+                component_name=component_name, probs=component_prob_rows[component_name],
+                output_path=output_dir / f"{component_name}.png", show_trajectories=show_trajectories,
+                pass_endpoint=pass_endpoint, compare_intended_receiver=compare_intended_receiver,
+                overlays=overlays, return_image=True,
+            )
+        save_component_pngs(component_order, render_selected_component, output_dir)
+        return
     for component_name in component_order:
         if component_name not in component_prob_rows:
             continue
@@ -1013,6 +1035,8 @@ def main() -> None:
         from scripts.inference_visualization_comparison import run_comparison
         run_comparison(args, sys.modules[__name__])
         return
+    comparison_xpass = (resolve_saved_xpass(args, {}, "sportec")
+                        if compare_pass_success_requested(args) else None)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("visualization")
     output_parent = Path(args.output_dir)
@@ -1188,6 +1212,7 @@ def main() -> None:
                 rendered_components=component_selection.rendered_components,
                 pass_endpoint=getattr(args, "pass_endpoint", True),
                 compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
+                comparison_xpass=comparison_xpass,
             )
         except Exception as exc:
             skipped_actions.append(
@@ -1314,8 +1339,11 @@ def main() -> None:
     }
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
-        available=getattr(args, "show_model_pass_success", False), output_root=output_root,
+        available=needs_model_pass_success(args), output_root=output_root,
     ))
+    metadata.update(comparison_metadata(args, output_root))
+    if comparison_xpass:
+        metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "sportec", records=shared_context.get("model_records", {}))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (

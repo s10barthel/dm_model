@@ -53,6 +53,9 @@ from project_config import (
     write_run_metadata,
 )
 from datatools.pass_success import require_model_pass_success, model_pass_success_metadata
+from scripts.visualization_pass_success import (
+    comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
+)
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -270,7 +273,7 @@ def render_possession(
             component_table = component_table.set_index("frame")
         possession_component_tables[component_name] = component_table
 
-    if bool(getattr(args, "show_physical_xpass", False)):
+    if needs_physical_xpass(args):
         physical_frame_ids = (
             [int(index) for index in possession_component_tables["pass_success"].index.tolist()]
             if not possession_component_tables["pass_success"].empty
@@ -290,20 +293,21 @@ def render_possession(
     selected_frames: list[dict[str, object]] = []
     if selected_output_mode == "png":
         selected_frames = resolve_skillcorner_png_frames(frame_ids, args)
-        for component_name in component_names:
-            for frame_selection in selected_frames:
-                frame_id = int(frame_selection["frame_id"])
+        for frame_selection in selected_frames:
+            frame_id = int(frame_selection["frame_id"])
+
+            def render_selected_component(component_name):
                 probs = _probs_for_component_frame(component_name, possession_component_tables, frame_id)
-                image = render_frame_image(
+                return render_frame_image(
                     possession,
                     frame_id,
                     component_name,
                     probs,
                     show_trajectories=args.show_trajectories,
                 )
-                output_path = output_dir / f"{component_name}_{frame_selection['label']}.png"
-                image.save(output_path)
-                output_paths.append(str(output_path.resolve()))
+            output_paths.extend(save_component_pngs(
+                component_names, render_selected_component, output_dir, f"_{frame_selection['label']}",
+            ))
     else:
         for component_name in component_names:
             def iter_component_images():
@@ -349,7 +353,7 @@ def main() -> None:
         )
 
     component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
-    require_model_pass_success(component_tables, getattr(args, "show_model_pass_success", False))
+    require_model_pass_success(component_tables, needs_model_pass_success(args))
     component_metadata = load_run_metadata(component_dir, required=False) or {}
     xpass = resolve_saved_xpass(args, component_metadata, "skillcorner", component_id=component_run_id)
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
@@ -417,6 +421,7 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
         available="model_pass_success" in component_tables, output_root=output_root,

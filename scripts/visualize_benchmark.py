@@ -50,6 +50,9 @@ from project_config import (
     write_run_metadata,
 )
 from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
+from scripts.visualization_pass_success import (
+    comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
+)
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -215,7 +218,7 @@ def main() -> None:
         component_dir = get_benchmark_component_run_root(component_run_id)
 
     component_export, component_metadata = load_benchmark_component_run(component_dir)
-    require_model_pass_success(component_export, getattr(args, "show_model_pass_success", False))
+    require_model_pass_success(component_export, needs_model_pass_success(args))
     state_pairs = resolve_benchmark_component_states(
         component_export,
         metadata=component_metadata,
@@ -265,7 +268,7 @@ def main() -> None:
                 build_benchmark_component_tables(component_export, state),
                 int(state.frame_meta.index.min()),
             )
-            if bool(args.show_physical_xpass):
+            if needs_physical_xpass(args):
                 frame_id = int(state.frame_meta.index.min())
                 state_contexts[game_state_id][1]["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
                     xpass.cache_dir,
@@ -278,7 +281,7 @@ def main() -> None:
         output_paths: list[str] = []
         modification_output_dir = output_root / f"modification_{modification_id}"
         modification_output_dir.mkdir(parents=True, exist_ok=True)
-        for component_name in component_names:
+        def render_selected_component(component_name):
             state_images: dict[int, Image.Image] = {}
             for game_state_id in (1, 2):
                 state, component_tables, frame_id = state_contexts[game_state_id]
@@ -290,9 +293,9 @@ def main() -> None:
                     show_trajectories=args.show_trajectories,
                 )
 
-            output_path = modification_output_dir / f"{component_name}.png"
-            combine_state_images(state_images[1], state_images[2]).save(output_path)
-            output_paths.append(str(output_path.resolve()))
+            return combine_state_images(state_images[1], state_images[2])
+
+        output_paths.extend(save_component_pngs(component_names, render_selected_component, modification_output_dir))
 
         print(f"Saved benchmark visualizations for modification_{modification_id} to {modification_output_dir}")
         rendered_modifications.append(
@@ -337,6 +340,7 @@ def main() -> None:
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
         "disabled_components": component_selection.disabled_components,
     }
+    metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
         available=("model_pass_success" in component_export), output_root=output_root,

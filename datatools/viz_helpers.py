@@ -13,6 +13,18 @@ from PIL import Image
 SeriesOrFrame = pd.Series | pd.DataFrame
 
 
+def stack_images_vertically(images: list[Image.Image]) -> Image.Image:
+    """Paste images at their original size, padding narrower images with white."""
+    if not images:
+        raise ValueError("Cannot stack an empty image list.")
+    canvas = Image.new("RGB", (max(image.width for image in images), sum(image.height for image in images)), "white")
+    offset = 0
+    for image in images:
+        canvas.paste(image, (0, offset))
+        offset += image.height
+    return canvas
+
+
 def figure_to_rgb_image(fig, dpi: int = 150, tight: bool = True) -> Image.Image:
     buffer = io.BytesIO()
     try:
