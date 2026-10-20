@@ -24,6 +24,13 @@ Without the option, new training inherits `pass_height_threshold_meters` from th
 
 ## Evaluation
 
+Evaluation defaults to the saved model cutoff. `--feature-run-id` can select a
+replacement compatible evaluation run; its continuous observed heights are relabeled
+at the saved model cutoff (or the explicit evaluation cutoff). Selecting a run does
+not redefine the model's height event. Diagnostics default to that run; a separate
+`--diagnostic-feature-run-id` override must be equal to or derived from the effective
+input run. All required files are checked before evaluation starts.
+
 Evaluation defaults to the saved model cutoff:
 
 ```powershell

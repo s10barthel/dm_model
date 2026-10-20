@@ -21,6 +21,7 @@ test*/*.csv
 test*/*.png
 !tests/
 tests/*.py
+!tests/test_synchronized_pass_refresh.py
 !tests/test_goal_context.py
 !tests/test_receiver_goal_context.py
 !tests/test_pass_height_threshold.py
@@ -39,6 +40,7 @@ tests/*.py
 !tests/test_inference_mask_integration.py
 !tests/test_model_comparison.py
 !tests/test_evaluation_membership_confirmation.py
+!tests/test_evaluation_data.py
 !tests/test_prediction_identity.py
 !tests/test_masked_evaluation_smoke.py
 tests/AS_viz/

@@ -255,6 +255,7 @@ def test_cancelled_statistical_run_saves_acceptance_state(tmp_path, monkeypatch)
                                "--outcome-scoring-model-id", "outcome_scoring/goal", "--evaluation-output-dir", str(tmp_path)])
     monkeypatch.setattr(wrapper, "parse_args", lambda: args)
     monkeypatch.setattr(wrapper, "resolve_evaluation_entries", lambda arguments: (entries, {}, None))
+    monkeypatch.setattr(wrapper, "preflight_evaluation_data", lambda requests: {})
     monkeypatch.setattr("sys.stdin", SimpleNamespace(isatty=lambda: False))
     monkeypatch.setattr(wrapper.subprocess, "run", lambda *a, **kw: pytest.fail("Inference started before acceptance"))
     with pytest.raises(ComparisonCancelled):

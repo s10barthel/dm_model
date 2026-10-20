@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import copy
+import json
+import re
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +18,8 @@ from datatools.artifact_storage import clone_feature_artifacts
 from datatools.graph_feature import (build_match_for_feature_generation, configure_worker_thread_limit,
                                     infer_node_feature_dim, resolve_num_workers, summarize_ball_trajectory,
                                     construct_graph_for_action)
-from datatools.pass_trajectory import PASS_DURATION, PASS_DURATION_KEY, ENDPOINT_COLUMNS, ensure_pass_endpoints
+from datatools.pass_trajectory import (PASS_DURATION, PASS_DURATION_KEY, ENDPOINT_COLUMNS, ensure_pass_endpoints,
+                                      ANGLE_ONLY_KEY, ANGLE_ONLY, ORIGINAL_KEY, ORIGINAL, MAX_DURATION_KEY)
 from models.edge_schema import edge_names, schema_for_names, generation_kwargs
 from datatools.success_intent import build_success_intent_resolved_actions
 from datatools.trajectory import (TRAJECTORY_SPEED, TRAJECTORY_SPEED_KEY, speed_definition)
@@ -35,7 +38,8 @@ def load_refresh_match(match_id, metadata):
     lineup = lineup.loc[lineup.stats_perform_match_id.astype(str).eq(str(match_id))].copy()
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
-        reception_policy=metadata.get("reception_policy", "legacy_elastic_v1")))
+        reception_policy=metadata.get("reception_policy", "legacy_elastic_v1"),
+        max_pass_duration=metadata.get(MAX_DURATION_KEY)))
     match.actions = build_success_intent_resolved_actions(match.actions)
     return match
 
@@ -53,6 +57,7 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
     template = next((graph for graph in graphs if graph is not None), None)
     schema = schema or (schema_for_names(edge_names(template)) if template is not None else {})
     schema = schema_for_names(edge_names(schema))
+    match._trajectory_refresh_skips = []
     for position, (row, graph) in enumerate(zip(labels, graphs)):
         action_index = int(row[0].item())
         if action_index not in match.actions.index:
@@ -67,6 +72,9 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
             raise ValueError(f"{context}: malformed success-intent graph for action {action_index}")
         summary = summarize_ball_trajectory(match, action_index)
         if summary is None or not np.isfinite(summary).all():
+            if match.actions.at[action_index, "action_type"] == "pass":
+                reason = match.actions.loc[action_index].get("pass_endpoint_reason") or "unusable_trajectory"
+                match._trajectory_refresh_skips.append(dict(action_index=action_index, reason=reason))
             graphs[position] = None
             continue
         if graph is None:
@@ -78,6 +86,10 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
             continue
         graph.x[:, column:column + 4] = graph.x.new_tensor(summary)
         setattr(graph, TRAJECTORY_SPEED_KEY, TRAJECTORY_SPEED)
+        endpoint = ensure_pass_endpoints(match, annotate=False).resolve(match.actions.loc[action_index])
+        graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
+        graph.trajectory_end_frame_id = endpoint.trajectory
+        graph.pass_endpoint_definition = PASS_DURATION
     return graphs
 
 
@@ -96,42 +108,169 @@ def refresh_duration_labels(labels, match, *, context):
     # Source passes can also produce synthetic shot rows. Match by source index,
     # independent of synthetic type flags, while retaining genuine shot/carry durations.
     selected = np.isin(indices, durations.index)
-    if not np.isfinite(values[selected]).all():
-        raise ValueError(f"{context}: invalid resolved pass duration")
     result[torch.as_tensor(selected, device=result.device), config.LABEL_INDEX["duration"]] = result.new_tensor(values[selected])
     return result
+
+
+def artifact_mode(name):
+    name = name.removesuffix("_carries")
+    return "model" if name.endswith("_model") else "angle_only" if name.endswith("_angle_only") else "original"
+
+
+def patch_receiver_targets(labels, actions, tracking):
+    """Patch real/temporal heuristic targets, retaining returns and other supervision."""
+    result = labels.clone()
+    lookup = {}
+    for index, action in actions.loc[actions.action_type.eq("pass")].iterrows():
+        player, frame = action.get("intent_id"), action.get("frame_id")
+        intent_index, x, y = -1, -config.FIELD_SIZE[0], -config.FIELD_SIZE[1]
+        if pd.notna(frame) and frame in tracking.index and isinstance(player, str):
+            prefix = str(action.object_id)[:4]
+            snapshot = tracking.loc[frame].dropna()
+            players = [c[:-2] for c in snapshot.index if re.fullmatch(rf"{prefix}_(?:\d+|goal)_x", c)]
+            if player in players:
+                intent_index = players.index(player)
+            end = action.get("observed_end_frame_id")
+            if pd.notna(end) and end in tracking.index:
+                values = tracking.loc[end].reindex([player + "_x", player + "_y"]).to_numpy(dtype=float)
+                if np.isfinite(values).all():
+                    x, y = values
+                    if prefix == "away":
+                        x, y = config.FIELD_SIZE[0] - x, config.FIELD_SIZE[1] - y
+        lookup[int(index)] = (intent_index, x, y)
+    for position, row in enumerate(labels):
+        values = lookup.get(int(row[0].item()))
+        if values is not None:
+            for column, value in zip(("intent_index", "intent_x", "intent_y"), values):
+                result[position, config.LABEL_INDEX[column]] = value
+    return result
+
+
+def refresh_artifact_paths(root, match_id=None):
+    """All rewritten files, including graph partners of regenerated augmentations."""
+    paths = []
+    for folder in root.iterdir():
+        if not folder.is_dir():
+            continue
+        name = folder.name
+        selected = (name == "action_graphs_success_intent" or name == "success_intent_labels"
+            or name.startswith(("action_labels", "augmented_labels", "resolved_actions"))
+            or name in {"augmented_graphs", "augmented_graphs_angle_only"})
+        if selected:
+            paths.extend(p for p in folder.glob("*") if p.suffix in {".pt", ".parquet"}
+                         and (match_id is None or p.stem == match_id))
+    return sorted(paths)
 
 
 def stage_refresh_match(task):
     file, temp, label_path, metadata, thread_limit, artifacts = task
     configure_worker_thread_limit(thread_limit)
     match = load_refresh_match(file.stem, metadata)
-    ensure_pass_endpoints(match)
-    staging = ExtensionAttempt(file.parent, "trajectory_staging", "in_place", {})
+    match.max_pass_duration = metadata.get(MAX_DURATION_KEY)
+    # Use persisted canonical identity/membership, even if current filtering differs.
+    root = file.parent.parent
+    resolved_paths = [p for p, _ in artifacts if p.parent.name.startswith("resolved_actions")
+                      and not p.parent.name.endswith("_carries")]
+    if resolved_paths:
+        match.actions = pd.read_parquet(resolved_paths[0])
+    resolver = ensure_pass_endpoints(match, annotate=False)
+    match.actions = resolver.annotate(match.actions)
+    canonical = match.actions.copy()
+    staging = ExtensionAttempt(root, "trajectory_staging", "in_place", {})
     if file.is_file():
         graphs = torch.load(file, map_location="cpu", weights_only=False)
         labels = torch.load(label_path, map_location="cpu", weights_only=False)
         graphs = refresh_match_graphs(graphs, labels, match, context=str(file), schema=metadata.get("graph_schema"))
         save_staged_graphs(graphs, temp, staging)
+    from datatools.utils import label_intended_receivers
+    frames, tensors = {}, {}
+    changed = {}
+    for path, staged in artifacts:
+        if path.suffix != ".parquet":
+            continue
+        actions = resolver.annotate(pd.read_parquet(path))
+        mode = artifact_mode(path.parent.name)
+        if mode in {"original", "angle_only"}:
+            labeled = label_intended_receivers(actions, match.tracking, action_type="all",
+                                               intended_receiver_mode=mode, fps=match.fps)
+            mask = actions.action_type.eq("pass")
+            previous = actions.get("intent_id", pd.Series(None, index=actions.index, dtype=object))
+            changed[path.parent.name] = int((previous.fillna("") != labeled.intent_id.fillna(""))[mask].sum())
+            actions.loc[mask, "intent_id"] = labeled.loc[mask, "intent_id"]
+        if "duration" in actions:
+            mask = actions.action_type.eq("pass")
+            actions.loc[mask, "duration"] = actions.loc[mask, "pass_duration"]
+        frames[(mode, path.parent.name.endswith("_carries"))] = actions
+        actions.to_parquet(staged)
+    for path, staged in artifacts:
+        if path.suffix != ".pt" or "labels" not in path.parent.name:
+            continue
+        labels = torch.load(path, map_location="cpu", weights_only=False)
+        labels = refresh_duration_labels(labels, match, context=str(path))
+        mode = artifact_mode(path.parent.name)
+        actions = frames.get((mode, path.parent.name.endswith("_carries")))
+        if actions is not None and mode in {"original", "angle_only"} and path.parent.name != "success_intent_labels" and not path.parent.name.startswith("augmented_labels"):
+            labels = patch_receiver_targets(labels, actions, match.tracking)
+        tensors[path] = labels
+    # Blocked-sample membership depends on the real intended receiver.
+    from datatools.graph_feature import augment_blocked_actions
+    from project_config import get_action_label_dir, get_augmented_label_dir, get_augmented_feature_dir
+    for mode in ("original", "angle_only"):
+        graph_path = get_augmented_feature_dir(mode, root=root) / file.name
+        augmented_path = get_augmented_label_dir(mode, root=root) / file.name
+        if not graph_path.exists() and not augmented_path.exists():
+            continue
+        if not graph_path.exists() or not augmented_path.exists():
+            raise ValueError(f"Missing augmented graph/label partner for {file.stem}/{mode}")
+        actions = frames.get((mode, False))
+        if actions is None:
+            raise ValueError(f"Missing resolved {mode} actions for augmentation refresh")
+        return_types = metadata.get("return_types") or ["disc_0.9"]
+        base_label = get_action_label_dir(return_types[0], intended_receiver_mode=mode, root=root) / file.name
+        base_graph = root / "action_graphs" / file.name
+        if base_label not in tensors or not base_graph.exists():
+            raise ValueError(f"Missing canonical graph/label inputs for {file.stem}/{mode}")
+        match.labels = tensors[base_label]
+        indices = match.labels[:, 0].long().tolist()
+        if len(indices) != len(set(indices)) or not set(indices).issubset(actions.index):
+            raise ValueError(f"Canonical action/label alignment mismatch: {base_label}")
+        match.actions = actions.loc[indices].copy()
+        match.graph_features_0 = torch.load(base_graph, map_location="cpu", weights_only=False)
+        if len(match.graph_features_0) != len(indices):
+            raise ValueError(f"Canonical graph/label alignment mismatch: {base_graph}")
+        graphs, labels = augment_blocked_actions(match, verbose=False)
+        tensors[graph_path], tensors[augmented_path] = graphs, labels
     for path, staged in artifacts:
         if path.suffix == ".pt":
-            labels = torch.load(path, map_location="cpu", weights_only=False)
-            save_staged_graphs(refresh_duration_labels(labels, match, context=str(path)), staged, staging)
-        else:
-            actions = pd.read_parquet(path)
-            # Carries retain their existing duration/receiver metadata. Source
-            # pass indices are stable across receiver modes and carry variants.
-            for index in actions.index.intersection(match.actions.index):
-                source = match.actions.loc[index]
-                if source.get("action_type") == "pass":
-                    for column in ENDPOINT_COLUMNS:
-                        if column not in actions:
-                            actions[column] = np.nan if column.endswith("frame_id") or column == "pass_duration" else ""
-                        actions.at[index, column] = source[column]
-            if "duration" in actions:
-                mask = actions.action_type.eq("pass")
-                actions.loc[mask, "duration"] = actions.loc[mask, "pass_duration"]
-            actions.to_parquet(staged)
+            if path not in tensors:
+                raise ValueError(f"Unstaged dependent artifact: {path}")
+            save_staged_graphs(tensors[path], staged, staging)
+    failed = canonical.loc[canonical.action_type.eq("pass") & canonical.observed_end_frame_id.isna()]
+    report = dict(match_id=file.stem, trajectory_skips=getattr(match, "_trajectory_refresh_skips", []), skipped_actions=[dict(action_index=int(i),
+        action_id=str(a.get("action_id", i)), reason=a.pass_endpoint_reason) for i, a in failed.iterrows()],
+        heuristic_changes=changed, pass_endpoint_definition=PASS_DURATION,
+        max_pass_duration=metadata.get(MAX_DURATION_KEY))
+    return report
+
+
+def refresh_directory_match(root, metadata, match_id, thread_limit=1):
+    """Stage one match completely before replacing its dependent files."""
+    root = Path(root)
+    file = get_success_intent_graph_dir(root) / (match_id + ".pt")
+    paths = refresh_artifact_paths(root, match_id)
+    pairs = [(p, p.with_name(p.name + ".trajectory.tmp")) for p in paths]
+    artifacts = [(p, t) for p, t in pairs if p != file]
+    try:
+        report = stage_refresh_match((file, file.with_name(file.name + ".trajectory.tmp"),
+            get_success_intent_label_dir(root) / file.name, metadata, thread_limit, artifacts))
+        for path, temporary in pairs:
+            temporary.replace(path)
+        from project_config import atomic_write_json
+        atomic_write_json(root / "trajectory_refresh" / (match_id + ".json"), report)
+        return report
+    finally:
+        for _, temporary in pairs:
+            temporary.unlink(missing_ok=True)
 
 
 def run_trajectory_refresh(args):
@@ -147,9 +286,12 @@ def run_trajectory_refresh(args):
     if metadata.get("status") != "completed" and not recovery:
         raise ValueError(f"Feature run {base_id} is not completed and is not a recoverable trajectory refresh")
     if (metadata.get("status") == "completed" and speed_definition(metadata) == TRAJECTORY_SPEED
-            and metadata.get(PASS_DURATION_KEY) == PASS_DURATION):
+            and metadata.get(PASS_DURATION_KEY) == PASS_DURATION
+            and metadata.get(ANGLE_ONLY_KEY) == ANGLE_ONLY and metadata.get(ORIGINAL_KEY) == ORIGINAL
+            and metadata.get(MAX_DURATION_KEY) == getattr(args, MAX_DURATION_KEY, None)):
         print(f"Trajectory and pass duration already current; no-op for {base_id}.")
         return
+    metadata[MAX_DURATION_KEY] = getattr(args, MAX_DURATION_KEY, None)
     in_place = bool(getattr(args, "in_place", False))
     if in_place and getattr(args, "run_id", None):
         raise ValueError("--run-id cannot be used with --in-place (alias --overwrite-feature-run).")
@@ -170,10 +312,7 @@ def run_trajectory_refresh(args):
         label_path = get_success_intent_label_dir(base_root) / file.name
         if not label_path.is_file():
             raise FileNotFoundError(label_path)
-    related = sorted(path for path in base_root.rglob("*") if path.is_file() and (
-        (path.suffix == ".pt" and (path.parent.name.startswith(("action_labels", "augmented_labels"))
-                                   or path.parent.name == "success_intent_labels"))
-        or (path.suffix == ".parquet" and path.parent.name.startswith("resolved_actions"))))
+    related = [p for p in refresh_artifact_paths(base_root) if p not in files]
     manifest = sorted(str(path.relative_to(base_root)) for path in [*files, *related])
     expected_manifest = (previous.get("target_settings") or {}).get("artifacts") if recovery else None
     if expected_manifest is not None and manifest != expected_manifest:
@@ -194,8 +333,12 @@ def run_trajectory_refresh(args):
         if final:
             result[TRAJECTORY_SPEED_KEY] = TRAJECTORY_SPEED
             result[PASS_DURATION_KEY] = PASS_DURATION
-            # Receiver definitions deliberately remain those of the source run.
-            result.setdefault("angle_only_definition", "legacy_2s_reception_positions_v1")
+            result[ANGLE_ONLY_KEY] = ANGLE_ONLY
+            result[ORIGINAL_KEY] = ORIGINAL
+            result[MAX_DURATION_KEY] = metadata.get(MAX_DURATION_KEY)
+            reports = [json.loads(p.read_text()) for p in (output_root / "trajectory_refresh").glob("*.json")]
+            result["skipped_actions"] = {r["match_id"]: r["skipped_actions"] for r in reports if r["skipped_actions"]}
+            result["skipped_action_count"] = sum(len(r["skipped_actions"]) for r in reports)
         if error:
             result["error"] = error
         else:
@@ -204,6 +347,7 @@ def run_trajectory_refresh(args):
 
     attempt = ExtensionAttempt(output_root, "refresh_trajectory", "in_place" if in_place else "derived",
                                {TRAJECTORY_SPEED_KEY: TRAJECTORY_SPEED, PASS_DURATION_KEY: PASS_DURATION,
+                                ANGLE_ONLY_KEY: ANGLE_ONLY, ORIGINAL_KEY: ORIGINAL, MAX_DURATION_KEY: metadata.get(MAX_DURATION_KEY),
                                 "graph_files": [file.name for file in files], "artifacts": manifest},
                                metadata_factory, write_run_metadata)
     temporary, primary = [], None
@@ -229,14 +373,18 @@ def run_trajectory_refresh(args):
                           get_success_intent_label_dir(output_root) / file.name, metadata,
                           int(getattr(args, "worker_thread_limit", 1)), by_match.get(match_id, [])))
         attempt.enter("staging", current_file=output_files[0])
+        reports = []
         if workers == 1:
             for task in tasks:
                 attempt.data["current_file"] = str(task[0])
-                stage_refresh_match(task)
+                reports.append(stage_refresh_match(task))
         else:
             with ProcessPoolExecutor(max_workers=workers) as pool:
-                list(pool.map(stage_refresh_match, tasks))
+                reports = list(pool.map(stage_refresh_match, tasks))
         replace_staged_graphs(temporary, attempt)
+        from project_config import atomic_write_json
+        for report in reports:
+            atomic_write_json(output_root / "trajectory_refresh" / (report["match_id"] + ".json"), report)
         attempt.finish()
     except BaseException as error:
         primary = error

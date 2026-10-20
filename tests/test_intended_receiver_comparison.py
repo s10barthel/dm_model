@@ -36,7 +36,7 @@ def receiver_match():
     tracking = pd.DataFrame(tracking, index=[10, 20, 60]).reindex(range(10, 61)).interpolate()
     official = pd.DataFrame(dict(event_id=["pass", "block"],
                                  utc_timestamp=["2023-01-01T00:00:00Z", "2023-01-01T00:00:02Z"],
-                                 raw_tag=["Play", "OtherBallAction"]))
+                                 raw_tag=["Play", "OtherBallAction"], frame_id=[10, 60]))
     return SimpleNamespace(match_id="match", actions=actions, tracking=tracking, fps=25, official_pass_events=official)
 
 

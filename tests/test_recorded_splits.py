@@ -142,8 +142,8 @@ def test_evaluation_entrypoint_uses_original_checkpoint_run(universe, monkeypatc
     args = SimpleNamespace(train_split=None, train_count=None, diagnostic_feature_run_id="modern")
     resolved, _ = evaluation.resolve_evaluation_split(args, record, run_id)
     assert resolved["test"] == old["test"]
-    with pytest.raises(ValueError, match="does not match"):
-        evaluation.resolve_evaluation_split(args, record, "modern")
+    resolved_with_other_inputs, _ = evaluation.resolve_evaluation_split(args, record, "modern")
+    assert resolved_with_other_inputs["manifest_id"] == old["manifest_id"]
 
 
 def test_requested_loaded_and_contributing_metadata():

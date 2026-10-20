@@ -39,6 +39,29 @@ Training records `split_manifest`, `split_resolution_source`, and `split_dataset
 with the equivalent information. Loaded matches can have no contributing rows
 after action-level filtering; these counts are intentionally distinct.
 
+## Evaluation data sources
+
+`--feature-run-id` selects evaluation graphs, primary labels, and default diagnostic
+labels without replacing the checkpoint's historical training manifest. An input run
+may record a different split; it is not used to infer which matches the checkpoint
+saw, or to replace its default test cohort. Explicit season selection takes precedence
+for evaluation populations. Unknown historical membership retains the interactive
+confirmation below, and a missing default cohort requires explicit selection.
+
+The evaluation wrapper preflights every primary model and auxiliary against the
+requested cohort before launching any evaluator. Missing required graph/label files
+stop the job; no intersection or regeneration is performed. Tensor-level validation
+and paired action alignment remain enforced during evaluation. Both entry points
+share path resolution, label selection, and graph compatibility checks.
+
+Diagnostic labels default to an explicitly selected primary run. The optional
+`--diagnostic-feature-run-id` changes diagnostics only; pass-height diagnostic
+ancestry is checked against the effective input run. Without either flag, existing
+checkpoint-based defaults are retained. Source selection does not change prediction
+semantics or target definitions. Portable `evaluation_data` metadata records the
+requested/resolved input and diagnostic sources, actual paths, label variants, and
+original training feature run; result destinations and pc-xPass caches are independent.
+
 ## Visualization and independently trained components
 
 Visualizers and their Hawkeye, SkillCorner, and benchmark component producers

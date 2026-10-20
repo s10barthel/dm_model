@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from copy import copy
 import math
 import sys
@@ -25,6 +26,7 @@ from PIL import Image
 
 from datatools import config
 from datatools.graph_feature import construct_graph_features, construct_graph_for_action, summarize_ball_trajectory
+from datatools.pass_trajectory import PASS_DURATION
 from datatools.match import Match
 from datatools.viz_helpers import (
     figure_to_rgb_image,
@@ -295,8 +297,10 @@ def load_match(
     from datatools.reception_policy import apply_run_policy, run_version
     raw_events = events
     events = apply_run_policy(events, feature_root, match_id) if feature_root is not None else events
+    feature_metadata = json.loads((feature_root / "metadata.json").read_text(encoding="utf-8-sig")) if feature_root is not None and (feature_root / "metadata.json").exists() else {}
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True,
-                  reception_policy=run_version(feature_root))
+                  reception_policy=run_version(feature_root),
+                  max_pass_duration=feature_metadata.get("max_pass_duration"))
     match.sportec_canonical_source = raw_events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,
@@ -398,7 +402,18 @@ def run_success_intent_component(
         match, model, device=device, post_action=False, event_indices=[action_index],
         graph_override=[graph], label_override=selected_labels,
     )
-    return probs.loc[action_index]
+    row = probs.loc[action_index].copy()
+    x = getattr(graph, "x", None)
+    if x is not None and x.ndim == 2 and x.shape[0] and x.shape[1] >= config.NODE_FEATURE_CORE_DIM + 4:
+        row.attrs["model_trajectory"] = x[0, config.NODE_FEATURE_CORE_DIM:config.NODE_FEATURE_CORE_DIM + 4].detach().cpu().tolist()
+        row.attrs["trajectory_speed_definition"] = getattr(graph, "trajectory_speed_definition", None)
+        row.attrs["trajectory_start_frame_id"] = getattr(graph, "trajectory_start_frame_id", None)
+        row.attrs["trajectory_end_frame_id"] = getattr(graph, "trajectory_end_frame_id", None)
+        provenance = getattr(match, "_visualization_trajectory_metadata", None)
+        if provenance is None:
+            provenance = match._visualization_trajectory_metadata = {}
+        provenance[str(action_index)] = dict(row.attrs)
+    return row
 
 
 def describe_action_subset_exclusion(match: Match, event_index: int) -> str:
@@ -586,12 +601,18 @@ def resolve_highlight_players(
     return highlight_players or None
 
 
-def resolve_ball_velocity_xy(match: Match, action_index: int, component_name: str) -> tuple[float, float] | None:
+def resolve_ball_velocity_xy(match: Match, action_index: int, component_name: str, probs: pd.Series | None = None) -> tuple[float, float] | None:
     action = match.actions.loc[action_index]
     if component_name != "success_intent" or action.get("action_type") != "pass":
         return None
 
-    summary = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=False)
+    saved = probs.attrs.get("model_trajectory") if probs is not None else None
+    if saved is not None:
+        summary = np.asarray(saved, dtype=float)
+        if str(action.get("object_id", "")).startswith("away"):
+            summary = summary * [1, -1, -1, 1]
+    else:
+        summary = summarize_ball_trajectory(match, action_index, fps=match.fps, rotate_to_ltr=False)
     if summary is None or summary.shape[0] < 3:
         return None
 
@@ -631,7 +652,7 @@ def render_component(
             compare_intended_receiver=show_receiver_rings,
         )
     highlight_players = resolve_highlight_players(snapshot, action, component_name, show_receiver_rings)
-    ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name)
+    ball_velocity_xy = resolve_ball_velocity_xy(match, action_index, component_name, probs)
     player_rings = {}
     if show_receiver_rings:
         for mode, player in overlays.receivers.items():
@@ -1233,6 +1254,9 @@ def main() -> None:
         "graph_schema": graph_schema,
         "show_trajectories": bool(args.show_trajectories),
         "pass_endpoint": bool(getattr(args, "pass_endpoint", True)),
+        "pass_endpoint_definition": PASS_DURATION,
+        "max_pass_duration": getattr(match, "max_pass_duration", None),
+        "success_intent_trajectories": getattr(match, "_visualization_trajectory_metadata", {}),
         "compare_intended_receiver": bool(getattr(args, "compare_intended_receiver", False)),
         "show_physical_xpass": bool(args.show_physical_xpass),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),

@@ -2,6 +2,7 @@
 import argparse
 import json
 import runpy
+import shutil
 import sys
 from pathlib import Path
 
@@ -126,11 +127,22 @@ def test_filter_preserves_predictions_targets_and_filtered_artifacts(action_arti
 
 
 @pytest.mark.parametrize("threshold,expected_count", [(None, 1), ("0", 4), ("0.1", 3), ("10", 0)])
-def test_evaluator_cli_selection_and_metadata(action_artifacts, tmp_path, monkeypatch, threshold, expected_count):
+@pytest.mark.parametrize("explicit_source", [False, True])
+def test_evaluator_cli_selection_and_metadata(action_artifacts, tmp_path, monkeypatch, threshold, expected_count, explicit_source):
     features, labels = action_artifacts
     arguments = model_args("outcome_scoring")
     arguments.update(batch_size=2, min_pass_dur=.2, return_type="next_3", use_xt=True,
                      feature_dir=str(features), label_dir=str(labels))
+    if explicit_source:
+        arguments["feature_run_id"] = "missing_original"
+        monkeypatch.setattr(project_config, "FEATURE_RUNS_DIR", tmp_path / "runs")
+        root = tmp_path / "runs" / "selected"
+        root.mkdir(parents=True)
+        (root / "metadata.json").write_text(json.dumps({"status": "completed"}))
+        shutil.copytree(features, root / features.name)
+        mode = arguments.get("intended_receiver_mode") or project_config.DEFAULT_INTENDED_RECEIVER_MODE
+        for return_type in ("next_3", "next_10"):
+            shutil.copytree(labels, project_config.get_action_label_dir(return_type, intended_receiver_mode=mode, root=root))
     model = GNN(arguments).eval()
     monkeypatch.setattr(utils, "load_model", lambda *args: model)
     monkeypatch.setattr(utils, "get_model_record", lambda *args: {
@@ -147,6 +159,8 @@ def test_evaluator_cli_selection_and_metadata(action_artifacts, tmp_path, monkey
                "--outcome-bootstrap-resamples", "0", "--comparison-rows"]
     if threshold is not None:
         command.extend(["--min-pass-duration", threshold])
+    if explicit_source:
+        command.extend(["--feature-run-id", "selected"])
     monkeypatch.setattr(sys, "argv", command)
     if expected_count == 0:
         with pytest.raises(ValueError, match="No usable test samples.*filter='pass'"):
@@ -154,6 +168,10 @@ def test_evaluator_cli_selection_and_metadata(action_artifacts, tmp_path, monkey
         return
     runpy.run_path(str(Path(evaluation.__file__)), run_name="__main__")
     metadata = json.loads((output / "metadata.json").read_text())
+    if explicit_source:
+        assert metadata["feature_run_id"] == "selected"
+        assert metadata["evaluation_data"]["training_feature_run_id"] == "missing_original"
+        assert metadata["evaluation_data"]["diagnostic_feature_run_id"] == "selected"
     context = metadata["evaluation_context"]
     assert context["filter"] == "pass"
     assert context["requested_min_pass_duration"] == (None if threshold is None else float(threshold))
@@ -175,6 +193,7 @@ def test_wrapper_applies_selection_to_all_checkpoints_and_saves_effective_contex
                                "--evaluation-output-dir", str(tmp_path)])
     monkeypatch.setattr(wrapper, "parse_args", lambda: args)
     monkeypatch.setattr(wrapper, "resolve_evaluation_entries", lambda args: (entries, {}, None))
+    monkeypatch.setattr(wrapper, "preflight_evaluation_data", lambda requests: {})
     context = dict(filter="pass", requested_min_pass_duration=.1, min_pass_duration=.1,
                    selection_counts={"evaluated_samples": 3})
     commands = []

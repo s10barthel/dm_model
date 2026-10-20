@@ -48,9 +48,11 @@ class Match(ABC):
         include_goals: bool = False,
         next_action_conditions_enabled: bool = True,
         reception_policy: str = "legacy_elastic_v1",
+        max_pass_duration: float | None = None,
     ):
         from datatools.reception_policy import apply_policy
         self.reception_policy = reception_policy
+        self.max_pass_duration = max_pass_duration
         self.events = apply_policy(events, reception_policy)
         events = self.events
         self.tracking = tracking.copy()
@@ -764,8 +766,10 @@ class Match(ABC):
                 end_x = self.actions.at[i, "end_x"]
                 end_y = self.actions.at[i, "end_y"]
                 pass_max_ball_z, pass_high = self.pass_height_labels(frame, receive_frame)
-                if not pd.isna(intent_id) and not pd.isna(receive_frame):
-                    receive_frame_int = int(receive_frame)
+                intent_frame = (self.actions.at[i, "observed_end_frame_id"]
+                                if intended_receiver_mode in {"original", "angle_only"} else receive_frame)
+                if not pd.isna(intent_id) and not pd.isna(intent_frame):
+                    receive_frame_int = int(intent_frame)
                     intent_x_col = f"{intent_id}_x"
                     intent_y_col = f"{intent_id}_y"
                     if (

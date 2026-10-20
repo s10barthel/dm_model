@@ -31,7 +31,7 @@ from datatools.ball_carries import augment_match_actions_with_carries, validate_
 from datatools.match import Match
 from datatools.success_intent import build_success_intent_resolved_actions
 from datatools.trajectory import TRAJECTORY_SPEED
-from datatools.pass_trajectory import ensure_pass_endpoints, trajectory_samples
+from datatools.pass_trajectory import ensure_pass_endpoints, trajectory_samples, positive_duration, PASS_DURATION
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -609,6 +609,10 @@ def construct_graph_for_action(
     )
     if graph is not None and feature_variant == "success_intent":
         graph.trajectory_speed_definition = TRAJECTORY_SPEED
+        endpoint = ensure_pass_endpoints(match, annotate=False).resolve(match.actions.loc[action_index])
+        graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
+        graph.trajectory_end_frame_id = endpoint.trajectory
+        graph.pass_endpoint_definition = PASS_DURATION
     return graph
 
 
@@ -673,6 +677,7 @@ def build_match_for_feature_generation(
         match_lineup,
         args.action_type,
         include_goals=True,
+        max_pass_duration=getattr(args, "max_pass_duration", None),
         next_action_conditions_enabled=args.next_action_conditions_enabled,
         **({"reception_policy": args.reception_policy} if hasattr(args, "reception_policy") else {}),
     )
@@ -1163,6 +1168,8 @@ def augment_blocked_actions(
         augmented_features.append(match.graph_features_0[i])
         augmented_labels.append(match.labels[i])
 
+        if match.graph_features_0[i] is None:
+            continue
         if match.actions.at[action_index, "spadl_type"] in config.SET_PIECE:
             continue
 
@@ -1255,6 +1262,7 @@ def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
         "overwrite_labels": bool(args.overwrite_labels),
         "next_action_conditions_enabled": bool(args.next_action_conditions_enabled),
         "pass_height_threshold": args.pass_height_threshold,
+        "max_pass_duration": getattr(args, "max_pass_duration", None),
         "use_carries": bool(args.use_carries),
         "add_v_edge_features": bool(args.add_v_edge_features),
         "add_relative_speed_edge_features": bool(args.add_relative_speed_edge_features),
@@ -1623,6 +1631,10 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
     from datatools.reception_policy import RETIRED, apply_policy, run_version, retirement_records
     from project_config import atomic_write_json
     args.reception_policy = run_version(feature_root) if (feature_root / "metadata.json").exists() else RETIRED
+    if (feature_root / "metadata.json").exists():
+        import json
+        run_metadata = json.loads((feature_root / "metadata.json").read_text(encoding="utf-8-sig"))
+        args.max_pass_duration = run_metadata.get("max_pass_duration", getattr(args, "max_pass_duration", None))
     records = None
     if args.reception_policy == RETIRED:
         import json
@@ -1757,6 +1769,7 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Overwrite existing label tensors in --labels-only mode.",
     )
+    parser.add_argument("--max-pass-duration", type=positive_duration, default=None)
     parser.add_argument(
         "--pass-height-threshold",
         type=positive_height,

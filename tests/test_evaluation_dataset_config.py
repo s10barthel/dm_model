@@ -20,7 +20,7 @@ from dataset import ActionDataset
 from datatools import config
 from datatools.config import LABEL_COLUMNS, LABEL_INDEX
 from datatools.utils import apply_extended_node_feature_mask
-from models import dataset_config
+from models import dataset_config, evaluation_data
 from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
 from models.utils import (
     calc_binary_cohort_metrics,
@@ -833,10 +833,10 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
                 task="pass_success", return_type="disc_0.7", intended_receiver_mode="original"
             )
             with (
-                patch.object(evaluation_script, "resolve_feature_run_id", side_effect=lambda value, **_: value),
-                patch.object(evaluation_script, "resolve_feature_root", return_value=diagnostic_root),
+                patch.object(evaluation_data, "resolve_feature_run_id", side_effect=lambda value, **_: value),
+                patch.object(evaluation_data, "resolve_feature_root", return_value=diagnostic_root),
                 patch.object(
-                    evaluation_script,
+                    evaluation_data,
                     "load_feature_run_metadata",
                     side_effect=lambda run_id, required=True: metadata[run_id],
                 ),
@@ -855,10 +855,10 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
                 task="pass_height", return_type="disc_0.7", intended_receiver_mode="original"
             )
             with (
-                patch.object(evaluation_script, "resolve_feature_run_id", side_effect=lambda value, **_: value),
-                patch.object(evaluation_script, "resolve_feature_root", return_value=diagnostic_root),
+                patch.object(evaluation_data, "resolve_feature_run_id", side_effect=lambda value, **_: value),
+                patch.object(evaluation_data, "resolve_feature_root", return_value=diagnostic_root),
                 patch.object(
-                    evaluation_script,
+                    evaluation_data,
                     "load_feature_run_metadata",
                     side_effect=lambda run_id, required=True: metadata[run_id],
                 ),
@@ -879,9 +879,9 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             task="pass_success", return_type="disc_0.7", intended_receiver_mode="original"
         )
         with (
-            patch.object(evaluation_script, "resolve_feature_run_id", side_effect=lambda value, **_: value),
+            patch.object(evaluation_data, "resolve_feature_run_id", side_effect=lambda value, **_: value),
             patch.object(
-                evaluation_script,
+                evaluation_data,
                 "load_feature_run_metadata",
                 side_effect=lambda run_id, required=True: {
                     "diagnostic": {"derived_from_feature_run_id": "other", "pass_height_threshold_meters": 1.0},
@@ -893,9 +893,9 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
                 evaluation_script.resolve_pass_height_diagnostic_context(args, model_args, "base", required=True)
 
         with (
-            patch.object(evaluation_script, "resolve_feature_run_id", side_effect=lambda value, **_: value),
+            patch.object(evaluation_data, "resolve_feature_run_id", side_effect=lambda value, **_: value),
             patch.object(
-                evaluation_script,
+                evaluation_data,
                 "load_feature_run_metadata",
                 return_value={"derived_from_feature_run_id": None, "pass_height_threshold_meters": 0.0},
             ),

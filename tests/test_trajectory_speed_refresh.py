@@ -30,7 +30,7 @@ def trajectory_match(*, end=35, away=False):
                                  ball_speed=1000, ball_vz=-1000), index=frames)
     actions = pd.DataFrame([dict(frame_id=10, receive_frame_id=end, period_id=1,
                                 object_id="away_1" if away else "home_1", receiver_id="home_2",
-                                action_type="pass", success=True, start_x=10, start_y=20,
+                                action_type="pass", success=True, endpoint_source="kpi_csv", start_x=10, start_y=20,
                                 start_z=1, end_x=20, end_y=22)], index=[17])
     return SimpleNamespace(tracking=tracking, actions=actions, fps=25)
 
@@ -227,7 +227,7 @@ def test_in_place_failure_rejection_and_recovery(feature_runs):
     assert json.loads((base / "metadata.json").read_text())["trajectory_speed_definition"] == TRAJECTORY_SPEED
     assert torch.load(labels_path, weights_only=False)[0, 7] == 1
     assert pd.read_parquet(actions_path).at[17, "observed_end_frame_id"] == 35
-    assert pd.read_parquet(actions_path).at[17, "intent_id"] == "home_9"
+    assert pd.read_parquet(actions_path).at[17, "intent_id"] == "home_2"
     latest.assert_not_called()
 
 
@@ -258,22 +258,22 @@ def test_staging_failure_changes_no_graphs_and_can_retry(feature_runs):
     assert_feature_run_usable(base)
 
 
-def test_refresh_all_label_variants_and_endpoint_metadata_preserves_receivers(feature_runs):
+def test_refresh_all_model_label_variants_and_endpoint_metadata_preserves_receivers(feature_runs):
     runs, base, args, latest = feature_runs
     labels = torch.randn(3, len(config.LABEL_COLUMNS))
     labels[:, 0] = 17
     labels[:, config.LABEL_INDEX["is_pass"]] = 1
     labels[:, config.LABEL_INDEX["duration"]] = 12
     labels[1, config.LABEL_INDEX["is_real"]] = 0
-    directories = ["action_labels_next_3", "action_labels_next_10_angle_only_carries",
-                   "action_labels_intent_train_next_3_model", "augmented_labels_angle_only"]
+    directories = ["action_labels_next_3_model", "action_labels_next_10_model_carries",
+                   "action_labels_intent_train_next_3_model", "augmented_labels_model"]
     for directory in directories:
         (base / directory).mkdir()
         torch.save(labels, base / directory / "a.pt")
     actions = trajectory_match().actions
     actions["intent_id"] = "home_9"
-    (base / "resolved_actions_angle_only_carries").mkdir()
-    resolved = base / "resolved_actions_angle_only_carries/a.parquet"
+    (base / "resolved_actions_model_carries").mkdir()
+    resolved = base / "resolved_actions_model_carries/a.parquet"
     actions.to_parquet(resolved)
     before = resolved.read_bytes()
     refresh.run_trajectory_refresh(args)
@@ -290,8 +290,8 @@ def test_refresh_all_label_variants_and_endpoint_metadata_preserves_receivers(fe
     assert updated.at[17, "pass_duration"] == 1
     assert resolved.read_bytes() == before
     metadata = json.loads((derived / "metadata.json").read_text())
-    assert metadata["angle_only_definition"] == "legacy_2s_reception_positions_v1"
-    assert metadata["pass_duration_definition"] == "official_event_observed_end_v1"
+    assert metadata["angle_only_definition"] == refresh.ANGLE_ONLY
+    assert metadata["pass_duration_definition"] == refresh.PASS_DURATION
 
 
 def test_failed_repair_stays_unusable(feature_runs):

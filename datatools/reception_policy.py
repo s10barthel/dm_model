@@ -58,7 +58,10 @@ def apply_policy(actions, version=LEGACY, *, mode=None, records=None):
             result.loc[mask, column] = np.nan
     if mode == "original" and "intent_id" in result:
         failure = result.get("success", result.get("source_event_success", pd.Series(None, index=result.index))).eq(False)
-        result.loc[mask & failure, "intent_id"] = None
+        from datatools.pass_trajectory import PASS_DURATION
+        refreshed = (result.get("pass_endpoint_definition", pd.Series("", index=result.index)).eq(PASS_DURATION)
+                     & result.get("observed_end_frame_id", pd.Series(float("nan"), index=result.index)).notna())
+        result.loc[mask & failure & ~refreshed, "intent_id"] = None
     return result
 
 

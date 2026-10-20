@@ -1,52 +1,86 @@
-# Pass trajectories and targeted refresh
+# Pass endpoints, receiver modes, and trajectory refresh
 
-Pass and cross actions have separate observed and trajectory endpoints. Neither replaces `receive_frame_id`, so possession reconstruction keeps its existing inputs.
+Fresh feature generation and `--refresh-trajectory` use the same synchronized official endpoint policy. No touch detector, raw-time difference, raw-time interpolation, or ELASTIC reception fallback is used to infer a pass endpoint. ELASTIC launch synchronization retains its existing policy.
 
-| Endpoint | Definition | Consumers |
-| --- | --- | --- |
-| Observed end | Successful pass: official KPI reception. Failed pass, or success without a valid KPI reception: next relevant official event raw time difference anchored to synchronized launch. Bound by launch episode last live frame and period end. | Pass duration, observed-end marker |
-| Trajectory end | Earlier of observed end and launch plus one second | Success-intent inputs, black arrow, angle_only candidates |
+## Endpoint policy
 
-Relevant events include Other Ball Action, ball won, tackles, passes, shots, restarts and stoppages. Deleted and administrative events and annotations at launch time do not terminate the segment. Contact KPI frames and ELASTIC reception frames do not determine failed-pass endpoints. Raw XML is preferred; saved control events can supply their original timestamps if XML is unavailable. There is no ball-motion contact detection or timestamp refinement.
+Active raw events are joined to official KPI frames using the existing CSV/AdvancedEvents readers. This includes events absent from the carry-control sidecar, such as offsides. Deleted and administrative events are excluded. Candidates are ordered by tracking frame, with deterministic handling of simultaneous events.
 
-Resolved actions record `observed_end_frame_id`, `trajectory_end_frame_id`, `pass_endpoint_source`, `pass_endpoint_event_id`, `pass_endpoint_definition` and `pass_duration`. An official live/period boundary can supply an endpoint when no later contact exists.
+The earliest valid associated endpoint is selected from:
 
-Success-intent inputs remain `[speed, direction_x, direction_y, direction_z]`: normalized net tracked-ball displacement and its magnitude divided by elapsed tracking time. Without tracking timestamps, elapsed time uses frame difference / frame rate. At least two finite positions and positive elapsed time are necessary. There is no event-coordinate fallback or extension beyond the endpoint. A 0.04-second segment uses just its two frames; unusable trajectories follow the existing unavailable-graph handling. Zero displacement produces a zero vector.
+- Official linked reception frames, for successful passes and interceptions alike.
+- Official physical-contact events, including plays, shots, other ball actions, claims, and duels.
+- Official stoppages, including fouls, offsides, and the final whistle. These are recorded as stoppages, not as confirmed touches or receivers.
+- Explicit out-of-play events, or an identified out boundary supported by out/restart semantics and the launch live episode.
 
-`min_pass_dur` uses launch-to-observed-end duration, without the one-second cap, for every component model. Omitted or zero adds no minimum-duration exclusion. Inference does not impose this training filter.
+Chronology, tracking membership, period, live-episode boundaries, and intervening restarts constrain selection. A stoppage can lie on the first dead frame. A later restart is never substituted for a contact. Arbitrary episode/period ends and `receiver_id="out"` alone do not establish an endpoint. Remaining annotation errors are accepted without tracking-based touch validation.
 
-Fresh `angle_only` generation uses horizontal ball displacement and candidate positions at trajectory end, retaining angular scoring and tie-breaking rules. Comparison visualizations recompute the heuristic using this definition; rings remain at launch positions. The black arrow uses the same trajectory as the model. The Observed pass end marker uses tracked ball position at observed end and is omitted if unavailable.
+Resolved actions record observed and capped trajectory frames, endpoint source/event/version, duration, and unavailable reason. Candidate frames and durations remain available for diagnostics when a duration safeguard rejects an endpoint. Physical reception and possession annotations remain separate.
 
-## Refresh workflow
+| Consumer | Interval or positions |
+| --- | --- |
+| Pass duration and observed-end marker | Launch to full observed endpoint |
+| Failed-pass `original` | Existing distance/angle scoring; tracked ball endpoint and candidate teammates at observed end |
+| Failed-pass `angle_only` | Horizontal displacement and candidates at trajectory end |
+| Success-intent inputs | Net 3D displacement over the capped trajectory interval |
+| Heuristic intended-receiver coordinates | Selected player's tracked position at observed end |
+
+Trajectory end is the earlier of observed end and launch plus one second. The four inputs remain `[speed, direction_x, direction_y, direction_z]`; this is an early net-displacement summary, not instantaneous launch velocity or peak height. Finite start/end positions and positive elapsed time are required. Missing interior samples are tolerated. Unavailable trajectories produce unavailable graphs.
+
+Successful passes retain the actual receiver for all modes. Failed-pass comparison model rings use the displayed model probabilities. Overlays do not replace runtime receiver labels.
+
+## Duration safeguard
+
+`--max-pass-duration SECONDS` accepts positive finite values and defaults to **disabled (`None`)**. An observed duration strictly greater than the limit makes its endpoint-dependent samples unavailable; equality remains eligible. The original candidate duration is retained, never shortened to the limit. The policy is recorded in run metadata and honored by visualization and dataset selection. Changing it on an existing run requires `--refresh-trajectory`.
+
+The one-second trajectory window and training's `min_pass_dur` are separate settings.
+
+## Refresh and composition
 
 ```powershell
-python scripts/generate_relevant_features.py --extend-feature-run-id OLD_RUN --refresh-trajectory --run-id NEW_RUN
-python scripts/train_relevant_models.py --feature-run-id NEW_RUN --only-success-intent
+python scripts\generate_relevant_features.py `
+  --replace-carries `
+  --retire-elastic `
+  --refresh-trajectory `
+  --extend-feature-run-id feature_20261019T215248_909646_f6c38c72 `
+  --num-workers 6 `
+  --worker-thread-limit 1
 ```
 
-`--refresh-trajectory-speed` remains a deprecated alias for the expanded operation. Refresh updates all four success-intent inputs, duration in every applicable label variant (including repeated and synthetic rows), and persisted pass endpoint metadata. It preserves saved receiver IDs, receiver coordinates, return targets, synthetic membership, unrelated node inputs and graph structure. It does **not** upgrade saved `angle_only` labels; generate a fresh feature run for those. Model-backed receiver replacement remains a separate operation after retraining.
+This creates one derived run: clone once, retire receptions, refresh canonical pass artifacts, rebuild carries from the updated canonical artifacts, then publish completion. Each match has a completion marker; failed derived runs resume with the same arguments and an explicit `--run-id` naming the failed target. Changed files are replaced atomically, preserving source hard links. Combined operations reject `--in-place`.
 
-- Requires `--extend-feature-run-id`, inherits source selection settings, and cannot be combined with unrelated generation/refresh options.
-- Derived runs share unchanged artifacts using hard links by default. Use `--artifact-copy-mode copy` for full copies. All changed artifacts are staged and replaced by complete-file renames, preserving the source run.
-- `--in-place` (alias `--overwrite-feature-run`) updates the existing run and cannot be combined with `--run-id`.
-- `--num-workers` and `--worker-thread-limit` control staging. Existing graphs reuse their structure; newly available success-intent graphs alone are rebuilt.
-- All files are staged before publication. Interrupted replacement leaves the run unusable until repaired with `--refresh-trajectory --in-place --extend-feature-run-id TARGET_RUN`. An interrupted clone must be recreated from the original. A completed run with both current contracts is a no-op.
+Standalone `--refresh-trajectory` retains derived and in-place operation/recovery. Its deprecated spelling `--refresh-trajectory-speed` remains supported. Refresh now updates:
 
-## Semantic compatibility
+- All four success-intent inputs and their contract tags.
+- Pass duration and endpoint metadata across persisted variants, including repeated/synthetic source rows.
+- Both saved heuristic receiver modes, target indices and coordinates.
+- Dependent temporal labels and blocked augmentation graphs/labels; synthetic membership is regenerated where it depends on the changed receiver.
 
-New/refreshed inputs use `trajectory_speed_definition = official_event_net_displacement_3d_1s_v3`. The old `net_displacement_3d_speed_v2` and missing-tag legacy v1 remain recognized for matching stored inputs. Training records the trajectory contract in checkpoint arguments, metadata and feature signatures. Resume/refit and inference reject incompatible inputs despite identical dimensions. Old checkpoints are never upgraded from mutable source-run metadata; on-demand construction requires a current checkpoint.
+Real-action identities, source selection, return targets, and unrelated graph inputs are preserved. Existing model-mode intent choices retain their checkpoint provenance. Retrain success-intent on refreshed inputs before explicit model-backed receiver replacement. Missing per-action data is logged in match reports and run metadata; structural graph/label corruption remains an error.
 
-`pass_duration_definition = official_event_observed_end_v1` is recorded separately. Fresh runs record `angle_only_definition = official_event_ball_direction_1s_v1`; refresh preserves the source receiver definition (or identifies its legacy policy). Prepared cache identities include the trajectory implementation/contract; replaced label/graph signatures invalidate cached samples.
+## Compatibility and visualization
 
-Full-corpus refresh and model retraining are explicit operations, not part of installing this change. Ball-carry/possession reconstruction is unaffected.
+New contracts are:
 
-## Validation example: DFL-MAT-J03YDU
+- `pass_duration_definition = synchronized_official_pass_end_v2`
+- `trajectory_speed_definition = synchronized_official_net_displacement_3d_1s_v4`
+- `angle_only_definition = synchronized_official_ball_direction_1s_v2`
+- `original_receiver_definition = synchronized_official_distance_angle_v2`
 
-Read-only inspection of the stored match and in-memory refresh selected these official contacts. Directions are unit 3D vectors in native tracking coordinates; both actions are home-team passes.
+Legacy trajectory v1/v2/v3 artifacts remain recognizable for matching legacy inference. Checkpoints are never upgraded through mutable feature metadata, and incompatible input/checkpoint contracts are rejected. Prepared caches include implementation fingerprints and changed artifact signatures.
 
-| Action | Subsequent event | Observed frame | Trajectory frame | Duration (s) | Direction (x, y, z) | Live angle_only |
-| --- | --- | --- | --- | --- | --- | --- |
-| 47 | Kim OtherBallAction, 18453000000073 | 14576 | 14566 | 1.40 | (0.526209, 0.786587, 0.323087) | home_8 (Weiser) |
-| 97 | Davies OtherBallAction, 18453000000151 | 24552 | 24552 | 0.76 | (0.552121, 0.833759, 0.002788) | home_11 |
+The black arrow uses the trajectory from the exact graph supplied for the displayed prediction. New graphs record their sampling frames. Legacy graphs without sampling metadata retain an unknown interval rather than inventing one. Comparison panels carry their own trajectory provenance. Current-policy endpoint markers and heuristic rings are recorded separately from the model-input contract.
 
-The black-arrow XY velocities are respectively (3.86, 5.77) and (2.605263, 3.934211) m/s. Observed-end markers are (82.17, 17.62) and (63.66, 5.64). Fresh and refreshed success-intent graphs match for both actions, including unrelated node and edge inputs. All stored label variants for this match passed in-memory duration refresh/alignment checks. Existing feature files, receiver labels, models and visualizations were not overwritten.
+## Read-only six-second audit
+
+```powershell
+python scripts\audit_pass_endpoints.py `
+  --feature-run-id feature_20261019T215248_909646_f6c38c72 `
+  --max-pass-duration 6 `
+  --num-workers 6 `
+  --count-label-rows
+```
+
+This resolves endpoints under the current policy without changing feature files or enabling a safeguard. It exports all selected unique passes, affected actions, endpoint provenance and durations, existing unavailability, and optional counts of repeated label rows. Carry copies and multiple return variants do not inflate unique-action counts. Use `--match-id` to restrict the audit.
+
+Regression examples in DFL-MAT-J03YDU: 105 ends at frame 26767 (0.64 s), 313 at 49217 (0.16 s), 484 at official offside frame 68452 (2.40 s). Action 97 uses the earliest available synchronized contact at 24616 (3.32 s); no tracking-based correction is applied.

@@ -24,7 +24,7 @@ from datatools.artifact_storage import clone_feature_artifacts
 from datatools.xt_refresh import refresh_xt
 from datatools.trajectory import TRAJECTORY_SPEED
 from datatools.trajectory_refresh import run_trajectory_refresh
-from datatools.pass_trajectory import PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY
+from datatools.pass_trajectory import PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY, ORIGINAL_KEY, ORIGINAL, MAX_DURATION_KEY, positive_duration
 from models.pass_height import positive_height
 from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.carry_policy import CarryPolicy
@@ -143,6 +143,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--replace-carries", action="store_true",
                         help="Create a derived run reusing canonical artifacts and completely rebuilding carries; supports --extend-feature-run-id latest.")
+    parser.add_argument("--max-pass-duration", type=positive_duration, default=None,
+                        help="Reject pass endpoints exceeding this many seconds; disabled by default.")
     parser.add_argument("--retire-elastic", action="store_true",
                         help="Retire Elastic reception fallback (not launch timing); refresh height/receiver targets and post-action states. Combine with --replace-carries for carry-enabled sources.")
     for name, value in asdict(CarryPolicy()).items():
@@ -150,7 +152,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--refresh-trajectory", "--refresh-trajectory-speed", dest="refresh_trajectory", action="store_true",
         help="Refresh success-intent speed/direction and all pass-duration labels; requires --extend-feature-run-id. "
-             "--refresh-trajectory-speed is a deprecated alias. Saved receiver labels are preserved.",
+             "--refresh-trajectory-speed is a deprecated alias. Original and angle_only receiver labels and their dependencies are regenerated.",
     )
     parser.add_argument(
         "--refresh-target-family",
@@ -288,7 +290,8 @@ def parse_args() -> argparse.Namespace:
             parser.error("--retire-elastic creates a derived run; --in-place is unsupported.")
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
         allowed = {"--retire-elastic", "--replace-carries", "--extend-feature-run-id", "--run-id",
-                   "--artifact-copy-mode", "--num-workers", "--worker-thread-limit"}
+                   "--artifact-copy-mode", "--num-workers", "--worker-thread-limit",
+                   "--refresh-trajectory", "--refresh-trajectory-speed", "--max-pass-duration"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
         if supplied - allowed:
             parser.error("Reception retirement inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
@@ -297,7 +300,7 @@ def parse_args() -> argparse.Namespace:
             parser.error("--replace-carries requires --extend-feature-run-id and creates a derived run; --in-place is unsupported.")
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
         allowed = {"--replace-carries", "--retire-elastic", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
-                   "--num-workers", "--worker-thread-limit"}
+                   "--num-workers", "--worker-thread-limit", "--refresh-trajectory", "--refresh-trajectory-speed", "--max-pass-duration"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
         if supplied - allowed:
             parser.error("--replace-carries inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
@@ -306,13 +309,18 @@ def parse_args() -> argparse.Namespace:
             parser.error("--refresh-trajectory requires --extend-feature-run-id.")
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
         allowed = {"--refresh-trajectory", "--refresh-trajectory-speed", "--extend-feature-run-id", "--in-place", "--overwrite-feature-run",
-                   "--run-id", "--artifact-copy-mode", "--num-workers", "--worker-thread-limit"}
+                   "--run-id", "--artifact-copy-mode", "--num-workers", "--worker-thread-limit",
+                   "--replace-carries", "--retire-elastic", "--max-pass-duration"}
+        allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
         if supplied - allowed:
             parser.error("--refresh-trajectory is dedicated; unsupported combined options: "
                          + ", ".join(sorted(supplied - allowed)))
-        base = load_feature_run_metadata(args.extend_feature_run_id, required=True)
-        vars(args).update(split_selector(base))
-        args.next_action_conditions_enabled = metadata_next_action_conditions_enabled(base)
+        if not (args.retire_elastic or args.replace_carries):
+            base = load_feature_run_metadata(args.extend_feature_run_id, required=True)
+            vars(args).update(split_selector(base))
+            args.next_action_conditions_enabled = metadata_next_action_conditions_enabled(base)
+    if args.extend_feature_run_id and args.max_pass_duration is not None and not args.refresh_trajectory:
+        parser.error("Changing --max-pass-duration on an existing run requires --refresh-trajectory.")
     if "xt" in args.refresh_target_families:
         if args.use_carries or len(args.refresh_target_families) != 1:
             parser.error("xT refresh must run separately from carry generation and other target refreshes.")
@@ -381,6 +389,8 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     for group in INTERACTION_GROUPS:
         option = group.replace("_", "-") + "-edge-features"
         command.append("--" + ("" if getattr(args, f"add_{group}_edge_features", True) else "no-") + option)
+    if getattr(args, "max_pass_duration", None) is not None:
+        command.extend(["--max-pass-duration", str(args.max_pass_duration)])
     if bool(getattr(args, "pass_height", False)):
         command.extend(["--pass-height-threshold", str(pass_height_threshold_meters(args))])
     return command
@@ -1540,6 +1550,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "trajectory_speed_definition": TRAJECTORY_SPEED,
         PASS_DURATION_KEY: PASS_DURATION,
         ANGLE_ONLY_KEY: ANGLE_ONLY,
+        ORIGINAL_KEY: ORIGINAL,
+        MAX_DURATION_KEY: getattr(args, "max_pass_duration", None),
         "next_action_conditions_enabled": args.next_action_conditions_enabled,
         "endpoint_consumer_version": ENDPOINT_POLICY_VERSION,
         "pass_height_threshold_meters": pass_height_threshold_meters(args),
@@ -1572,7 +1584,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.retire_elastic and args.extend_feature_run_id:
+    if args.refresh_trajectory and (args.retire_elastic or args.replace_carries):
+        from datatools.feature_refresh import run_combined_refresh
+        run_combined_refresh(args)
+    elif args.retire_elastic and args.extend_feature_run_id:
         from datatools.reception_refresh import run_retirement
         run_retirement(args)
     elif args.replace_carries:

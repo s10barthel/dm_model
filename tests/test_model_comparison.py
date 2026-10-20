@@ -130,6 +130,7 @@ class EvaluationWrapperTests(unittest.TestCase):
             frame.to_csv(output / "learning_curve_predictions.csv", index=False)
         args = wrapper.parse_args(["--accept-comparison-warnings", *argv, "--evaluation-output-dir", str(output_root), "--comparison-bootstrap-resamples", "0"])
         with patch.object(wrapper, "parse_args", return_value=args), \
+             patch.object(wrapper, "preflight_evaluation_data", return_value={}), \
              patch.object(model_comparison, "checkpoint", side_effect=checkpoint_fn), \
              patch.object(wrapper.subprocess, "run", side_effect=fake_run):
             wrapper.main()
@@ -237,7 +238,8 @@ class EvaluationWrapperTests(unittest.TestCase):
                      patch.object(wrapper.pc_versions, "cache_dir", side_effect=resolve_cache) as resolve, \
                      patch.object(wrapper.subprocess, "run", side_effect=fake_run) as run, \
                      patch.object(wrapper.learning_curve, "save_plot"):
-                    wrapper.run_learning_curve(args)
+                    with patch.object(wrapper, "preflight_evaluation_data", return_value={}):
+                        wrapper.run_learning_curve(args)
 
                 self.assertEqual(run.call_count, 2)
                 if selection == "directory":

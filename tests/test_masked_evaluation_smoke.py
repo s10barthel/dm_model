@@ -65,6 +65,7 @@ def test_wrapper_mask_reports_use_real_predictions_and_preserve_summary_variants
                 "train_match_ids": ["train"], "test_match_ids": ["a", "b"], "target_definitions": {},
                 "checkpoint_record": {"args": args, "metadata": {"train_match_ids": ["train"], "validation_match_ids": []}, "is_complete": True}}
     monkeypatch.setattr(model_comparison, "checkpoint", checkpoint)
+    monkeypatch.setattr(wrapper, "preflight_evaluation_data", lambda requests: {})
     commands = []
     def evaluate_command(command, **kwargs):
         commands.append(command)

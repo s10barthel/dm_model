@@ -25,6 +25,9 @@ from models.inference_masks import (
     resolve_inference_mask_configurations,
 )
 from models.prediction_identity import ensure_dataset_node_identities
+from models.evaluation_data import (validate_checkpoint_edge_schema, resolve_goal_next10_diagnostic_context,
+    validate_diagnostic_feature_run_ancestry, resolve_pass_height_diagnostic_context,
+    resolve_evaluation_data, preflight_evaluation_data)
 from models.evaluation_context import (add_evaluation_arguments, evaluation_selection,
                                        diagnostic_name)
 from models.membership import recorded_manifest_id
@@ -78,23 +81,6 @@ from models.pass_height import (add_pass_height_argument, evaluation_height,
 
 
 
-def validate_checkpoint_edge_schema(feature_schema, model_args):
-    settings = vars(model_args) if not isinstance(model_args, dict) else model_args
-    model_schema = schema_for_names(edge_names(settings), explicit=settings.get("edge_feature_names") is not None)
-    reconstructed = infer_training_edge_schema(
-        feature_schema,
-        v_edge_feature_mode=settings.get("v_edge_feature_mode"),
-        relative_speed_edge_feature_mode=settings.get("relative_speed_edge_feature_mode"),
-        **{f"{group}_edge_feature_mode": settings.get(f"{group}_edge_feature_mode", "none")
-           for group in INTERACTION_GROUPS},
-    )
-    if edge_names(reconstructed) != edge_names(model_schema):
-        raise ValueError(
-            "Checkpoint edge-feature settings do not reconstruct its recorded graph schema: "
-            f"reconstructed={reconstructed}, checkpoint={model_schema}."
-        )
-    validate_feature_graph_schema(feature_schema, model_schema, context="Selected feature artifacts")
-    return model_schema
 
 
 def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_id):
@@ -106,21 +92,14 @@ def resolve_evaluation_split(cli_args, checkpoint_record, selected_feature_run_i
     if not manifest_id:
         if evaluation_selection(cli_args) is None:
             raise ValueError("No recorded default test cohort; select an evaluation population with --season.")
-        if selected_feature_run_id != original_id:
-            load_feature_run_metadata(selected_feature_run_id, required=True)
         return None, "explicit season selection; historical split unavailable"
     manifest, source = resolve_artifact_split(
         cli_args, feature_metadata, feature_run_id=original_id, checkpoint=checkpoint_provenance,
     )
-    if selected_feature_run_id != original_id:
-        resolve_artifact_split(
-            cli_args, load_feature_run_metadata(selected_feature_run_id, required=True),
-            feature_run_id=selected_feature_run_id, checkpoint={"split_manifest_id": manifest["manifest_id"]},
-        )
     return manifest, source
 
 
-def prepare_evaluation_population(args, checkpoint_record, selected_feature_run_id, auxiliary_models):
+def prepare_evaluation_population(args, checkpoint_record, selected_feature_run_id, auxiliary_models, *, data_context=None):
     """Select a cohort and verify all participants before constructing test datasets."""
     manifest, source = resolve_evaluation_split(args, checkpoint_record, selected_feature_run_id)
     selected = evaluation_selection(args)
@@ -135,6 +114,12 @@ def prepare_evaluation_population(args, checkpoint_record, selected_feature_run_
         if not auxiliary_id:
             raise ValueError("Cannot verify held-out membership of a participating auxiliary checkpoint.")
         record_cohorts.append((utils.get_model_record(auxiliary_id), match_ids))
+    if data_context is not None:
+        checked = preflight_evaluation_data([{
+            "model_id": args.model_id, "model_args": checkpoint_record["args"], "cli_args": args,
+            "match_ids": match_ids, "auxiliaries": [{"args": auxiliary.args} for auxiliary in auxiliary_models.values()],
+        }])
+        data_context.update(checked[args.model_id])
     membership = collect_evaluation_membership(record_cohorts)
     confirm_direct_evaluation_membership(membership, args)
     return manifest, source, match_ids, membership
@@ -245,116 +230,10 @@ def resolve_evaluation_xpass_cache(
     return str(cache_dir), metric, metadata
 
 
-def resolve_goal_next10_diagnostic_context(
-    cli_args: argparse.Namespace,
-    model_args: argparse.Namespace,
-    feature_root: Path,
-) -> tuple[str | None, str | None]:
-    if not requires_goal_next10_diagnostics(getattr(model_args, "task", None)):
-        return None, None
-    if getattr(cli_args, "diagnostic_return_type", None) is not None:
-        return cli_args.diagnostic_feature_run_id or getattr(model_args, "feature_run_id", None), None
-
-    mode = getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE
-    if mode == "unknown":
-        mode = DEFAULT_INTENDED_RECEIVER_MODE
-
-    if cli_args.diagnostic_feature_run_id:
-        diagnostic_feature_run_id = resolve_feature_run_id(
-            cli_args.diagnostic_feature_run_id,
-            required=True,
-            allow_latest=False,
-        )
-        diagnostic_root = resolve_feature_root(diagnostic_feature_run_id)
-        diagnostic_label_dir = get_action_label_dir(
-            config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
-            intended_receiver_mode=mode,
-            root=diagnostic_root,
-        )
-        if not diagnostic_label_dir.exists():
-            raise FileNotFoundError(f"Canonical goal-next10 diagnostic labels not found at {diagnostic_label_dir}.")
-        return diagnostic_feature_run_id, str(diagnostic_label_dir)
-
-    model_diagnostic_label_dir = getattr(model_args, "diagnostic_label_dir", None)
-    if model_diagnostic_label_dir and Path(model_diagnostic_label_dir).exists():
-        return getattr(model_args, "diagnostic_feature_run_id", None), str(model_diagnostic_label_dir)
-
-    selected_label_dir = get_action_label_dir(
-        config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE,
-        intended_receiver_mode=mode,
-        root=feature_root,
-    )
-    if selected_label_dir.exists():
-        return getattr(model_args, "feature_run_id", None), str(selected_label_dir)
-    return getattr(model_args, "feature_run_id", None), None
 
 
-def validate_diagnostic_feature_run_ancestry(
-    diagnostic_feature_run_id: str,
-    selected_feature_run_id: str,
-) -> list[str]:
-    """Return the diagnostic lineage after proving it reaches the selected feature run."""
-    current = str(diagnostic_feature_run_id)
-    expected = str(selected_feature_run_id)
-    lineage: list[str] = []
-    seen: set[str] = set()
-    while current:
-        if current in seen:
-            raise ValueError(f"Feature-run ancestry contains a cycle at {current!r}.")
-        seen.add(current)
-        lineage.append(current)
-        if current == expected:
-            return lineage
-        metadata = load_feature_run_metadata(current, required=True) or {}
-        current = str(metadata.get("derived_from_feature_run_id") or "")
-    raise ValueError(
-        f"Diagnostic feature run {diagnostic_feature_run_id!r} is not equal to or derived from "
-        f"checkpoint feature run {selected_feature_run_id!r}."
-    )
 
 
-def resolve_pass_height_diagnostic_context(
-    cli_args: argparse.Namespace,
-    model_args: argparse.Namespace,
-    selected_feature_run_id: str | None,
-    *,
-    required: bool,
-) -> tuple[str | None, str | None, float | None, list[str] | None]:
-    task = str(getattr(model_args, "task", ""))
-    if not cli_args.diagnostic_feature_run_id or task not in {"pass_success", "pass_height"}:
-        return None, None, None, None
-    if not required:
-        raise ValueError(
-            "--diagnostic-feature-run-id is unused for pass_success when no pass-height evaluation is enabled."
-        )
-    if not selected_feature_run_id:
-        raise ValueError("Pass-height diagnostic evaluation requires a checkpoint feature_run_id.")
-
-    diagnostic_run_id = resolve_feature_run_id(
-        cli_args.diagnostic_feature_run_id,
-        required=True,
-        allow_latest=False,
-    )
-    lineage = validate_diagnostic_feature_run_ancestry(diagnostic_run_id, str(selected_feature_run_id))
-    metadata = load_feature_run_metadata(diagnostic_run_id, required=True) or {}
-    threshold = metadata.get("pass_height_threshold_meters")
-    if threshold is None or not math.isfinite(float(threshold)) or float(threshold) <= 0.0:
-        raise ValueError(
-            f"Diagnostic feature run {diagnostic_run_id!r} must record a positive finite "
-            "pass_height_threshold_meters value."
-        )
-
-    mode = getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE
-    if mode == "unknown":
-        mode = DEFAULT_INTENDED_RECEIVER_MODE
-    return_type = getattr(model_args, "return_type", None)
-    if not return_type:
-        raise ValueError(f"{task} checkpoint does not record return_type for diagnostic-label resolution.")
-    diagnostic_root = resolve_feature_root(diagnostic_run_id)
-    label_dir = get_action_label_dir(str(return_type), intended_receiver_mode=mode, root=diagnostic_root)
-    if not label_dir.exists():
-        raise FileNotFoundError(f"Pass-height diagnostic labels not found at {label_dir}.")
-    return diagnostic_run_id, str(label_dir), float(threshold), lineage
 
 
 def resolve_physical_xpass_context(
@@ -810,6 +689,7 @@ def write_model_evaluation_artifacts(
     outcome_metrics: pd.DataFrame | None = None,
     split_provenance: dict | None = None,
     evaluation_membership: dict | None = None,
+    evaluation_data: dict | None = None,
     pass_height_diagnostic_feature_run_id: str | None = None,
     pass_height_diagnostic_label_dir: str | None = None,
     observed_pass_height_threshold_meters: float | None = None,
@@ -839,6 +719,8 @@ def write_model_evaluation_artifacts(
         metadata["split_provenance"] = split_provenance
     if evaluation_membership is not None:
         metadata["evaluation_membership"] = evaluation_membership
+    if evaluation_data is not None:
+        metadata["evaluation_data"] = evaluation_data
     (artifact_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8")
     metric_record = {
         "evaluation_timestamp": timestamp,
@@ -898,7 +780,8 @@ def main():
     parser.add_argument("--model_id", type=str, required=True, help="task/trial, e.g., pass_success/01")
     parser.add_argument("--device", type=str, required=False, default="cuda:0")
     parser.add_argument("--feature_dir", type=str, required=False, default=None)
-    parser.add_argument("--feature-run-id", type=str, required=False, default=None)
+    parser.add_argument("--feature-run-id", type=str, required=False, default=None,
+                        help="Evaluation graphs, primary labels, and default diagnostics; checkpoint settings remain authoritative.")
     add_split_arguments(parser)
     parser.add_argument("--diagnostic-feature-run-id", type=str, required=False, default=None)
     parser.add_argument("--evaluation-output-dir", type=str, required=False, default=None)
@@ -990,47 +873,17 @@ def main():
     configuration_id = args.inference_configuration_id or mask_metadata["configuration_id"]
 
     print("\nGenerating test datasets...")
-    resolved_feature_run_id = args.feature_run_id or getattr(model_args, "feature_run_id", None)
-    if resolved_feature_run_id:
-        feature_root = resolve_feature_root(resolved_feature_run_id)
-        feature_name = Path(getattr(model_args, "feature_dir", "data/features/action_graphs")).name
-        label_name = Path(
-            getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
-        ).name
-        feature_dir = args.feature_dir or str(feature_root / feature_name)
-        label_dir = str(feature_root / label_name)
-    else:
-        feature_dir = args.feature_dir or getattr(model_args, "feature_dir", "data/features/action_graphs")
-        label_dir = getattr(model_args, "label_dir", f"data/features/action_labels_{model_args.return_type}")
-        feature_root = Path(feature_dir).parent
-    if args.intended_receiver_mode is not None:
-        label_dir = str(get_action_label_dir(model_args.return_type, args.intended_receiver_mode,
-            root=feature_root, use_carries=bool(getattr(model_args, "use_carries", False))))
-    diagnostic_feature_run_id, diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, model_args, feature_root)
+    evaluation_data = resolve_evaluation_data(args, model_args)
+    resolved_feature_run_id = evaluation_data["feature_run_id"]
+    feature_root = Path(evaluation_data["feature_root"])
+    feature_dir, label_dir = evaluation_data["feature_dir"], evaluation_data["label_dir"]
+    diagnostic_feature_run_id = evaluation_data["diagnostic_feature_run_id"]
+    diagnostic_label_dir = evaluation_data["diagnostic_label_dir"]
+    pass_height_diagnostic_feature_run_id = evaluation_data["pass_height_diagnostic_feature_run_id"]
+    pass_height_diagnostic_label_dir = evaluation_data["pass_height_diagnostic_label_dir"]
+    observed_pass_height_threshold_meters = evaluation_data["observed_pass_height_threshold_meters"]
+    pass_height_diagnostic_lineage = evaluation_data["pass_height_diagnostic_lineage"]
     evaluated_task = str(getattr(model_args, "task", ""))
-    pass_height_diagnostics_required = bool(
-        (evaluated_task == "pass_height" and args.diagnostic_feature_run_id)
-        or (
-            evaluated_task == "pass_success"
-            and (
-                args.observed_pass_height_stratification
-                or args.weighted_pass_success_metrics
-                or args.evaluate_xpass
-                or args.evaluate_combined_success
-            )
-        )
-    )
-    (
-        pass_height_diagnostic_feature_run_id,
-        pass_height_diagnostic_label_dir,
-        observed_pass_height_threshold_meters,
-        pass_height_diagnostic_lineage,
-    ) = resolve_pass_height_diagnostic_context(
-        args,
-        model_args,
-        resolved_feature_run_id,
-        required=pass_height_diagnostics_required,
-    )
     if model_args.pass_height_threshold is None and pass_height_diagnostic_label_dir:
         height_context["evaluation_pass_height_definition"] = definition(
             observed_pass_height_threshold_meters, "diagnostic_feature_run")
@@ -1044,12 +897,11 @@ def main():
         ),
     )
     lane_survival_cache_dir = resolve_lane_survival_context(model_args, args)
-    feature_schema = infer_feature_graph_schema(feature_dir)
-    model_schema = validate_checkpoint_edge_schema(feature_schema, model_args)
-
     checkpoint_record = utils.get_model_record(args.model_id)
     evaluation_manifest, split_source, test_match_ids, evaluation_membership = prepare_evaluation_population(
-        args, checkpoint_record, resolved_feature_run_id, auxiliary_models)
+        args, checkpoint_record, resolved_feature_run_id, auxiliary_models, data_context=evaluation_data)
+    feature_schema = evaluation_data["feature_schema"]
+    model_schema = evaluation_data["model_schema"]
     exclusion_checks = evaluation_membership["checks"]
     evaluation_manifest = evaluation_manifest or {}
     print(f"Using {split_source} (manifest={evaluation_manifest.get('manifest_id')}): "
@@ -1064,11 +916,8 @@ def main():
         lane_survival_cache_dir=lane_survival_cache_dir,
         evaluation_filter=args.evaluation_filter,
     )
-    if evaluated_task in {"outcome_scoring", "outcome_conceding"} and args.diagnostic_return_type is not None:
-        diagnostic_root = resolve_feature_root(args.diagnostic_feature_run_id) if args.diagnostic_feature_run_id else feature_root
-        dataset_args["evaluation_diagnostic_label_dir"] = str(get_action_label_dir(
-            model_args.diagnostic_return_type, getattr(model_args, "intended_receiver_mode", None) or DEFAULT_INTENDED_RECEIVER_MODE,
-            root=diagnostic_root, use_carries=bool(getattr(model_args, "use_carries", False))))
+    if evaluation_data["evaluation_diagnostic_label_dir"] is not None:
+        dataset_args["evaluation_diagnostic_label_dir"] = evaluation_data["evaluation_diagnostic_label_dir"]
         dataset_args["require_goal_next10_diagnostics"] = False
     if weighted_pc_xpass_cache_dir is not None:
         dataset_args["pass_distance_cache_dir"] = weighted_pc_xpass_cache_dir
@@ -1242,6 +1091,8 @@ def main():
                 **height_export,
                 **evaluation_split_metadata(evaluation_manifest),
                 "evaluation_membership_status": evaluation_membership["status"],
+                "training_feature_run_id": evaluation_data["training_feature_run_id"],
+                "requested_feature_run_id": evaluation_data["requested_feature_run_id"],
                 "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
                 "evaluate_xpass": bool(args.evaluate_xpass),
                 "evaluate_combined_success": bool(args.evaluate_combined_success),
@@ -1276,6 +1127,7 @@ def main():
             test_metrics=test_metrics,
             outcome_metrics=outcome_metrics,
             evaluation_membership=evaluation_membership,
+            evaluation_data=evaluation_data,
             split_provenance={"manifest_id": evaluation_manifest.get("manifest_id"),
                               "universe_fingerprint": (evaluation_manifest.get("metadata") or {}).get("universe_fingerprint"),
                               "resolution_source": split_source, "test": test_split_provenance},

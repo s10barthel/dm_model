@@ -343,6 +343,12 @@ class ComparisonExport:
             self.policy.add(f"Aligned prediction export unavailable for {scene}/{component}: {exc}. Native predictions and images are retained.",
                             key=self.warning_key("invalid_predictions", component, str(exc)))
             aligned = native
+        if component == "success_intent":
+            for index, row in enumerate(native):
+                if row is not None and row.attrs.get("model_trajectory") is not None:
+                    self.metadata.setdefault("success_intent_trajectories", []).append(dict(
+                        variant_id=self.variants[index].identifier, scene_id=str(scene), frame_id=int(frame_id),
+                        **row.attrs))
         key = (str(scene), int(frame_id), component)
         if key in self.recorded:
             return aligned
@@ -492,6 +498,7 @@ def render_independent_groups(report, variant_groups, names, *, benchmark=False)
                     table = scene["tables"][0][component]
                     row = (table.loc[scene["frame"]] if scene["frame"] in table.index
                            else pd.Series(float("nan"), index=table.columns, dtype=float))
+                    row.attrs.update(table.attrs)
                     rows.append(row)
                     scene_geometries.append((index, scene.get("geometry", {})))
                     if component in names:

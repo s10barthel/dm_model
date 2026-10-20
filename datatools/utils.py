@@ -969,7 +969,7 @@ def label_intended_receivers(
         raise ValueError(f"Unsupported heuristic intended receiver mode: {intended_receiver_mode}")
 
     actions = actions.copy()
-    if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY:
+    if intended_receiver_mode in {INTENDED_RECEIVER_MODE_ORIGINAL, INTENDED_RECEIVER_MODE_ANGLE_ONLY}:
         if "pass_endpoint_definition" not in actions or not actions.pass_endpoint_definition.isin(["", PASS_DURATION]).all():
             match_ids = actions.get("stats_perform_match_id", pd.Series(dtype=str)).dropna()
             match_id = str(match_ids.iloc[0]) if len(match_ids) else None
@@ -996,6 +996,8 @@ def label_intended_receivers(
 
         receive_frame = actions.at[i, "receive_frame_id"]
         receiver = actions.at[i, "receiver_id"]
+        if actions.at[i, "action_type"] in {"pass", "shot"} and pd.isna(actions.at[i, "success"]):
+            continue
 
         if actions.at[i, "action_type"] not in ["pass", "shot"]:  # Mostly for clearances and dribbles
             actions.at[i, "intent_id"] = possessor
@@ -1030,11 +1032,11 @@ def label_intended_receivers(
         elif actions.at[i, "success"]:  # For successful passes
             actions.at[i, "intent_id"] = actions.at[i, "receiver_id"]
 
-        elif (intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY
-              or (not pd.isna(receiver) and not pd.isna(receive_frame))):  # Failed passes
+        else:  # Failed passes use a validated shared endpoint for either heuristic.
             stats["failed_passes_total"] += 1
             effective_receive_frame = (actions.at[i, "trajectory_end_frame_id"]
-                                       if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY else receive_frame)
+                                       if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY
+                                       else actions.at[i, "observed_end_frame_id"])
             if pd.isna(effective_receive_frame) or effective_receive_frame not in tracking.index:
                 stats["failed_passes_missing_endpoint"] += 1
                 continue
@@ -1063,13 +1065,8 @@ def label_intended_receivers(
                     start_y = actions.at[i, "start_y"]
                 if pd.isna(start_x) or pd.isna(start_y):
                     continue
-                if receiver != "out":
-                    end_x = receive_snapshot.get(f"{receiver}_x", actions.at[i, "end_x"])
-                    end_y = receive_snapshot.get(f"{receiver}_y", actions.at[i, "end_y"])
-                else:
-                    end_x = receive_snapshot.get("ball_x", actions.at[i, "end_x"])
-                    end_y = receive_snapshot.get("ball_y", actions.at[i, "end_y"])
-                trajectory_frame = effective_receive_frame
+                end_x = receive_snapshot.get("ball_x", np.nan)
+                end_y = receive_snapshot.get("ball_y", np.nan)
             else:
                 samples = trajectory_samples(tracking, actions.loc[i])
                 if samples is None:

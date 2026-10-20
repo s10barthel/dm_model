@@ -107,9 +107,14 @@ def refresh_match(task):
         if folder.name.endswith("_carries") or not gp.exists():
             continue
         graphs = torch.load(gp, map_location="cpu", weights_only=False)
-        if len(graphs) != len(primary):
+        from project_config import get_action_label_dir
+        labels = torch.load(get_action_label_dir(metadata["return_types"][0],
+            intended_receiver_mode=metadata["intended_receiver_modes"][0], root=source) / gp.name,
+            map_location="cpu", weights_only=False)
+        indices = labels[:, 0].long().tolist()
+        if len(graphs) != len(indices) or not set(indices).issubset(primary.index):
             raise ValueError(f"Post-action graph alignment mismatch: {gp}")
-        for pos, index in enumerate(primary.index):
+        for pos, index in enumerate(indices):
             if int(index) in invalid_post:
                 graphs[pos] = None
         artifacts[output / gp.relative_to(source)] = graphs

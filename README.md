@@ -1888,13 +1888,32 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 
 Evaluation-only overrides leave checkpoint training provenance unchanged:
 
+- `--feature-run-id <id>` selects evaluation graphs, the primary label variants required by each checkpoint, and default diagnostic labels. It is supported by ordinary evaluations, model comparisons, masks, learning curves, and direct `test.py`. Without it, each checkpoint retains its recorded input run. This does not change weights, native target definitions, or historical training membership.
+- `--diagnostic-feature-run-id <id>` remains an optional diagnostic-label override for supported tasks. It never selects input graphs. When both flags are supplied, primary data comes from `--feature-run-id` and diagnostic labels come from the diagnostic override. With only an explicit primary run, diagnostics must come from that run; archived diagnostic paths are not used as fallback. With neither flag, existing checkpoint defaults are retained.
+
+Before any evaluator starts, all requested matches are checked for the required graph and label files, and model/auxiliary graph requirements are validated. Missing artifacts stop the complete job with a consolidated error; the selected cohort is never reduced automatically. The selected data run may have a different split from the checkpoint: historical membership and held-out checks remain based on the checkpoint's records. Saved `evaluation_data` metadata records requested/resolved sources, actual paths, label definitions, and the original training feature-run ID. `--evaluation-output-dir` still selects result destinations, and pc-xPass caches remain independently selected and validated.
+
+For a historical model whose original input run is unavailable, add an available compatible run:
+
+```powershell
+python scripts/evaluate_relevant_models.py `
+  --compare `
+  --pass-intent-model-id pass_intent/pass_intent_20260617T003107_673410_04a90875 `
+  --pass-intent-model-id pass_intent/pass_intent_20260812T005214_787091_6fe83a18 `
+  --feature-run-id <compatible_run> `
+  --pc-xpass-cache-dir 'C:\dm_model\data\pc_xpass_\sportec' `
+  --season 24_25 --season-half second --filter pass --min-pass-duration 0.5
+```
+
+The selected run must provide both required label variants (`disc_0.7` and `next_10` in this example), compatible input graphs, and the requested matches. Selecting a run does not regenerate missing labels.
+
 - `--intended-receiver-mode original|angle_only|model` selects a common receiver reference; omission retains each checkpoint's resolution.
 - `--diagnostic-return-type next_3` changes the common binary goal diagnostic (default `next_10`). Supported definitions are `next_<N>` and undiscounted `disc_1` equivalents, optionally `_skip1`; continuous diagnostics are rejected. Native continuous-target metrics remain available.
 - `--filter pass` evaluates only rows with `is_pass == 1`, including when a checkpoint uses carry-inclusive artifacts. Omission retains the checkpoint's action population. The filter applies before inference to all metrics, diagnostics, exports, and bootstrap intervals; it does not alter graphs or targets. Filtered-out samples are counted separately from unusable rows.
 - `--min-pass-duration SECONDS` applies a common finite, nonnegative pass-duration filter, retaining passes with duration greater than or equal to the threshold. Zero removes the minimum; omission retains checkpoint settings. Combine it with `--filter pass` to compare passes under a shared duration threshold. Requested and effective thresholds, the filter, and selection counts are recorded in evaluation metadata and each experiment-manifest entry.
-- `--season 24_25 --season-half second` explicitly selects matchdays 18?34. Omit the half for the full season; `first` selects 1?17. Seasons can be repeated. Requested matches are never silently intersected with existing test lists. Training/validation overlap, unknown exclusion provenance, and unavailable required artifacts fail, including for participating learned auxiliaries.
+- `--season 24_25 --season-half second` explicitly selects matchdays 18?34. Omit the half for the full season; `first` selects 1?17. Seasons can be repeated. Requested matches are never silently intersected with existing test lists. Training/validation overlap and unavailable required artifacts fail, including for participating learned auxiliaries. Missing historical exclusion evidence requires the separate interactive confirmation described below.
 
-Statistical and visualization comparisons explain material limitations and ask for explicit `yes` or `no`; empty answers do not accept warnings. `--accept-comparison-warnings` accepts them for unattended execution. Warnings and acceptance are saved in run metadata. This option never bypasses statistical action-alignment or held-out exclusion errors. New evaluation overrides cannot be combined with learning-curve mode.
+Statistical and visualization comparisons explain material limitations and ask for explicit `yes` or `no`; empty answers do not accept warnings. `--accept-comparison-warnings` accepts them for unattended execution. Warnings and acceptance are saved in run metadata. This option never bypasses statistical action-alignment or held-out exclusion errors. Season, receiver-reference, diagnostic-horizon, pass-filter, and duration overrides cannot be combined with learning-curve mode. The artifact source selector `--feature-run-id` is supported; recorded training sizes, splits, and series-consistency requirements remain enforced.
 
 - Task-specific model selectors are repeatable. Without `--compare` or masks, every specified checkpoint is evaluated independently, including several checkpoints of one task and different tasks sharing a run identifier. Explicit selections replace the corresponding task's bundle entry.
 - `--compare`: compare at least two completed checkpoints of one task. Use repeatable task-specific selectors; there is no generic `--model-id`. Feature configurations, architectures, seeds, and training sizes may differ. Comparison requires identical evaluated action identities. Different targets, receiver resolution, and intent candidate membership produce warnings requiring explicit acceptance; target differences are qualified per metric. Training and validation overlap remains an error.

@@ -109,9 +109,16 @@ def rebuild_match(task):
     lineup = lineup.loc[lineup.stats_perform_match_id.eq(match_id)].copy()
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
-        reception_policy=policy_version(metadata)))
+        reception_policy=policy_version(metadata),
+        max_pass_duration=metadata.get("max_pass_duration")))
     primary = metadata["intended_receiver_modes"][0]
     canonical_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=primary, root=canonical_root))
+    canonical_labels = torch.load(get_action_label_dir(metadata["return_types"][0],
+        intended_receiver_mode=primary, root=canonical_root) / f"{match_id}.pt", map_location="cpu", weights_only=False)
+    canonical_ids = canonical_labels[:, 0].long().tolist()
+    if len(canonical_ids) != len(set(canonical_ids)) or not set(canonical_ids).issubset(canonical_actions.index):
+        raise ValueError("Canonical action/label alignment failed")
+    canonical_actions = canonical_actions.loc[canonical_ids].copy()
     match.actions = canonical_actions.copy()
     augment_match_actions_with_carries(match, segments)
     carry_actions = match.actions.loc[match.actions.spadl_type.eq("ball_carry")].copy()
@@ -136,6 +143,9 @@ def rebuild_match(task):
     expected_rows = len(base_graphs) + len(carry_ids)
     for mode in metadata["intended_receiver_modes"]:
         base_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=mode, root=canonical_root))
+        if not set(canonical_ids).issubset(base_actions.index):
+            raise ValueError("Canonical action/label alignment failed")
+        base_actions = base_actions.loc[canonical_ids].copy()
         resolved = pd.concat([base_actions, carry_actions], sort=False)
         # Sportec IDs can be numeric in base artifacts; synthetic IDs are strings.
         resolved["original_event_id"] = resolved.original_event_id.astype("string")

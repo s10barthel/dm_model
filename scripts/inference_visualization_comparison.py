@@ -247,7 +247,12 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                     pass_endpoint=getattr(args, "pass_endpoint", True),
                     compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
                 )
-                tables.append({component: pd.DataFrame([row], index=[frame]) for component, row in values.items()})
+                panel_tables = {}
+                for component, row in values.items():
+                    table = pd.DataFrame([row], index=[frame])
+                    table.attrs.update(row.attrs)
+                    panel_tables[component] = table
+                tables.append(panel_tables)
             action = subject.actions.loc[action_index]
             yield {"scene": f"{args.match_id}/action_{display_id}", "frame": frame, "tables": tables,
                    "folder": str(Path(str(args.match_id)) / str(display_id)), "suffix": "",

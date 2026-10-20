@@ -343,6 +343,7 @@ class GraphFeatureMatchConstructionTests(unittest.TestCase):
             ANY,
             "all",
             include_goals=True,
+            max_pass_duration=None,
             next_action_conditions_enabled=False,
         )
 

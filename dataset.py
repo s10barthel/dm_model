@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import torch
@@ -315,6 +316,12 @@ class ActionDataset(Dataset):
         if pass_height_threshold is not None:
             pass_height_threshold = positive_height(pass_height_threshold)
         feature_root = Path(feature_dir)
+        maximum_duration = None
+        for parent in (feature_root, *feature_root.parents):
+            metadata_path = parent / "metadata.json"
+            if metadata_path.is_file():
+                maximum_duration = json.loads(metadata_path.read_text(encoding="utf-8-sig")).get("max_pass_duration")
+                break
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
         pass_height_diagnostic_label_root = (
@@ -550,6 +557,13 @@ class ActionDataset(Dataset):
             self.selection_counts["excluded_by_filter"] = int((condition & ~pass_rows).sum())
             condition &= pass_rows
 
+        if maximum_duration is not None:
+            duration = labels[:, LABEL_INDEX["duration"]]
+            dependent = (labels[:, LABEL_INDEX["is_pass"]] == 1) | (
+                (labels[:, LABEL_INDEX["is_real"]] == 0) & ~torch.isfinite(duration))
+            eligible = ~dependent | (torch.isfinite(duration) & (duration > 0) & (duration <= maximum_duration))
+            self.selection_counts["excluded_by_endpoint_guard"] = int((condition & ~eligible).sum())
+            condition &= eligible
         if min_pass_dur > 0:
             # Remove passes with not enough durations
             duration_rows = (labels[:, LABEL_INDEX["is_pass"]] == 0) | (labels[:, 7] >= min_pass_dur)

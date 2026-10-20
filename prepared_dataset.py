@@ -231,8 +231,9 @@ class PreparedActionDataset(IterableDataset):
 
     def _source_signatures(self, match_id):
         paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
-        if self.options.get("task") == "success_intent":
-            paths.append(self.feature_dir.parent / "metadata.json")
+        metadata_path = self.feature_dir.parent / "metadata.json"
+        if metadata_path.is_file() or self.options.get("task") == "success_intent":
+            paths.append(metadata_path)
         for key, directory in self.options.items():
             if not key.endswith("_dir") or directory is None:
                 continue

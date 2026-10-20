@@ -20,6 +20,7 @@ from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled,
 from models.evaluation_context import add_evaluation_arguments, evaluation_selection
 from models.evaluation_membership import (collect_evaluation_membership, confirm_evaluation_membership,
     membership_for_models, EvaluationMembershipCancelled)
+from models.evaluation_data import preflight_evaluation_data
 from models.utils import load_bundle_record
 from models.outcome_bootstrap import add_outcome_bootstrap_arguments, nonnegative_integer
 from models.inference_masks import (
@@ -92,7 +93,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for task in SUPPORTED_EVALUATION_TASKS:
         parser.add_argument(f"--{task.replace('_', '-')}-model-id", action=RepeatableModelId,
                             help="Task-qualified checkpoint ID; repeat to evaluate more checkpoints.")
-    parser.add_argument("--diagnostic-feature-run-id")
+    parser.add_argument("--feature-run-id", help="Evaluation graphs, primary labels, and default diagnostics for every selected checkpoint.")
+    parser.add_argument("--diagnostic-feature-run-id", help="Optional diagnostic-label source override; does not select input graphs.")
     parser.add_argument("--evaluation-output-dir", default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--weighted-pass-success-metrics", action="store_true")
@@ -247,6 +249,8 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    if getattr(args, "feature_run_id", None):
+        command.extend(["--feature-run-id", args.feature_run_id])
     if getattr(args, "evaluation_filter", None) is not None:
         command.extend(["--filter", args.evaluation_filter])
     for name in ("intended_receiver_mode", "diagnostic_return_type", "min_pass_duration", "season_half"):
@@ -384,6 +388,8 @@ def run_learning_curve(args: argparse.Namespace) -> None:
             skipped[task] = str(exc)
     if not series:
         raise ValueError(f"No comparable checkpoint series found; skipped: {skipped}")
+    evaluation_data = preflight_evaluation_entries(args, [record for records in series.values() for record in records],
+                                                 learning_curve=True)
     resolve_pc_xpass_cache(args, requires_lane_survival=any(
         ((record.get("comparison_config") or {}).get("feature_signature") or {}).get("lane_survival", False)
         for records in series.values() for record in records
@@ -396,7 +402,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
               "classification_threshold": args.classification_threshold,
               "f1_outcome_threshold": args.f1_outcome_threshold,
               "pc_xpass_id": args.pc_xpass_id, "pc_xpass_cache_dir": args.pc_xpass_cache_dir,
-              "series": series, "skipped": skipped}
+              "evaluation_data": evaluation_data, "series": series, "skipped": skipped}
     manifest_path = output_root / "experiment_manifest.json"
     manifest_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     for task, records in series.items():
@@ -407,8 +413,12 @@ def run_learning_curve(args: argparse.Namespace) -> None:
                        "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
                        "--learning-curve-rows"]
             add_pc_xpass_options(command, args)
+            if args.feature_run_id:
+                command.extend(["--feature-run-id", args.feature_run_id])
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
                 command.extend(["--diagnostic-feature-run-id", args.diagnostic_feature_run_id])
+                if task == "pass_success" and not args.no_observed_pass_height_stratification:
+                    command.append("--observed-pass-height-stratification")
             if args.pass_height_threshold is not None:
                 command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
             if task in {"pass_success", "pass_height"}:
@@ -476,6 +486,7 @@ def _entry_name(model_id: str) -> str:
 
 def evaluation_options(args: argparse.Namespace) -> dict:
     return {
+        "feature_run_id": args.feature_run_id,
         "filter": getattr(args, "evaluation_filter", None),
         "min_pass_duration": args.min_pass_duration,
         "weighted_pass_success_metrics": bool(args.weighted_pass_success_metrics),
@@ -512,6 +523,22 @@ def _participating_entry_tasks(args: argparse.Namespace, task: str) -> set[str]:
 def _write_manifest(path: Path, report: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+
+
+def preflight_evaluation_entries(args, entries, auxiliaries=(), *, learning_curve=False):
+    requests = []
+    for entry in entries:
+        task = entry["task"]
+        options = vars(args).copy()
+        if not task_uses_diagnostic_feature_run(args, task):
+            options["diagnostic_feature_run_id"] = None
+        options["observed_pass_height_stratification"] = bool(
+            task == "pass_success" and not args.no_observed_pass_height_stratification
+            and (not learning_curve or options.get("diagnostic_feature_run_id")))
+        requests.append({"model_id": entry["model_id"], "match_ids": entry["test_match_ids"],
+                         "model_args": (entry.get("checkpoint_record") or {}).get("args"),
+                         "cli_args": argparse.Namespace(**options), "auxiliaries": list(auxiliaries)})
+    return preflight_evaluation_data(requests)
 
 
 def _main(args, policy) -> None:
@@ -551,9 +578,11 @@ def _main(args, policy) -> None:
         if args.intended_receiver_mode is not None:
             entry["target_definitions"]["intended_receiver_mode"] = args.intended_receiver_mode
     auxiliary_ids = [getattr(args, "xpass_" + role + "_model_id", None) for role in ("pass_height", "pass_intent")]
+    auxiliary_records = []
     for model_id in filter(None, auxiliary_ids):
         auxiliary = model_comparison.checkpoint(model_id)
         auxiliary["checkpoint_record"] = {"model_id": model_id, **auxiliary["checkpoint_record"]}
+        auxiliary_records.append(auxiliary["checkpoint_record"])
         for entry in entries:
             record_cohorts.append((auxiliary["checkpoint_record"], entry["test_match_ids"]))
     evaluation_membership = collect_evaluation_membership(record_cohorts)
@@ -568,6 +597,7 @@ def _main(args, policy) -> None:
             names = configuration["scoped_masks"].get(entry["task"], [])
             if names:
                 resolve_model_masks(entry["checkpoint_record"]["args"], names)
+    evaluation_data = preflight_evaluation_entries(args, entries, auxiliary_records)
     resolve_pc_xpass_cache(args, requires_lane_survival=any(
         entry["checkpoint_record"]["args"].get("lane_survival", False) for entry in entries
     ))
@@ -603,6 +633,7 @@ def _main(args, policy) -> None:
         "comparison_confidence_level": 0.95,
         "comparison_interval_scope": "pointwise",
         "evaluation_membership": evaluation_membership,
+        "evaluation_data": evaluation_data,
         "evaluation_context": {"intended_receiver_mode": args.intended_receiver_mode,
             "filter": args.evaluation_filter,
             "diagnostic_target_family": "goal", "diagnostic_return_type": args.diagnostic_return_type or "next_10",
@@ -641,6 +672,7 @@ def _main(args, policy) -> None:
                       "output_dir": str(output_dir), "label": variant["id"] if mask_mode else model_id}
             record["evaluation_membership"] = membership_for_models(
                 evaluation_membership, [model_id, *filter(None, auxiliary_ids)], entry["test_match_ids"])
+            record["evaluation_data"] = evaluation_data.get(model_id)
             command = [sys.executable, "test.py", "--model_id", model_id, "--device", args.device,
                        "--evaluation-output-dir", str(output_dir), "--evaluation-timestamp", timestamp]
             if record["evaluation_membership"]["status"] == "unverified":
@@ -665,6 +697,7 @@ def _main(args, policy) -> None:
             record["inference_masks"] = artifact_metadata.get("inference_masks", {})
             record["evaluation_context"] = artifact_metadata.get("evaluation_context", {})
             record["evaluation_membership"] = artifact_metadata.get("evaluation_membership", record["evaluation_membership"])
+            record["evaluation_data"] = artifact_metadata.get("evaluation_data", record["evaluation_data"])
             records.append(record)
             report["entries"].append(record)
             _write_manifest(manifest_path, report)

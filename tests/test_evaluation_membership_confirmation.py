@@ -180,6 +180,7 @@ def test_wrapper_confirms_once_and_preserves_export_qualification(monkeypatch, t
     ])
     monkeypatch.setattr(wrapper, "parse_args", lambda: args)
     monkeypatch.setattr(model_comparison, "checkpoint", wrapper_checkpoint)
+    monkeypatch.setattr(wrapper, "preflight_evaluation_data", lambda requests: {})
     monkeypatch.setattr(wrapper, "evaluation_selection", lambda args: ["eval"])
     monkeypatch.setattr(evaluation, "evaluation_selection", lambda args: ["eval"])
     prompt = interactive(monkeypatch, ["yes"])
@@ -223,6 +224,7 @@ def test_wrapper_confirms_once_and_preserves_export_qualification(monkeypatch, t
 
 
 def test_wrapper_refusal_and_general_acceptance_flag_do_not_launch_children(monkeypatch, tmp_path):
+    monkeypatch.setattr(wrapper, "preflight_evaluation_data", lambda requests: {})
     args = wrapper.parse_args(["--pass-intent-model-id", "pass_intent/legacy", "--season", "24_25",
                                "--evaluation-output-dir", str(tmp_path), "--accept-comparison-warnings"])
     monkeypatch.setattr(wrapper, "parse_args", lambda: args)

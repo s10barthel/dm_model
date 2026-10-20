@@ -198,8 +198,7 @@ def test_cli_allows_combination_but_rejects_unrelated_flags(monkeypatch):
     with pytest.raises(SystemExit):
         parse_args()
     monkeypatch.setattr(sys, 'argv', base + ['--refresh-trajectory'])
-    with pytest.raises(SystemExit):
-        parse_args()
+    assert parse_args().refresh_trajectory
 
 
 def test_unknown_outcome_preserves_launch_without_manufacturing_failure():
@@ -255,7 +254,7 @@ def test_real_refresh_preserves_temporal_model_targets_and_combination_order(tmp
         assert torch.load(output / 'post_action_graphs/m.pt', weights_only=False)[0] is None
         return dict(segments=0, artifacts={})
     monkeypatch.setattr(rc, 'rebuild_match', rebuild)
-    rf.refresh_match((str(source), str(output), dict(intended_receiver_modes=['original']),
+    rf.refresh_match((str(source), str(output), dict(intended_receiver_modes=['original'], return_types=['next_10']),
                       'm', True, asdict(CarryPolicy()), 1))
     for mode in ['model', 'angle_only']:
         result = torch.load(output / f'action_labels_intent_train_next_10_{mode}/m.pt', weights_only=False)

@@ -96,7 +96,7 @@ def test_period_boundary_restart_overlap_and_known_receiver():
 
 
 @pytest.mark.parametrize("start,end", [(10, 10), (12, 10), (None, 12), (10, None), (9, 12), (10, 15)])
-def test_invalid_legacy_reception_does_not_override_official_live_boundary(start, end):
+def test_invalid_legacy_reception_does_not_manufacture_endpoint(start, end):
     match = Match.__new__(Match)
     match.tracking = tracking()
     match.fps = 25
@@ -104,17 +104,14 @@ def test_invalid_legacy_reception_does_not_override_official_live_boundary(start
                                      receiver_id="out", object_id="home_1", start_x=0., start_y=0., end_x=5., end_y=0.)])
     assert all(np.isnan(v) for v in match.pass_height_labels(start, end))
     summary = graph_feature.summarize_ball_trajectory(match, 0)
-    if start in (10, 12):
-        assert summary is not None  # Official last-live frame 13 ends the segment.
-    else:
-        assert summary is None
+    assert summary is None  # A live boundary alone is not a pass endpoint.
 
 
 def test_valid_height_and_trajectory_unchanged():
     match = Match.__new__(Match)
     match.tracking = tracking()
     match.fps = 25
-    match.actions = pd.DataFrame([dict(frame_id=10, receive_frame_id=13, period_id=1, receiver_id="home_2", object_id="home_1")])
+    match.actions = pd.DataFrame([dict(frame_id=10, receive_frame_id=13, period_id=1, receiver_id="home_2", object_id="home_1", endpoint_source="kpi_csv")])
     assert match.pass_height_labels(10, 13) == (3., 1.)
     assert np.isfinite(graph_feature.summarize_ball_trajectory(match, 0)).all()
 

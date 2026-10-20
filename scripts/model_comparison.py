@@ -314,6 +314,7 @@ def write_report(records: list[dict], output_dir: Path, *, resamples: int, seed:
     membership["status"] = evaluation_membership_status(records)
     report = {"task": task, "variants": records, **policy.metadata(), "reference_differences": messages,
               "evaluation_membership": membership,
+              "evaluation_data": {record["model_id"]: record.get("evaluation_data") for record in records},
               "identity_columns": comparison_identity_columns(frames),
               "soft_target_tolerance": {"rtol": SOFT_TARGET_RTOL, "atol": SOFT_TARGET_ATOL},
               "example_count": len(frames[0]), "contributing_match_ids": sorted(frames[0].match_id.unique().tolist()),

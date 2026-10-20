@@ -1,65 +1,81 @@
-"""Official-event endpoints shared by pass labels, trajectories and visuals.
-
-Contact timing uses raw event differences anchored to the synchronized launch.
-It deliberately does not use synchronized contact frames or infer contacts from
-ball motion. These endpoints do not replace possession/reception annotations.
-"""
+"""Synchronized official pass endpoints shared by features, labels and visuals."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from bisect import bisect_right
+from itertools import islice
+import argparse
 import xml.etree.ElementTree as ET
-
 import numpy as np
 import pandas as pd
 
 PASS_DURATION_KEY = "pass_duration_definition"
-PASS_DURATION = "official_event_observed_end_v1"
+PASS_DURATION = "synchronized_official_pass_end_v2"
 ANGLE_ONLY_KEY = "angle_only_definition"
-ANGLE_ONLY = "official_event_ball_direction_1s_v1"
+ANGLE_ONLY = "synchronized_official_ball_direction_1s_v2"
+ORIGINAL_KEY = "original_receiver_definition"
+ORIGINAL = "synchronized_official_distance_angle_v2"
+MAX_DURATION_KEY = "max_pass_duration"
 TRAJECTORY_WINDOW_SECONDS = 1.0
 ENDPOINT_COLUMNS = ("observed_end_frame_id", "trajectory_end_frame_id", "pass_endpoint_source",
-                    "pass_endpoint_event_id", "pass_endpoint_definition", "pass_duration")
-CONTACT_TAGS = {"Play", "ShotAtGoal", "OtherBallAction", "BallClaiming", "TacklingGame",
-                "Foul", "Offside", "FinalWhistle", "BallOut", "BallOutOfPlay", "OutOfPlay",
-                "KickOff", "ThrowIn", "GoalKick", "CornerKick", "FreeKick", "Penalty", "RefereeBall"}
+    "pass_endpoint_event_id", "pass_endpoint_definition", "pass_duration", "pass_endpoint_reason",
+    "candidate_end_frame_id", "candidate_pass_duration")
+PHYSICAL_TAGS = {"Play", "ShotAtGoal", "OtherBallAction", "BallClaiming", "TacklingGame"}
+STOPPAGE_TAGS = {"Foul", "Offside", "FinalWhistle"}
+OUT_TAGS = {"BallOut", "BallOutOfPlay", "OutOfPlay"}
+RESTART_TAGS = {"KickOff", "ThrowIn", "GoalKick", "CornerKick", "FreeKick", "Penalty", "RefereeBall"}
+CONTACT_TAGS = PHYSICAL_TAGS | STOPPAGE_TAGS | OUT_TAGS | RESTART_TAGS
 
 
 def event_key(value):
-    if pd.isna(value):
-        return ""
-    return str(value).removesuffix(".0")
+    return "" if pd.isna(value) else str(value).removesuffix(".0")
 
 
-def utc(value):
-    return pd.to_datetime(value, utc=True, errors="coerce")
+def positive_duration(value):
+    try:
+        result = float(value)
+    except (ValueError, TypeError) as exc:
+        raise argparse.ArgumentTypeError("maximum pass duration must be positive and finite") from exc
+    if not np.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("maximum pass duration must be positive and finite")
+    return result
+
+
+@lru_cache(maxsize=1)
+def _match_files():
+    from scripts.preprocess_sportec import discover_match_files
+    return {match.match_id: match for match in discover_match_files()}
 
 
 def load_official_events(match_id):
-    """Read raw contact events once per match; synced controls retain raw times."""
-    from project_config import RAW_SEASON_ROOTS, CONTROL_EVENTS_SYNCED_DIR
+    """Join active raw events to KPI frames, including events omitted by carry controls.
 
+    No interpolated/calculated/raw-time frames are accepted. KPI frame numbers
+    are raw tracking frame IDs retained by processed tracking.
+    """
     if not match_id or not str(match_id).startswith("DFL-MAT-"):
         return pd.DataFrame()
-    for root in RAW_SEASON_ROOTS.values():
-        path = root / "event_data" / f"{match_id}.xml"
-        if not path.is_file():
+    from scripts.preprocess_sportec import load_kpi_merged_table
+    files = _match_files().get(str(match_id))
+    if files is None or files.kpi_path is None:
+        return pd.DataFrame()
+    kpi = load_kpi_merged_table(files).copy()
+    kpi["_key"] = kpi.EVENT_ID.map(event_key)
+    kpi = kpi.drop_duplicates("_key").set_index("_key")
+    events = ET.parse(files.event_path).getroot().findall(".//Event")
+    deleted = {event_key(node.attrib.get("EventId", event.attrib.get("EventId"))) for event in events
+               for node in event if node.tag == "Delete"}
+    records = []
+    for event in events:
+        node = next((node for node in event if node.tag != "Qualifier"), None)
+        key = event_key(event.attrib.get("EventId"))
+        if node is None or node.tag not in CONTACT_TAGS or key in deleted:
             continue
-        events = ET.parse(path).getroot().findall(".//Event")
-        deleted = {event_key(node.attrib.get("EventId", event.attrib.get("EventId"))) for event in events
-                   for node in event if node.tag == "Delete"}
-        records = []
-        for event in events:
-            node = next((node for node in event if node.tag != "Qualifier"), None)
-            key = event_key(event.attrib.get("EventId"))
-            if node is None or node.tag not in CONTACT_TAGS or key in deleted:
-                continue
-            records.append(dict(event_id=key, utc_timestamp=utc(event.attrib.get("EventTime")),
-                                raw_tag=node.tag))
-        return pd.DataFrame(records)
-    path = CONTROL_EVENTS_SYNCED_DIR / f"{match_id}.parquet"
-    if path.is_file():
-        return pd.read_parquet(path)
-    raise FileNotFoundError(f"Raw Sportec events/control timestamps are required for pass endpoints: {match_id}")
+        row = kpi.loc[key] if key in kpi.index else pd.Series(dtype=object)
+        records.append(dict(event_id=key, raw_tag=node.tag, frame_id=row.get("FRAME_NUMBER"),
+                            reception_frame_id=row.get("RECFRM"), frame_source="kpi"))
+    return pd.DataFrame(records)
 
 
 @dataclass(frozen=True)
@@ -68,119 +84,139 @@ class PassEndpoint:
     trajectory: int | None = None
     source: str = "unavailable"
     event_id: str = ""
-    duration: float = 0.0
+    duration: float = np.nan
+    reason: str = "missing_official_endpoint"
+    candidate: int | None = None
+    candidate_duration: float = np.nan
 
 
 class PassEndpointResolver:
-    def __init__(self, tracking, fps=25, events=None):
+    def __init__(self, tracking, fps=25, events=None, max_pass_duration=None):
         self.tracking, self.fps = tracking, fps
-        self.period_ends = {}
+        self.max_pass_duration = None if max_pass_duration is None else positive_duration(max_pass_duration)
+        self.period = tracking.get("period_id", pd.Series(0, index=tracking.index))
+        self.period_ends = {p: int(rows.index.max()) for p, rows in tracking.groupby(self.period)}
         self.episode_ends = {}
-        period = tracking.get("period_id", pd.Series(0, index=tracking.index))
-        for key, rows in tracking.groupby(period):
-            self.period_ends[key] = int(rows.index.max())
         if {"episode_id", "ball_state"}.issubset(tracking):
             live = tracking.loc[tracking.ball_state.eq("alive")]
-            for (period_id, episode), rows in live.groupby([period.loc[live.index], "episode_id"]):
-                self.episode_ends[(period_id, episode)] = int(rows.index.max())
+            self.episode_ends = {(p, e): int(rows.index.max())
+                for (p, e), rows in live.groupby([self.period.loc[live.index], "episode_id"])}
         self.events = (events if events is not None else pd.DataFrame()).copy()
-        self.event_times = {}
-        self.following = {}
-        if not self.events.empty:
-            key_column = "event_id" if "event_id" in self.events else "original_event_id"
-            self.events["_key"] = self.events[key_column].map(event_key)
-            self.events["_time"] = utc(self.events.utc_timestamp)
-            if "raw_tag" in self.events:
-                self.events = self.events[self.events.raw_tag.isin(CONTACT_TAGS)]
-            self.events = self.events.dropna(subset=["_time"]).drop_duplicates("_key").sort_values("_time")
-            self.event_times = dict(zip(self.events._key, self.events._time))
-            # Same-time annotations cannot end the flight. Each launch maps to
-            # the first strictly later official event, regardless of KPI order.
-            times = self.events._time.array
-            for key, time in self.event_times.items():
-                position = times.searchsorted(time, side="right")
-                if position < len(times):
-                    row = self.events.iloc[position]
-                    self.following[key] = (row._time, row._key)
+        self.receptions, self.ordered, self.event_frames, self.restarts = {}, {}, {}, {}
+        if self.events.empty:
+            return
+        key_column = "event_id" if "event_id" in self.events else "original_event_id"
+        self.events["_key"] = self.events[key_column].map(event_key)
+        if "frame_source" in self.events:
+            self.events = self.events.loc[self.events.frame_source.eq("kpi")].copy()
+        if "reception_frame_id" in self.events:
+            self.receptions = dict(zip(self.events._key, self.events.reception_frame_id))
+        self.events["frame_id"] = pd.to_numeric(self.events.get("frame_id"), errors="coerce")
+        self.events = self.events.loc[self.events.frame_id.isin(tracking.index)].copy()
+        self.events = self.events.loc[self.events.raw_tag.isin(CONTACT_TAGS)]
+        self.events = self.events.drop_duplicates("_key").sort_values(["frame_id", "_key"])
+        self.events["_period"] = self.events.frame_id.map(self.period)
+        for period, rows in self.events.groupby("_period"):
+            entries = list(rows[["frame_id", "raw_tag", "_key"]].itertuples(index=False, name=None))
+            self.ordered[period] = entries
+            self.event_frames[period] = [int(f) for f, _, _ in entries]
+            self.restarts[period] = [(int(f), tag) for f, tag, _ in entries if tag in RESTART_TAGS]
 
     def resolve(self, action):
         frame = action.get("frame_id")
         if pd.isna(frame) or frame not in self.tracking.index:
-            return PassEndpoint()
+            return PassEndpoint(reason="missing_launch_tracking")
         frame = int(frame)
         snapshot = self.tracking.loc[frame]
-        period = snapshot.get("period_id", 0)
+        period = self.period.at[frame]
         if pd.notna(action.get("period_id")) and action.get("period_id") != period:
-            return PassEndpoint()
-        boundary = self.period_ends.get(period, frame)
-        boundary_source = "period_end"
-        episode_end = self.episode_ends.get((period, snapshot.get("episode_id")))
-        if episode_end is not None and episode_end >= frame:
-            boundary = min(boundary, episode_end)
-            boundary_source = "episode_last_live"
-        elif "ball_state" in self.tracking:
-            later = self.tracking.loc[frame:boundary]
-            dead = later.index[~later.ball_state.eq("alive")]
-            if len(dead):
-                live = later.index[(later.index < dead[0]) & later.ball_state.eq("alive")]
-                boundary = int(live[-1]) if len(live) else frame
-                boundary_source = "episode_last_live"
+            return PassEndpoint(reason="launch_period_mismatch")
+        if "ball_state" in snapshot and pd.isna(snapshot.ball_state):
+            return PassEndpoint(reason="missing_launch_state")
+        if "ball_state" in snapshot and snapshot.ball_state != "alive":
+            return PassEndpoint(reason="dead_launch")
+        boundary = self.episode_ends.get((period, snapshot.get("episode_id")), self.period_ends[period])
+        position = self.tracking.index.searchsorted(boundary, side="right")
+        stop_boundary = boundary
+        if position < len(self.tracking):
+            following = self.tracking.index[position]
+            if self.period.at[following] == period:
+                stop_boundary = int(following)
+        key = event_key(action.get("original_event_id"))
+        candidates = []
 
-        end, source, contact_id = None, "unavailable", ""
-        reception = action.get("receive_frame_id")
-        success = pd.notna(action.get("success")) and bool(action.get("success"))
-        provenance = action.get("endpoint_source")
-        official = pd.isna(provenance) or provenance in {"kpi_csv", "reception", "kpi_xml"}
-        if success and official and pd.notna(reception) and reception >= frame:
-            if reception in self.tracking.index and self.tracking.loc[reception].get("period_id", 0) == period:
-                end, source = int(reception), "kpi_reception"
-        if end is None:
-            key = event_key(action.get("original_event_id"))
-            next_event = self.following.get(key)
-            if next_event is not None:
-                timestamp, contact_id = next_event
-                delta = (timestamp - self.event_times[key]).total_seconds()
-                end, source = frame + int(round(delta * self.fps)), "subsequent_event"
-        if end is None:
-            # An official episode/period boundary is itself an observed end.
-            # Without live-state metadata a missing event remains unavailable.
-            if "ball_state" not in self.tracking:
-                return PassEndpoint()
-            end, source = boundary, boundary_source
-        if end > boundary:
-            end, source = boundary, boundary_source
+        def valid(end, limit=boundary):
+            return (pd.notna(end) and end in self.tracking.index and frame < end <= limit
+                    and self.period.at[end] == period)
+
+        reception = self.receptions.get(key)
+        # Explicit official provenance also supports non-Sportec/injected actions.
+        if pd.isna(reception) and action.get("endpoint_source") in {"kpi_csv", "reception", "kpi_xml"}:
+            reception = action.get("receive_frame_id")
+        if valid(reception):
+            candidates.append((int(reception), 0, "official_reception", key))
+        entries = self.ordered.get(period, ())
+        begin = bisect_right(self.event_frames.get(period, ()), frame)
+        restart_entry = next(((f, tag) for f, tag in self.restarts.get(period, ()) if f > frame), None)
+        restart = restart_entry[0] if restart_entry else None
+        if restart is not None:
+            candidates = [c for c in candidates if c[0] < restart]
+        for end, tag, eid in islice(entries, begin, None):
+            if restart is not None and end >= restart:
+                break
+            limit = stop_boundary if tag in STOPPAGE_TAGS | OUT_TAGS else boundary
+            if valid(end, limit):
+                source = "official_stoppage" if tag in STOPPAGE_TAGS else "official_out" if tag in OUT_TAGS else "official_contact"
+                candidates.append((end, 1, source, eid))
+                break
+        out_restart = restart_entry[1] if restart_entry else None
+        known_out = (isinstance(action.get("receiver_id"), str) and action.get("receiver_id") == "out" and
+            (out_restart in {"ThrowIn", "GoalKick", "CornerKick"}
+             or action.get("next_type") in {"throw_in", "goalkick", "goal_kick", "corner_short", "corner_crossed"}))
+        if known_out and boundary > frame and (restart is None or boundary < restart):
+            candidates.append((boundary, 2, "known_out_boundary", ""))
+        if not candidates:
+            return PassEndpoint()
+        end, _, source, event_id = min(candidates)
+        duration = float((end - frame) / self.fps)
+        if self.max_pass_duration is not None and duration > self.max_pass_duration:
+            return PassEndpoint(source=source, event_id=event_id, reason="duration_limit_exceeded",
+                                candidate=end, candidate_duration=duration)
         capped = min(end, frame + max(int(round(self.fps * TRAJECTORY_WINDOW_SECONDS)), 1))
-        duration = (end - frame) / self.fps
-        return PassEndpoint(end, capped, source, contact_id, max(float(duration), 0.0))
+        return PassEndpoint(end, capped, source, event_id, duration, "", end, duration)
 
     def annotate(self, actions):
         result = actions.copy()
         for column in ENDPOINT_COLUMNS:
-            result[column] = np.nan if column.endswith("frame_id") or column == "pass_duration" else ""
+            result[column] = np.nan if column.endswith("frame_id") or column.endswith("duration") else ""
         mask = result.get("action_type", pd.Series("", index=result.index)).eq("pass")
         mask |= result.get("spadl_type", pd.Series("", index=result.index)).isin(["pass", "cross"])
         for index, action in result.loc[mask].iterrows():
-            endpoint = self.resolve(action)
-            result.loc[index, list(ENDPOINT_COLUMNS)] = [endpoint.observed, endpoint.trajectory, endpoint.source,
-                                                        endpoint.event_id, PASS_DURATION, endpoint.duration]
+            end = self.resolve(action)
+            result.loc[index, list(ENDPOINT_COLUMNS)] = [end.observed, end.trajectory, end.source,
+                end.event_id, PASS_DURATION, end.duration, end.reason, end.candidate, end.candidate_duration]
+        result[MAX_DURATION_KEY] = self.max_pass_duration
         return result
 
 
 def ensure_pass_endpoints(match, *, annotate=True):
+    maximum = getattr(match, MAX_DURATION_KEY, None)
     resolver = getattr(match, "_pass_endpoint_resolver", None)
-    if resolver is None:
+    if resolver is None or resolver.max_pass_duration != maximum:
         events = getattr(match, "official_pass_events", None)
         if events is None:
             events = load_official_events(getattr(match, "match_id", None))
-        resolver = match._pass_endpoint_resolver = PassEndpointResolver(match.tracking, match.fps, events)
+        resolver = match._pass_endpoint_resolver = PassEndpointResolver(match.tracking, match.fps, events, maximum)
     definitions = match.actions.get("pass_endpoint_definition")
-    if annotate and (definitions is None or not definitions.isin(["", PASS_DURATION]).all()):
+    limits = match.actions.get(MAX_DURATION_KEY)
+    current_limit = limits is not None and (limits.isna().all() if maximum is None else limits.eq(maximum).all())
+    if annotate and (definitions is None or not definitions.isin(["", PASS_DURATION]).all() or not current_limit):
         match.actions = resolver.annotate(match.actions)
     return resolver
 
 
 def trajectory_samples(tracking, action):
-    """Finite samples strictly inside the resolved segment; no coordinate fallback."""
+    """Require finite segment endpoints; allow missing interior samples."""
     start, end = action.get("frame_id"), action.get("trajectory_end_frame_id")
     if pd.isna(start) or pd.isna(end) or end <= start or start not in tracking.index or end not in tracking.index:
         return None
@@ -190,7 +226,7 @@ def trajectory_samples(tracking, action):
     if "ball_z" not in segment:
         segment["ball_z"] = 0.0
     finite = np.isfinite(segment[["ball_x", "ball_y", "ball_z"]].to_numpy(dtype=float)).all(axis=1)
-    segment = segment.loc[finite]
-    if len(segment) < 2:
+    if not finite[0] or not finite[-1]:
         return None
-    return segment
+    segment = segment.loc[finite]
+    return segment if len(segment) >= 2 else None

@@ -33,45 +33,46 @@ def fixture(*, contact=.76, tag="OtherBallAction", success=False, reception=170,
     time = pd.Timestamp("2023-08-18T18:00:00Z")
     events = pd.DataFrame(dict(event_id=["launch", "same_time_annotation", "contact"],
                                utc_timestamp=[time, time, time + pd.Timedelta(seconds=contact)],
-                               raw_tag=["Play", "Play", tag], frame_id=[100, 100, 99999]))
+                               raw_tag=["Play", "Play", tag], frame_id=[100, 100, 100 + round(contact * 25)]))
     return SimpleNamespace(actions=actions, tracking=tracking, fps=25, official_pass_events=events)
 
 
 @pytest.mark.parametrize("tag", ["OtherBallAction", "BallClaiming", "TacklingGame", "Play", "ShotAtGoal", "Foul", "Offside"])
-def test_failed_pass_uses_raw_contact_delta_despite_bad_kpi_frame(tag):
+def test_failed_pass_uses_synchronized_contact_instead_of_raw_delta(tag):
     match = fixture(tag=tag)
+    match.official_pass_events.loc[2, "utc_timestamp"] += pd.Timedelta(seconds=15)
     ensure_pass_endpoints(match)
     action = match.actions.loc[7]
     assert action.observed_end_frame_id == action.trajectory_end_frame_id == 119
     assert action.pass_endpoint_event_id == "contact"
-    assert action.pass_endpoint_source == "subsequent_event"
+    assert action.pass_endpoint_source == ("official_stoppage" if tag in {"Foul", "Offside"} else "official_contact")
     assert action.pass_duration == .76
     assert action.receive_frame_id == 170
     assert action.pass_endpoint_definition == PASS_DURATION
 
 
-def test_success_uses_kpi_even_when_raw_next_event_is_earlier():
-    match = fixture(success=True, reception=150, source="kpi_csv")
+def test_success_uses_earliest_official_endpoint():
+    match = fixture(success=True, reception=150, source="kpi_csv", contact=3)
     ensure_pass_endpoints(match)
     assert match.actions.at[7, "observed_end_frame_id"] == 150
     assert match.actions.at[7, "trajectory_end_frame_id"] == 125
     assert match.actions.at[7, "pass_duration"] == 2
-    assert match.actions.at[7, "pass_endpoint_source"] == "kpi_reception"
+    assert match.actions.at[7, "pass_endpoint_source"] == "official_reception"
     match.actions.at[7, "endpoint_source"] = "elastic"
-    assert match._pass_endpoint_resolver.resolve(match.actions.loc[7]).observed == 119
+    assert match._pass_endpoint_resolver.resolve(match.actions.loc[7]).observed == 175
 
 
 @pytest.mark.parametrize("period_boundary", [False, True])
-def test_episode_last_live_and_period_boundary_bound_all_endpoints(period_boundary):
+def test_invalid_endpoint_does_not_fall_back_to_arbitrary_boundary(period_boundary):
     match = fixture(contact=3, success=period_boundary, source="kpi_csv")
     if period_boundary:
         match.tracking.loc[140:, "period_id"] = 2
     else:
         match.tracking.loc[140:, ["ball_state", "episode_id"]] = ["dead", 0]
     ensure_pass_endpoints(match)
-    assert match.actions.at[7, "observed_end_frame_id"] == 139
-    assert match.actions.at[7, "trajectory_end_frame_id"] == 125
-    assert match.actions.at[7, "pass_duration"] == 1.56
+    assert pd.isna(match.actions.at[7, "observed_end_frame_id"])
+    assert pd.isna(match.actions.at[7, "trajectory_end_frame_id"])
+    assert pd.isna(match.actions.at[7, "pass_duration"])
 
 
 def test_one_frame_segment_arrow_and_endpoint_share_tracking_inputs():
@@ -137,7 +138,10 @@ def test_raw_xml_filters_administration_deletions_and_same_time_annotations(tmp_
       <Event EventId="deletion" EventTime="2023-01-01T00:00:01Z"><Delete EventId="deleted" /></Event>
       <Event EventId="contact" EventTime="2023-01-01T00:00:00.04Z"><OtherBallAction /></Event>
       </Root>''')
-    with patch("project_config.RAW_SEASON_ROOTS", {"test": tmp_path}):
+    files = SimpleNamespace(event_path=directory / "DFL-MAT-test.xml", kpi_path=directory / "kpi.csv")
+    kpi = pd.DataFrame(dict(EVENT_ID=["launch", "annotation", "admin", "deleted", "contact"],
+                            FRAME_NUMBER=[100, 100, 100, 100, 101], RECFRM=[None]*5))
+    with patch("datatools.pass_trajectory._match_files", return_value={"DFL-MAT-test": files}), patch("scripts.preprocess_sportec.load_kpi_merged_table", return_value=kpi):
         events = load_official_events("DFL-MAT-test")
     match = fixture()
     endpoint = PassEndpointResolver(match.tracking, 25, events).resolve(match.actions.loc[7])
@@ -149,7 +153,7 @@ def test_raw_xml_filters_administration_deletions_and_same_time_annotations(tmp_
                                   "outcome_scoring", "outcome_conceding", "failure_receiver"])
 @pytest.mark.parametrize("minimum,expected", [(0., 2), (.1, 1)])
 def test_refreshed_duration_filters_every_component_model(tmp_path, task, minimum, expected):
-    match = fixture(success=True, reception=101, source="kpi_csv")
+    match = fixture(success=True, reception=101, source="kpi_csv", contact=3)
     match.actions.loc[8] = match.actions.loc[7]
     match.actions.at[8, "receive_frame_id"] = 103
     ensure_pass_endpoints(match)
