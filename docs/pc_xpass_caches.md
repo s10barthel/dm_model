@@ -134,9 +134,32 @@ Saved-run comparisons resolve each variant's settings independently. CLI
 overrides apply to every variant. Console output and visualization metadata
 record the selected cache, metric, inherited fields, and explicit overrides.
 Overrides affect only the physical xPass panel; saved component predictions
-are not recomputed. Without `--show-physical-xpass`, `--compare-pass-success`, or
-`--only-compare-pass-success`, these scripts do not access the physical-panel cache.
+are not recomputed. Outside cache comparison mode, these scripts do not access the
+physical-panel cache without `--show-physical-xpass`, `--only-physical-xpass`,
+`--compare-pass-success`, or `--only-compare-pass-success`.
 Scripts that run inference retain their own selection behavior.
+
+To vary caches instead of component/checkpoint runs, all five visualization commands
+accept `--compare --pc-xpass-id CACHE_A --pc-xpass-id CACHE_B` (repeat the singular
+selector). At least two distinct IDs are required, in display order. `--pc-xpass`
+is implied; one metric and all supplied runtime settings apply to every cache.
+Use `--show-physical-xpass` or `--only-physical-xpass` for raw panels. In inference
+commands, `--use-physical-xpass` also recomputes blended pass success and derived
+pass score. The selected cache supplies all lane-survival consumers, including
+auxiliaries; existing compatibility checks remain in force. Saved visualizers load
+one component source once, inherit its metric unless overridden, and leave stored
+predictions unchanged. Physical-only scene discovery follows standalone behavior,
+including the saved geometry requirement for Hawkeye location/freeze modes.
+
+Cache comparisons are PNG-only and cannot vary models/components simultaneously,
+use directory overrides or `--no-physical-cache`, or combine with numbered masks,
+tracking-only output, `--compare-pass-success`, or `--only-compare-pass-success`.
+One shared unnumbered mask is supported by inference commands. Every cache is
+preflighted for the dataset and metric; missing rows or required auxiliary columns
+fail with the offending cache ID and scene instead of dropping frames. No fallback
+or generation occurs. Comparison metadata records `comparison_mode: pc_xpass`,
+fixed models/source, shared CLI settings, and each cache's resolved provenance.
+Evaluation commands are unchanged.
 
 All five visualization commands support `--compare-pass-success`, which stacks
 the existing model pass-success, pc-xPass, and final pass-success images into one

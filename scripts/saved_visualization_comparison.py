@@ -1,8 +1,8 @@
 """Dataset adapters for comparisons of already-exported component runs."""
 from __future__ import annotations
 
-from pathlib import Path
 from copy import copy
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -52,10 +52,14 @@ def _physical(settings, mod, subject, frames, *, dataset, cache_match=None):
     kwargs = {}
     if dataset == "skillcorner":
         kwargs["cache_selection"] = mod.match_cache.selection_for(subject)
-    return mod.load_runtime_physical_xpass_visualization_table(
-        settings.cache_dir, str(cache_match or subject.match_id), frames, metric=settings.metric,
-        x_pass_version=settings.x_pass_version, **kwargs,
-    )
+    try:
+        return mod.load_runtime_physical_xpass_visualization_table(
+            settings.cache_dir, str(cache_match or subject.match_id), frames, metric=settings.metric,
+            x_pass_version=settings.x_pass_version, **kwargs,
+        )
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        raise type(exc)(f"pc-xPass cache {settings.pc_xpass_id!r}, scene {cache_match or subject.match_id}, "
+                        f"frames {frames}: {exc}") from exc
 
 
 def _overlays(args, mod, tracking, subject, overlay_data):
@@ -125,6 +129,7 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
         entries = [(key, [items[key] for items in indexed]) for key in indexed[0]]
     else:
         selections = [mod.resolve_hawkeye_component_situation_ids(raw, metadata=item, requested_ids=args.situation_id)
+                      if raw is not None else mod.resolve_tracking_situation_ids(tracking, args.situation_id)
                       for raw, item in zip(exports, metadata)]
         require_same_selection(selections, "Hawkeye situations")
         entries = [(identifier, None) for identifier in selections[0]]
@@ -153,7 +158,7 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
             tables, selected_raw = [], []
             for index, raw in enumerate(exports):
-                rows = raw.loc[raw.id.eq(identifier)].copy()
+                rows = raw.loc[raw.id.eq(identifier)].copy() if raw is not None else None
                 if location_rows is not None:
                     row_id = int(location_rows[index]["selection_row_id"])
                     rows = rows.loc[pd.to_numeric(rows.selection_row_id).eq(row_id)]
@@ -161,9 +166,10 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
                     for column in ("original_action_id", "PositionX", "PositionY", "resolved_time_norm"):
                         if rows[column].nunique(dropna=False) != 1:
                             raise ValueError(f"Inconsistent Hawkeye location geometry in {column}.")
-                table = mod.build_hawkeye_component_tables(rows, subject)
+                table = mod.build_hawkeye_component_tables(rows, subject) if rows is not None else {}
                 table = {name: table[name].reindex(frames) for name in source_components(names)}
-                selected_raw.append(rows.loc[rows.abs_time.isin(subject.frame_meta.loc[frames, "abs_time"])])
+                if rows is not None:
+                    selected_raw.append(rows.loc[rows.abs_time.isin(subject.frame_meta.loc[frames, "abs_time"])])
                 if "physical_xpass" in names:
                     table["physical_xpass"] = _physical(xpass_settings[index], mod, subject, frames,
                         dataset="hawkeye_loc" if location_rows is not None else "hawkeye",
@@ -194,9 +200,14 @@ def hawkeye_groups(args, mod, exports, metadata, names, *, deferred=False, xpass
 def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False, xpass_settings=None):
     if "physical_xpass" in names and xpass_settings is None:
         xpass_settings = [resolve_saved_xpass(args, info, "benchmark") for info in metadata]
-    selections = [mod.resolve_benchmark_component_states(raw, metadata=item,
-                    requested_modifications=args.modification, requested_game_states=args.game_state)
-                  for raw, item in zip(exports, metadata)]
+    selections = []
+    for raw, item in zip(exports, metadata):
+        if raw is not None:
+            selections.append(mod.resolve_benchmark_component_states(raw, metadata=item,
+                requested_modifications=args.modification, requested_game_states=args.game_state))
+        else:
+            modifications, _ = mod.discover_benchmark_modifications(args.input_dir, args.modification)
+            selections.append([(value, state) for value in modifications for state in (args.game_state or [1, 2])])
     require_same_selection(selections, "benchmark modification/state pairs")
     modifications = sorted({pair[0] for pair in selections[0]})
     if any(not {(item, 1), (item, 2)}.issubset(selections[0]) for item in modifications):
@@ -211,8 +222,8 @@ def benchmark_groups(args, mod, exports, metadata, names, *, deferred=False, xpa
                 frame = int(subject.frame_meta.index.min())
                 tables = []
                 for index, raw in enumerate(exports):
-                    rows = raw.loc[raw.modification.eq(modification) & raw.game_state.eq(state_id)]
-                    table = mod.build_benchmark_component_tables(rows, subject)
+                    rows = raw.loc[raw.modification.eq(modification) & raw.game_state.eq(state_id)] if raw is not None else None
+                    table = mod.build_benchmark_component_tables(rows, subject) if rows is not None else {}
                     table = {name: table[name].reindex([frame]) for name in source_components(names)}
                     if "physical_xpass" in names:
                         table["physical_xpass"] = _physical(xpass_settings[index], mod, subject, [frame], dataset="benchmark")
@@ -295,46 +306,99 @@ def skillcorner_groups(args, mod, exports, metadata, names, *, deferred=False, x
             yield from group.load()
 
 
+def load_fixed_source(args, mod, kind):
+    """Pin the same component source standalone visualization would select, once."""
+    selection = mod.resolve_component_selection(args)
+    identifier = args.component_run_id
+    folder = Path(args.component_dir) if args.component_dir else None
+    location = kind == "hawkeye" and args.mode in {"loc", "freeze"}
+    if folder is None and (identifier or selection.required_component_groups or location):
+        component_kind = "hawkeye_loc_component" if location else kind + "_component"
+        identifier = mod.resolve_named_component_run_id(component_kind, identifier, required=kind != "skillcorner")
+        if kind == "hawkeye":
+            getter = mod.get_hawkeye_loc_component_run_root if location else mod.get_hawkeye_component_run_root
+            folder = getter(identifier)
+        elif kind == "benchmark":
+            folder = mod.get_benchmark_component_run_root(identifier)
+        else:
+            folder = mod.get_skillcorner_component_run_root(identifier) if identifier else mod.COMPONENT_DIR / "skillcorner"
+    raw, info = ({} if kind == "skillcorner" else None), {}
+    if folder is not None:
+        if kind == "hawkeye":
+            raw, info = mod.load_hawkeye_component_run(folder)
+            if info.get("inference_mode", "standard") != args.mode:
+                raise ValueError(f"Requested Hawkeye mode {args.mode} does not match the fixed component source.")
+        elif kind == "benchmark":
+            raw, info = mod.load_benchmark_component_run(folder)
+        else:
+            raw = mod.load_skillcorner_component_tables(folder, args.match_id)
+            info = mod.load_run_metadata(folder, required=False) or {}
+        require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
+    return identifier, folder, raw, info
+
+
 def run_comparison(args, mod):
     kind = Path(mod.__file__).stem.removeprefix("visualize_")
     identifiers = selection_list(args.component_run_id)
     variants, exports, metadata, xpass_settings = [], [], [], []
-    for identifier in identifiers:
-        if kind == "hawkeye":
-            getter = mod.get_hawkeye_loc_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_component_run_root
-            folder = getter(identifier)
+    cache_comparison = args.visualization_comparison == "pc_xpass"
+    if cache_comparison:
+        source_id, folder, raw, info = load_fixed_source(args, mod, kind)
+        dataset = "hawkeye_loc" if kind == "hawkeye" and args.mode in {"loc", "freeze"} else kind
+        for identifier in selection_list(args.pc_xpass_id):
+            options = copy(args)
+            options.pc_xpass_id = identifier
+            # Preflight every explicitly compared cache even when only stored outputs are selected.
+            options.show_physical_xpass = True
             try:
-                raw, info = mod.load_hawkeye_component_run(folder)
-            except FileNotFoundError:
-                alternate = mod.get_hawkeye_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_loc_component_run_root
-                alternate_folder = alternate(identifier)
-                if not alternate_folder.exists():
-                    raise
-                folder = alternate_folder
-                raw, info = mod.load_hawkeye_component_run(folder)
-        elif kind == "benchmark":
-            folder = mod.get_benchmark_component_run_root(identifier)
-            raw, info = mod.load_benchmark_component_run(folder)
-        else:
-            folder = mod.get_skillcorner_component_run_root(identifier)
-            info = mod.load_run_metadata(folder, required=False) or {}
-            raw = mod.load_skillcorner_component_tables(folder, args.match_id)
-        require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
-        dataset = kind
-        if kind == "hawkeye" and info.get("inference_mode", args.mode) in {"loc", "freeze"}:
-            dataset = "hawkeye_loc"
-        xpass = resolve_saved_xpass(args, info, dataset, component_id=identifier)
-        xpass_settings.append(xpass)
-        recorded_masks = info.get("inference_masks") or {}
-        requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
-        variants.append(Variant(identifier, identifier,
-            {"component_run_id": identifier, "component_dir": str(folder), "metadata": info,
-             "inference_masks": recorded_masks, **saved_xpass_metadata(xpass)}, requested_masks))
-        exports.append(raw)
-        metadata.append(info)
+                xpass = resolve_saved_xpass(options, info, dataset, component_id=source_id)
+            except (ValueError, FileNotFoundError) as exc:
+                raise type(exc)(f"pc-xPass cache {identifier!r}: {exc}") from exc
+            xpass_settings.append(xpass)
+            recorded_masks = info.get("inference_masks") or {}
+            masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
+            variants.append(Variant(identifier, identifier, {
+                "component_run_id": source_id, "component_dir": str(folder) if folder else None,
+                "metadata": info, "inference_masks": recorded_masks, **saved_xpass_metadata(xpass)}, masks))
+            exports.append(raw)
+            metadata.append(info)
+    else:
+        for identifier in identifiers:
+            if kind == "hawkeye":
+                getter = mod.get_hawkeye_loc_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_component_run_root
+                folder = getter(identifier)
+                try:
+                    raw, info = mod.load_hawkeye_component_run(folder)
+                except FileNotFoundError:
+                    alternate = mod.get_hawkeye_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_loc_component_run_root
+                    alternate_folder = alternate(identifier)
+                    if not alternate_folder.exists():
+                        raise
+                    folder = alternate_folder
+                    raw, info = mod.load_hawkeye_component_run(folder)
+            elif kind == "benchmark":
+                folder = mod.get_benchmark_component_run_root(identifier)
+                raw, info = mod.load_benchmark_component_run(folder)
+            else:
+                folder = mod.get_skillcorner_component_run_root(identifier)
+                info = mod.load_run_metadata(folder, required=False) or {}
+                raw = mod.load_skillcorner_component_tables(folder, args.match_id)
+            require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
+            dataset = kind
+            if kind == "hawkeye" and info.get("inference_mode", args.mode) in {"loc", "freeze"}:
+                dataset = "hawkeye_loc"
+            xpass = resolve_saved_xpass(args, info, dataset, component_id=identifier)
+            xpass_settings.append(xpass)
+            recorded_masks = info.get("inference_masks") or {}
+            requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
+            variants.append(Variant(identifier, identifier,
+                {"component_run_id": identifier, "component_dir": str(folder), "metadata": info,
+                 "inference_masks": recorded_masks, **saved_xpass_metadata(xpass)}, requested_masks))
+            exports.append(raw)
+            metadata.append(info)
     names = mod.resolve_component_selection(args).rendered_components
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(kind + "_visualization_comparison"))
-    report = ComparisonExport(root, variants, args, "components")
+    report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
     adapters = {"hawkeye": hawkeye_groups, "benchmark": benchmark_groups, "skillcorner": skillcorner_groups}

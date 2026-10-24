@@ -100,7 +100,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
-    parser.epilog = ("Use --compare with repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
+    parser.epilog = ("Use --compare with repeated --pc-xpass-id for fixed-model cache comparisons with shared settings, "
+                     "or repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
                      "Outcome IDs pair by selection order; repeat a fixed counterpart explicitly for each pair. "
                      "Varying outcomes for derived outputs requires pairs. Optionally apply one combined --inference-mask. "
                      "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
@@ -197,7 +198,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
     add_top_pass_selector(parser)
-    pc_versions.add_selection_argument(parser)
+    pc_versions.add_selection_argument(parser, repeatable=True)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     if args.compare_intended_receiver and args.no_success_intent:

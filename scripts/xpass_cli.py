@@ -14,6 +14,9 @@ def add_top_pass_selector(parser):
 
 
 def resolve_top_pass_selector(parser, args, *, pc_only=False):
+    # Only visualization parsers opt into repeatable cache IDs.
+    if getattr(args, "compare", False) and isinstance(getattr(args, "pc_xpass_id", None), list):
+        args.pc_xpass = True
     dest = parser._option_string_actions["--xpass-version"].dest
     version = getattr(args, dest)
     count = args.top_pass

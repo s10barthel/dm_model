@@ -68,6 +68,7 @@ tests/AS_viz/
 !tests/test_bundesliga_ranking.py
 !tests/test_visualization_versioning.py
 !tests/test_saved_visualization_xpass.py
+!tests/test_pc_xpass_visualization_comparison.py
 !tests/test_combined_outcome_visualization.py
 !tests/test_visualization_carries.py
 !tests/test_model_pass_success_visualization.py

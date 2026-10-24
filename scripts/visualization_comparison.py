@@ -42,7 +42,8 @@ def add_compare_argument(parser):
     add_warning_argument(parser)
     parser.add_argument("--compare", action="store_true",
                         help="Compare multiple selected IDs in PNG panels and export aligned prediction tables.")
-    parser.epilog = "Comparisons export PNG panels and aligned prediction tables; existing single-result output is preserved."
+    parser.epilog = ("Compare checkpoints/component runs, or repeat --pc-xpass-id to compare caches with fixed models "
+                     "and shared settings. Comparisons export PNG panels and aligned prediction tables.")
 
 
 def validate_comparison_args(parser, args, *, inference=False):
@@ -57,6 +58,18 @@ def validate_comparison_args(parser, args, *, inference=False):
             if getattr(args, "only_tracking", False):
                 raise ValueError("--compare-pass-success/--only-compare-pass-success cannot be combined with --only-tracking.")
         mode = None
+        cache_ids = selection_list(getattr(args, "pc_xpass_id", None))
+        if len(cache_ids) != len(set(cache_ids)):
+            raise ValueError("Duplicate pc-xPass cache selection.")
+        cache_comparison = len(cache_ids) > 1
+        if cache_comparison:
+            if not args.compare:
+                raise ValueError("Repeated --pc-xpass-id selections require --compare.")
+            if getattr(args, "only_tracking", False):
+                raise ValueError("--compare cannot be combined with --only-tracking.")
+            if getattr(args, "no_physical_cache", False):
+                raise ValueError("pc-xPass comparison requires caches; omit --no-physical-cache.")
+            mode = "pc_xpass"
         if inference:
             configurations = resolve_inference_mask_configurations(args)
             numbered = any(entry["id"] != "mask" for entry in configurations)
@@ -77,6 +90,9 @@ def validate_comparison_args(parser, args, *, inference=False):
                 if repeated:
                     raise ValueError("Numbered masks require one checkpoint per task, including fixed supporting models.")
                 mode = "masks"
+            elif cache_comparison:
+                if repeated:
+                    raise ValueError("pc-xPass comparison cannot be combined with model comparisons.")
             elif args.compare:
                 if paired:
                     scoring, conceding = (selections[task] for task in OUTCOME_TASKS)
@@ -95,7 +111,12 @@ def validate_comparison_args(parser, args, *, inference=False):
             ids = selection_list(args.component_run_id)
             if len(ids) != len(set(ids)):
                 raise ValueError("Duplicate component-run selection.")
-            if args.compare:
+            if cache_comparison:
+                if len(ids) > 1:
+                    raise ValueError("pc-xPass comparison requires one fixed component source, without component comparisons.")
+                if ids and args.component_dir:
+                    raise ValueError("Select the fixed component source with --component-run-id or --component-dir, not both.")
+            elif args.compare:
                 if len(ids) < 2:
                     raise ValueError("--compare requires at least two --component-run-id selections.")
                 if args.component_dir:
@@ -128,6 +149,7 @@ class Variant:
     provenance: dict = field(default_factory=dict)
     masks: list[str] = field(default_factory=list)
     models: dict = field(default_factory=dict)
+    runtime_model_args: dict = field(default_factory=dict)
 
 
 @dataclass

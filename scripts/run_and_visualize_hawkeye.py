@@ -97,7 +97,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
-    parser.epilog = ("Use --compare with repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
+    parser.epilog = ("Use --compare with repeated --pc-xpass-id for fixed-model cache comparisons with shared settings, "
+                     "or repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
                      "Outcome IDs pair by selection order; repeat a fixed counterpart explicitly for each pair. "
                      "Varying outcomes for derived outputs requires pairs. Optionally apply one combined --inference-mask. "
                      "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
@@ -189,7 +190,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", default=str(HAWKEYE_VISUALIZATION_DIR))
     parser.set_defaults(freeze_ballreceipt=True)
     add_top_pass_selector(parser)
-    pc_versions.add_selection_argument(parser)
+    pc_versions.add_selection_argument(parser, repeatable=True)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.check_selectors(args)

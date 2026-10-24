@@ -723,6 +723,12 @@ def filter_missing_physical_xpass_rows_for_inference(
         kept_graphs.append(graph)
         kept_labels.append(label)
 
+    if skipped_action_indexes and model.args.get("physical_xpass_require_complete", False):
+        raise ValueError(
+            f"Physical xPass comparison requires every requested row in {cache_dir}: "
+            f"missing or invalid actions {skipped_action_indexes}; reasons {skip_reasons}."
+        )
+
     _record_physical_xpass_skipped_actions(
         match,
         model,
@@ -924,6 +930,8 @@ def inference_gnn(
                 match, graphs, labels, model, post_action=post_action,
             )
         except PhysicalXPassNoUsableRowsError:
+            if model.args.get("physical_xpass_require_complete", False):
+                raise
             if not retain_unblended_states:
                 if capture_model:
                     return pd.DataFrame(), pd.DataFrame()
@@ -1231,6 +1239,12 @@ def inference_gnn(
                     ball_z=ball_z_i,
                     ball_z_limit=ball_z_limit,
                 )
+                if model.args.get("physical_xpass_require_complete", False) and missing_physical_mask.any():
+                    missing = [player for player, invalid in zip(player_indices_i, missing_physical_mask) if invalid]
+                    raise ValueError(
+                        f"Physical xPass comparison is missing required blend inputs in match {match.match_id}, "
+                        f"state/action {event_index}, frame {frame}: {missing}."
+                    )
                 if finite_mask.any():
                     blend_kwargs = {}
                     if weight_version == "v2":

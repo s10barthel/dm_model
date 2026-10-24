@@ -1,7 +1,9 @@
-"""Checkpoint and runtime-mask comparison adapters for inference visualizers."""
+"""Checkpoint, pc-xPass cache, and runtime-mask comparisons for inference visualizers."""
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from copy import copy, deepcopy
 from pathlib import Path
 import pandas as pd
 import torch
@@ -10,6 +12,11 @@ from models.inference_masks import configure_inference_masks, flatten_mask_value
 from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
 from models.edge_schema import generation_kwargs
 from models.membership import explicit_split_provenance
+from physical_pass_model import (
+    PC_XPASS_SOURCE, physical_xpass_metric_for_version,
+    validate_physical_xpass_cache_metadata, validate_x_pass_version_available,
+    validate_pc_xpass_lane_survival_mode_cache_metadata,
+)
 from models.utils import (
     get_model_record, load_bundle_record, load_model,
     validate_model_record_consistency, validate_model_graph_schemas,
@@ -56,7 +63,10 @@ def resolve_variants(args, mod, sportec):
             raise ValueError(f"Missing --{task.replace('_', '-')}-model-id or bundle checkpoint for selected components.")
         base[task] = identifiers[0]
     common_masks = flatten_mask_values(args.inference_mask)
-    if args.visualization_comparison == "checkpoints":
+    if args.visualization_comparison == "pc_xpass":
+        specifications = [(identifier, identifier, base, common_masks)
+                          for identifier in selection_list(args.pc_xpass_id)]
+    elif args.visualization_comparison == "checkpoints":
         if paired:
             specifications = [("outcome_pair:" + json.dumps(pair, separators=(",", ":")),
                                "\n".join(pair), {**base, **dict(zip(OUTCOME_TASKS, pair))}, common_masks)
@@ -71,6 +81,7 @@ def resolve_variants(args, mod, sportec):
             number = entry["id"].split("_")[-1]
             specifications.append((entry["id"], f"mask-{number}: " + ", ".join(entry["masks"]), base, entry["masks"]))
     models, records, contexts, variants = {}, {}, [], []
+    shared_auxiliaries = None
     for identifier, label, ids, masks in specifications:
         pipeline_records = {}
         pipeline_models = {}
@@ -94,11 +105,18 @@ def resolve_variants(args, mod, sportec):
                 models[model_id] = model
             pipeline_records[task] = records[model_id]
             pipeline_models[task] = models[model_id]
-        context = validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
+        context = (validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
             require_intended_receiver_mode=False, require_return_type=False, require_target_family=False,
-            allow_pass_only_success=True)
+            allow_pass_only_success=True) if pipeline_records else {})
         contexts.append(context)
-        auxiliaries = configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
+        if args.visualization_comparison == "pc_xpass" and shared_auxiliaries is not None:
+            auxiliaries = shared_auxiliaries
+            pipeline_models.update({f"xpass_{role}": model for role, model in auxiliaries.items()})
+        else:
+            auxiliaries = (configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
+                           if pipeline_models else {})
+            if args.visualization_comparison == "pc_xpass":
+                shared_auxiliaries = auxiliaries
         for role, auxiliary in auxiliaries.items():
             models[f"auxiliary:{identifier}:{role}"] = auxiliary
         variant_schema = validate_model_graph_schemas(pipeline_models)
@@ -117,6 +135,9 @@ def resolve_variants(args, mod, sportec):
 
 
 def configure_physical(args, mod, variants, dataset):
+    if getattr(args, "visualization_comparison", None) == "pc_xpass":
+        configure_cache_variants(args, mod, variants, dataset)
+        return
     cache = args.physical_cache_dir or str(mod.pc_versions.cache_dir(dataset, args) if args.pc_xpass
                                          else mod.get_runtime_physical_xpass_dir(dataset))
     args.physical_cache_dir = cache
@@ -146,6 +167,86 @@ def configure_physical(args, mod, variants, dataset):
                 model.args["physical_cache_dir"] = cache
 
 
+def configure_cache_variants(args, mod, variants, dataset):
+    """Resolve caches independently and capture settings without mutating shared models."""
+    metric = physical_xpass_metric_for_version(args.x_pass_version, pc_xpass=True)
+    for variant in variants:
+        options = copy(args)
+        options.pc_xpass_id = variant.identifier
+        options.visualization_comparison = None
+        options.physical_cache_dir = None
+        try:
+            cache = mod.pc_versions.cache_dir(dataset, options)
+            metadata = validate_physical_xpass_cache_metadata(cache, expected_source=PC_XPASS_SOURCE)
+            validate_x_pass_version_available(cache, source=PC_XPASS_SOURCE,
+                                              x_pass_version=args.x_pass_version, metric=metric)
+            originals = {key: model.args for key, model in variant.models.items()}
+            try:
+                for model in variant.models.values():
+                    model.args = deepcopy(model.args)
+                configure_physical(options, mod, [variant], dataset)
+                for key, model in variant.models.items():
+                    if model.args.get("lane_survival"):
+                        validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, model.args.get("lane_survival_mode"))
+                    if key == "pass_success":
+                        model.args["physical_xpass_require_complete"] = True
+                    if key == "pass_success" and (mod.model_uses_physical_xpass(model.args)
+                                                  or mod.inference_uses_physical_xpass(model.args)):
+                        model.args["pc_xpass"] = True
+                    if model.args.get("lane_survival") or key == "pass_success":
+                        model.args["pc_xpass_id"] = variant.identifier
+                        model.args["pc_xpass_namespace"] = options.pc_xpass_namespace
+                variant.runtime_model_args = {key: deepcopy(model.args) for key, model in variant.models.items()}
+            finally:
+                for key, model in variant.models.items():
+                    model.args = originals[key]
+            variant.provenance.update(pc_xpass_id=variant.identifier, physical_cache_dir=str(cache),
+                pc_xpass_namespace=options.pc_xpass_namespace, physical_xpass_runtime_source=PC_XPASS_SOURCE,
+                x_pass_version=args.x_pass_version, physical_xpass_metric=metric,
+                effective_model_args=variant.runtime_model_args)
+        except (ValueError, FileNotFoundError) as exc:
+            raise type(exc)(f"pc-xPass cache {variant.identifier!r}: {exc}") from exc
+
+
+@contextmanager
+def active_variant(variant, scene):
+    """Scope cache configuration, masks and auxiliary bindings to one prediction pipeline."""
+    if "pc_xpass_id" not in variant.provenance:
+        _configure_variant(variant)
+        yield
+        return
+    originals, masks = [], []
+    missing = object()
+    primary = variant.models.get("pass_success")
+    auxiliary_binding = getattr(primary, "_xpass_auxiliary_models", missing)
+    try:
+        for key, model in variant.models.items():
+            originals.append((model, model.args))
+            model.args = deepcopy(variant.runtime_model_args[key])
+            for component in (model, getattr(model, "encoder", None), getattr(model, "decoder", None)):
+                if component is not None:
+                    masks.append((component, getattr(component, "inference_masks", missing)))
+        _configure_variant(variant)
+        yield
+    except (ValueError, KeyError, FileNotFoundError) as exc:
+        raise type(exc)(f"pc-xPass cache {variant.identifier!r}, {scene}: {exc}") from exc
+    finally:
+        for model, original in originals:
+            model.args = original
+        for component, original in masks:
+            if original is missing:
+                if hasattr(component, "inference_masks"):
+                    del component.inference_masks
+            else:
+                component.inference_masks = original
+        if primary is not None:
+            if auxiliary_binding is missing:
+                if hasattr(primary, "_xpass_auxiliary_models"):
+                    del primary._xpass_auxiliary_models
+            else:
+                primary._xpass_auxiliary_models = auxiliary_binding
+
+
 def _configure_variant(variant):
     primary = variant.models.get("pass_success")
     if primary is not None:
@@ -170,22 +271,24 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
         def load_group(identifier=identifier):
             scene_tracking = tracking.loc[tracking.id.eq(str(identifier))].copy()
             subject, _, _ = mod.build_hawkeye_situation(scene_tracking, ball,
-                freeze_ballreceipt=args.freeze_ballreceipt, add_v_edge_features=bool(schema["add_v_edge_features"]),
+                freeze_ballreceipt=args.freeze_ballreceipt, **({"build_graphs": False} if not variants[0].models else {}),
+                add_v_edge_features=bool(schema["add_v_edge_features"]),
                 add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)), **generation_kwargs(schema))
             selected_frames = mod.resolve_hawkeye_png_frames(subject, mod.resolve_ballreceipt(scene_tracking), mod.requested_time_norms(args))
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
-            tables, cache = [], {}
-            physical = None
-            if "physical_xpass" in selection.rendered_components:
-                physical = mod.load_runtime_physical_xpass_visualization_table(args.physical_cache_dir, str(subject.match_id),
-                    frames, metric=mod.physical_xpass_metric(args), x_pass_version=args.x_pass_version)
+            tables, cache, physical_tables = [], {}, {}
             for variant in variants:
-                _configure_variant(variant)
-                values = mod.collect_situation_components(subject, variant.models, device, frames,
-                    selection.rendered_components, prediction_cache=cache)
-                if physical is not None:
-                    values["physical_xpass"] = physical.copy(deep=True)
-                tables.append(values)
+                with active_variant(variant, f"situation {identifier}, frames {frames}"):
+                    values = (mod.collect_situation_components(subject, variant.models, device, frames,
+                        selection.rendered_components, prediction_cache=cache) if variant.models else {})
+                    if "physical_xpass" in selection.rendered_components:
+                        directory = variant.provenance.get("physical_cache_dir", args.physical_cache_dir)
+                        if directory not in physical_tables:
+                            physical_tables[directory] = mod.load_runtime_physical_xpass_visualization_table(
+                                directory, str(subject.match_id), frames, metric=mod.physical_xpass_metric(args),
+                                x_pass_version=args.x_pass_version)
+                        values["physical_xpass"] = physical_tables[directory].copy(deep=True)
+                    tables.append(values)
             scores, labels, stats = mod.build_situation_overlays(overlays, str(identifier), scene_tracking, subject,
                                                                selection_format=args.selection_format)
             overlay_kwargs = dict(coach_scores=scores, selection_labels=labels, selections_enabled=args.selections,
@@ -208,7 +311,11 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
 
 
 def sportec_groups(args, mod, variants, selection, shared, bundle, schema, device, *, deferred=False):
-    runtime = mod.resolve_runtime_feature_run_context(args.feature_run_id, shared, bundle, args.intended_receiver_mode,
+    feature_run_id = args.feature_run_id
+    if not feature_run_id and not selection.required_component_groups and variants[0].provenance.get("physical_cache_dir"):
+        info = mod.pc_versions.read_metadata(variants[0].provenance["physical_cache_dir"])
+        feature_run_id = (info.get("source_inputs") or {}).get("feature_run_id")
+    runtime = mod.resolve_runtime_feature_run_context(feature_run_id, shared, bundle, args.intended_receiver_mode,
                                                      schema, context="Selected comparison visualization feature artifacts")
     feature_root = Path(runtime["feature_root"])
     return_type = mod.resolve_runtime_return_type(shared, args.return_type)
@@ -235,13 +342,13 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
             frame = int(subject.actions.at[action_index, "frame_id"])
             tables, cache = [], {}
             for variant in variants:
-                _configure_variant(variant)
-                values = mod.collect_action_components(subject, variant.models, feature_root, device, action_index,
-                    display_id, Path(args.output_dir), show_trajectories=args.show_trajectories,
-                    show_physical_xpass=args.show_physical_xpass, physical_cache_dir=args.physical_cache_dir,
-                    physical_xpass_metric_name=mod.physical_xpass_metric(args), physical_xpass_version_name=args.x_pass_version,
-                    rendered_components=selection.rendered_components, prediction_cache=cache,
-                    possession_states=possession_states)
+                with active_variant(variant, f"match {args.match_id}, action {display_id}"):
+                    values = mod.collect_action_components(subject, variant.models, feature_root, device, action_index,
+                        display_id, Path(args.output_dir), show_trajectories=args.show_trajectories,
+                        show_physical_xpass=args.show_physical_xpass, physical_cache_dir=variant.provenance.get("physical_cache_dir", args.physical_cache_dir),
+                        physical_xpass_metric_name=mod.physical_xpass_metric(args), physical_xpass_version_name=args.x_pass_version,
+                        rendered_components=selection.rendered_components, prediction_cache=cache,
+                        possession_states=possession_states)
                 mod.prepare_action_overlays(
                     subject, action_index, values.get("success_intent"),
                     pass_endpoint=getattr(args, "pass_endpoint", True),
@@ -279,14 +386,15 @@ def run_comparison(args, mod):
     configure_physical(args, mod, variants, dataset)
     # Validate all scopes/schemas before any expensive inference or artifact output.
     for variant in variants:
-        _configure_variant(variant)
+        with active_variant(variant, "preflight"):
+            pass
     names = list(selection.rendered_components)
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(dataset + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
-    if "physical_xpass" in names:
+    if "physical_xpass" in names and args.visualization_comparison != "pc_xpass":
         report.metadata.update(physical_cache_dir=args.physical_cache_dir,
             physical_xpass_runtime_source=mod.physical_xpass_panel_source(args, args.physical_cache_dir),
             physical_xpass_metric=mod.physical_xpass_metric(args), x_pass_version=args.x_pass_version)
@@ -318,7 +426,7 @@ def run_comparison(args, mod):
                               variant.provenance["graph_schema"], device, deferred=True) if sportec else hawkeye_groups(
                               args, mod, [variant], selection, variant.provenance["graph_schema"], device, deferred=True) for variant in variants]
         render_comparison_groups(report, variant_groups, names, shared=same_schema and (not sportec or same_context),
-                                 skip_failed_groups=sportec)
+                                 skip_failed_groups=sportec and args.visualization_comparison != "pc_xpass")
         if sportec and not report.outputs:
             raise RuntimeError("All selected actions were skipped or failed during rendering.")
         report.finish()
@@ -327,8 +435,9 @@ def run_comparison(args, mod):
         raise
     finally:
         # Shared model instances must not retain the last numbered intervention.
-        for variant in variants:
-            configure_inference_masks(variant.models, [])
+        if args.visualization_comparison != "pc_xpass":
+            for variant in variants:
+                configure_inference_masks(variant.models, [])
     print(f"Saved {dataset} comparison visualizations and prediction tables to {root}")
 
 

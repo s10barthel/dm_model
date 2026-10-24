@@ -2080,6 +2080,42 @@ strict; raw inference predictions are unchanged.
 
 ### PNG prediction comparison visualizations
 
+All five visualization commands support pc-xPass cache comparisons with `--compare`
+and repeated **singular** `--pc-xpass-id` selectors. Select at least two distinct IDs;
+IDs retain their selection order. Every cache uses the same metric, blending settings,
+auxiliary checkpoints, and (for inference commands) common unnumbered mask. `--pc-xpass`
+is implied. Cache comparisons cannot also vary checkpoints or component runs, and
+reject cache-directory overrides, `--no-physical-cache`, numbered masks,
+`--compare-pass-success`, `--only-compare-pass-success`, and tracking-only output.
+They support PNG only and export the usual aligned prediction tables and per-variant
+cache provenance (`comparison_mode: pc_xpass`). Missing cache inputs fail with the
+cache ID and scene; no fallback cache is selected and no cache is generated.
+
+```powershell
+# Compare raw cached probabilities without loading models or a component source.
+python scripts/visualize_hawkeye.py --compare `
+  --pc-xpass-id cache_a --pc-xpass-id cache_b `
+  --situation-id SITUATION --only-physical-xpass --top-pass 10
+
+# Recompute blended success and pass score with one fixed model bundle.
+python scripts/run_and_visualize_hawkeye.py --compare `
+  --pc-xpass-id cache_a --pc-xpass-id cache_b --bundle-id BUNDLE `
+  --situation-id SITUATION --use-physical-xpass --xpass-version top25 --xpass-weight v3 `
+  --only-pass-success --only-pass-score --show-physical-xpass
+```
+
+Inference commands recompute blended pass success and dependent pass score when
+blending is enabled. Each cache also supplies lane-survival inputs to participating
+models and auxiliaries, so those learned predictions may change with a fixed checkpoint;
+existing lane-survival compatibility checks still apply. Raw physical panels use
+`--show-physical-xpass` or `--only-physical-xpass` and are unaffected by blend weights.
+Saved visualizers resolve one fixed component source using their usual source-selection
+rules, inherit its metric unless overridden, and change only the physical panel;
+saved pass success and pass score are not recomputed. Physical-only output can run
+without component predictions; Hawkeye location/freeze modes still require their
+saved geometry source and use the `hawkeye_loc` cache namespace. Evaluation commands
+retain their existing single-cache behavior.
+
 Saved-component visualization supports `--compare` with repeated `--component-run-id` in
 `scripts/visualize_hawkeye.py`, `scripts/visualize_skillcorner.py`, and `scripts/visualize_benchmark.py`.
 Select at least two distinct completed runs. These scripts display stored predictions and reject all

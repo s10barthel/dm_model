@@ -30,9 +30,9 @@ def add_saved_xpass_arguments(parser: ArgumentParser) -> None:
                         dest="x_pass_version", default=None,
                         help="Override the inherited pc-xPass metric: max, top<N>, or top-pass<N>.")
     add_top_pass_selector(parser)
-    versions.add_selection_argument(parser)
+    versions.add_selection_argument(parser, repeatable=True)
     parser._option_string_actions["--pc-xpass-id"].help = (
-        "Override the component's pc-xPass cache ID; never defaults to latest."
+        "Override the component's pc-xPass cache ID; repeat with --compare. Never defaults to latest."
     )
 
 

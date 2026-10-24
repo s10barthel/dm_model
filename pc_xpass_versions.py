@@ -61,10 +61,17 @@ def atomic_json(path: str | Path, data: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def add_selection_argument(parser: ArgumentParser) -> None:
+def add_selection_argument(parser: ArgumentParser, *, repeatable: bool = False) -> None:
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
-    parser.add_argument("--pc-xpass-id", help="pc-xPass cache version; normal consumers default to latest.")
+    options = {}
+    if repeatable:
+        from scripts.visualization_comparison import RepeatableSelection
+        options["action"] = RepeatableSelection
+    help_text = "pc-xPass cache version; normal consumers default to latest."
+    if repeatable:
+        help_text += " Repeat with --compare to compare caches using shared settings and fixed models."
+    parser.add_argument("--pc-xpass-id", **options, help=help_text)
 
 
 def check_selectors(args: Namespace) -> None:
