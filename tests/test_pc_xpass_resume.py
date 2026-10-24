@@ -189,3 +189,26 @@ def test_resume_requires_new_physical_input_contract(setup_cache):
     versions.atomic_json(resume.root(args) / "metadata.json", metadata)
     with pytest.raises(ValueError, match="physical input contract"):
         generate.parse_args(["--pc-xpass", "--pc-xpass-id", "resume"])
+
+
+
+def test_drag_computation_dependencies_and_resume(tmp_path, monkeypatch):
+    monkeypatch.setattr(versions.config, "PC_XPASS_DIR", tmp_path)
+    args = generate.parse_args([
+        "--pc-xpass", "--pc-xpass-id", "drag", "--ball-dec", "drag",
+        "--no-sportec", "--no-skillcorner", "--no-benchmark",
+    ])
+    resume.prepare_contracts(args, ["hawkeye"])
+    versions.start_generation(args)
+    resume.persist_contracts(args)
+    root = resume.root(args)
+    metadata = versions.read_metadata(root)
+    assert metadata["computation_dependencies"]["physics_version"] == 3
+    assert metadata["computation_dependencies"]["ball_drag"] == metadata["ball_drag"]
+    selected = generate.parse_args(["--pc-xpass", "--pc-xpass-id", "drag"])
+    assert selected.ball_dec == "drag"
+    resume.prepare_contracts(selected, ["hawkeye"])
+    metadata["computation_dependencies"]["ball_drag"]["k_m_inv"] *= 2
+    versions.atomic_json(root / "metadata.json", metadata)
+    with pytest.raises(ValueError, match="dependencies changed"):
+        resume.prepare_contracts(selected, ["hawkeye"])

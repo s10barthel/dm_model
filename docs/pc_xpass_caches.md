@@ -1,15 +1,31 @@
 # pc-xPass deceleration and cache versions
 
-pc-xPass models each speed-grid value as the initial release speed. The ball slows
-at `--ball-dec` metres per second squared (default `0.45`). Use `--ball-dec 0` for
-constant-speed passes. The ball never reverses: sampled targets beyond its stopping
-distance are excluded from scoring and ranking. Accessible Space is unchanged.
+pc-xPass models each speed-grid value as the initial release speed. Select its
+motion with `--ball-dec <number|drag>`; the default remains `0.45`.
+
+- A non-negative finite number specifies constant deceleration in m/s^2. `0`
+  gives constant-speed passes. The ball never reverses: sampled targets beyond
+  its stopping distance are excluded from scoring and ranking.
+- `drag` uses straight-line quadratic air drag, with arrival time
+  `expm1(k * distance) / (k * initial_speed)`. The fixed paper constants are air
+  density 1.22 kg/m^3, drag coefficient 0.25, ball cross-sectional area 0.038 m^2,
+  and mass 0.42 kg. Thus `k = 0.013797619047619048 m^-1`. All finite pitch
+  distances are reachable for positive initial speeds; zero distance takes zero
+  time. This model has no finite stopping distance or travel-time cutoff and
+  does not include rolling resistance.
+
+Both `generate_physical_xpass.py` and `run_hawkeye_loc.py` accept this selector.
+Accessible Space is unchanged. Drag is an alternative model, not a claim of
+improved predictive accuracy; player/control parameters are not retuned.
 
 ## Normal caches
 
 ```powershell
 # Create a fresh version with an automatically generated ID.
 python scripts/generate_physical_xpass.py --pc-xpass --ball-dec 0.45
+
+# Create a fresh quadratic-drag version with top-pass 10.
+python scripts/generate_physical_xpass.py --pc-xpass --ball-dec drag --top-pass 10
 
 # Create a named version, or resume it with its recorded settings.
 python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id dec045
@@ -26,6 +42,12 @@ Generation without an ID always creates a new version. Resuming an ID inherits
 omitted generation settings and rejects explicitly conflicting settings. The
 metadata records settings, physics/schema versions, invocation history, coverage,
 and completion status. Compatible missing rows can be added to a version.
+Numeric caches retain physics version 2 and their existing metadata/fingerprints.
+Drag caches use physics version 3, record `ball_dec: "drag"`, and include the
+fixed constants and derived coefficient in `ball_drag`. The drag definition is
+validated on reuse and included in computation dependencies and lane-survival
+fingerprints. Changing between numeric deceleration and drag requires a fresh
+cache ID; existing caches are not migrated or regenerated automatically.
 
 Normal inference and training consumers default to the ID in `data/pc_xpass/latest.json`. Successful
 generation updates this global pointer; failed, incomplete, and dry runs do not.

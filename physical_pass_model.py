@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, as_completed, wait
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import reachability as reach
@@ -39,6 +39,16 @@ PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
 PC_XPASS_SOURCE = "pc_xpass"
 PC_XPASS_DEFAULT_BALL_DEC = 0.45
 PC_XPASS_PHYSICS_VERSION = 2
+PC_XPASS_DRAG_PHYSICS_VERSION = 3
+BallDeceleration = float | Literal["drag"]
+PC_XPASS_DRAG_AIR_DENSITY = 1.22  # kg/m^3
+PC_XPASS_DRAG_COEFFICIENT = 0.25
+PC_XPASS_DRAG_AREA = 0.038  # m^2
+PC_XPASS_DRAG_MASS = 0.42  # kg
+PC_XPASS_DRAG_K = (
+    PC_XPASS_DRAG_AIR_DENSITY * PC_XPASS_DRAG_COEFFICIENT * PC_XPASS_DRAG_AREA
+    / (2 * PC_XPASS_DRAG_MASS)
+)
 PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE, PC_XPASS_SOURCE}
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
@@ -380,7 +390,7 @@ def pc_xpass_metadata(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -507,8 +517,7 @@ def pc_xpass_metadata(
         "lane_survival_policy": lane_survival_policy,
         "max_speed": float(v0_values[-1]),
         "min_speed": min_speed_value,
-        "ball_dec": float(ball_dec),
-        "physics_version": PC_XPASS_PHYSICS_VERSION,
+        **pc_xpass_ball_motion_metadata(ball_dec),
         "physical_input_contract": PHYSICAL_INPUT_CONTRACT,
         "speed_step": speed_step_value,
         "angle_step": float(angle_step),
@@ -560,6 +569,8 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
         key: metadata.get(key) for key in PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS
         if key not in {"ball_dec", "physics_version"} or key in metadata
     }
+    if metadata.get("ball_dec") == "drag":
+        payload["ball_drag"] = metadata.get("ball_drag")
     if metadata.get("margin", "tta") != "tta":
         payload.update(margin=metadata["margin"], reachability_config=metadata.get("reachability_config"))
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -833,6 +844,8 @@ def validate_physical_xpass_cache_metadata(
             f"Physical xPass sidecars at {cache_dir} use incompatible source {source!r}; "
             f"expected {expected_source!r}. {rerun_message}"
         )
+    if source == PC_XPASS_SOURCE:
+        validate_pc_xpass_ball_motion_metadata(metadata)
     if expected_speed_aggregation is not None and source == PHYSICAL_XPASS_SOURCE:
         actual_speed_aggregation = normalize_physical_xpass_speed_aggregation(metadata.get("speed_aggregation"))
         expected_speed_aggregation = normalize_physical_xpass_speed_aggregation(expected_speed_aggregation)
@@ -916,6 +929,8 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
         raise FileNotFoundError(f"Physical xPass metadata not found at {metadata_path}.")
     metadata = match_cache.read_json(metadata_path, memo=memo)
     resolved_source = str(source or metadata.get("source") or metadata.get("metric_family") or PHYSICAL_XPASS_SOURCE)
+    if resolved_source == PC_XPASS_SOURCE:
+        validate_pc_xpass_ball_motion_metadata(metadata)
     cache_source = str(metadata.get("source") or metadata.get("metric_family") or "")
     if cache_source and cache_source != resolved_source:
         raise ValueError(f"Requested {resolved_source!r} xPass, but cache at {cache_dir} has source {cache_source!r}.")
@@ -2727,6 +2742,7 @@ def pc_xpass_lane_survival_column_for_mode(player_id: str, mode: str | None = No
 
 def validate_pc_xpass_lane_survival_mode_cache_metadata(metadata: Mapping[str, Any], mode: str | None = None) -> str:
     """Validate metadata needed by an enabled lane-survival mode and return its normalized name."""
+    validate_pc_xpass_ball_motion_metadata(metadata)
     normalized = normalize_pc_xpass_lane_survival_mode(mode)
     if normalized == PC_XPASS_LANE_SURVIVAL_MODE_MAX:
         return normalized
@@ -3063,16 +3079,66 @@ def _pc_xpass_dist_pass_reaction_times(
     return np.clip(dist_pass / float(dist_pass_div), float(dist_pass_min), float(dist_pass_max)).astype(float)
 
 
-def validate_ball_dec(ball_dec: float) -> None:
-    if not math.isfinite(float(ball_dec)) or float(ball_dec) < 0:
-        raise ValueError("ball_dec must be a finite non-negative value.")
+def parse_ball_dec(value: str | float) -> BallDeceleration:
+    """Parse the selector; validate numeric values after cache inheritance."""
+    if value == "drag":
+        return "drag"
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("ball_dec must be a number or 'drag'.") from exc
 
 
-def pc_xpass_ball_arrival_times(distances: np.ndarray, speeds: np.ndarray, ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC) -> tuple[np.ndarray, np.ndarray]:
+def validate_ball_dec(ball_dec: BallDeceleration) -> None:
+    value = parse_ball_dec(ball_dec)
+    if value != "drag" and (not math.isfinite(value) or value < 0):
+        raise ValueError("ball_dec must be a finite non-negative number or 'drag'.")
+
+
+def pc_xpass_ball_motion_metadata(ball_dec: BallDeceleration) -> dict[str, Any]:
+    value = parse_ball_dec(ball_dec)
+    validate_ball_dec(value)
+    if value != "drag":
+        return {"ball_dec": value, "physics_version": PC_XPASS_PHYSICS_VERSION}
+    return {
+        "ball_dec": "drag",
+        "physics_version": PC_XPASS_DRAG_PHYSICS_VERSION,
+        "ball_drag": {
+            "model": "quadratic_drag",
+            "air_density_kg_m3": PC_XPASS_DRAG_AIR_DENSITY,
+            "drag_coefficient": PC_XPASS_DRAG_COEFFICIENT,
+            "cross_sectional_area_m2": PC_XPASS_DRAG_AREA,
+            "mass_kg": PC_XPASS_DRAG_MASS,
+            "k_m_inv": PC_XPASS_DRAG_K,
+        },
+    }
+
+
+def validate_pc_xpass_ball_motion_metadata(metadata: Mapping[str, Any]) -> BallDeceleration:
+    """Reject mixed laws or definitions; missing legacy deceleration means zero."""
+    value = parse_ball_dec(metadata.get("ball_dec", 0.0))
+    expected = pc_xpass_ball_motion_metadata(value)
+    # Only numeric legacy caches may omit the physics version.
+    version = metadata.get("physics_version", PC_XPASS_PHYSICS_VERSION)
+    if version != expected["physics_version"]:
+        raise ValueError("Incompatible pc-xPass physics_version; create a new version.")
+    if metadata.get("ball_drag") != expected.get("ball_drag"):
+        raise ValueError("Incompatible pc-xPass ball_drag definition; create a new version.")
+    recorded = metadata.get("generation_settings", {})
+    if "ball_dec" in recorded and parse_ball_dec(recorded["ball_dec"]) != value:
+        raise ValueError("Cache ball deceleration differs from its generation settings; create a new version.")
+    return value
+
+
+def pc_xpass_ball_arrival_times(distances: np.ndarray, speeds: np.ndarray, ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC) -> tuple[np.ndarray, np.ndarray]:
     """Arrival times and reachability, shaped speed x 1 x distance."""
+    ball_dec = parse_ball_dec(ball_dec)
     validate_ball_dec(ball_dec)
     distance = np.asarray(distances, dtype=float)[None, None, :]
     speed = np.asarray(speeds, dtype=float)[:, None, None]
+    if ball_dec == "drag":
+        times = np.expm1(PC_XPASS_DRAG_K * distance) / (PC_XPASS_DRAG_K * speed)
+        return times, np.ones_like(times, dtype=bool)
     if ball_dec == 0:
         times = distance / speed
         return times, np.ones_like(times, dtype=bool)
@@ -3097,7 +3163,7 @@ def compute_graph_pc_xpass_metrics(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -3398,7 +3464,7 @@ def compute_graphs_pc_xpass_metrics(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     angle_step: float = AS_DEFAULT_ANGLE_STEP_DEG,
     radial_gridsize: float = PC_XPASS_DEFAULT_RADIAL_GRIDSIZE,
@@ -4118,6 +4184,8 @@ def load_physical_xpass_match(
     frame = frame.set_index("action_index", drop=False)
     metadata = (match_cache.read_json(cache_root / "metadata.json", memo=cache_selection.memo)
                 if cache_selection is not None else validate_runtime_physical_xpass_visualization_cache(cache_root))
+    if metadata.get("source") == PC_XPASS_SOURCE or metadata.get("ball_dec") == "drag":
+        validate_pc_xpass_ball_motion_metadata(metadata)
     version_metadata = cache_root.parent / "metadata.json"
     if version_metadata.exists():
         parent_metadata = match_cache.read_json(version_metadata, memo=cache_selection.memo if cache_selection else None)
@@ -4304,7 +4372,7 @@ def _runtime_cache_metadata(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -4432,7 +4500,7 @@ def _ensure_runtime_physical_xpass_cache(
     ignore_teammates_control: bool | None = None,
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -4517,12 +4585,17 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
+            if ("ball_dec" in metadata or "ball_drag" in metadata
+                    or metadata.get("physics_version") == PC_XPASS_DRAG_PHYSICS_VERSION):
+                cached_dec = validate_pc_xpass_ball_motion_metadata(metadata)
+                if cached_dec != parse_ball_dec(ball_dec):
+                    raise ValueError("Cache ball deceleration differs; select matching settings or create a new pc-xPass version.")
             if ("generation_settings" in metadata or match_cache.is_match_format(metadata.get("cache_format"))) and "source" not in metadata:
                 metadata = {**metadata, **expected_metadata}
                 if create_if_missing:
                     from pc_xpass_versions import atomic_json
                     atomic_json(metadata_path, metadata)
-            if float(metadata.get("ball_dec", 0.0)) != float(ball_dec):
+            if validate_pc_xpass_ball_motion_metadata(metadata) != parse_ball_dec(ball_dec):
                 raise ValueError("Cache ball deceleration differs; select matching settings or create a new pc-xPass version.")
             mismatches = []
             for key in [
@@ -4585,13 +4658,12 @@ def _ensure_runtime_physical_xpass_cache(
                 "position_discount_distance",
                 "max_speed",
                 "min_speed",
-                "ball_dec",
                 "physics_version",
                 "speed_step",
                 "angle_step",
                 "radial_gridsize",
             ]:
-                actual_value = metadata.get(key, 0.0 if key == "ball_dec" else (PC_XPASS_PHYSICS_VERSION if key == "physics_version" else None))
+                actual_value = metadata.get(key, PC_XPASS_PHYSICS_VERSION if key == "physics_version" else None)
                 expected_value = expected_metadata.get(key)
                 if expected_value is None:
                     values_match = actual_value is None
@@ -5333,7 +5405,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     ignore_teammates_control = task.get("ignore_teammates_control", None)
     max_speed = task.get("max_speed", None)
     min_speed = float(task.get("min_speed", PC_XPASS_DEFAULT_MIN_SPEED))
-    ball_dec = float(task.get("ball_dec", PC_XPASS_DEFAULT_BALL_DEC))
+    ball_dec = parse_ball_dec(task.get("ball_dec", PC_XPASS_DEFAULT_BALL_DEC))
     speed_step = task.get("speed_step", None)
     coarse_n_angles = int(task.get("coarse_n_angles", AS_DEFAULT_COARSE_N_ANGLES))
     refine_top_k_angles = int(task.get("refine_top_k_angles", AS_DEFAULT_REFINE_TOP_K_ANGLES))
@@ -5760,7 +5832,7 @@ def prewarm_physical_xpass_runtime_cache(
     pass_height_device: str = "cpu",
     max_speed: float | None = None,
     min_speed: float = PC_XPASS_DEFAULT_MIN_SPEED,
-    ball_dec: float = PC_XPASS_DEFAULT_BALL_DEC,
+    ball_dec: BallDeceleration = PC_XPASS_DEFAULT_BALL_DEC,
     speed_step: float | None = None,
     coarse_n_angles: int = AS_DEFAULT_COARSE_N_ANGLES,
     refine_top_k_angles: int = AS_DEFAULT_REFINE_TOP_K_ANGLES,
@@ -5891,6 +5963,8 @@ def prewarm_physical_xpass_runtime_cache(
         reuse_metadata_path = Path(reuse_cache_dir) / "metadata.json"
         if reuse_metadata_path.is_file():
             reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
+            if validate_pc_xpass_ball_motion_metadata(reuse_metadata) != parse_ball_dec(ball_dec):
+                raise ValueError("pc-xPass reuse cache has incompatible ball deceleration; create a new version.")
             if (reuse_metadata.get("margin", "tta") != cache_metadata.get("margin", "tta")
                     or reuse_metadata.get("reachability_config", {}) != cache_metadata.get("reachability_config", {})):
                 raise ValueError("pc-xPass reuse cache has incompatible reachability/margin settings.")
@@ -5899,6 +5973,8 @@ def prewarm_physical_xpass_runtime_cache(
                 raise ValueError(
                     f"pc-xPass reuse cache at {reuse_cache_dir} is incompatible with the requested xT ranking mode."
                 )
+        elif ball_dec == "drag":
+            raise ValueError("A drag reuse cache requires compatible ball-motion metadata.")
         elif margin == "reachability":
             raise ValueError("A reachability reuse cache requires metadata with matching artifact/settings.")
     pass_height_enabled = pass_height_model is not None
@@ -6219,7 +6295,7 @@ def prewarm_physical_xpass_runtime_cache(
             "physical_batch_size": int(physical_batch_size),
             "max_speed": max_speed,
             "min_speed": float(min_speed),
-            "ball_dec": float(ball_dec),
+            "ball_dec": parse_ball_dec(ball_dec),
             "speed_step": speed_step,
             "coarse_n_angles": int(coarse_n_angles),
             "refine_top_k_angles": int(refine_top_k_angles),

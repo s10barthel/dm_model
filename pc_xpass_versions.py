@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import sys
 import uuid
@@ -45,7 +44,10 @@ def read_metadata(path: str | Path) -> dict[str, Any]:
     path = Path(path) / "metadata.json"
     if not path.is_file():
         raise FileNotFoundError(f"pc-xPass metadata not found: {path}")
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    metadata = json.loads(path.read_text(encoding="utf-8-sig"))
+    from physical_pass_model import validate_pc_xpass_ball_motion_metadata
+    validate_pc_xpass_ball_motion_metadata(metadata)
+    return metadata
 
 
 def atomic_json(path: str | Path, data: dict[str, Any]) -> None:
@@ -85,6 +87,7 @@ def settings(args: Namespace) -> dict[str, Any]:
 
 
 def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[str] | None = None, *, location: bool = False) -> None:
+    from physical_pass_model import parse_ball_dec, validate_ball_dec
     check_selectors(args)
     tokens = list(sys.argv[1:] if argv is None else argv)
     explicit = {action.dest for token in tokens for action in [parser._option_string_actions.get(token.split("=", 1)[0])] if action}
@@ -100,9 +103,8 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
             if metadata.get("physical_input_contract") != PHYSICAL_INPUT_CONTRACT:
                 raise ValueError("Incompatible pc-xPass physical input contract; create a new cache version.")
             if not location:
-                for key, expected in (("schema_version", 1), ("physics_version", 2)):
-                    if metadata.get(key, expected) != expected:
-                        raise ValueError(f"Incompatible pc-xPass {key}; create a new version.")
+                if metadata.get("schema_version", 1) != 1:
+                    raise ValueError("Incompatible pc-xPass schema_version; create a new version.")
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
             metadata["generation_settings"].setdefault("export_lane_control", False)
@@ -140,15 +142,19 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
         root = Path(directory)
         if (root / "metadata.json").exists():
             legacy = read_metadata(root)
-            cached_dec = float(legacy.get("ball_dec", 0.0))
-            if "ball_dec" in explicit and float(args.ball_dec) != cached_dec:
+            cached_dec = parse_ball_dec(legacy.get("ball_dec", 0.0))
+            if "ball_dec" in explicit and parse_ball_dec(args.ball_dec) != cached_dec:
                 raise ValueError("Explicit cache directory uses different ball deceleration; create a new version.")
             args.ball_dec = cached_dec
-    if not math.isfinite(float(args.ball_dec)) or args.ball_dec < 0:
-        parser.error("--ball-dec must be a finite non-negative number")
+    try:
+        args.ball_dec = parse_ball_dec(args.ball_dec)
+        validate_ball_dec(args.ball_dec)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def start_generation(args: Namespace, *, location: bool = False) -> None:
+    from physical_pass_model import pc_xpass_ball_motion_metadata
     if not getattr(args, "pc_xpass", False):
         return
     directory = getattr(args, "pc_xpass_cache_dir", None) if location else None
@@ -174,7 +180,7 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     now = datetime.now(timezone.utc).isoformat()
     metadata = dict(old)
     metadata.update(pc_xpass_id=args.pc_xpass_id, namespace=args.pc_xpass_namespace,
-                    schema_version=1, physics_version=2, ball_dec=float(args.ball_dec),
+                    schema_version=1, **pc_xpass_ball_motion_metadata(args.ball_dec),
                     physical_input_contract=PHYSICAL_INPUT_CONTRACT,
                     generation_settings=effective, created_at=old.get("created_at", now),
                     updated_at=now, status="running")

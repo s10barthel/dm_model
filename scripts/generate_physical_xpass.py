@@ -50,6 +50,7 @@ import pc_xpass_match_cache as match_cache
 
 from physical_pass_model import (
     PC_XPASS_DEFAULT_BALL_DEC,
+    parse_ball_dec,
     AS_DEFAULT_V0_MIN,
     AS_DEFAULT_ANGLE_STEP_DEG,
     AS_DEFAULT_COARSE_N_ANGLES,
@@ -237,7 +238,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Legacy/Sportec intended-receiver mode. Defaults to angle_only when available.",
     )
-    parser.add_argument("--ball-dec", type=float, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass initial-speed deceleration in m/s^2; 0 disables slowing.")
+    parser.add_argument("--ball-dec", type=parse_ball_dec, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass constant deceleration in m/s^2, or drag for quadratic air drag; default 0.45; 0 disables slowing.")
     parser.add_argument("--physical-eps", type=float, default=1e-4)
     parser.add_argument(
         "--speed-aggregation",
@@ -1303,7 +1304,7 @@ def prewarm_runtime_items(
             reuse_cache_dir=reuse_cache_dir,
             max_speed=args.max_speed,
             min_speed=float(args.min_speed) if bool(getattr(args, "pc_xpass", False)) else AS_DEFAULT_V0_MIN,
-            ball_dec=float(getattr(args, "ball_dec", PC_XPASS_DEFAULT_BALL_DEC)),
+            ball_dec=parse_ball_dec(getattr(args, "ball_dec", PC_XPASS_DEFAULT_BALL_DEC)),
             speed_step=args.speed_step,
             coarse_n_angles=int(args.coarse_n_angles),
             refine_top_k_angles=int(args.refine_top_k_angles),
@@ -1531,7 +1532,7 @@ def write_runtime_dataset_metadata(
             ignore_teammates_control=pc_ignore_teammates_control_from_args(args),
             max_speed=args.max_speed,
             min_speed=float(args.min_speed),
-            ball_dec=float(args.ball_dec),
+            ball_dec=parse_ball_dec(args.ball_dec),
             speed_step=args.speed_step,
             angle_step=args.angle_step,
             radial_gridsize=float(args.radial_gridsize),

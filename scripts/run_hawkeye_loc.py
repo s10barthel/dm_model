@@ -48,6 +48,7 @@ from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_mode
 
 from physical_pass_model import (
     PC_XPASS_DEFAULT_BALL_DEC,
+    parse_ball_dec,
     AS_DEFAULT_ANGLE_STEP_DEG,
     AS_DEFAULT_COARSE_N_ANGLES,
     AS_DEFAULT_REFINE_ANGLE_RADIUS_DEG,
@@ -249,7 +250,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ball-z-limit", default="none")
 
     # Applicable pc-xPass generation flags from generate_physical_xpass.py.
-    parser.add_argument("--ball-dec", type=float, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass initial-speed deceleration in m/s^2; 0 disables slowing.")
+    parser.add_argument("--ball-dec", type=parse_ball_dec, default=PC_XPASS_DEFAULT_BALL_DEC, help="pc-xPass constant deceleration in m/s^2, or drag for quadratic air drag; default 0.45; 0 disables slowing.")
     parser.add_argument("--physical-eps", type=float, default=1e-4)
     parser.add_argument(
         "--speed-aggregation",

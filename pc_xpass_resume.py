@@ -123,6 +123,8 @@ def prepare_contracts(args, selected):
         "physics_version", "ranking_mode", "lane_function", "control_function", "lane_survival_aggregation",
         "top_pass_definition", "position_discount_function", "xt_surface", "reachability_config")}
     dependencies["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
+    if effective["ball_dec"] == "drag":
+        dependencies["ball_drag"] = effective["ball_drag"]
     if dependencies["xt_surface"]:
         dependencies["xt_surface"] = {key: value for key, value in dependencies["xt_surface"].items() if key != "path"}
     saved_dependencies = metadata.get("computation_dependencies")
