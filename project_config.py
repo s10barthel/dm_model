@@ -584,6 +584,15 @@ def assert_feature_paths_usable(*paths) -> None:
         if value is None:
             continue
         path = Path(value).resolve()
+        for parent in (path, *path.parents):
+            metadata_path = parent / "metadata.json"
+            if metadata_path.is_file() and parent.parent.name == "runs":
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                if metadata.get("model_mode_regeneration_required") and any(
+                        part.endswith(("_model", "_model_carries")) for part in path.relative_to(parent).parts):
+                    raise ValueError("Model receiver mode requires regeneration: retrain success_intent, then extend "
+                                     "this feature run with --intended-receiver-model-id.")
+                break
         for candidate in (path, *path.parents):
             if candidate in seen:
                 continue

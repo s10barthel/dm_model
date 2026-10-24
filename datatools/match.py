@@ -766,8 +766,7 @@ class Match(ABC):
                 end_x = self.actions.at[i, "end_x"]
                 end_y = self.actions.at[i, "end_y"]
                 pass_max_ball_z, pass_high = self.pass_height_labels(frame, receive_frame)
-                intent_frame = (self.actions.at[i, "observed_end_frame_id"]
-                                if intended_receiver_mode in {"original", "angle_only"} else receive_frame)
+                intent_frame = receive_frame
                 if not pd.isna(intent_id) and not pd.isna(intent_frame):
                     receive_frame_int = int(intent_frame)
                     intent_x_col = f"{intent_id}_x"

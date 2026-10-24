@@ -11,7 +11,8 @@ from pathlib import Path
 LEGACY_TRAJECTORY_SPEED = "smoothed_mean_3d_speed_v1"
 PREVIOUS_TRAJECTORY_SPEED = "net_displacement_3d_speed_v2"
 OFFICIAL_RAW_TRAJECTORY_SPEED = "official_event_net_displacement_3d_1s_v3"
-TRAJECTORY_SPEED = "synchronized_official_net_displacement_3d_1s_v4"
+MAPPED_LEGACY_TRAJECTORY_SPEED = "synchronized_official_net_displacement_3d_1s_v4"
+TRAJECTORY_SPEED = "canonical_official_net_displacement_3d_1s_v5"
 TRAJECTORY_SPEED_KEY = "trajectory_speed_definition"
 
 
@@ -19,7 +20,7 @@ def speed_definition(value=None):
     if isinstance(value, dict):
         value = value.get(TRAJECTORY_SPEED_KEY)
     value = value or LEGACY_TRAJECTORY_SPEED
-    if value not in (LEGACY_TRAJECTORY_SPEED, PREVIOUS_TRAJECTORY_SPEED, OFFICIAL_RAW_TRAJECTORY_SPEED, TRAJECTORY_SPEED):
+    if value not in (LEGACY_TRAJECTORY_SPEED, PREVIOUS_TRAJECTORY_SPEED, OFFICIAL_RAW_TRAJECTORY_SPEED, MAPPED_LEGACY_TRAJECTORY_SPEED, TRAJECTORY_SPEED):
         raise ValueError(f"Unknown trajectory speed definition: {value!r}")
     return value
 

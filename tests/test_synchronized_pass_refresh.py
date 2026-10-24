@@ -69,7 +69,8 @@ def test_safeguard_changes_invalidate_refresh_noop_and_record_skips(feature_runs
     runs, base, args, latest = feature_runs
     refresh.run_trajectory_refresh(args)
     args.extend_feature_run_id, args.run_id, args.max_pass_duration = 'derived', 'limited', .5
-    refresh.run_trajectory_refresh(args)
+    with pytest.raises(ValueError, match='All selected passes'):
+        refresh.run_trajectory_refresh(args)
     metadata = json.loads((runs / 'limited/metadata.json').read_text())
     assert metadata['max_pass_duration'] == .5
     assert metadata['skipped_action_count'] == 2

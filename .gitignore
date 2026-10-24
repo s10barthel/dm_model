@@ -133,3 +133,5 @@ _vendor/defcon/saved
 !tests/test_replace_carries.py
 
 !tests/test_reception_retirement.py
+
+!tests/test_canonical_pass_endpoints.py

@@ -104,6 +104,12 @@ def rebuild_match(task):
     controls = pd.read_parquet(control_path)
     tracking_path = DATA_ROOT / "tracking_processed" / f"{match_id}.parquet"
     tracking = pd.read_parquet(tracking_path)
+    from datatools.pass_trajectory import prepare_pass_events
+    endpoint_path = canonical_root / "pass_endpoints" / f"{match_id}.parquet"
+    if endpoint_path.exists():
+        events = pd.read_parquet(endpoint_path)
+    else:
+        events = prepare_pass_events(events, tracking, match_id, metadata.get("max_pass_duration"))
     segments, audit = derive_carry_segments(controls, events, tracking, policy=policy)
     lineup = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     lineup = lineup.loc[lineup.stats_perform_match_id.eq(match_id)].copy()
@@ -211,6 +217,10 @@ def marker_complete(output, match_id):
 def replace_carries(args):
     source = resolve_source(args.extend_feature_run_id)
     original = load_feature_run_metadata(source.name, required=True)
+    from datatools.pass_trajectory import PASS_DURATION
+    if original.get("pass_duration_definition") != PASS_DURATION:
+        raise ValueError("Carry replacement requires canonical pass endpoints; add --refresh-trajectory "
+                         "and --retire-elastic to update the source consistently.")
     ids = match_ids(source, original)
     output = get_feature_run_root(args.run_id or generate_run_id("feature"))
     policy = CarryPolicy(**{key: getattr(args, "carry_" + key, value) for key, value in asdict(CarryPolicy()).items()})

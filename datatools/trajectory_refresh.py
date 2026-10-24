@@ -32,10 +32,18 @@ from scripts.feature_extension_diagnostics import (ExtensionAttempt, cleanup_tem
 
 def load_refresh_match(match_id, metadata):
     """Reconstruct action filtering, but do not relabel returns or infer receivers."""
+    config.PASS_HEIGHT_THRESHOLD_METERS = metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)
     events = pd.read_csv(DATA_ROOT / "event_synced" / f"{match_id}.csv", parse_dates=["utc_timestamp"])
     tracking = pd.read_parquet(DATA_ROOT / "tracking_processed" / f"{match_id}.parquet")
     lineup = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     lineup = lineup.loc[lineup.stats_perform_match_id.astype(str).eq(str(match_id))].copy()
+    from datatools.reception_policy import apply_policy
+    from datatools.pass_trajectory import prepare_pass_events
+    events = apply_policy(events, metadata.get("reception_policy", "legacy_elastic_v1"))
+    events = prepare_pass_events(events, tracking, match_id, metadata.get(MAX_DURATION_KEY))
+    if metadata.get("_endpoint_root"):
+        from datatools.graph_feature import atomic_parquet_save
+        atomic_parquet_save(events, Path(metadata["_endpoint_root"]) / "pass_endpoints" / f"{match_id}.parquet")
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
         reception_policy=metadata.get("reception_policy", "legacy_elastic_v1"),
@@ -94,7 +102,7 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
 
 
 def refresh_duration_labels(labels, match, *, context):
-    """Patch only duration, including repeated source indices in augmented rows."""
+    """Refresh endpoint-derived targets, including repeated source indices."""
     if not isinstance(labels, torch.Tensor) or labels.ndim != 2 or labels.shape[1] <= config.LABEL_INDEX["duration"]:
         raise ValueError(f"{context}: malformed label artifact")
     result = labels.clone()
@@ -109,6 +117,19 @@ def refresh_duration_labels(labels, match, *, context):
     # independent of synthetic type flags, while retaining genuine shot/carry durations.
     selected = np.isin(indices, durations.index)
     result[torch.as_tensor(selected, device=result.device), config.LABEL_INDEX["duration"]] = result.new_tensor(values[selected])
+    for position in np.flatnonzero(selected):
+        action = match.actions.loc[int(indices[position])]
+        if hasattr(match, "pass_height_labels"):
+            height, high = match.pass_height_labels(action.frame_id, action.receive_frame_id)
+            for name, value in (("pass_max_ball_z", height), ("pass_high", high)):
+                result[position, config.LABEL_INDEX[name]] = float(value)
+        for axis, extent in (("x", config.FIELD_SIZE[0]), ("y", config.FIELD_SIZE[1])):
+            name = "end_" + axis
+            if name in action and name in config.LABEL_INDEX:
+                value = action[name]
+                if str(action.get("object_id", "")).startswith("away"):
+                    value = extent - value
+                result[position, config.LABEL_INDEX[name]] = float(value)
     return result
 
 
@@ -130,7 +151,7 @@ def patch_receiver_targets(labels, actions, tracking):
             players = [c[:-2] for c in snapshot.index if re.fullmatch(rf"{prefix}_(?:\d+|goal)_x", c)]
             if player in players:
                 intent_index = players.index(player)
-            end = action.get("observed_end_frame_id")
+            end = action.get("receive_frame_id")
             if pd.notna(end) and end in tracking.index:
                 values = tracking.loc[end].reindex([player + "_x", player + "_y"]).to_numpy(dtype=float)
                 if np.isfinite(values).all():
@@ -155,7 +176,7 @@ def refresh_artifact_paths(root, match_id=None):
         name = folder.name
         selected = (name == "action_graphs_success_intent" or name == "success_intent_labels"
             or name.startswith(("action_labels", "augmented_labels", "resolved_actions"))
-            or name in {"augmented_graphs", "augmented_graphs_angle_only"})
+            or name in {"augmented_graphs", "augmented_graphs_angle_only", "post_action_graphs"})
         if selected:
             paths.extend(p for p in folder.glob("*") if p.suffix in {".pt", ".parquet"}
                          and (match_id is None or p.stem == match_id))
@@ -165,7 +186,7 @@ def refresh_artifact_paths(root, match_id=None):
 def stage_refresh_match(task):
     file, temp, label_path, metadata, thread_limit, artifacts = task
     configure_worker_thread_limit(thread_limit)
-    match = load_refresh_match(file.stem, metadata)
+    match = load_refresh_match(file.stem, dict(metadata, _endpoint_root=str(file.parent.parent)))
     match.max_pass_duration = metadata.get(MAX_DURATION_KEY)
     # Use persisted canonical identity/membership, even if current filtering differs.
     root = file.parent.parent
@@ -197,6 +218,17 @@ def stage_refresh_match(task):
             previous = actions.get("intent_id", pd.Series(None, index=actions.index, dtype=object))
             changed[path.parent.name] = int((previous.fillna("") != labeled.intent_id.fillna(""))[mask].sum())
             actions.loc[mask, "intent_id"] = labeled.loc[mask, "intent_id"]
+        for index, row in actions.loc[actions.action_type.eq("pass")].iterrows():
+            if hasattr(match, "pass_height_labels"):
+                height, high = match.pass_height_labels(row.frame_id, row.receive_frame_id)
+                actions.loc[index, ["pass_max_ball_z", "pass_high"]] = [height, high]
+            for axis in ("x", "y"):
+                column = "intent_" + axis
+                player_column = str(row.get("intent_id")) + "_" + axis
+                if column in actions:
+                    actions.loc[index, column] = (match.tracking.at[row.receive_frame_id, player_column]
+                        if pd.notna(row.receive_frame_id) and row.receive_frame_id in match.tracking.index
+                        and player_column in match.tracking else np.nan)
         if "duration" in actions:
             mask = actions.action_type.eq("pass")
             actions.loc[mask, "duration"] = actions.loc[mask, "pass_duration"]
@@ -240,6 +272,23 @@ def stage_refresh_match(task):
             raise ValueError(f"Canonical graph/label alignment mismatch: {base_graph}")
         graphs, labels = augment_blocked_actions(match, verbose=False)
         tensors[graph_path], tensors[augmented_path] = graphs, labels
+    # Rebuild post-action observations, whose initial frame is the pass endpoint.
+    for path, _ in artifacts:
+        if path.parent.name != "post_action_graphs":
+            continue
+        from datatools.graph_feature import construct_graph_features
+        actions = frames.get(("original", False), canonical)
+        match.actions = actions.copy()
+        label_path = get_action_label_dir((metadata.get("return_types") or ["disc_0.9"])[0],
+                                         intended_receiver_mode="original", root=root) / file.name
+        labels = tensors.get(label_path)
+        if labels is None:
+            labels = torch.load(label_path, map_location="cpu", weights_only=False)
+        schema = metadata.get("graph_schema") or {}
+        tensors[path] = construct_graph_features(match, action_indices=labels[:, 0].long().tolist(),
+            post_action=True, verbose=False, add_v_edge_features=bool(schema.get("add_v_edge_features", False)),
+            add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),
+            **generation_kwargs(schema))
     for path, staged in artifacts:
         if path.suffix == ".pt":
             if path not in tensors:
@@ -248,6 +297,11 @@ def stage_refresh_match(task):
     failed = canonical.loc[canonical.action_type.eq("pass") & canonical.observed_end_frame_id.isna()]
     report = dict(match_id=file.stem, trajectory_skips=getattr(match, "_trajectory_refresh_skips", []), skipped_actions=[dict(action_index=int(i),
         action_id=str(a.get("action_id", i)), reason=a.pass_endpoint_reason) for i, a in failed.iterrows()],
+        pass_count=int(canonical.action_type.eq("pass").sum()),
+        usable_pass_count=int((canonical.action_type.eq("pass") & canonical.receive_frame_id.notna()).sum()),
+        endpoint_sources=canonical.loc[canonical.action_type.eq("pass"), "pass_endpoint_source"].value_counts().to_dict(),
+        changed_endpoint_count=int((canonical.loc[canonical.action_type.eq("pass"), "receive_frame_id"].fillna(-1)
+            != canonical.loc[canonical.action_type.eq("pass"), "original_receive_frame_id"].fillna(-1)).sum()),
         heuristic_changes=changed, pass_endpoint_definition=PASS_DURATION,
         max_pass_duration=metadata.get(MAX_DURATION_KEY))
     return report
@@ -291,6 +345,12 @@ def run_trajectory_refresh(args):
             and metadata.get(MAX_DURATION_KEY) == getattr(args, MAX_DURATION_KEY, None)):
         print(f"Trajectory and pass duration already current; no-op for {base_id}.")
         return
+    if (metadata.get("carry_variant") or {}).get("available"):
+        raise ValueError("Refreshing pass endpoints in a carry-enabled run requires --replace-carries.")
+    if "model" in metadata.get("intended_receiver_modes", []):
+        metadata["model_mode_regeneration_required"] = True
+        metadata["previous_intended_receiver_model_id"] = metadata.pop("intended_receiver_model_id", None)
+        metadata["intended_receiver_modes"] = [m for m in metadata["intended_receiver_modes"] if m != "model"]
     metadata[MAX_DURATION_KEY] = getattr(args, MAX_DURATION_KEY, None)
     in_place = bool(getattr(args, "in_place", False))
     if in_place and getattr(args, "run_id", None):
@@ -312,7 +372,8 @@ def run_trajectory_refresh(args):
         label_path = get_success_intent_label_dir(base_root) / file.name
         if not label_path.is_file():
             raise FileNotFoundError(label_path)
-    related = [p for p in refresh_artifact_paths(base_root) if p not in files]
+    related = [p for p in refresh_artifact_paths(base_root) if p not in files
+               and not (metadata.get("model_mode_regeneration_required") and p.parent.name.endswith(("_model", "_model_carries")))]
     manifest = sorted(str(path.relative_to(base_root)) for path in [*files, *related])
     expected_manifest = (previous.get("target_settings") or {}).get("artifacts") if recovery else None
     if expected_manifest is not None and manifest != expected_manifest:
@@ -340,6 +401,9 @@ def run_trajectory_refresh(args):
             result["skipped_actions"] = {r["match_id"]: r["skipped_actions"] for r in reports if r["skipped_actions"]}
             result["skipped_action_count"] = sum(len(r["skipped_actions"]) for r in reports)
         if error:
+            reports = [json.loads(p.read_text()) for p in (output_root / "trajectory_refresh").glob("*.json")]
+            result["skipped_actions"] = {r["match_id"]: r["skipped_actions"] for r in reports if r["skipped_actions"]}
+            result["skipped_action_count"] = sum(len(r["skipped_actions"]) for r in reports)
             result["error"] = error
         else:
             result.pop("error", None)
@@ -355,7 +419,9 @@ def run_trajectory_refresh(args):
         if not in_place:
             attempt.begin_mutation("copying", current_file=output_root)
             clone_feature_artifacts(base_root, output_root, mode=getattr(args, "artifact_copy_mode", "hardlink"),
-                                    diagnostics=attempt.data)
+                                    diagnostics=attempt.data,
+                                    exclude=lambda p: metadata.get("model_mode_regeneration_required", False)
+                                    and any(part.endswith(("_model", "_model_carries")) for part in p.parts))
             attempt.mutation_finished()
         output_files = [get_success_intent_graph_dir(output_root) / file.name for file in files]
         pairs = [(output_root / name, (output_root / name).with_name(Path(name).name + ".trajectory.tmp"))
@@ -385,6 +451,8 @@ def run_trajectory_refresh(args):
         from project_config import atomic_write_json
         for report in reports:
             atomic_write_json(output_root / "trajectory_refresh" / (report["match_id"] + ".json"), report)
+        if sum(r.get("pass_count", 0) for r in reports) and not sum(r.get("usable_pass_count", 0) for r in reports):
+            raise ValueError("All selected passes lack usable endpoints; see trajectory_refresh diagnostics.")
         attempt.finish()
     except BaseException as error:
         primary = error

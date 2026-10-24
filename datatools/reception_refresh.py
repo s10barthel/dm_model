@@ -72,6 +72,8 @@ def refresh_match(task):
     artifacts, counts = {}, Counter(receptions=len(records))
     for folder in sorted(p for p in source.iterdir() if p.is_dir() and not p.name.endswith("_carries")):
         name = folder.name
+        if metadata.get("model_mode_regeneration_required") and name.endswith("_model"):
+            continue
         if name.startswith("resolved_actions"):
             path = folder / f"{match_id}.parquet"
             if path.exists():

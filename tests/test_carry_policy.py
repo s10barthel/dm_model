@@ -162,7 +162,7 @@ def test_inference_rejects_interval_preserving_canonical_observations(tmp_path):
         definition=DEFINITION, validation_parameters=asdict(CarryPolicy())))))
     match = SimpleNamespace(events=events, actions=events, tracking=tracking, fps=25, lineup=pd.DataFrame())
     plan = reconstruct_sportec_states(match, "test", tmp_path, control_events=controls)
-    assert plan.provenance["state_contract"] == "sportec_possession_states_v4"
+    assert plan.provenance["state_contract"] == "sportec_possession_states_v5"
     assert all(s["start_state_id"] is None and s["supported_until"] is None for s in plan.spells)
     assert plan.actions[-1]["pre_state_id"] in plan.observations
     assert plan.actions[-1]["start_state_id"] is None

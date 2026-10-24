@@ -46,6 +46,9 @@ def apply_policy(actions, version=LEGACY, *, mode=None, records=None):
     # Synthetic carries use their own validated segment endpoints.
     mask &= result.get("spadl_type", pd.Series("", index=result.index)).ne("ball_carry")
     result["reception_retired"] = mask
+    from datatools.pass_trajectory import PASS_DURATION
+    canonical = result.get("pass_endpoint_definition", pd.Series("", index=result.index)).eq(PASS_DURATION)
+    mask &= ~canonical
     result["reception_policy_version"] = RETIRED
     for column in ("receive_frame_id", "receive_ts"):
         if column in result:
@@ -73,6 +76,8 @@ def apply_run_policy(actions, root, match_id=None, *, mode=None):
         if not path.exists():
             raise FileNotFoundError(f"Missing pinned reception policy records: {path}")
         records = json.loads(path.read_text(encoding="utf-8"))["receptions"]
+    from datatools.pass_trajectory import apply_pinned_endpoints
+    actions = apply_pinned_endpoints(actions, root, match_id)
     return apply_policy(actions, version, mode=mode, records=records)
 
 

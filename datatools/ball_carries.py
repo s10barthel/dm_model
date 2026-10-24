@@ -571,10 +571,11 @@ def derive_carry_segments(control_events, canonical_events, tracking, fps=25, *,
 
 
 def validate_carry_artifact_version(carries: pd.DataFrame) -> None:
+    from datatools.carry_policy import PREVIOUS_DEFINITION
     versions = set(carries.get("carry_definition", pd.Series(dtype=str)).dropna())
     if carries.empty:
         versions = {carries.attrs.get("carry_definition")}
-    if versions not in ({CARRY_DEFINITION_VERSION}, {LEGACY_DEFINITION}):
+    if versions not in ({CARRY_DEFINITION_VERSION}, {LEGACY_DEFINITION}, {PREVIOUS_DEFINITION}):
         raise ValueError("Stale carry sidecar: rebuild synchronization and carry artifacts with "
                          "scripts/preprocess_sportec.py before generating new carry features.")
 

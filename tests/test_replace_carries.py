@@ -38,7 +38,8 @@ def test_cloning_can_resume_after_partial_copy(tmp_path):
 def test_failed_replacement_resumes_completed_matches_and_preserves_source(tmp_path, monkeypatch):
     source, output = tmp_path / "source", tmp_path / "derived"
     source.mkdir()
-    original = dict(status="completed", carry_variant=dict(available=True, definition="sportec_fernandez_1s_v2"))
+    from datatools.pass_trajectory import PASS_DURATION
+    original = dict(status="completed", pass_duration_definition=PASS_DURATION, carry_variant=dict(available=True, definition="sportec_fernandez_1s_v2"))
     (source / "metadata.json").write_text(json.dumps(original))
     (source / "canonical.parquet").write_bytes(b"source")
     checksum = rc.digest(source / "canonical.parquet")

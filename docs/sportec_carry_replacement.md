@@ -1,4 +1,4 @@
-# Sportec carry definition v3
+# Sportec carry definition v4
 
 The shared policy governs Sportec training/evaluation carries and inference.
 Legacy feature runs retain their original inference definition. SkillCorner
@@ -25,14 +25,16 @@ Run from C:\dm_model:
 ```powershell
 .\.venv\Scripts\python.exe scripts\generate_relevant_features.py `
   --replace-carries `
+  --retire-elastic `
+  --refresh-trajectory `
   --extend-feature-run-id latest `
   --num-workers 4 `
   --worker-thread-limit 1
 ```
 
-The latest completed carry-enabled source with complete canonical artifacts is
-selected. A new run reuses non-carry artifacts using hard links and rebuilds the
-complete carry variant. Canonical graph and label rows are reused exactly inside
+The latest completed source with complete canonical artifacts is selected. The
+combined update refreshes endpoint-dependent artifacts and rebuilds carries.
+Standalone carry replacement on an already refreshed run reuses canonical rows inside
 combined artifacts. Event IDs normalize to nullable strings for numeric Sportec
 and synthetic carry IDs. No receiver model is rerun. Use --artifact-copy-mode copy
 if hard links are unavailable. No source artifacts are overwritten.
@@ -121,3 +123,9 @@ Bounded integration audit (four matches; never updates the latest pointer):
 Use a new audit directory for each attempt. If production hard linking is unavailable,
 select `--artifact-copy-mode copy` explicitly; this copies reusable artifacts and
 requires the corresponding disk space.
+
+## Canonical pass endpoints
+
+New carry generation and replacement consume the run-pinned `receive_frame_id` policy, after ELASTIC retirement and endpoint resolution. Only a confirmed official reception can supply a synthetic receipt; an official touch, duel or stoppage does not by itself establish possession. Explicit control events can still establish acquisition under the existing checks. Acquisition/separation thresholds are unchanged, and unavailable training passes remain in the control timeline.
+
+When pass timing changes, combine `--replace-carries --retire-elastic --refresh-trajectory`. Fresh `--use-carries` uses the same preparation. Legacy v3 artifacts retain their validated inference engine; new v4 artifacts use the updated endpoint contract.

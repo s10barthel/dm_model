@@ -16,7 +16,7 @@ import torch
 from datatools import config, preprocess, utils
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
 from project_config import CONTROL_EVENTS_SYNCED_DIR
-from datatools.carry_policy import DEFINITION, STATE_CONTRACT as VALIDATED_STATE_CONTRACT, run_policy
+from datatools.carry_policy import DEFINITION, PREVIOUS_DEFINITION, PREVIOUS_STATE_CONTRACT, STATE_CONTRACT as VALIDATED_STATE_CONTRACT, run_policy
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 STATE_CONTRACT = "sportec_possession_states_v3"
@@ -36,7 +36,8 @@ STATE_METADATA_COLUMNS = [
 
 def state_contract_for_run(feature_root):
     definition, _ = run_policy(feature_root)
-    return VALIDATED_STATE_CONTRACT if definition == DEFINITION else STATE_CONTRACT
+    return (VALIDATED_STATE_CONTRACT if definition == DEFINITION else
+            PREVIOUS_STATE_CONTRACT if definition == PREVIOUS_DEFINITION else STATE_CONTRACT)
 
 
 def _digest(value):
@@ -135,7 +136,7 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
     if control_events is None:
         path = CONTROL_EVENTS_SYNCED_DIR / f"{match_id}.parquet"
         local = Path(feature_root) / "carry_sidecars" / "control_events" / f"{match_id}.parquet"
-        if definition == DEFINITION:
+        if definition in {DEFINITION, PREVIOUS_DEFINITION}:
             path = local
         if not path.exists():
             raise FileNotFoundError(f"Missing synchronized control events {path}; run Sportec preprocessing.")
@@ -152,13 +153,13 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
     actions = apply_run_policy(actions, feature_root, match_id)
     if "spadl_type" in actions:
         actions = actions.loc[actions.spadl_type.ne("ball_carry")].copy()
-    provenance = dict(state_contract=VALIDATED_STATE_CONTRACT if definition == DEFINITION else STATE_CONTRACT, feature_run_id=Path(feature_root).name,
+    provenance = dict(state_contract=state_contract_for_run(feature_root), feature_run_id=Path(feature_root).name,
         canonical_sha256=(_table_fingerprint(match.sportec_canonical_source) if hasattr(match, "sportec_canonical_source")
                           else _canonical_fingerprint(canonical)), control_sha256=_table_fingerprint(control_events),
         resolved_actions_sha256=_action_fingerprint(actions), tracking_sha256=_table_fingerprint(match.tracking),
         lineup_sha256=_table_fingerprint(getattr(match, "lineup", pd.DataFrame())),
         physical_input_contract=PHYSICAL_INPUT_CONTRACT)
-    if definition == DEFINITION:
+    if definition in {DEFINITION, PREVIOUS_DEFINITION}:
         provenance["carry_validation_parameters"] = asdict(policy)
     provenance["reception_policy"] = match.reception_policy
     plan = SportecStatePlan(str(match_id), provenance)
@@ -186,7 +187,7 @@ def reconstruct_sportec_states(match, match_id, feature_root, *, control_events=
             owner_id=action.get("object_id") if _player(action.get("object_id")) else None,
             pre_state_id=pre_id, post_state_id=post_id, spell_id=None,
             start_state_id=None, end_state_id=pre_id, next_state_id=None))
-    if definition == DEFINITION:
+    if definition in {DEFINITION, PREVIOUS_DEFINITION}:
         from datatools.carry_inference import populate
         return populate(plan, match, control_events, canonical, policy)
     timeline = []
@@ -584,7 +585,7 @@ def sportec_event_endpoint_view(component: pd.DataFrame, manifest=None) -> pd.Da
     """Resolve event roles; probabilities retain each physical state's team perspective."""
     if "state_id" not in component:
         return component
-    if manifest is None or manifest.get("state_contract") not in {STATE_CONTRACT, VALIDATED_STATE_CONTRACT}:
+    if manifest is None or manifest.get("state_contract") not in {STATE_CONTRACT, PREVIOUS_STATE_CONTRACT, VALIDATED_STATE_CONTRACT}:
         raise ValueError("Sportec state components require a matching possession manifest; regenerate the component run.")
     if component.state_id.duplicated().any():
         raise ValueError("Duplicate physical state predictions")

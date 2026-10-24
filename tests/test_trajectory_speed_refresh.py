@@ -281,11 +281,13 @@ def test_refresh_all_model_label_variants_and_endpoint_metadata_preserves_receiv
     for directory in directories:
         saved = torch.load(derived / directory / "a.pt", weights_only=False)
         torch.testing.assert_close(saved[:, 7], torch.ones(3))
-        saved[:, 7] = labels[:, 7]
+        for name in ("duration", "end_x", "end_y"):
+            saved[:, config.LABEL_INDEX[name]] = labels[:, config.LABEL_INDEX[name]]
         torch.testing.assert_close(saved, labels, rtol=0, atol=0)
         torch.testing.assert_close(torch.load(base / directory / "a.pt", weights_only=False), labels)
     updated = pd.read_parquet(derived / resolved.relative_to(base))
-    pd.testing.assert_frame_equal(updated[actions.columns], actions)
+    unchanged = [c for c in actions.columns if c not in {"endpoint_source", "end_x", "end_y", "receive_frame_id"}]
+    pd.testing.assert_frame_equal(updated[unchanged], actions[unchanged])
     assert updated.at[17, "observed_end_frame_id"] == 35
     assert updated.at[17, "pass_duration"] == 1
     assert resolved.read_bytes() == before

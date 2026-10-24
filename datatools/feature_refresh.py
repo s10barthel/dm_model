@@ -34,9 +34,10 @@ def _refresh_match(task):
         carry = rebuild_match((str(source), str(output), dict(metadata, _canonical_root=str(output)),
                                match_id, settings['carry_parameters'], threads))
         report['carry_segments'] = carry['segments']
-    report['artifacts'] = {str(p.relative_to(output)): p.stat().st_size
+    carry_artifacts = carry.get('artifacts', {}) if settings['replace_carries'] else {}
+    report['artifacts'] = {**carry_artifacts, **{str(p.relative_to(output)): p.stat().st_size
         for folder in output.iterdir() if folder.is_dir()
-        for p in folder.glob(match_id + '.*') if p.suffix in {'.pt', '.parquet'}}
+        for p in folder.glob(match_id + '.*') if p.suffix in {'.pt', '.parquet'}}}
     atomic_write_json(output / 'feature_refresh' / (match_id + '.json'), report)
     return report
 
@@ -57,8 +58,8 @@ def run_combined_refresh(args):
     if getattr(args, 'in_place', False):
         raise ValueError('Combined refresh creates a derived run; --in-place is unsupported.')
     replace, retire = bool(args.replace_carries), bool(args.retire_elastic)
-    if retire and (original.get('carry_variant') or {}).get('available') and not replace:
-        raise ValueError('Retiring receptions in a carry-enabled run requires --replace-carries')
+    if (original.get('carry_variant') or {}).get('available') and not replace:
+        raise ValueError('Refreshing pass endpoints in a carry-enabled run requires --replace-carries')
     ids = rc.match_ids(source, original)
     defaults = {**asdict(CarryPolicy()), **(original.get('carry_variant') or {}).get('validation_parameters', {})}
     explicit = getattr(args, 'explicit_carry_parameters', set())
@@ -66,7 +67,7 @@ def run_combined_refresh(args):
                   for key, value in defaults.items()}
     CarryPolicy(**parameters)
     settings = dict(source_sha256=rc.digest(source / 'metadata.json'), matches=ids,
-        retire_elastic=retire, replace_carries=replace, carry_parameters=parameters,
+        retire_elastic=retire, replace_carries=replace, carry_definition=DEFINITION, carry_parameters=parameters,
         artifact_copy_mode=args.artifact_copy_mode, **{PASS_DURATION_KEY: PASS_DURATION,
         TRAJECTORY_SPEED_KEY: TRAJECTORY_SPEED, ANGLE_ONLY_KEY: ANGLE_ONLY, ORIGINAL_KEY: ORIGINAL,
         MAX_DURATION_KEY: getattr(args, MAX_DURATION_KEY, None)})
@@ -78,6 +79,10 @@ def run_combined_refresh(args):
         created_at=datetime.now().isoformat(timespec='seconds'), command=subprocess.list2cmdline(sys.argv),
         feature_refresh=settings, **{PASS_DURATION_KEY: PASS_DURATION, TRAJECTORY_SPEED_KEY: TRAJECTORY_SPEED,
         ANGLE_ONLY_KEY: ANGLE_ONLY, ORIGINAL_KEY: ORIGINAL, MAX_DURATION_KEY: settings[MAX_DURATION_KEY]})
+    if "model" in metadata.get("intended_receiver_modes", []):
+        metadata["model_mode_regeneration_required"] = True
+        metadata["previous_intended_receiver_model_id"] = metadata.pop("intended_receiver_model_id", None)
+        metadata["intended_receiver_modes"] = [m for m in metadata["intended_receiver_modes"] if m != "model"]
     if retire:
         metadata[KEY] = RETIRED
     if replace:
@@ -97,7 +102,7 @@ def run_combined_refresh(args):
         if not cloned:
             clone_feature_artifacts(source, output, mode=args.artifact_copy_mode, resume=True,
                 exclude=lambda p: (replace and rc.excluded_artifact(p))
-                    or any(part in {'feature_refresh', 'trajectory_refresh'} for part in p.parts))
+                    or any(part in {'feature_refresh', 'trajectory_refresh'} or part.endswith(('_model', '_model_carries')) for part in p.parts))
             metadata['feature_refresh_clone_complete'] = True
             write_run_metadata(output, metadata)
         tasks = [(str(source), str(output), metadata, mid, settings, args.worker_thread_limit)
@@ -116,6 +121,9 @@ def run_combined_refresh(args):
         reports = [json.loads((output / 'feature_refresh' / (mid + '.json')).read_text()) for mid in ids]
         metadata['skipped_actions'] = {r['match_id']: r['skipped_actions'] for r in reports if r['skipped_actions']}
         metadata['skipped_action_count'] = sum(len(r['skipped_actions']) for r in reports)
+        if sum(r.get("pass_count", 0) for r in reports) and not sum(r.get("usable_pass_count", 0) for r in reports):
+            write_run_metadata(output, metadata)
+            raise ValueError("All selected passes lack usable endpoints; see skipped_actions in metadata.")
         if replace:
             metadata['carry_variant'].update(available=True, generated_at=datetime.now().isoformat(timespec='seconds'))
         metadata['status'] = 'completed'

@@ -1646,7 +1646,24 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
         atomic_write_json(record_path, manifest)
     events = apply_policy(events, args.reception_policy, records=records)
     tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
+    from datatools.pass_trajectory import prepare_pass_events
+    endpoint_path = feature_root / "pass_endpoints" / f"{task.match_id}.parquet"
+    if endpoint_path.exists():
+        events = pd.read_parquet(endpoint_path)
+    else:
+        events = prepare_pass_events(events, tracking, task.match_id, getattr(args, "max_pass_duration", None))
+        atomic_parquet_save(events, endpoint_path)
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    # Extensions retain the source run's action identities and membership.
+    from datatools.pass_trajectory import PASS_DURATION
+    for mode in ("original", "angle_only"):
+        baseline = get_resolved_action_path(task.match_id, intended_receiver_mode=mode, root=feature_root)
+        if baseline.exists():
+            pinned_actions = pd.read_parquet(baseline)
+            definitions = pinned_actions.get("pass_endpoint_definition")
+            if definitions is not None and definitions.fillna("").isin(["", PASS_DURATION]).all():
+                match.actions = pinned_actions.copy()
+                break
     if args.use_carries:
         from datatools.ball_carries import derive_carry_segments
         from datatools.carry_policy import run_policy

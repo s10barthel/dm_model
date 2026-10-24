@@ -319,6 +319,8 @@ def load_match(
         root=feature_root,
         use_carries=use_carries,
     )
+    from project_config import assert_feature_paths_usable
+    assert_feature_paths_usable(resolved_action_path)
     if not resolved_action_path.exists():
         raise FileNotFoundError(
             f"Resolved actions not found at {resolved_action_path}. Run scripts/generate_relevant_features.py for this mode first."

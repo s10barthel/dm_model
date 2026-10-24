@@ -1,4 +1,4 @@
-ÃƒÂ¯Ã‚Â»Ã‚Â¿"""Read-only audit of official pass endpoints and an optional duration safeguard."""
+"""Read-only audit of official pass endpoints and an optional duration safeguard."""
 from __future__ import annotations
 import argparse
 from collections import Counter

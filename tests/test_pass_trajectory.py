@@ -47,7 +47,8 @@ def test_failed_pass_uses_synchronized_contact_instead_of_raw_delta(tag):
     assert action.pass_endpoint_event_id == "contact"
     assert action.pass_endpoint_source == ("official_stoppage" if tag in {"Foul", "Offside"} else "official_contact")
     assert action.pass_duration == .76
-    assert action.receive_frame_id == 170
+    assert action.receive_frame_id == 119
+    assert action.original_receive_frame_id == 170
     assert action.pass_endpoint_definition == PASS_DURATION
 
 
@@ -59,7 +60,7 @@ def test_success_uses_earliest_official_endpoint():
     assert match.actions.at[7, "pass_duration"] == 2
     assert match.actions.at[7, "pass_endpoint_source"] == "official_reception"
     match.actions.at[7, "endpoint_source"] = "elastic"
-    assert match._pass_endpoint_resolver.resolve(match.actions.loc[7]).observed == 175
+    assert match._pass_endpoint_resolver.resolve(match.actions.loc[7]).observed == 150  # Pinned endpoint wins.
 
 
 @pytest.mark.parametrize("period_boundary", [False, True])
@@ -122,7 +123,8 @@ def test_duplicate_duration_rows_change_only_duration():
     before = labels.clone()
     updated = refresh_duration_labels(labels, match, context="duplicated labels")
     torch.testing.assert_close(updated[:4, 7], torch.full((4,), .04))
-    updated[:4, 7] = before[:4, 7]
+    for name in ("duration", "end_x", "end_y"):
+        updated[:4, config.LABEL_INDEX[name]] = before[:4, config.LABEL_INDEX[name]]
     torch.testing.assert_close(updated, before, rtol=0, atol=0)
     torch.testing.assert_close(labels, before, rtol=0, atol=0)
 
@@ -141,7 +143,10 @@ def test_raw_xml_filters_administration_deletions_and_same_time_annotations(tmp_
     files = SimpleNamespace(event_path=directory / "DFL-MAT-test.xml", kpi_path=directory / "kpi.csv")
     kpi = pd.DataFrame(dict(EVENT_ID=["launch", "annotation", "admin", "deleted", "contact"],
                             FRAME_NUMBER=[100, 100, 100, 100, 101], RECFRM=[None]*5))
-    with patch("datatools.pass_trajectory._match_files", return_value={"DFL-MAT-test": files}), patch("scripts.preprocess_sportec.load_kpi_merged_table", return_value=kpi):
+    with patch("datatools.pass_trajectory._match_files", return_value={"DFL-MAT-test": files}), patch("scripts.preprocess_sportec.load_kpi_merged_table", return_value=kpi), patch(
+        "scripts.preprocess_sportec.load_match_raw_events", return_value=pd.DataFrame(
+            dict(event_id=kpi.EVENT_ID, period_id=1))), patch("pandas.read_parquet", return_value=pd.DataFrame(
+                dict(period_id=[1, 1], raw_frame_id=[100, 101], frame_id=[100, 101]))):
         events = load_official_events("DFL-MAT-test")
     match = fixture()
     endpoint = PassEndpointResolver(match.tracking, 25, events).resolve(match.actions.loc[7])

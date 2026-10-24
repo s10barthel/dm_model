@@ -151,7 +151,7 @@ def parse_args() -> argparse.Namespace:
         parser.add_argument("--carry-" + name.replace("_", "-"), type=float, default=value)
     parser.add_argument(
         "--refresh-trajectory", "--refresh-trajectory-speed", dest="refresh_trajectory", action="store_true",
-        help="Refresh success-intent speed/direction and all pass-duration labels; requires --extend-feature-run-id. "
+        help="Refresh canonical pass endpoints, height, trajectory, receiver dependencies and retire stale model mode; requires --extend-feature-run-id. "
              "--refresh-trajectory-speed is a deprecated alias. Original and angle_only receiver labels and their dependencies are regenerated.",
     )
     parser.add_argument(
@@ -1099,6 +1099,8 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "base_feature_run_metadata": plan.base_metadata,
         "status": status,
     }
+    if status == "completed" and "model" in metadata.get("intended_receiver_modes", []):
+        metadata["model_mode_regeneration_required"] = False
     if error:
         metadata["error"] = error
     else:
@@ -1211,6 +1213,8 @@ def mutating_metadata(
             "status": status,
         }
     )
+    if status == "completed" and "model" in metadata.get("intended_receiver_modes", []):
+        metadata["model_mode_regeneration_required"] = False
     if error:
         metadata["error"] = error
     else:
@@ -1392,6 +1396,12 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                        attempt=attempt)
         else:
             run_generation_steps(plan.command_steps, attempt=attempt)
+            if ((plan.base_metadata.get("carry_variant") or {}).get("available")
+                    and ("model" in plan.added_intended_receiver_modes or plan.regenerate_model_mode)):
+                carry_args = copy.copy(args)
+                carry_metadata = dict(plan.base_metadata, intended_receiver_modes=["model"],
+                                      intended_receiver_model_id=plan.intended_receiver_model_id)
+                run_generation_steps(carry_extension_steps(carry_args, carry_metadata, plan.target_run_id), attempt=attempt)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
         if plan.extend_interaction_edge_features:
@@ -1462,6 +1472,8 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
     metadata = load_feature_run_metadata(base_run_id, required=True)
     if metadata is None or metadata.get("status") != "completed":
         raise ValueError(f"Feature run {base_run_id} must be completed before adding carries.")
+    if metadata.get(PASS_DURATION_KEY) != PASS_DURATION:
+        raise ValueError("Adding carries to an existing run requires --refresh-trajectory first.")
     if bool((metadata.get("carry_variant") or {}).get("available", False)):
         raise ValueError(f"Feature run {base_run_id} already contains carry-augmented artifacts.")
 

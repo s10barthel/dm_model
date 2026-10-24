@@ -970,7 +970,7 @@ def label_intended_receivers(
 
     actions = actions.copy()
     if intended_receiver_mode in {INTENDED_RECEIVER_MODE_ORIGINAL, INTENDED_RECEIVER_MODE_ANGLE_ONLY}:
-        if "pass_endpoint_definition" not in actions or not actions.pass_endpoint_definition.isin(["", PASS_DURATION]).all():
+        if "pass_endpoint_definition" not in actions or not actions.pass_endpoint_definition.fillna("").isin(["", PASS_DURATION]).all():
             match_ids = actions.get("stats_perform_match_id", pd.Series(dtype=str)).dropna()
             match_id = str(match_ids.iloc[0]) if len(match_ids) else None
             actions = PassEndpointResolver(tracking, fps, load_official_events(match_id)).annotate(actions)
@@ -1036,7 +1036,7 @@ def label_intended_receivers(
             stats["failed_passes_total"] += 1
             effective_receive_frame = (actions.at[i, "trajectory_end_frame_id"]
                                        if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY
-                                       else actions.at[i, "observed_end_frame_id"])
+                                       else actions.at[i, "receive_frame_id"])
             if pd.isna(effective_receive_frame) or effective_receive_frame not in tracking.index:
                 stats["failed_passes_missing_endpoint"] += 1
                 continue

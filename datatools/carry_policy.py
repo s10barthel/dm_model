@@ -13,9 +13,11 @@ import re
 import numpy as np
 import pandas as pd
 
-DEFINITION = "sportec_fernandez_1s_v3"
+DEFINITION = "sportec_fernandez_1s_v4"
+PREVIOUS_DEFINITION = "sportec_fernandez_1s_v3"
 LEGACY_DEFINITION = "sportec_fernandez_1s_v2"
-STATE_CONTRACT = "sportec_possession_states_v4"
+PREVIOUS_STATE_CONTRACT = "sportec_possession_states_v4"
+STATE_CONTRACT = "sportec_possession_states_v5"
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,7 @@ def run_policy(root):
     metadata = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     carry = metadata.get("carry_variant") or {}
     definition = carry.get("definition", LEGACY_DEFINITION)
-    if definition not in {DEFINITION, LEGACY_DEFINITION}:
+    if definition not in {DEFINITION, PREVIOUS_DEFINITION, LEGACY_DEFINITION}:
         raise ValueError(f"Unsupported carry definition: {definition}")
     return definition, CarryPolicy(**carry.get("validation_parameters", {}))
 
@@ -138,6 +140,10 @@ def reconstruct_spells(controls, canonical, tracking, fps=25, policy=None):
             rows.append(dict(event_id=event, event_kind=action.spadl_type, frame_id=action.frame_id,
                              period_id=action.period_id, object_id=action.object_id, frame_source="canonical"))
         if action.spadl_type not in {"pass", "cross"} or truth(getattr(action, "offside", False)):
+            continue
+        # An endpoint terminates a pass; only a confirmed reception establishes control.
+        endpoint_kind = getattr(action, "pass_endpoint_source", None)
+        if endpoint_kind is not None and endpoint_kind != "official_reception":
             continue
         receiver = getattr(action, "receiver_id", None)
         if not player(receiver) or receiver[:4] != str(action.object_id)[:4]:
