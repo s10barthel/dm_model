@@ -85,7 +85,7 @@ from datatools.pass_success import model_pass_success_metadata
 from scripts.saved_visualization_xpass import resolve_saved_xpass
 from scripts.visualization_pass_success import (
     COMPARISON_COMPONENT, compare_pass_success_requested, comparison_metadata,
-    input_components, needs_model_pass_success, save_component_pngs,
+    input_components, needs_model_pass_success, needs_physical_xpass, physical_xpass_panel_source, save_component_pngs,
 )
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
@@ -857,7 +857,7 @@ def collect_action_components(
                         else pd.Series(float("nan"), index=probs.columns, dtype=float)
                     )
 
-    if show_physical_xpass or comparison_xpass:
+    if "physical_xpass" in rendered_components or show_physical_xpass or comparison_xpass:
         cache_dir = Path(panel_cache_dir) if panel_cache_dir is not None else get_runtime_physical_xpass_dir("sportec")
         component_prob_rows["physical_xpass"] = load_runtime_physical_xpass_visualization_component(
             cache_dir,
@@ -931,7 +931,7 @@ def render_action_components(
         "outcome_success",
     ]
     component_order = list(rendered_components)
-    if show_physical_xpass:
+    if show_physical_xpass and "physical_xpass" not in component_order:
         component_order.append("physical_xpass")
     overlays = prepare_action_overlays(
         match, action_index, component_prob_rows.get("success_intent"),
@@ -1096,16 +1096,15 @@ def main() -> None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
     if not success_intent_model_id and "success_intent" in initial_component_selection.rendered_components:
         raise ValueError("Success-intent visualization requires --success-intent-model-id or a bundle success_intent checkpoint.")
-    if success_intent_model_id:
-        shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
-    carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
-    for message in carry_warnings:
-        warnings.warn(message, UserWarning, stacklevel=2)
     component_selection = resolve_component_selection(
         args,
         include_success_intent=bool(success_intent_model_id),
     )
-
+    if success_intent_model_id and "success_intent" in component_selection.required_component_groups:
+        shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
+    carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
+    for message in carry_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
     model_ids = dict(resolved_model_ids)
     if success_intent_model_id:
         model_ids["success_intent"] = str(success_intent_model_id)
@@ -1118,17 +1117,29 @@ def main() -> None:
     missing = [name for name, model in loaded_models.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Could not load model checkpoints for: {', '.join(missing)}.")
-    configure_auxiliary_models(args, loaded_models, device)
+    if loaded_models:
+        configure_auxiliary_models(args, loaded_models, device)
     inference_mask_config = configure_inference_masks(loaded_models, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(loaded_models)
+    physical_cache_dir = args.physical_cache_dir or str(
+        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+    )
+    feature_run_id = args.feature_run_id
+    if not feature_run_id and not component_selection.required_component_groups:
+        cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json")
+        if bool(getattr(args, "pc_xpass", False)) or cache_metadata.get("source") == "pc_xpass":
+            cache_metadata = pc_versions.read_metadata(physical_cache_dir)
+            feature_run_id = (cache_metadata.get("source_inputs") or {}).get("feature_run_id")
     runtime_feature_context = resolve_runtime_feature_run_context(
-        args.feature_run_id,
+        feature_run_id,
         shared_context,
         bundle,
         args.intended_receiver_mode,
         graph_schema,
         context="Selected visualization feature artifacts",
     )
+    if not args.feature_run_id and feature_run_id:
+        runtime_feature_context["selection"] = "physical_xpass_cache"
     feature_run_id = str(runtime_feature_context["feature_run_id"])
     intended_receiver_mode = str(runtime_feature_context["intended_receiver_mode"])
     return_type = resolve_runtime_return_type(shared_context, args.return_type)
@@ -1144,9 +1155,6 @@ def main() -> None:
     use_carries = bool(shared_context.get("use_carries", (bundle or {}).get("use_carries", False)))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = args.physical_cache_dir or str(
-        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
-    )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("sportec", args, loaded_models)
     configure_lane_survival_runtime_cache(loaded_models, lane_survival_cache_dir)
     selected_physical_xpass_metric = physical_xpass_metric(args)
@@ -1286,6 +1294,7 @@ def main() -> None:
         "success_intent_trajectories": getattr(match, "_visualization_trajectory_metadata", {}),
         "compare_intended_receiver": bool(getattr(args, "compare_intended_receiver", False)),
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
@@ -1344,6 +1353,9 @@ def main() -> None:
         available=needs_model_pass_success(args), output_root=output_root,
     ))
     metadata.update(comparison_metadata(args, output_root))
+    if pass_success_model is None and needs_physical_xpass(args):
+        metadata["physical_xpass_runtime_source"] = physical_xpass_panel_source(args, physical_cache_dir)
+        metadata["x_pass_version"] = args.x_pass_version
     if comparison_xpass:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "sportec", records=shared_context.get("model_records", {}))

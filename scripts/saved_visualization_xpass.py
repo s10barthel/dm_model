@@ -139,7 +139,8 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
     if explicit_id and explicit_dir:
         raise ValueError("--pc-xpass-id cannot be combined with --physical-cache-dir.")
     if usage != "pc_xpass" and not ((explicit_dir or explicit_id) and explicit_version):
-        option = "--compare-pass-success" if compare_pass_success_requested(args) else "--show-physical-xpass"
+        option = ("--compare-pass-success" if compare_pass_success_requested(args) else
+                  "--only-physical-xpass" if getattr(args, "only_physical_xpass", False) else "--show-physical-xpass")
         raise ValueError(
             f"pc-xPass usage is {usage}. {option} requires both an explicit "
             "--pc-xpass-id or --physical-cache-dir and --xpass-version (or --top-pass)."

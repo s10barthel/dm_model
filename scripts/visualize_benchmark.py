@@ -21,6 +21,7 @@ from datatools.benchmark import (
     build_benchmark_component_tables,
     build_benchmark_state,
     build_benchmark_visualization_probs,
+    discover_benchmark_modifications,
     load_benchmark_component_run,
     load_benchmark_modification_data,
     resolve_benchmark_component_states,
@@ -211,31 +212,39 @@ def main() -> None:
     output_root = output_parent / visualization_run_id
     output_root.mkdir(parents=True, exist_ok=True)
     component_run_id = None
+    component_dir = None
+    component_export, component_metadata = None, {}
+    discovery_skips = {}
     if args.component_dir:
         component_dir = Path(args.component_dir)
-    else:
+    elif args.component_run_id or component_selection.required_component_groups:
         component_run_id = resolve_named_component_run_id("benchmark_component", args.component_run_id, required=True)
         component_dir = get_benchmark_component_run_root(component_run_id)
 
-    component_export, component_metadata = load_benchmark_component_run(component_dir)
-    require_model_pass_success(component_export, needs_model_pass_success(args))
-    state_pairs = resolve_benchmark_component_states(
-        component_export,
-        metadata=component_metadata,
-        requested_modifications=args.modification,
-        requested_game_states=args.game_state,
-    )
+    if component_dir is not None:
+        component_export, component_metadata = load_benchmark_component_run(component_dir)
+        require_model_pass_success(component_export, needs_model_pass_success(args))
+        state_pairs = resolve_benchmark_component_states(
+            component_export,
+            metadata=component_metadata,
+            requested_modifications=args.modification,
+            requested_game_states=args.game_state,
+        )
+    else:
+        modifications, discovery_skips = discover_benchmark_modifications(args.input_dir, args.modification)
+        state_pairs = [(modification, state) for modification in modifications for state in (args.game_state or [1, 2])]
 
     xpass = resolve_saved_xpass(args, component_metadata, "benchmark", component_id=component_run_id)
     component_names = list(component_selection.rendered_components)
-    if bool(args.show_physical_xpass):
-        component_names.append("physical_xpass")
     pairs_by_modification: dict[int, set[int]] = {}
     for modification_id, game_state_id in state_pairs:
         pairs_by_modification.setdefault(int(modification_id), set()).add(int(game_state_id))
 
     rendered_modifications: list[dict[str, object]] = []
-    skipped_modifications: list[dict[str, object]] = []
+    skipped_modifications: list[dict[str, object]] = [
+        {"modification": modification, "reason": reason}
+        for reason, modifications in discovery_skips.items() for modification in modifications
+    ]
 
     for modification_id in sorted(pairs_by_modification):
         available_game_states = pairs_by_modification[modification_id]
@@ -265,7 +274,7 @@ def main() -> None:
             )
             state_contexts[game_state_id] = (
                 state,
-                build_benchmark_component_tables(component_export, state),
+                build_benchmark_component_tables(component_export, state) if component_export is not None else {},
                 int(state.frame_meta.index.min()),
             )
             if needs_physical_xpass(args):
@@ -319,7 +328,7 @@ def main() -> None:
         "output_dir": str(output_root.resolve()),
         "status": "completed",
         "component_run_id": component_run_id,
-        "component_dir": str(component_dir.resolve()),
+        "component_dir": str(component_dir.resolve()) if component_dir is not None else None,
         "component_metadata_run_id": component_metadata.get("run_id"),
         "requested_modifications": [int(value) for value in (args.modification or [])],
         "requested_game_states": [int(value) for value in (args.game_state or [])],
@@ -332,6 +341,7 @@ def main() -> None:
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
@@ -343,7 +353,7 @@ def main() -> None:
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
-        available=("model_pass_success" in component_export), output_root=output_root,
+        available=(component_export is not None and "model_pass_success" in component_export), output_root=output_root,
     ))
     attach_membership_report(metadata, "benchmark", source=component_metadata)
     metadata_path = write_run_metadata(output_root, metadata)

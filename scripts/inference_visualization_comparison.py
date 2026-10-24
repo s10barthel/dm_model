@@ -176,7 +176,7 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
             frames = list(dict.fromkeys(int(item["frame_id"]) for item in selected_frames))
             tables, cache = [], {}
             physical = None
-            if args.show_physical_xpass:
+            if "physical_xpass" in selection.rendered_components:
                 physical = mod.load_runtime_physical_xpass_visualization_table(args.physical_cache_dir, str(subject.match_id),
                     frames, metric=mod.physical_xpass_metric(args), x_pass_version=args.x_pass_version)
             for variant in variants:
@@ -281,12 +281,15 @@ def run_comparison(args, mod):
     for variant in variants:
         _configure_variant(variant)
     names = list(selection.rendered_components)
-    if args.show_physical_xpass:
-        names.append("physical_xpass")
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(dataset + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
-                           source_context=shared, bundle_id=args.bundle_id, rendered_components=names)
+                           source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
+                           only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
+    if "physical_xpass" in names:
+        report.metadata.update(physical_cache_dir=args.physical_cache_dir,
+            physical_xpass_runtime_source=mod.physical_xpass_panel_source(args, args.physical_cache_dir),
+            physical_xpass_metric=mod.physical_xpass_metric(args), x_pass_version=args.x_pass_version)
     if sportec:
         report.metadata.update(pass_endpoint=getattr(args, "pass_endpoint", True),
                                compare_intended_receiver=getattr(args, "compare_intended_receiver", False),

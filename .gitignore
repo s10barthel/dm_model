@@ -72,6 +72,7 @@ tests/AS_viz/
 !tests/test_visualization_carries.py
 !tests/test_model_pass_success_visualization.py
 !tests/test_compare_pass_success.py
+!tests/test_only_physical_xpass_visualization.py
 !tests/test_hawkeye_target_clamping.py
 !tests/test_hawkeye_goal_placement.py
 !tests/test_temporal_splits.py

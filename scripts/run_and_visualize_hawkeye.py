@@ -78,7 +78,7 @@ from scripts.visualization_selection import add_component_selection_args, resolv
 from scripts.saved_visualization_xpass import resolve_saved_xpass
 from scripts.visualization_pass_success import (
     compare_pass_success_requested, comparison_metadata, input_components,
-    needs_model_pass_success, needs_physical_xpass, save_component_pngs,
+    needs_model_pass_success, needs_physical_xpass, physical_xpass_panel_source, save_component_pngs,
 )
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 from scripts.visualize_hawkeye import (
@@ -428,6 +428,7 @@ def render_situation(
         situation_tracking,
         ball,
         freeze_ballreceipt=args.freeze_ballreceipt,
+        build_graphs=bool(model_specs),
         add_v_edge_features=bool(graph_schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
         **generation_kwargs(graph_schema),
@@ -480,11 +481,9 @@ def render_situation(
 
     component_frames = collect_situation_components(
         situation, model_specs, device, inference_frame_ids, rendered_components,
-    )
+    ) if model_specs else {}
 
     component_names = list(rendered_components)
-    if bool(getattr(args, "show_physical_xpass", False)):
-        component_names.append("physical_xpass")
     output_paths: list[str] = []
 
     if needs_physical_xpass(args):
@@ -631,17 +630,20 @@ def main() -> None:
         ]
         if task in component_selection.required_component_groups
     ]
-    model_ids, shared_context, _ = resolve_model_selection(
-        required_tasks=required_model_tasks,
-        bundle_id=args.bundle_id,
-        explicit_model_ids=explicit_model_ids,
-        require_feature_run_id=False,
-        require_intended_receiver_mode=False,
-        require_return_type=False,
-        require_target_family=False,
-        allow_pass_only_success=True,
-        require_shared_split=False,
-    )
+    if required_model_tasks:
+        model_ids, shared_context, _ = resolve_model_selection(
+            required_tasks=required_model_tasks,
+            bundle_id=args.bundle_id,
+            explicit_model_ids=explicit_model_ids,
+            require_feature_run_id=False,
+            require_intended_receiver_mode=False,
+            require_return_type=False,
+            require_target_family=False,
+            allow_pass_only_success=True,
+            require_shared_split=False,
+        )
+    else:
+        model_ids, shared_context = {}, {}
     carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
     for message in carry_warnings:
         warnings.warn(message, UserWarning, stacklevel=2)
@@ -654,7 +656,8 @@ def main() -> None:
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
-    configure_auxiliary_models(args, model_specs, device)
+    if model_specs:
+        configure_auxiliary_models(args, model_specs, device)
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("hawkeye", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
@@ -814,11 +817,12 @@ def main() -> None:
         "physical_xpass_pass_intent_model_id": getattr(args, "xpass_pass_intent_model_id", None) if getattr(args, "xpass_weight", "v3") == "v5" else None,
         "physical_xpass_ball_z_limit": physical_xpass_inference_lookup_config(pass_success_model.args, cache_dir=physical_cache_dir)["ball_z_limit"] if pass_success_model is not None else None,
         "show_physical_xpass": bool(getattr(args, "show_physical_xpass", False)),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_metric": selected_physical_xpass_metric,
         "physical_cache_dir": None if no_physical_cache else physical_cache_dir,
         "lane_survival_cache_dir": lane_survival_cache_dir,
-        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass*")) if path.is_file()],
         "physical_cache_disabled": no_physical_cache,
         "refresh_physical_cache": refresh_physical_cache,
         "tracking_csv": str(Path(args.tracking_csv).resolve()),
@@ -842,6 +846,9 @@ def main() -> None:
         available=needs_model_pass_success(args), output_root=output_root,
     ))
     metadata.update(comparison_metadata(args, output_root))
+    if pass_success_model is None and needs_physical_xpass(args):
+        metadata["physical_xpass_runtime_source"] = physical_xpass_panel_source(args, physical_cache_dir)
+        metadata["x_pass_version"] = args.x_pass_version
     if comparison_xpass:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))

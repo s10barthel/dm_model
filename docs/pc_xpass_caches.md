@@ -79,6 +79,18 @@ component run, as described below.
 
 ## Visualizing saved component runs
 
+All five visualization commands accept `--only-physical-xpass`. It selects only the cached physical view without loading checkpoints or running inference. Other `--only-*` selections are additive and load their own dependencies; existing `--show-*` additions remain available. Combining `--show-physical-xpass` with the new selector produces one physical output. Existing output formats, filenames, and frame suffixes are retained.
+
+For standard Hawkeye, Benchmark, and SkillCorner, no component run is needed when physical xPass is the only selected output. Scenes come from tracking/input data and the existing situation/modification/possession selectors. Supply both an explicit cache ID/directory and an explicit metric; there is no latest-cache or default-metric fallback. If a component run is explicitly supplied, its scene selection and cache/metric inheritance remain in effect. Hawkeye `loc`/`freeze` still requires a matching component export for its row identities and geometry. Sportec still requires feature/resolved-action artifacts and uses the selected pc-xPass cache's recorded feature run when available, unless overridden with `--feature-run-id`. Inference commands keep their existing cache defaults.
+
+```powershell
+python scripts/visualize_hawkeye.py --situation-id SITUATION --only-physical-xpass --pc-xpass-id CACHE_ID --xpass-version top25
+python scripts/visualize_benchmark.py --modification 1 --only-physical-xpass --pc-xpass-id CACHE_ID --top-pass 10
+python scripts/visualize_skillcorner.py --match-id MATCH --index 1 --only-physical-xpass --physical-cache-dir CACHE_DIR --xpass-version max
+```
+
+Physical-only output requires an existing cache and rejects `--no-physical-cache`. Hawkeye `--only-tracking` conflicts with it. Saved-run comparisons support physical-only selection; checkpoint/mask comparisons need at least one model-backed output as well.
+
 `visualize_hawkeye.py` (standard, location, and freeze), `visualize_benchmark.py`,
 and `visualize_skillcorner.py` support only pc-xPass for `--show-physical-xpass`.
 They inherit the selected component run's cache ID or recorded dataset cache

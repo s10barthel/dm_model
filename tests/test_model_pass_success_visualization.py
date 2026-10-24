@@ -160,7 +160,7 @@ def test_all_cli_selections(module, required):
         args = module.parse_args([*required, "--only-pass-success", "--no-pass-success",
                                   "--show-model-pass-success", *physical])
         selected = resolve_component_selection(args)
-        assert selected.rendered_components == ["model_pass_success"]
+        assert selected.rendered_components == ["model_pass_success", *(["physical_xpass"] if physical else [])]
         assert selected.required_component_groups == ["pass_success"]
         assert not getattr(module.parse_args(required), "show_model_pass_success")
 

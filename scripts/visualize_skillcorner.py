@@ -260,6 +260,8 @@ def render_possession(
     possession_component_tables = {name: table.copy() for name, table in component_tables.items()}
     frame_ids = [int(frame_id) for frame_id in possession.frame_meta.index.tolist()]
     component_names = list(rendered_components)
+    selected_output_mode = output_mode(args)
+    selected_frames = resolve_skillcorner_png_frames(frame_ids, args) if selected_output_mode == "png" else []
 
     for component_name in COMPONENT_COLUMNS:
         if component_name not in possession_component_tables:
@@ -274,10 +276,12 @@ def render_possession(
         possession_component_tables[component_name] = component_table
 
     if needs_physical_xpass(args):
+        pass_success = possession_component_tables.get("pass_success", pd.DataFrame())
+        selected_frame_ids = [int(selection["frame_id"]) for selection in selected_frames] if selected_output_mode == "png" else frame_ids
         physical_frame_ids = (
-            [int(index) for index in possession_component_tables["pass_success"].index.tolist()]
-            if not possession_component_tables["pass_success"].empty
-            else frame_ids
+            [int(index) for index in pass_success.index.tolist()]
+            if not pass_success.empty
+            else selected_frame_ids
         )
         possession_component_tables["physical_xpass"] = load_runtime_physical_xpass_visualization_table(
             physical_cache_dir,
@@ -288,11 +292,8 @@ def render_possession(
             x_pass_version=physical_xpass_version_name,
         )
 
-    selected_output_mode = output_mode(args)
     output_paths: list[str] = []
-    selected_frames: list[dict[str, object]] = []
     if selected_output_mode == "png":
-        selected_frames = resolve_skillcorner_png_frames(frame_ids, args)
         for frame_selection in selected_frames:
             frame_id = int(frame_selection["frame_id"])
 
@@ -344,22 +345,23 @@ def main() -> None:
     output_root = output_parent / visualization_run_id
     output_root.mkdir(parents=True, exist_ok=True)
     component_run_id = None
+    component_dir = None
+    component_tables, component_metadata = {}, {}
     if args.component_dir:
         component_dir = Path(args.component_dir)
-    else:
+    elif args.component_run_id or component_selection.required_component_groups:
         component_run_id = resolve_named_component_run_id("skillcorner_component", args.component_run_id, required=False)
         component_dir = (
             get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
         )
 
-    component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
-    require_model_pass_success(component_tables, needs_model_pass_success(args))
-    component_metadata = load_run_metadata(component_dir, required=False) or {}
+    if component_dir is not None:
+        component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
+        require_model_pass_success(component_tables, needs_model_pass_success(args))
+        component_metadata = load_run_metadata(component_dir, required=False) or {}
     xpass = resolve_saved_xpass(args, component_metadata, "skillcorner", component_id=component_run_id)
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     rendered_components = list(component_selection.rendered_components)
-    if bool(args.show_physical_xpass):
-        rendered_components.append("physical_xpass")
 
     output_dirs: list[Path] = []
     rendered_possessions: list[dict[str, object]] = []
@@ -398,7 +400,7 @@ def main() -> None:
         "output_dir": str(output_root.resolve()),
         "status": "completed",
         "component_run_id": component_run_id,
-        "component_dir": str(component_dir.resolve()),
+        "component_dir": str(component_dir.resolve()) if component_dir is not None else None,
         "component_metadata_run_id": component_metadata.get("run_id"),
         "match_id": str(args.match_id),
         "requested_indices": [int(value) for value in (args.index or [])],
@@ -413,12 +415,13 @@ def main() -> None:
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
         **saved_xpass_metadata(xpass),
-        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass*")) if path.is_file()],
         "disabled_components": component_selection.disabled_components,
     }
     metadata.update(comparison_metadata(args, output_root))

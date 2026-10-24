@@ -333,11 +333,10 @@ def run_comparison(args, mod):
         exports.append(raw)
         metadata.append(info)
     names = mod.resolve_component_selection(args).rendered_components
-    if args.show_physical_xpass:
-        names = [*names, "physical_xpass"]
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(kind + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, "components")
-    report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, rendered_components=names)
+    report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, rendered_components=names,
+                           only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
     adapters = {"hawkeye": hawkeye_groups, "benchmark": benchmark_groups, "skillcorner": skillcorner_groups}
     try:
         selection = mod.resolve_component_selection(args)

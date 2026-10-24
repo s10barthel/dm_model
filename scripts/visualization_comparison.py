@@ -107,6 +107,14 @@ def validate_comparison_args(parser, args, *, inference=False):
                 raise ValueError("Repeated component-run IDs require --compare.")
         if mode and getattr(args, "output", "png") != "png":
             raise ValueError("Visualization comparisons support PNG output only.")
+        from scripts.visualization_selection import resolve_component_selection
+        if getattr(args, "only_physical_xpass", False):
+            selection = resolve_component_selection(args, include_success_intent=inference)
+            if not selection.required_component_groups:
+                if getattr(args, "no_physical_cache", False):
+                    raise ValueError("--only-physical-xpass requires a cache; omit --no-physical-cache.")
+                if mode in {"masks", "checkpoints"}:
+                    raise ValueError("Checkpoint/mask comparisons require at least one model-backed selected output.")
         args.visualization_comparison = mode
     except ValueError as exc:
         parser.error(str(exc))
@@ -404,6 +412,9 @@ class ComparisonExport:
         self.metadata.update(model_pass_success_metadata(
             requested=requested, available=requested, output_root=self.root,
         ))
+        self.metadata["physical_xpass_output_paths"] = [
+            str(path.resolve()) for path in sorted(self.root.rglob("physical_xpass*.png"))
+        ]
         attach_comparison_membership(self.metadata, reporter=self.membership_reporter)
         write_run_metadata(self.root, self.metadata)
 

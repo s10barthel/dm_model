@@ -1,4 +1,5 @@
 """Compose existing pass-success views without changing their predictions."""
+import json
 from pathlib import Path
 
 from datatools.viz_helpers import stack_images_vertically
@@ -14,11 +15,20 @@ def compare_pass_success_requested(args):
 
 
 def needs_physical_xpass(args):
-    return bool(getattr(args, "show_physical_xpass", False) or compare_pass_success_requested(args))
+    return bool(getattr(args, "show_physical_xpass", False) or
+                getattr(args, "only_physical_xpass", False) or compare_pass_success_requested(args))
 
 
 def needs_model_pass_success(args):
     return bool(getattr(args, "show_model_pass_success", False) or compare_pass_success_requested(args))
+
+
+def physical_xpass_panel_source(args, cache_dir):
+    """Describe a rendered cache independently of pass-success model settings."""
+    from physical_pass_model import PC_XPASS_SOURCE, PHYSICAL_XPASS_SOURCE
+    metadata_path = Path(cache_dir) / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig")) if metadata_path.is_file() else {}
+    return metadata.get("source") or (PC_XPASS_SOURCE if getattr(args, "pc_xpass", False) else PHYSICAL_XPASS_SOURCE)
 
 
 def input_components(components):

@@ -738,6 +738,7 @@ Useful options:
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
 - `--show-physical-xpass` to render the cached physical xPass metric itself
+- `--only-physical-xpass` to render cached physical xPass alone, without model IDs, checkpoint loading, or inference. Combine it with other `--only-*` selections to add outputs and their dependencies; `--show-*` additions still work.
 - `--show-model-pass-success` to render **Model Pass Success** separately: the selected checkpoint's probability after normal offside handling and before inference-time physical xPass blending. Physical inputs used inside a checkpoint remain part of its prediction. This flag works independently of `--show-physical-xpass`, with or without blending, and adds its plot even when `--only-*` or `--no-pass-success` hides ordinary pass success.
 - `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
@@ -748,6 +749,19 @@ Useful options:
 - `--player-id`, `--object-id`, `--advanced-position`, `--team-id`, `--spadl-type`, `--success`, `--offside`, and `--next-type` filter rows from `data/event_synced/<match_id>.csv`; repeated values for one column are OR alternatives
 - `--start-x-lt`, `--start-x-gt`, `--start-y-lt`, `--start-y-gt`, `--end-x-lt`, `--end-x-gt`, `--end-y-lt`, and `--end-y-gt` filter coordinate columns with strict lower-than or greater-than comparisons
 - all CSV filters are off by default, enabled filters are combined with AND logic, and unprocessed/problematic rows are skipped with warnings instead of stopping the whole batch
+
+All five visualization commands support `--only-physical-xpass` in their existing output formats. Standard Hawkeye, Benchmark, and SkillCorner can render it without a component run: provide an explicit `--pc-xpass-id` or `--physical-cache-dir` and an explicit `--xpass-version` or `--top-pass`. These saved-data commands use pc-xPass only and never select the latest cache implicitly. Explicit component runs retain their scene selection and cache/metric inheritance. Hawkeye `loc`/`freeze` still requires a matching component export for row selection and scene geometry. Sportec retains its feature/resolved-action requirements, preferring the selected pc-xPass cache's feature run when no `--feature-run-id` is given. Inference commands retain their existing cache and metric defaults. Caches must already exist; `--no-physical-cache` is rejected for physical-only output. Hawkeye `--only-tracking` conflicts with this selector. Checkpoint/mask comparisons require an additional model-backed selected output; saved-run comparisons can select physical xPass alone.
+
+```powershell
+# Render cached physical xPass without checkpoint IDs.
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --only-physical-xpass --pc-xpass --pc-xpass-id <cache_id>
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --only-physical-xpass --physical-cache-dir <cache_dir>
+
+# Render directly from tracking/scene data, without a saved component run.
+python scripts/visualize_hawkeye.py --situation-id <hawkeye_id> --only-physical-xpass --pc-xpass-id <cache_id> --xpass-version top25
+python scripts/visualize_benchmark.py --modification 1 --only-physical-xpass --pc-xpass-id <cache_id> --top-pass 10
+python scripts/visualize_skillcorner.py --match-id <match_id> --index 1 --only-physical-xpass --pc-xpass-id <cache_id> --xpass-version top25
+```
 
 The separate model view is available in all five visualization commands, including checkpoint/mask comparisons, Hawkeye `loc`/`freeze`, and supported PNG/GIF/MP4 exports. Its files use the name `model_pass_success` with the usual frame suffixes. For example:
 

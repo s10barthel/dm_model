@@ -30,6 +30,7 @@ GROUP_TO_COMPONENTS = {
     "outcome_failure": ("outcome_failure",),
     "outcome_success": ("outcome_success",),
     "success_intent": ("success_intent",),
+    "physical_xpass": ("physical_xpass",),
 }
 
 
@@ -49,10 +50,14 @@ class ComponentSelection:
             required.update(PASS_SCORE_DEPENDENCIES)
         if required & {"outcome_failure", "outcome_success"}:
             required.update({"outcome_scoring", "outcome_conceding"})
-        return [group for group in GROUP_TO_COMPONENTS if group in required]
+        return [group for group in GROUP_TO_COMPONENTS if group in required and group != "physical_xpass"]
 
 
 def add_component_selection_args(parser: argparse.ArgumentParser, *, include_success_intent: bool = False) -> None:
+    parser.add_argument(
+        "--only-physical-xpass", action="store_true",
+        help="Render only cached physical xPass without model IDs; combine with other --only-* selections to add outputs.",
+    )
     parser.add_argument(
         "--compare-pass-success", action="store_true",
         help="Stack model pass success, cached pc-xPass, and final pass success in one PNG.",
@@ -102,6 +107,7 @@ def resolve_component_selection(
     if include_success_intent:
         groups.append(SUCCESS_INTENT_GROUP)
 
+    groups.append("physical_xpass")
     only_groups = {group for group in groups if getattr(args, f"only_{group}", False)}
     no_groups = {group for group in groups if getattr(args, f"no_{group}", False)}
 
@@ -111,6 +117,8 @@ def resolve_component_selection(
     has_only_selection = bool(only_groups or getattr(args, "only_compare_pass_success", False))
     selected = set(only_groups) if has_only_selection else set(default_groups)
     selected.update(group for group in OPTIONAL_COMPONENT_GROUPS if getattr(args, f"show_{group}", False))
+    if getattr(args, "show_physical_xpass", False):
+        selected.add("physical_xpass")
     compare_receivers = getattr(args, "compare_intended_receiver", False)
     if compare_receivers and getattr(args, "no_success_intent", False):
         raise ValueError("--compare-intended-receiver cannot be combined with --no-success-intent.")
@@ -121,13 +129,15 @@ def resolve_component_selection(
     rendered_components = [
         component
         for group in groups
-        if group in selected
+        if group in selected and group != "physical_xpass"
         for component in GROUP_TO_COMPONENTS[group]
     ]
     if getattr(args, "show_model_pass_success", False):
         rendered_components.append("model_pass_success")
     if compare_pass_success_requested(args):
         rendered_components.append(COMPARISON_COMPONENT)
+    if "physical_xpass" in selected:
+        rendered_components.append("physical_xpass")
     if not rendered_components:
         raise ValueError("No visualization components were selected after applying --only-* and --no-* flags.")
 

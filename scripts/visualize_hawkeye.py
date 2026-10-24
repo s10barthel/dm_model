@@ -189,6 +189,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             conflicts.append("--selection-format")
         if args.show_physical_xpass:
             conflicts.append("--show-physical-xpass")
+        if args.only_physical_xpass:
+            conflicts.append("--only-physical-xpass")
         if args.show_model_pass_success:
             conflicts.append("--show-model-pass-success")
         if args.pc_xpass:
@@ -552,8 +554,6 @@ def run_location_visualization(
             raise ValueError("No coach-rated Hawkeye situations were found among the selected location rows.")
 
     component_names = list(component_selection.rendered_components)
-    if bool(args.show_physical_xpass):
-        component_names.append("physical_xpass")
     rendered_situations: list[dict[str, object]] = []
 
     for _, location_row in selected_rows.iterrows():
@@ -662,6 +662,7 @@ def run_location_visualization(
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         **saved_xpass_metadata(xpass),
         "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.png"))],
@@ -815,6 +816,7 @@ def run_tracking_only_visualization(
         "coach_ratings": False,
         "selections": False,
         "show_physical_xpass": False,
+        "only_physical_xpass": False,
         "source_models": {},
         "requested_component_groups": [],
         "disabled_component_groups": [],
@@ -849,9 +851,11 @@ def main() -> None:
 
     component_selection = resolve_component_selection(args)
     component_run_id = None
+    component_dir = None
+    component_export, component_metadata = None, {}
     if args.component_dir:
         component_dir = Path(args.component_dir)
-    else:
+    elif args.component_run_id or component_selection.required_component_groups or mode in {"loc", "freeze"}:
         component_kind = "hawkeye_loc_component" if mode in {"loc", "freeze"} else "hawkeye_component"
         component_run_id = resolve_named_component_run_id(component_kind, args.component_run_id, required=True)
         component_dir = (
@@ -860,8 +864,9 @@ def main() -> None:
             else get_hawkeye_component_run_root(component_run_id)
         )
 
-    component_export, component_metadata = load_hawkeye_component_run(component_dir)
-    require_model_pass_success(component_export, needs_model_pass_success(args))
+    if component_dir is not None:
+        component_export, component_metadata = load_hawkeye_component_run(component_dir)
+        require_model_pass_success(component_export, needs_model_pass_success(args))
     if mode in {"loc", "freeze"}:
         component_mode = component_metadata.get("inference_mode")
         if component_mode != mode:
@@ -881,13 +886,16 @@ def main() -> None:
             visualization_run_id,
         )
         return
-    situation_ids = resolve_hawkeye_component_situation_ids(
-        component_export,
-        metadata=component_metadata,
-        requested_ids=args.situation_id,
-    )
-    freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", True))
     xpass = resolve_saved_xpass(args, component_metadata, "hawkeye", component_id=component_run_id)
+    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
+    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
+    if component_export is not None:
+        situation_ids = resolve_hawkeye_component_situation_ids(
+            component_export, metadata=component_metadata, requested_ids=args.situation_id,
+        )
+    else:
+        situation_ids = resolve_tracking_situation_ids(tracking, args.situation_id)
+    freeze_ballreceipt = bool(component_metadata.get("freeze_ballreceipt", getattr(args, "freeze_ballreceipt", True)))
     overlay_data = load_overlay_data(
         include_coach_ratings=bool(getattr(args, "coach_ratings", False)),
         include_selections=bool(getattr(args, "selections", False)),
@@ -910,11 +918,7 @@ def main() -> None:
         if not situation_ids:
             raise ValueError("No coach-rated Hawkeye situations were found among the selected component situations.")
 
-    tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
-    ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     component_names = list(component_selection.rendered_components)
-    if bool(args.show_physical_xpass):
-        component_names.append("physical_xpass")
     rendered_situations: list[dict[str, object]] = []
     resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
@@ -930,7 +934,7 @@ def main() -> None:
             freeze_ballreceipt=freeze_ballreceipt,
             build_graphs=False,
         )
-        component_tables = build_hawkeye_component_tables(component_export, situation)
+        component_tables = build_hawkeye_component_tables(component_export, situation) if component_export is not None else {}
         coach_scores, selection_labels, overlay_stats = build_situation_overlays(
             overlay_data,
             str(situation_id),
@@ -1041,7 +1045,7 @@ def main() -> None:
         "output_dir": str(output_root.resolve()),
         "status": "completed",
         "component_run_id": component_run_id,
-        "component_dir": str(component_dir.resolve()),
+        "component_dir": str(component_dir.resolve()) if component_dir is not None else None,
         "component_metadata_run_id": component_metadata.get("run_id"),
         "requested_situation_ids": [str(value) for value in (args.situation_id or [])],
         "rendered_situation_ids": [item["situation_id"] for item in rendered_situations],
@@ -1065,18 +1069,19 @@ def main() -> None:
         "disabled_component_groups": component_selection.disabled_component_groups,
         "rendered_components": component_selection.rendered_components,
         "show_physical_xpass": bool(args.show_physical_xpass),
+        "only_physical_xpass": bool(getattr(args, "only_physical_xpass", False)),
         "show_pass_height": bool(getattr(args, "show_pass_height", False)),
         "physical_xpass_hash_policy": PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
         "physical_xpass_lookup_policy": "dataset_event_frame_player_only",
         "physical_xpass_checkpoint_source": None,
         **saved_xpass_metadata(xpass),
-        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass.*"))],
+        "physical_xpass_output_paths": [str(path.resolve()) for path in sorted(output_root.rglob("physical_xpass*")) if path.is_file()],
         "disabled_components": component_selection.disabled_components,
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
         requested=getattr(args, "show_model_pass_success", False),
-        available="model_pass_success" in component_export, output_root=output_root,
+        available=component_export is not None and "model_pass_success" in component_export, output_root=output_root,
     ))
     attach_membership_report(metadata, "hawkeye", source=component_metadata)
     metadata_path = write_run_metadata(output_root, metadata)
