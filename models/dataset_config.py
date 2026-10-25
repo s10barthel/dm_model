@@ -81,6 +81,7 @@ def build_action_dataset_kwargs(
 
     return {
         "task": task,
+        "graph_validation": _get_arg(args, "graph_validation", True),
         "trajectory_speed_definition": _get_arg(args, "trajectory_speed_definition", None) if task == "success_intent" else None,
         "pass_height_threshold": _get_arg(args, "pass_height_threshold", None),
         "defer_pass_height_relabel": False,

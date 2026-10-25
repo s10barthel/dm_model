@@ -49,7 +49,7 @@ def setup(tmp_path, monkeypatch):
             x[:, config.NODE_FEATURE_IS_TEAMMATE] = 1
             x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
             x[:, config.NODE_FEATURE_X] = torch.arange(n) * (match + 1)
-            graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.ones(2, 5))
+            graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(n), torch.arange(n)).T.contiguous(), edge_attr=torch.ones(n * n, 5))
             graphs.append(graph)
             for key, value in {"action_index": row // 2, "is_pass": row != 2, "is_dribble": row == 2,
                                "intent_index": 0 if row == 2 else 1, "duration": 1,

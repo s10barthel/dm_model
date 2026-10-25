@@ -97,7 +97,9 @@ def test_receiver_refresh_rebuilds_synthetic_membership(tmp_path):
     for key, value in dict(is_pass=1, is_real=1, n_players=5, intent_index=1).items():
         labels[0, config.LABEL_INDEX[key]] = value
     labels[0, 0] = 7
-    graph = Data(x=torch.zeros((5, 26)), edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.zeros((2, 2)))
+    graph = Data(x=torch.zeros((5, 26)),
+                 edge_index=torch.cartesian_prod(torch.arange(5), torch.arange(5)).T.contiguous(),
+                 edge_attr=torch.zeros((25, 2)))
     for folder in ['resolved_actions_original', 'action_labels_next_10', 'action_graphs', 'augmented_graphs', 'augmented_labels']:
         (tmp_path / folder).mkdir()
     actions.to_parquet(tmp_path / 'resolved_actions_original/m.parquet')
@@ -124,7 +126,7 @@ def test_combined_worker_orders_retirement_refresh_and_carries(tmp_path, monkeyp
     import scripts.replace_carries as carries
     order = []
     monkeypatch.setattr(retirement, 'refresh_match', lambda *a: order.append('retire'))
-    monkeypatch.setattr(refresh, 'refresh_directory_match', lambda *a: (order.append('refresh') or dict(match_id='m', skipped_actions=[])))
+    monkeypatch.setattr(refresh, 'refresh_directory_match', lambda *a, **kw: (order.append('refresh') or dict(match_id='m', skipped_actions=[])))
     monkeypatch.setattr(carries, 'rebuild_match', lambda *a: (order.append('carries') or dict(segments=3)))
     result = combined._refresh_match((str(tmp_path), str(tmp_path), {}, 'm',
         dict(retire_elastic=True, replace_carries=True, carry_parameters={}), 1))
@@ -196,7 +198,7 @@ def test_guard_filters_cached_model_targets_and_synthetic_rows(tmp_path):
     x = torch.zeros((2, config.NODE_FEATURE_CORE_DIM))
     x[:, config.NODE_FEATURE_IS_TEAMMATE] = 1
     x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
-    graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.zeros((2, 2)))
+    graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(), edge_attr=torch.zeros((4, 2)))
     labels = torch.zeros((3, len(config.LABEL_COLUMNS)))
     labels[:, 0] = torch.arange(3)
     labels[:, config.LABEL_INDEX['is_pass']] = 1

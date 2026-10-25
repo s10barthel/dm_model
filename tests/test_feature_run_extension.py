@@ -608,15 +608,15 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             x = torch.zeros((2, 25), dtype=torch.float32)
             x[:, config.NODE_FEATURE_VX] = torch.tensor([1.0, 4.0])
             x[:, config.NODE_FEATURE_VY] = torch.tensor([2.0, 6.0])
-            edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-            edge_attr = torch.ones((2, 4), dtype=torch.float32)
+            edge_index = torch.tensor([[0, 0, 1, 1], [0, 1, 0, 1]], dtype=torch.long)
+            edge_attr = torch.ones((4, 4), dtype=torch.float32)
             torch.save([Data(x=x, edge_index=edge_index, edge_attr=edge_attr)], graph_dir / "match.pt")
 
             generator.extend_relative_speed_edge_features(root, ["original"])
 
             graphs = torch.load(graph_dir / "match.pt", weights_only=False)
             self.assertEqual(graphs[0].edge_attr.shape[1], 5)
-            self.assertTrue(torch.allclose(graphs[0].edge_attr[:, 4], torch.full((2,), 5.0)))
+            self.assertTrue(torch.allclose(graphs[0].edge_attr[:, 4], torch.tensor([0., 5., 5., 0.])))
 
     def test_extend_relative_speed_edge_features_preserves_null_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -626,8 +626,8 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             x = torch.zeros((2, 25), dtype=torch.float32)
             x[:, config.NODE_FEATURE_VX] = torch.tensor([1.0, 4.0])
             x[:, config.NODE_FEATURE_VY] = torch.tensor([2.0, 6.0])
-            edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-            edge_attr = torch.ones((2, 4), dtype=torch.float32)
+            edge_index = torch.tensor([[0, 0, 1, 1], [0, 1, 0, 1]], dtype=torch.long)
+            edge_attr = torch.ones((4, 4), dtype=torch.float32)
             first_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr.clone())
             second_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr.clone())
             torch.save([first_graph, None, second_graph], graph_dir / "match.pt")
@@ -639,8 +639,8 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             self.assertIsNone(graphs[1])
             self.assertEqual(graphs[0].edge_attr.shape[1], 5)
             self.assertEqual(graphs[2].edge_attr.shape[1], 5)
-            self.assertTrue(torch.allclose(graphs[0].edge_attr[:, 4], torch.full((2,), 5.0)))
-            self.assertTrue(torch.allclose(graphs[2].edge_attr[:, 4], torch.full((2,), 5.0)))
+            self.assertTrue(torch.allclose(graphs[0].edge_attr[:, 4], torch.tensor([0., 5., 5., 0.])))
+            self.assertTrue(torch.allclose(graphs[2].edge_attr[:, 4], torch.tensor([0., 5., 5., 0.])))
 
     def test_extend_relative_speed_edge_features_rejects_malformed_non_null_graphs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -648,7 +648,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             graph_dir = get_action_graph_dir(root)
             graph_dir.mkdir(parents=True)
             x = torch.zeros((2, 25), dtype=torch.float32)
-            edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
+            edge_index = torch.tensor([[0, 0, 1, 1], [0, 1, 0, 1]], dtype=torch.long)
             graph = Data(x=x, edge_index=edge_index)
             torch.save([graph], graph_dir / "match.pt")
 

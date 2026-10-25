@@ -18,8 +18,10 @@ from types import SimpleNamespace
 
 import pandas as pd
 import torch
+from datatools.graph_validation import (validate_graphs, graph_fingerprints, assert_preserved,
+    graph_validation_enabled, validation_stats, merge_validation_stats)
 
-from datatools.artifact_storage import atomic_parquet_save, atomic_torch_save, clone_feature_artifacts
+from datatools.artifact_storage import atomic_parquet_save, atomic_torch_save, atomic_graph_save, clone_feature_artifacts
 from datatools.ball_carries import augment_match_actions_with_carries, derive_carry_segments
 from datatools.carry_policy import DEFINITION, CarryPolicy
 from datatools.graph_feature import (build_match_for_feature_generation, configure_worker_thread_limit,
@@ -87,6 +89,8 @@ def match_ids(source, metadata):
 def rebuild_match(task):
     source, output, metadata, match_id, policy_values, thread_limit = task
     source, output = Path(source), Path(output)
+    enabled = graph_validation_enabled(metadata.get("graph_validation", True))
+    stats = validation_stats(enabled)
     configure_worker_thread_limit(thread_limit)
     start = time.perf_counter()
     policy = CarryPolicy(**policy_values)
@@ -117,6 +121,7 @@ def rebuild_match(task):
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
         reception_policy=policy_version(metadata),
         max_pass_duration=metadata.get("max_pass_duration")))
+    match.graph_validation = enabled
     primary = metadata["intended_receiver_modes"][0]
     canonical_actions = pd.read_parquet(get_resolved_action_path(match_id, intended_receiver_mode=primary, root=canonical_root))
     canonical_labels = torch.load(get_action_label_dir(metadata["return_types"][0],
@@ -136,13 +141,17 @@ def rebuild_match(task):
                    add_relative_speed_edge_features=schema.get("add_relative_speed_edge_features", False),
                    **generation_kwargs(schema))
     match.actions = carry_actions.copy()
-    generated = {}
+    generated, retained = {}, {}
     for post in [False, True]:
         graphs = construct_graph_features(match, extend=True, post_action=post, action_indices=carry_ids,
                                           verbose=False, **options) if carry_ids else []
         base_dir = get_post_action_graph_dir(canonical_root) if post else get_action_graph_dir(canonical_root)
         target_dir = get_post_action_graph_dir(output, use_carries=True) if post else get_action_graph_dir(output, use_carries=True)
         base_graphs = torch.load(Path(base_dir) / f"{match_id}.pt", map_location="cpu", weights_only=False)
+        validate_graphs(base_graphs, context=Path(base_dir) / f"{match_id}.pt", labels=canonical_labels,
+                        graph_validation=enabled, stats=stats)
+        retained[Path(target_dir) / f"{match_id}.pt"] = graph_fingerprints(
+            base_graphs, graph_validation=enabled, stats=stats)
         if len(graphs) != len(carry_ids):
             raise ValueError("Carry graph alignment failed")
         generated[Path(target_dir) / f"{match_id}.pt"] = base_graphs + graphs
@@ -180,13 +189,21 @@ def rebuild_match(task):
     generated[sidecars / "control_events" / f"{match_id}.parquet"] = controls
     generated[sidecars / "segments" / f"{match_id}.parquet"] = segments
     generated[sidecars / "audits" / f"{match_id}.parquet"] = audit
+    graph_labels = generated[Path(get_action_label_dir(metadata["return_types"][0], intended_receiver_mode=primary,
+        root=output, use_carries=True)) / f"{match_id}.pt"]
     # Every writer replaces complete files, including hard-linked source artifacts.
     for path, value in generated.items():
         if path.suffix == ".pt":
-            atomic_torch_save(value, path)
+            if isinstance(value, list):
+                if enabled:
+                    before = retained[path]
+                    assert_preserved(before, value[:len(before)], context=path, labels=canonical_labels, stats=stats)
+                atomic_graph_save(value, path, labels=graph_labels, graph_validation=enabled, stats=stats)
+            else:
+                atomic_torch_save(value, path)
         else:
             atomic_parquet_save(value, path)
-    summary = dict(match_id=match_id, definition=DEFINITION, parameters=policy_values,
+    summary = dict(graph_validation=stats, match_id=match_id, definition=DEFINITION, parameters=policy_values,
         segments=len(segments), spells=len(audit), retained_spells=int(audit.retained.sum()),
         exclusions=audit.loc[~audit.retained, "reason"].value_counts().to_dict() if len(audit) else {},
         starts=audit.start_kind.value_counts().to_dict() if len(audit) else {},
@@ -228,7 +245,7 @@ def replace_carries(args):
     print(f"Carry replacement source: {source.name}\nDerived run: {output.name}", flush=True)
     settings = dict(definition=DEFINITION, validation_parameters=asdict(policy), artifact_suffix="_carries",
                     available=False, sidecar_root="carry_sidecars")
-    metadata = dict(original, run_id=output.name, base_feature_run_id=source.name, status="in_progress",
+    metadata = dict(original, graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)), run_id=output.name, base_feature_run_id=source.name, status="in_progress",
                     carry_variant=settings, command=" ".join(sys.argv),
                     carry_replacement=dict(source_metadata_sha256=fingerprint, matches=ids))
     cloning_complete = False
@@ -248,7 +265,7 @@ def replace_carries(args):
             metadata["carry_replacement"]["cloning_complete"] = True
             write_run_metadata(output, metadata)
         todo = [m for m in ids if not marker_complete(output, m)]
-        tasks = [(str(source), str(output), original, m, asdict(policy), args.worker_thread_limit) for m in todo]
+        tasks = [(str(source), str(output), metadata, m, asdict(policy), args.worker_thread_limit) for m in todo]
         workers = int(args.num_workers)
         if workers < 1:
             raise ValueError("Carry replacement requires a positive integer --num-workers")
@@ -268,6 +285,8 @@ def replace_carries(args):
             counts.update(report["exclusions"])
         metadata["carry_replacement"].update(exclusions=dict(counts), segments=sum(r["segments"] for r in reports),
                                                elapsed_match_seconds=sum(r["elapsed_seconds"] for r in reports))
+        metadata["graph_validation_summary"] = merge_validation_stats(
+            [r.get("graph_validation") for r in reports], metadata["graph_validation"])
         metadata["carry_variant"]["available"] = True
         metadata["carry_variant"]["generated_at"] = datetime.now().isoformat(timespec="seconds")
         metadata["status"] = "completed"

@@ -774,6 +774,8 @@ def write_model_evaluation_artifacts(
 
 def main():
     parser = argparse.ArgumentParser()
+    from datatools.graph_validation import add_graph_validation_argument
+    add_graph_validation_argument(parser)
     add_pass_height_argument(parser)
     add_evaluation_arguments(parser)
     add_outcome_bootstrap_arguments(parser)
@@ -827,6 +829,7 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    model_args.graph_validation = args.graph_validation
     training_evaluation_settings = {key: getattr(model_args, key, None) for key in
                                     ("intended_receiver_mode", "min_pass_dur", "return_type")}
     if args.intended_receiver_mode is not None:
@@ -1085,6 +1088,7 @@ def main():
                 "requested_min_pass_duration": args.min_pass_duration,
                 "min_pass_duration": model_args.min_pass_dur,
                 "selection_counts": test_dataset.selection_counts,
+                "graph_validation": test_dataset.graph_validation_stats,
                 "configuration_id": configuration_id,
                 "inference_masks": mask_metadata,
                 **height_context,

@@ -885,6 +885,7 @@ def inference_gnn(
     auxiliary_prediction: bool = False,
     precomputed_auxiliaries: dict | None = None,
     return_model_pass_success: bool = False,
+    graph_validation: bool = True,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Predict options, recording/reusing auxiliaries within one collector invocation.
 
@@ -918,6 +919,8 @@ def inference_gnn(
         feature_action_indices=feature_action_indices,
         # Success-intent predicts recipients even when no receiver was observed.
         validate_targets=not auxiliary_prediction and model.args["task"] != "success_intent",
+        graph_validation=graph_validation,
+        validation_context=f"match {getattr(match, 'match_id', 'unknown')}; stored graph inputs",
     )
     if graph_override is not None and not graphs:
         raise ValueError("No usable graphs remain for the selected inference actions.")
@@ -947,7 +950,7 @@ def inference_gnn(
         auxiliary = predict_auxiliaries(match, model, device, graphs=match_graphs, labels=source_labels,
                                         event_indices=labels[:, 0].tolist(), post_action=post_action,
                                         feature_action_indices=feature_action_indices,
-                                        precomputed_auxiliaries=precomputed_auxiliaries)
+                                        precomputed_auxiliaries=precomputed_auxiliaries, graph_validation=graph_validation)
         pass_height_probs = auxiliary.get("pass_height", pass_height_probs)
         pass_intent_probs = auxiliary.get("pass_intent", pass_intent_probs)
         version = physical_xpass_weight_version(model.args)
@@ -1320,6 +1323,7 @@ def inference_gnn_posterior(
     device="cuda",
     event_indices: pd.Index = None,
     melt: bool = True,
+    *, graph_validation: bool = True,
 ) -> pd.DataFrame:
     if hasattr(model, "eval"):
         model.eval()
@@ -1330,6 +1334,8 @@ def inference_gnn_posterior(
         model.args,
         event_indices,
         feature_action_indices=feature_action_indices,
+        graph_validation=graph_validation,
+        validation_context=f"match {getattr(match, 'match_id', 'unknown')}; stored posterior inputs",
     )
     policy = goal_policy(model.args)
     if policy.version == 2:
@@ -1415,7 +1421,7 @@ def inference_gnn_posterior(
         return posteriors
 
 
-def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, torch.Tensor]:
+def inference_gnn_grid(match: Match, model: GNN, device="cuda", *, graph_validation: bool = True) -> Dict[int, torch.Tensor]:
     if hasattr(model, "eval"):
         model.eval()
     assert "dest" in model.args["task"]
@@ -1432,6 +1438,8 @@ def inference_gnn_grid(match: Match, model: GNN, device="cuda") -> Dict[int, tor
         match.labels,
         model.args,
         feature_action_indices=feature_action_indices,
+        graph_validation=graph_validation,
+        validation_context=f"match {getattr(match, 'match_id', 'unknown')}; stored grid inputs",
     )
     receive_probs = dict()
     success_probs = dict()

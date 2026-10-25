@@ -21,6 +21,7 @@ test*/*.csv
 test*/*.png
 !tests/
 tests/*.py
+!tests/test_graph_validation.py
 !tests/test_synchronized_pass_refresh.py
 !tests/test_goal_context.py
 !tests/test_receiver_goal_context.py

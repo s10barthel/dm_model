@@ -160,7 +160,10 @@ def synthetic_training(tmp_path, monkeypatch):
         labels[:, config.LABEL_INDEX["intent_index"]] = 1
         labels[:, 7] = 1
         from scripts.generate_relevant_features import append_interactions_to_graph
-        torch.save([append_interactions_to_graph(graph(5, 3))], features / f"{match}.pt")
+        raw = graph(5, 3)
+        raw.edge_index = torch.cartesian_prod(torch.arange(5), torch.arange(5)).T.contiguous()
+        raw.edge_attr = torch.ones((25, 2))
+        torch.save([append_interactions_to_graph(raw)], features / f"{match}.pt")
         torch.save(labels, labels_dir / f"{match}.pt")
     manifest = {"manifest_id": "fixture", "train": ids, "test": [], "metadata": {"train_size": 5}}
     monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: None)
@@ -290,3 +293,25 @@ def test_wrapper_forwards_sparsify_to_every_task(mode, use_carries):
     for command in commands:
         assert command.count("--sparsify") == 1
         assert wrapper.get_cli_value(command, "--sparsify") == (mode or "none")
+
+
+@pytest.mark.parametrize("mode", [None, "off", "on"])
+def test_resume_validation_uses_invocation_default(synthetic_training, monkeypatch, mode):
+    run, _, epoch, utils, tmp_path = synthetic_training
+    def interrupt(args, *a, **kw):
+        if args._epoch == 2:
+            raise RuntimeError("validation resume fixture")
+        return epoch(args, *a, **kw)
+    monkeypatch.setattr(utils, "run_epoch", interrupt)
+    with pytest.raises(RuntimeError, match="validation resume fixture"):
+        run("validation_policy", ["--graph-validation", "off", "--max-epochs", "3"])
+    path = tmp_path / "saved/pass_intent/validation_policy" / CHECKPOINT_NAME
+    saved = load_checkpoint(path)
+    assert saved["args"]["graph_validation"] is False
+    monkeypatch.setattr(utils, "run_epoch", epoch)
+    flags = [] if mode is None else ["--graph-validation", mode]
+    resumed = run("validation_policy", flags, resume=True)
+    assert resumed["args"]["graph_validation"] is (mode != "off")
+    stats = resumed["metadata"]["dataset_loading"]["train"]["graph_validation"]
+    assert stats["enabled"] is (mode != "off")
+    assert bool(stats["checked_files"]) is (mode != "off")

@@ -12,9 +12,11 @@ from types import SimpleNamespace
 
 import pandas as pd
 import torch
+from datatools.graph_validation import (validate_graphs, graph_fingerprints, assert_preserved,
+    graph_validation_enabled, validation_stats, merge_validation_stats)
 
 from datatools import config
-from datatools.artifact_storage import atomic_parquet_save, atomic_torch_save, clone_feature_artifacts
+from datatools.artifact_storage import atomic_parquet_save, atomic_torch_save, atomic_graph_save, clone_feature_artifacts
 from datatools.carry_policy import CarryPolicy
 from datatools.match import Match
 from datatools.reception_policy import KEY, RETIRED, apply_policy, event_key, policy_version, retirement_records
@@ -48,6 +50,8 @@ def patch_labels(labels, retired_ids, failed_ids, *, original=False):
 def refresh_match(task):
     source, output, metadata, match_id, replace, policy_values, thread_limit = task
     source, output = Path(source), Path(output)
+    enabled = graph_validation_enabled(metadata.get("graph_validation", True))
+    stats = validation_stats(enabled)
     from datatools.graph_feature import configure_worker_thread_limit
     from scripts import replace_carries as rc
     configure_worker_thread_limit(thread_limit)
@@ -69,7 +73,7 @@ def refresh_match(task):
     filtered = apply_policy(primary, RETIRED, records=records)
     post = Match.label_post_actions(SimpleNamespace(events=events, reception_policy=RETIRED), filtered)
     invalid_post = {int(i) for i in retired_ids if pd.isna(post.at[i, "end_frame_id"])}
-    artifacts, counts = {}, Counter(receptions=len(records))
+    artifacts, graph_labels, counts = {}, {}, Counter(receptions=len(records))
     for folder in sorted(p for p in source.iterdir() if p.is_dir() and not p.name.endswith("_carries")):
         name = folder.name
         if metadata.get("model_mode_regeneration_required") and name.endswith("_model"):
@@ -97,12 +101,16 @@ def refresh_match(task):
             gp = source / name.replace("labels", "graphs", 1) / path.name
             if gp.exists():
                 graphs = torch.load(gp, map_location="cpu", weights_only=False)
+                validate_graphs(graphs, context=gp, labels=labels, graph_validation=enabled, stats=stats)
+                before = graph_fingerprints(graphs, graph_validation=enabled, stats=stats)
                 if len(graphs) != len(labels):
                     raise ValueError(f"Augmented graph alignment mismatch: {gp}")
                 dependent = failed & labels[:, config.LABEL_INDEX["is_real"]].eq(0)
                 for pos in dependent.nonzero().flatten().tolist():
                     graphs[pos] = None
                 artifacts[output / gp.relative_to(source)] = graphs
+                graph_labels[output / gp.relative_to(source)] = changed
+                assert_preserved(before, graphs, context=gp, labels=labels, allow_availability=True, graph_validation=enabled, stats=stats)
                 counts["synthetic_states"] += int(dependent.sum())
     for folder in source.glob("post_action_graphs*"):
         gp = folder / f"{match_id}.pt"
@@ -113,6 +121,8 @@ def refresh_match(task):
         labels = torch.load(get_action_label_dir(metadata["return_types"][0],
             intended_receiver_mode=metadata["intended_receiver_modes"][0], root=source) / gp.name,
             map_location="cpu", weights_only=False)
+        validate_graphs(graphs, context=gp, labels=labels, graph_validation=enabled, stats=stats)
+        before = graph_fingerprints(graphs, graph_validation=enabled, stats=stats)
         indices = labels[:, 0].long().tolist()
         if len(graphs) != len(indices) or not set(indices).issubset(primary.index):
             raise ValueError(f"Post-action graph alignment mismatch: {gp}")
@@ -120,10 +130,15 @@ def refresh_match(task):
             if int(index) in invalid_post:
                 graphs[pos] = None
         artifacts[output / gp.relative_to(source)] = graphs
+        graph_labels[output / gp.relative_to(source)] = labels
+        assert_preserved(before, graphs, context=gp, labels=labels, allow_availability=True, graph_validation=enabled, stats=stats)
         counts["post_action_states"] += len(invalid_post)
     for path, value in artifacts.items():
         if path.suffix == ".pt":
-            atomic_torch_save(value, path)
+            if isinstance(value, list):
+                atomic_graph_save(value, path, labels=graph_labels.get(path), graph_validation=enabled, stats=stats)
+            else:
+                atomic_torch_save(value, path)
         else:
             atomic_parquet_save(value, path)
     record_path = output / "reception_retirement" / f"{match_id}.json"
@@ -131,7 +146,7 @@ def refresh_match(task):
     layouts = {"22_23": "starting_players", "23_24": "match_information", "24_25": "match_information/starting_players"}
     season = next((s for s, root in RAW_SEASON_ROOTS.items() if any(
         (Path(root) / layouts[s] / (match_id + ext)).exists() for ext in ("", ".xml"))), "unknown")
-    report = dict(policy=RETIRED, match_id=match_id, season=season, receptions=records, counts=dict(counts),
+    report = dict(graph_validation=stats, policy=RETIRED, match_id=match_id, season=season, receptions=records, counts=dict(counts),
                   source_events_sha256=rc.digest(DATA_ROOT / "event_synced" / f"{match_id}.csv"),
                   artifacts={str(p.relative_to(output)): p.stat().st_size for p in artifacts})
     atomic_write_json(record_path, report)
@@ -140,6 +155,8 @@ def refresh_match(task):
         carry_metadata = dict(metadata, **{KEY: RETIRED}, _canonical_root=str(output))
         carry_report = rc.rebuild_match((str(source), str(output), carry_metadata, match_id, policy_values, thread_limit))
         report["carry_segments"] = carry_report["segments"]
+        report["graph_validation"] = merge_validation_stats(
+            [report["graph_validation"], carry_report.get("graph_validation")], enabled)
         report["artifacts"].update(carry_report["artifacts"])
     # Completion is separate from the policy manifest needed by runtime loading.
     atomic_write_json(output / "reception_retirement" / "completed" / f"{match_id}.json", report)
@@ -199,7 +216,7 @@ def run_retirement(args):
     workers = int(args.num_workers)
     if workers < 1:
         raise ValueError("Reception refresh requires positive --num-workers")
-    metadata = dict(original, run_id=output.name, base_feature_run_id=source.name,
+    metadata = dict(original, graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)), run_id=output.name, base_feature_run_id=source.name,
                     status="in_progress", reception_refresh=settings,
                     created_at=datetime.now().isoformat(timespec="seconds"),
                     command=subprocess.list2cmdline(sys.argv), **{KEY: RETIRED})
@@ -240,6 +257,8 @@ def run_retirement(args):
         for report in reports:
             counts.update(report["counts"])
         metadata["reception_retirement_counts"] = dict(counts)
+        metadata["graph_validation_summary"] = merge_validation_stats(
+            [r.get("graph_validation") for r in reports], metadata["graph_validation"])
         by_season = {}
         for report in reports:
             group = by_season.setdefault(report.get("season", "unknown"), Counter())

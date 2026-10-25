@@ -35,6 +35,8 @@ def action_artifacts(tmp_path):
         label[config.LABEL_INDEX["action_index"]] = 10 + i
         label[7] = [.05, .1, .15, .2][i]
         label[config.LABEL_INDEX["scores_xt"]] = .02 * (i + 1)
+        graph.edge_index = torch.cartesian_prod(torch.arange(graph.num_nodes), torch.arange(graph.num_nodes)).T.contiguous()
+        graph.edge_attr = torch.ones((graph.num_edges, 2))
         graphs.append(graph)
         rows.append(label)
     carry = rows[-1].clone()

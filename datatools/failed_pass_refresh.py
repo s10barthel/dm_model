@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import copy
 import json
+from datatools.graph_validation import (validate_graphs, graph_fingerprints, assert_preserved,
+    graph_validation_enabled, validation_stats, merge_validation_stats)
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +13,7 @@ import torch
 
 from datatools.failed_pass_trajectory import KEY, VERSION, SETTINGS, detect, observation
 from datatools.pass_trajectory import ensure_pass_endpoints, event_key, PASS_DURATION, PASS_DURATION_KEY
-from datatools.artifact_storage import clone_feature_artifacts, atomic_parquet_save, atomic_torch_save
+from datatools.artifact_storage import clone_feature_artifacts, atomic_parquet_save, atomic_graph_save
 from project_config import (DATA_ROOT, get_feature_run_root, load_feature_run_metadata,
                             write_run_metadata, generate_run_id, write_latest_run, atomic_write_json)
 
@@ -19,6 +21,8 @@ from project_config import (DATA_ROOT, get_feature_run_root, load_feature_run_me
 def refresh_match(task):
     root, match_id, metadata, thread_limit = task
     root = Path(root)
+    enabled = graph_validation_enabled(metadata.get("graph_validation", True))
+    stats = validation_stats(enabled)
     from datatools.graph_feature import (build_match_for_feature_generation, configure_worker_thread_limit,
                                         summarize_ball_trajectory, construct_graph_for_action)
     from models.edge_schema import generation_kwargs
@@ -73,6 +77,8 @@ def refresh_match(task):
         labels = torch.load(labels_path, map_location="cpu", weights_only=False)
         if len(graphs) != len(labels):
             raise ValueError(f"Graph/label alignment mismatch: {path}")
+        validate_graphs(graphs, context=path, labels=labels, graph_validation=enabled, stats=stats)
+        before = graph_fingerprints(graphs, graph_validation=enabled, stats=stats)
         for pos, label in enumerate(labels):
             index = int(label[0])
             if index not in match.actions.index:
@@ -102,8 +108,10 @@ def refresh_match(task):
                     graph.x[:, col:col+4] = graph.x.new_tensor(summary)
                 graph.trajectory_end_frame_id = observation(match, action, resolver.resolve(action).trajectory)
                 setattr(graph, KEY, VERSION)
-        atomic_torch_save(graphs, path)
-    report = dict(match_id=match_id, total=len(records),
+        validate_graphs(graphs, context=path, labels=labels, graph_validation=enabled, stats=stats)
+        assert_preserved(before, graphs, context=path, labels=labels, allow_availability=True, graph_validation=enabled, stats=stats)
+        atomic_graph_save(graphs, path, labels=labels, graph_validation=enabled, stats=stats)
+    report = dict(graph_validation=stats, match_id=match_id, total=len(records),
                   counts=pd.Series([r["status"] for r in records], dtype=object).value_counts().to_dict(),
                   unavailable=[dict(action_index=r["action_index"], reason=r["reason"]) for r in records if r["status"] == "unavailable"])
     atomic_write_json(root / "failed_pass_trajectory_refresh" / f"{match_id}.json", report)
@@ -114,6 +122,7 @@ def run_failed_pass_refresh(args):
     base_id = args.extend_feature_run_id
     base = get_feature_run_root(base_id)
     metadata = copy.deepcopy(load_feature_run_metadata(base_id, required=True))
+    metadata["graph_validation"] = graph_validation_enabled(getattr(args, "graph_validation", True))
     resume = metadata.get("status") in {"failed", "in_progress"} and metadata.get("refresh_operation") == KEY
     if metadata.get("status") != "completed" and not resume:
         raise ValueError("Source run must be completed, or a failed failed-pass refresh to resume.")
@@ -159,6 +168,8 @@ def run_failed_pass_refresh(args):
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 reports = list(pool.map(refresh_match, tasks))
         metadata["failed_pass_refresh_reports"] = reports
+        metadata["graph_validation_summary"] = merge_validation_stats(
+            [r.get("graph_validation") for r in reports], metadata["graph_validation"])
         if sum(r["total"] for r in reports) and all(r["counts"].get("unavailable", 0) == r["total"] for r in reports):
             raise ValueError("All failed passes unavailable; see failed_pass_trajectory_refresh diagnostics.")
         metadata.update(status="completed", refresh_phase="completed")

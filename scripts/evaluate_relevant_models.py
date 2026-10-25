@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.graph_validation import add_graph_validation_argument, graph_validation_flags, graph_validation_enabled
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from scripts import learning_curve, model_comparison
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument
@@ -78,6 +79,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     from models.pass_height import add_pass_height_argument
     add_pass_height_argument(parser)
+    add_graph_validation_argument(parser)
     add_evaluation_arguments(parser)
     add_warning_argument(parser)
     add_outcome_bootstrap_arguments(parser)
@@ -249,6 +251,7 @@ def validate_selected_task_options(args: argparse.Namespace, requested_tasks: li
 
 def add_task_evaluation_options(command: list[str], args: argparse.Namespace, task: str) -> list[str]:
     """Append task-specific, evaluation-only CLI options."""
+    command.extend(graph_validation_flags(args))
     if getattr(args, "feature_run_id", None):
         command.extend(["--feature-run-id", args.feature_run_id])
     if getattr(args, "evaluation_filter", None) is not None:
@@ -396,6 +399,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
     ))
     output_root.mkdir(parents=True)
     report = {"evaluation_timestamp": timestamp, "bundle_id": args.bundle_id,
+              "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
               "evaluation_pass_height_threshold_meters": args.pass_height_threshold,
               "bootstrap_resamples": args.learning_curve_bootstrap_resamples,
               "bootstrap_seed": args.learning_curve_bootstrap_seed,
@@ -413,6 +417,7 @@ def run_learning_curve(args: argparse.Namespace) -> None:
                        "--evaluation-output-dir", str(model_dir), "--evaluation-timestamp", timestamp,
                        "--learning-curve-rows"]
             add_pc_xpass_options(command, args)
+            command.extend(graph_validation_flags(args))
             if args.feature_run_id:
                 command.extend(["--feature-run-id", args.feature_run_id])
             if args.diagnostic_feature_run_id and task_uses_diagnostic_feature_run(args, task):
@@ -486,6 +491,7 @@ def _entry_name(model_id: str) -> str:
 
 def evaluation_options(args: argparse.Namespace) -> dict:
     return {
+        "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
         "feature_run_id": args.feature_run_id,
         "filter": getattr(args, "evaluation_filter", None),
         "min_pass_duration": args.min_pass_duration,

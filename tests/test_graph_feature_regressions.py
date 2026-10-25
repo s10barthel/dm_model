@@ -176,13 +176,7 @@ def make_inference_graph() -> Data:
     x = torch.zeros((4, 25), dtype=torch.float32)
     x[:3, 0] = 1.0
     x[0, 13] = 1.0
-    edge_index = torch.tensor(
-        [
-            [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3],
-            [1, 2, 3, 0, 2, 3, 0, 1, 3, 0, 1, 2],
-        ],
-        dtype=torch.long,
-    )
+    edge_index = torch.cartesian_prod(torch.arange(4), torch.arange(4)).T.contiguous()
     edge_attr = torch.ones((edge_index.shape[1], 2), dtype=torch.float32)
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
 
@@ -882,8 +876,8 @@ class PassOnlyIntentInferenceRegressionTests(unittest.TestCase):
         self.assertIsNotNone(model.seen_edge_attr)
         graph = match.graph_features_0[0]
         incident_edges = (graph.edge_index[0] == 0) | (graph.edge_index[1] == 0)
-        self.assertTrue(torch.equal(model.seen_edge_attr[incident_edges, 2:4], torch.zeros((6, 2))))
-        self.assertTrue(torch.equal(model.seen_edge_attr[~incident_edges, 2:4], torch.ones((6, 2))))
+        self.assertTrue(torch.equal(model.seen_edge_attr[incident_edges, 2:4], torch.zeros((int(incident_edges.sum()), 2))))
+        self.assertTrue(torch.equal(model.seen_edge_attr[~incident_edges, 2:4], torch.ones((int((~incident_edges).sum()), 2))))
 
     def test_pass_intent_keeps_offside_options_and_renormalizes(self) -> None:
         model = DummyNodeModel("pass_intent", logits=[0.0, 5.0, 0.0, 0.0], node_in_dim=26)

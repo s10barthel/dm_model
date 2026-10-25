@@ -40,7 +40,7 @@ def stored_graph(match, *, definition=None):
     x = torch.arange(72, dtype=torch.float32).reshape(3, 24)
     x[:, 19] = 123
     x[:, 20:23] = torch.tensor(summary[1:], dtype=torch.float32)
-    graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 2]]), edge_attr=torch.randn(2, 2))
+    graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(3), torch.arange(3)).T.contiguous(), edge_attr=torch.randn(9, 2))
     graph.node_ids = ["home_1", "home_2", "away_1"]
     if definition:
         graph.trajectory_speed_definition = definition

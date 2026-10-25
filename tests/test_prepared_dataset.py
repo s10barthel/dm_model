@@ -36,8 +36,8 @@ def artifacts(tmp_path):
             x[:, config.NODE_FEATURE_X] = torch.arange(4) + i * 5 + match * 50
             x[:, config.NODE_FEATURE_Y] = 34
             x[:, config.NODE_FEATURE_VX] = 3
-            graph = Data(x=x, edge_index=torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]]),
-                         edge_attr=torch.ones((4, 5)))
+            graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(4), torch.arange(4)).T.contiguous(),
+                         edge_attr=torch.ones((16, 5)))
             graphs.append(None if i == 6 else graph)
             rows[i, LABEL_INDEX["action_index"]] = i // 2  # repeated IDs represent augmentation
             rows[i, LABEL_INDEX["is_pass"]] = int(i != 2)

@@ -17,6 +17,8 @@ def positive_int(value):
 
 
 def add_dataset_loading_arguments(parser):
+    from datatools.graph_validation import add_graph_validation_argument
+    add_graph_validation_argument(parser)
     parser.add_argument("--dataset-loading", choices=("auto", "memory", "disk"), default="auto")
     parser.add_argument("--dataset-buffer-matches", type=positive_int, default=4)
     parser.add_argument("--dataset-cache-dir", default=DEFAULT_CACHE_DIR)
@@ -25,10 +27,11 @@ def add_dataset_loading_arguments(parser):
 
 
 def dataset_loading_flags(args):
+    from datatools.graph_validation import graph_validation_flags
     return ["--dataset-loading", getattr(args, "dataset_loading", "auto"),
             "--dataset-buffer-matches", str(getattr(args, "dataset_buffer_matches", 4)),
             "--dataset-cache-dir", str(getattr(args, "dataset_cache_dir", DEFAULT_CACHE_DIR))] + (
-                ["--keep-cache"] if getattr(args, "keep_cache", False) else [])
+                ["--keep-cache"] if getattr(args, "keep_cache", False) else []) + graph_validation_flags(args)
 
 
 def resolve_dataset_loading(mode, task, ipw_model_id="none"):

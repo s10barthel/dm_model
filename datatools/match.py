@@ -354,6 +354,8 @@ class Match(ABC):
                 try:
                     filtered_graphs, _ = utils.filter_features_and_labels(
                         [graph], dummy_label, model.args, [action_index], validate_targets=False,
+                        graph_validation=getattr(self, "graph_validation", True),
+                        validation_context=f"match {getattr(self, 'match_id', 'unknown')}; intended-receiver model inputs",
                     )
                 except ValueError as error:
                     if "No usable graph/label pairs remain" not in str(error):

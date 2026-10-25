@@ -524,6 +524,8 @@ resume_probe.add_argument("--keep-cache", action="store_true")
 add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "light", "off"), default="off")
 resume_probe.add_argument("--batch-loader", choices=("auto", "pyg"))
+from datatools.graph_validation import add_graph_validation_argument
+add_graph_validation_argument(resume_probe)
 resume_nodes = resume_probe.add_mutually_exclusive_group()
 resume_nodes.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true")
 resume_nodes.add_argument("--no-goal-nodes", dest="goal_nodes_aware", action="store_false")
@@ -536,7 +538,7 @@ resume_options, resume_extra = resume_probe.parse_known_args()
 resume_checkpoint = None
 if resume_options.resume_checkpoint:
     if resume_extra:
-        parser.error("Resume restores saved settings; only --batch-loader, --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
+        parser.error("Resume restores saved settings; only --graph-validation, --batch-loader, --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
     resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
     from models.goal_context import resolve_training_goal_settings
     resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
@@ -553,13 +555,16 @@ if resume_options.resume_checkpoint:
     args.resume_run_id = args.run_id
     args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
     args.monitoring = resume_options.monitoring
+    args.graph_validation = resume_options.graph_validation
     args.batch_loader = restored_batch_loader(resume_checkpoint["args"], resume_options.batch_loader)
     args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
 elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
     refit_probe = argparse.ArgumentParser(add_help=False)
     refit_probe.add_argument("--refit-config", required=True)
+    add_graph_validation_argument(refit_probe)
     refit_options = refit_probe.parse_args()
     args = argparse.Namespace(**load_refit_config(refit_options.refit_config))
+    args.graph_validation = refit_options.graph_validation
 else:
     args, _ = parser.parse_known_args()
     if args.resume_run_id:
@@ -1210,9 +1215,12 @@ def main(cache_session):
     monitor.event("dataset_loaded", device)
     log_skipped_matches("training", train_dataset, trial_path)
     metadata["dataset_loading"] = {
+        "graph_validation": args.graph_validation,
         "requested": args.dataset_loading, "resolved": args.resolved_dataset_loading,
-        "train": train_dataset.metadata() if disk_args else {"mode": "memory"},
-        "validation": valid_dataset.metadata() if disk_args and valid_dataset is not None else None,
+        "train": train_dataset.metadata() if disk_args else {"mode": "memory", "graph_validation": train_dataset.graph_validation_stats},
+        "validation": (valid_dataset.metadata() if disk_args else
+                       {"mode": "memory", "graph_validation": valid_dataset.graph_validation_stats})
+                      if valid_dataset is not None else None,
     }
     metadata["split_datasets"] = {"train": split_dataset_provenance(train_match_ids, train_dataset)}
     if valid_dataset is not None:

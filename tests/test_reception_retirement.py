@@ -126,7 +126,7 @@ def test_missing_original_target_is_skipped_before_dataset_indexing(tmp_path):
     x = torch.zeros((2, config.NODE_FEATURE_CORE_DIM))
     x[:, config.NODE_FEATURE_IS_TEAMMATE] = 1
     x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
-    graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.zeros((2, 2)))
+    graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(), edge_attr=torch.zeros((4, 2)))
     labels = torch.zeros((2, len(config.LABEL_COLUMNS)))
     labels[:, 0] = torch.arange(2)
     labels[:, config.LABEL_INDEX['is_pass']] = 1
@@ -242,7 +242,11 @@ def test_real_refresh_preserves_temporal_model_targets_and_combination_order(tmp
         torch.save(labels, path)
     post = source / 'post_action_graphs/m.pt'
     post.parent.mkdir()
-    torch.save([1, 2], post)
+    from torch_geometric.data import Data
+    graph = Data(x=torch.ones((2, config.NODE_FEATURE_CORE_DIM)),
+                 edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(),
+                 edge_attr=torch.zeros((4, 2)))
+    torch.save([graph, graph.clone()], post)
     monkeypatch.setattr(rf, 'DATA_ROOT', data)
     def rebuild(task):
         assert task[2][KEY] == RETIRED
@@ -259,7 +263,9 @@ def test_real_refresh_preserves_temporal_model_targets_and_combination_order(tmp
     for mode in ['model', 'angle_only']:
         result = torch.load(output / f'action_labels_intent_train_next_10_{mode}/m.pt', weights_only=False)
         assert result[:, 5].tolist() == [1, 1]
-    assert torch.load(post, weights_only=False) == [1, 2]
+    for saved in torch.load(post, weights_only=False):
+        torch.testing.assert_close(saved.x, graph.x)
+        torch.testing.assert_close(saved.edge_index, graph.edge_index)
 
 
 def test_unknown_policy_and_missing_manifest_fail_explicitly(tmp_path):

@@ -2934,3 +2934,8 @@ reconstruction for all eight wrapper tasks. Version 1 caches rebuild once;
 [dataset loading and cache lifetime](docs/intent_dataset_loading.md).
 
 For model-only early-contact cutoffs, see [Failed-pass trajectory refresh](docs/failed_pass_trajectories.md).
+
+Graph connectivity validation and verified output publication default to on. Use
+`--graph-validation off` to disable the added checks for a generation, refresh,
+training or evaluation invocation. See [graph validation](docs/graph_validation.md)
+for scope, cache behavior and computation costs.

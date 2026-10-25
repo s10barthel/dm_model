@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 from datatools.artifact_storage import clone_feature_artifacts
+from datatools.graph_validation import graph_validation_enabled, merge_validation_stats
 from datatools.carry_policy import CarryPolicy, DEFINITION
 from datatools.graph_feature import configure_worker_thread_limit, resolve_num_workers
 from datatools.pass_trajectory import (PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY,
@@ -27,13 +28,19 @@ def _refresh_match(task):
     from scripts.replace_carries import rebuild_match
     configure_worker_thread_limit(threads)
     source, output = Path(source), Path(output)
+    retirement = None
     if settings['retire_elastic']:
-        retire_match((str(source), str(output), metadata, match_id, False, settings['carry_parameters'], threads))
-    report = refresh_directory_match(output, metadata, match_id, threads)
+        retirement = retire_match((str(source), str(output), metadata, match_id, False, settings['carry_parameters'], threads))
+    report = refresh_directory_match(output, metadata, match_id, threads,
+                                     graph_validation=metadata.get("graph_validation", True))
+    report["graph_validation"] = merge_validation_stats(
+        [report.get("graph_validation"), (retirement or {}).get("graph_validation")],
+        metadata.get("graph_validation", True))
     if settings['replace_carries']:
         carry = rebuild_match((str(source), str(output), dict(metadata, _canonical_root=str(output)),
                                match_id, settings['carry_parameters'], threads))
         report['carry_segments'] = carry['segments']
+        report['graph_validation'] = merge_validation_stats([report.get('graph_validation'), carry.get('graph_validation')], metadata.get('graph_validation', True))
     carry_artifacts = carry.get('artifacts', {}) if settings['replace_carries'] else {}
     report['artifacts'] = {**carry_artifacts, **{str(p.relative_to(output)): p.stat().st_size
         for folder in output.iterdir() if folder.is_dir()
@@ -75,6 +82,7 @@ def run_combined_refresh(args):
     if output == source:
         raise ValueError('Combined refresh requires a new derived run')
     metadata = copy.deepcopy(original)
+    metadata["graph_validation"] = graph_validation_enabled(getattr(args, "graph_validation", True))
     metadata.update(run_id=output.name, base_feature_run_id=source.name, status='in_progress',
         created_at=datetime.now().isoformat(timespec='seconds'), command=subprocess.list2cmdline(sys.argv),
         feature_refresh=settings, **{PASS_DURATION_KEY: PASS_DURATION, TRAJECTORY_SPEED_KEY: TRAJECTORY_SPEED,
@@ -121,6 +129,8 @@ def run_combined_refresh(args):
         reports = [json.loads((output / 'feature_refresh' / (mid + '.json')).read_text()) for mid in ids]
         metadata['skipped_actions'] = {r['match_id']: r['skipped_actions'] for r in reports if r['skipped_actions']}
         metadata['skipped_action_count'] = sum(len(r['skipped_actions']) for r in reports)
+        metadata['graph_validation_summary'] = merge_validation_stats(
+            [r.get('graph_validation') for r in reports], metadata['graph_validation'])
         if sum(r.get("pass_count", 0) for r in reports) and not sum(r.get("usable_pass_count", 0) for r in reports):
             write_run_metadata(output, metadata)
             raise ValueError("All selected passes lack usable endpoints; see skipped_actions in metadata.")

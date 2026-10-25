@@ -249,7 +249,8 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
             "--start_lr", "0.002", "--min_lr", "0.00001",
             "--batch_size", "2", "--accumulation-steps", "2", "--dataset-loading", "disk",
             "--dataset-cache-dir", str(tmp_path / "cache"), "--node_emb_dim", "8", "--graph_emb_dim", "8",
-            "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping"]
+            "--gnn_heads", "2", "--mlp_h1_dim", "8", "--mlp_h2_dim", "4", "--no-early-stopping",
+            "--graph-validation", "off"]  # This numerical regression uses legacy sparse raw fixtures.
     entry = Path(__file__).resolve().parents[1] / "train.py"
     base.extend(["--no-goal-nodes", "--monitoring", monitoring,
                  "--no-position-direction-edge-features", "--no-relative-velocity-edge-features",
@@ -291,7 +292,7 @@ def test_real_train_epoch_checkpoint_resume_equivalence(tmp_path, monkeypatch, d
         atomic_torch_save(checkpoint, checkpoint_path)
     override = ["--batch-loader", "pyg"] if monitoring == "off" else []
     monkeypatch.setattr(sys, "argv", ["train.py", "--resume-checkpoint", str(checkpoint_path),
-                                    "--monitoring", monitoring] + override)
+                                    "--monitoring", monitoring, "--graph-validation", "off"] + override)
     runpy.run_path(str(entry), run_name="__main__")
     resumed = load_checkpoint(checkpoint_path)
     assert resumed["finished"] and resumed["metadata"]["last_epoch"] == 5

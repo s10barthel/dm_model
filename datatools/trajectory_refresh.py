@@ -12,6 +12,8 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import torch
+from datatools.graph_validation import (validate_graphs, graph_fingerprints, assert_preserved,
+    validation_stats, graph_validation_enabled, merge_validation_stats)
 
 from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
@@ -52,7 +54,7 @@ def load_refresh_match(match_id, metadata):
     return match
 
 
-def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
+def refresh_match_graphs(graphs, labels, match, *, context, schema=None, graph_validation=True, stats=None):
     """Replace trajectory inputs, preserving every other graph feature."""
     if not isinstance(graphs, list) or not isinstance(labels, torch.Tensor) or labels.ndim != 2:
         raise ValueError(f"{context}: malformed graph/label artifacts")
@@ -61,6 +63,8 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
     indices = labels[:, 0].cpu().numpy()
     if not np.isfinite(indices).all() or not np.equal(indices, np.floor(indices)).all() or len(set(indices)) != len(indices):
         raise ValueError(f"{context}: invalid/duplicate action indices")
+    validate_graphs(graphs, context=context, labels=labels, graph_validation=graph_validation, stats=stats)
+    before = graph_fingerprints(graphs, graph_validation=graph_validation, stats=stats)
     column = config.NODE_FEATURE_CORE_DIM
     template = next((graph for graph in graphs if graph is not None), None)
     schema = schema or (schema_for_names(edge_names(template)) if template is not None else {})
@@ -98,6 +102,9 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None):
         graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
         graph.trajectory_end_frame_id = endpoint.trajectory
         graph.pass_endpoint_definition = PASS_DURATION
+    validate_graphs(graphs, context=context, labels=labels, graph_validation=graph_validation, stats=stats)
+    assert_preserved(before, graphs, context=context, labels=labels, allow_availability=True,
+                     graph_validation=graph_validation, stats=stats)
     return graphs
 
 
@@ -186,6 +193,8 @@ def refresh_artifact_paths(root, match_id=None):
 def stage_refresh_match(task):
     file, temp, label_path, metadata, thread_limit, artifacts = task
     configure_worker_thread_limit(thread_limit)
+    enabled = graph_validation_enabled(metadata.get("graph_validation", True))
+    stats = validation_stats(enabled)
     match = load_refresh_match(file.stem, dict(metadata, _endpoint_root=str(file.parent.parent)))
     match.max_pass_duration = metadata.get(MAX_DURATION_KEY)
     # Use persisted canonical identity/membership, even if current filtering differs.
@@ -201,10 +210,10 @@ def stage_refresh_match(task):
     if file.is_file():
         graphs = torch.load(file, map_location="cpu", weights_only=False)
         labels = torch.load(label_path, map_location="cpu", weights_only=False)
-        graphs = refresh_match_graphs(graphs, labels, match, context=str(file), schema=metadata.get("graph_schema"))
-        save_staged_graphs(graphs, temp, staging)
+        graphs = refresh_match_graphs(graphs, labels, match, context=str(file), schema=metadata.get("graph_schema"), graph_validation=enabled, stats=stats)
+        save_staged_graphs(graphs, temp, staging, graph_validation=enabled, labels=labels, context=file)
     from datatools.utils import label_intended_receivers
-    frames, tensors = {}, {}
+    frames, tensors, graph_labels = {}, {}, {}
     changed = {}
     for path, staged in artifacts:
         if path.suffix != ".parquet":
@@ -268,10 +277,13 @@ def stage_refresh_match(task):
             raise ValueError(f"Canonical action/label alignment mismatch: {base_label}")
         match.actions = actions.loc[indices].copy()
         match.graph_features_0 = torch.load(base_graph, map_location="cpu", weights_only=False)
+        validate_graphs(match.graph_features_0, context=base_graph, labels=match.labels,
+                        graph_validation=enabled, stats=stats)
         if len(match.graph_features_0) != len(indices):
             raise ValueError(f"Canonical graph/label alignment mismatch: {base_graph}")
         graphs, labels = augment_blocked_actions(match, verbose=False)
         tensors[graph_path], tensors[augmented_path] = graphs, labels
+        graph_labels[graph_path] = labels
     # Rebuild post-action observations, whose initial frame is the pass endpoint.
     for path, _ in artifacts:
         if path.parent.name != "post_action_graphs":
@@ -285,6 +297,7 @@ def stage_refresh_match(task):
         if labels is None:
             labels = torch.load(label_path, map_location="cpu", weights_only=False)
         schema = metadata.get("graph_schema") or {}
+        graph_labels[path] = labels
         tensors[path] = construct_graph_features(match, action_indices=labels[:, 0].long().tolist(),
             post_action=True, verbose=False, add_v_edge_features=bool(schema.get("add_v_edge_features", False)),
             add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),
@@ -293,9 +306,11 @@ def stage_refresh_match(task):
         if path.suffix == ".pt":
             if path not in tensors:
                 raise ValueError(f"Unstaged dependent artifact: {path}")
-            save_staged_graphs(tensors[path], staged, staging)
+            save_staged_graphs(tensors[path], staged, staging, graph_payload=isinstance(tensors[path], list),
+                               graph_validation=enabled, labels=graph_labels.get(path), context=path)
     failed = canonical.loc[canonical.action_type.eq("pass") & canonical.observed_end_frame_id.isna()]
-    report = dict(match_id=file.stem, trajectory_skips=getattr(match, "_trajectory_refresh_skips", []), skipped_actions=[dict(action_index=int(i),
+    stats = merge_validation_stats([stats, staging.data.get("graph_validation")], enabled)
+    report = dict(graph_validation=stats, match_id=file.stem, trajectory_skips=getattr(match, "_trajectory_refresh_skips", []), skipped_actions=[dict(action_index=int(i),
         action_id=str(a.get("action_id", i)), reason=a.pass_endpoint_reason) for i, a in failed.iterrows()],
         pass_count=int(canonical.action_type.eq("pass").sum()),
         usable_pass_count=int((canonical.action_type.eq("pass") & canonical.receive_frame_id.notna()).sum()),
@@ -307,8 +322,9 @@ def stage_refresh_match(task):
     return report
 
 
-def refresh_directory_match(root, metadata, match_id, thread_limit=1):
+def refresh_directory_match(root, metadata, match_id, thread_limit=1, *, graph_validation=True):
     """Stage one match completely before replacing its dependent files."""
+    metadata = dict(metadata, graph_validation=graph_validation_enabled(graph_validation))
     root = Path(root)
     file = get_success_intent_graph_dir(root) / (match_id + ".pt")
     paths = refresh_artifact_paths(root, match_id)
@@ -331,6 +347,7 @@ def run_trajectory_refresh(args):
     base_id = str(args.extend_feature_run_id)
     base_root = get_feature_run_root(base_id)
     metadata = load_feature_run_metadata(base_id, required=True)
+    metadata["graph_validation"] = graph_validation_enabled(getattr(args, "graph_validation", True))
     previous = metadata.get("extension_attempt") or {}
     recovery = (metadata.get("status") in ("failed", "in_progress")
                 and previous.get("operation") in {"refresh_trajectory", "refresh_trajectory_speed"})
@@ -400,6 +417,8 @@ def run_trajectory_refresh(args):
             reports = [json.loads(p.read_text()) for p in (output_root / "trajectory_refresh").glob("*.json")]
             result["skipped_actions"] = {r["match_id"]: r["skipped_actions"] for r in reports if r["skipped_actions"]}
             result["skipped_action_count"] = sum(len(r["skipped_actions"]) for r in reports)
+            result["graph_validation_summary"] = merge_validation_stats(
+                [r.get("graph_validation") for r in reports], metadata["graph_validation"])
         if error:
             reports = [json.loads(p.read_text()) for p in (output_root / "trajectory_refresh").glob("*.json")]
             result["skipped_actions"] = {r["match_id"]: r["skipped_actions"] for r in reports if r["skipped_actions"]}

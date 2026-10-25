@@ -344,6 +344,8 @@ def test_real_inference_routes_switch_to_eval_and_preserve_original_roles(monkey
     model = GNN(args)  # Match load_model's train-mode default.
     configure_inference_masks({task: model}, ["poss-vel-aware"])
     source = source_batch().to_data_list()[0]
+    source.edge_index = torch.cartesian_prod(torch.arange(3), torch.arange(3)).T.contiguous()
+    source.edge_attr = torch.arange(9 * 5, dtype=torch.float32).reshape(9, 5) / 10 + 1
     source.node_ids = ["home_1", "home_2", "away_1"]
     del source.inference_possessor_mask
     original = source.clone()

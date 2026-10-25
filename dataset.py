@@ -300,6 +300,7 @@ class ActionDataset(Dataset):
         evaluation_filter=None,
         speed_aware=True,
         feature_selections=None,
+        graph_validation=True,
     ):
         from models.feature_masks import mask_node_inputs
         mask_settings = dict(locals())
@@ -335,6 +336,9 @@ class ActionDataset(Dataset):
         pass_height_cache_root = Path(pass_height_cache_dir) if pass_height_cache_dir else None
         evaluation_xpass_cache_root = Path(evaluation_xpass_cache_dir) if evaluation_xpass_cache_dir else None
         lane_survival_cache_root = Path(lane_survival_cache_dir) if lane_survival_cache_dir else (get_pc_xpass_dir("sportec") if lane_survival else None)
+        from datatools.graph_validation import validation_stats, graph_validation_enabled
+        graph_validation = graph_validation_enabled(graph_validation)
+        self.graph_validation_stats = validation_stats(graph_validation)
         self.requested_match_ids = [str(match_id) for match_id in match_ids]
         self.loaded_match_ids: list[str] = []
         self.skipped_matches: dict[str, str] = {}
@@ -404,6 +408,10 @@ class ActionDataset(Dataset):
                 self.skipped_matches[match_id] = f"{type(exc).__name__}: {exc}"
                 continue
 
+            from datatools.graph_validation import validate_graphs
+            validate_graphs(match_features, context=str(feature_path),
+                            labels=match_labels if isinstance(match_labels, torch.Tensor) and match_labels.ndim == 2 else None,
+                            graph_validation=graph_validation, stats=self.graph_validation_stats)
             if not isinstance(match_features, list):
                 self.skipped_matches[match_id] = "feature_tensor_is_not_a_list"
                 continue
@@ -706,7 +714,8 @@ class ActionDataset(Dataset):
                 possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
                 graph = sparsify_edges(graph, "distance", possessor_index, max_edge_dist)
             elif sparsify == "delaunay" and graph.x.shape[0] > 3:
-                graph = sparsify_edges(graph, "delaunay")
+                graph = sparsify_edges(graph, "delaunay", context=f"{feature_root}; match {feature_match_ids[int(i)]}; "
+                    f"source row {feature_source_indices[int(i)]}; action index {graph_labels[0].item():g}")
 
             if self.lane_survival:
                 if bool(graph_labels[LABEL_INDEX["is_dribble"]].item()):
@@ -807,7 +816,7 @@ class ActionDataset(Dataset):
             for auxiliary_role, auxiliary_args in auxiliary_models_args.items():
                 from datatools.utils import filter_features_and_labels
                 aux_graphs, aux_labels = filter_features_and_labels([auxiliary_source], auxiliary_label.unsqueeze(0), auxiliary_args,
-                                                                  validate_targets=False)
+                                                                  validate_targets=False, graph_validation=graph_validation)
                 if len(aux_graphs) != 1:
                     raise ValueError(f"PC-xPass auxiliary {auxiliary_role} has no input for match {feature_match_ids[int(i)]}, action {int(auxiliary_label[0])}.")
                 aux_graph = aux_graphs[0]

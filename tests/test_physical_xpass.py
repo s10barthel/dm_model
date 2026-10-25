@@ -354,8 +354,8 @@ def make_graph(node_ids: list[str] | None = None, *, edge_dim: int = 2) -> Data:
     x[0, 13] = 1.0
     if len(node_ids) > 2:
         x[2, 0] = 0.0
-    edge_index = torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-    edge_attr = torch.ones((2, int(edge_dim)), dtype=torch.float32)
+    edge_index = torch.cartesian_prod(torch.arange(len(node_ids)), torch.arange(len(node_ids))).T.contiguous()
+    edge_attr = torch.ones((len(node_ids)**2, int(edge_dim)), dtype=torch.float32)
     graph = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
     graph.node_ids = node_ids
     return graph
@@ -4084,16 +4084,11 @@ class PhysicalXPassTests(unittest.TestCase):
             label_dir.mkdir()
 
             graph = make_graph(edge_dim=5)
-            graph.edge_index = torch.tensor([[0, 1, 1, 2], [1, 0, 2, 1]], dtype=torch.long)
-            graph.edge_attr = torch.tensor(
-                [
-                    [1.0, 1.0, 1.0, 11.0, 11.0],
-                    [1.0, 1.0, 1.0, 12.0, 12.0],
-                    [1.0, 1.0, 1.0, 13.0, 13.0],
-                    [1.0, 1.0, 1.0, 14.0, 14.0],
-                ],
-                dtype=torch.float32,
-            )
+            graph.edge_attr = torch.ones((graph.num_edges, 5))
+            graph.edge_attr[:, 4] = torch.arange(graph.num_edges) + 11
+            expected = graph.edge_attr[:, 4].clone()
+            incident = (graph.edge_index[0] == 0) | (graph.edge_index[1] == 0)
+            expected[incident] = 0
             torch.save([graph], feature_dir / "match_1.pt")
             torch.save(
                 torch.stack([make_label(action_index=7, intent_index=1)]),
@@ -4110,7 +4105,7 @@ class PhysicalXPassTests(unittest.TestCase):
 
         self.assertEqual(len(dataset), 1)
         self.assertTrue(
-            torch.equal(dataset.features[0].edge_attr[:, 4], torch.tensor([0.0, 0.0, 13.0, 14.0]))
+            torch.equal(dataset.features[0].edge_attr[:, 4], expected)
         )
 
     def test_missing_sidecar_failure_mentions_precompute_script(self) -> None:

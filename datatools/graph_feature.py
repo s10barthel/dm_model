@@ -3,7 +3,7 @@ import os
 import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from multiprocessing import freeze_support
 from pathlib import Path
@@ -16,7 +16,9 @@ if not os.getcwd() in sys.path:
 import numpy as np
 import pandas as pd
 import torch
-from datatools.artifact_storage import atomic_torch_save, atomic_parquet_save
+from datatools.artifact_storage import atomic_torch_save, atomic_parquet_save, atomic_graph_save
+from datatools.graph_validation import (add_graph_validation_argument, graph_validation_enabled,
+    validate_graphs, validation_stats, merge_validation_stats, GraphValidationError)
 from scipy.spatial.distance import cdist
 from torch_geometric.data import Data
 from torch_geometric.utils import dense_to_sparse
@@ -94,6 +96,7 @@ class MatchGenerationResult:
     match_id: str
     summary: str
     stats_by_mode: dict[str, dict[str, int]]
+    graph_validation: dict | None = None
 
 
 def resolve_num_workers(value: str | int) -> int:
@@ -979,11 +982,14 @@ def save_augmented_blocks_from_existing_graphs(
     feature_root: Path,
     overwrite: bool = False,
     verbose: bool = True,
+    *, graph_validation: bool = True,
 ) -> None:
     graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
     if not graph_path.exists():
         raise FileNotFoundError(f"Base action graphs not found at {graph_path}.")
     base_graphs = torch.load(graph_path, weights_only=False)
+    validate_graphs(base_graphs, context=graph_path, graph_validation=graph_validation,
+                    stats=getattr(match, "graph_validation_stats", None))
 
     for mode, resolved_actions in resolved_actions_by_mode.items():
         augmented_feature_dir = get_augmented_feature_dir(mode, root=feature_root)
@@ -999,7 +1005,10 @@ def save_augmented_blocks_from_existing_graphs(
         match.labels = labels_by_key[(mode, return_type)]
         match.graph_features_0 = list(base_graphs)
         augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=verbose)
-        atomic_torch_save(augmented_graph_features, augmented_feature_path)
+        atomic_graph_save(
+            augmented_graph_features, augmented_feature_path, labels=augmented_labels,
+            graph_validation=graph_validation,
+            stats=getattr(match, "graph_validation_stats", None))
         atomic_torch_save(augmented_labels, augmented_label_path)
         if verbose:
             print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
@@ -1019,6 +1028,7 @@ def save_labels_only_artifacts(
     augment_blocks_from_existing_graphs: bool = False,
     overwrite_labels: bool = False,
     verbose: bool = True,
+    *, graph_validation: bool = True,
 ) -> None:
     _validate_labels_only_base_artifacts(
         match_id,
@@ -1059,6 +1069,7 @@ def save_labels_only_artifacts(
                 match_id,
                 feature_root,
                 verbose=verbose,
+                graph_validation=graph_validation,
             )
         if verbose:
             print("Successfully saved labels-only action labels.")
@@ -1253,6 +1264,7 @@ def augment_blocked_actions(
 def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
     return {
         "action_type": args.action_type,
+        "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
         "split": args.split,
         "return_types": list(args.return_types),
         "post_action": bool(args.post_action),
@@ -1380,7 +1392,10 @@ def _save_success_intent_match(
     valid_graphs = len(success_graphs) - invalid_graphs
     if valid_graphs == 0:
         raise ValueError("No usable success-intent graphs were constructed for this match.")
-    atomic_torch_save(success_graphs, f"{feature_dir}/{match_id}.pt")
+    atomic_graph_save(
+        success_graphs, f"{feature_dir}/{match_id}.pt", labels=success_intent_labels[primary_return_type],
+        graph_validation=getattr(match, "graph_validation", True),
+        stats=getattr(match, "graph_validation_stats", None))
     label_dir = get_success_intent_label_dir(root=feature_root)
     atomic_torch_save(success_intent_labels[primary_return_type], f"{label_dir}/{match_id}.pt")
     if invalid_graphs and show_progress:
@@ -1437,6 +1452,7 @@ def _save_action_type_all_match(
             intent_train_label_source_return_type=args.intent_train_label_source_return_type,
             augment_blocks_from_existing_graphs=args.augment_blocks_from_existing_graphs,
             overwrite_labels=args.overwrite_labels,
+            graph_validation=getattr(args, "graph_validation", True),
             verbose=show_progress,
         )
         primary_mode = args.intended_receiver_modes[0]
@@ -1484,7 +1500,10 @@ def _save_action_type_all_match(
         )
         if not augmented_graphs:
             raise ValueError("No usable intent-training samples were constructed for this match.")
-        atomic_torch_save(augmented_graphs, f"{paths.feature_dir}/{match_id}.pt")
+        atomic_graph_save(
+            augmented_graphs, f"{paths.feature_dir}/{match_id}.pt", labels=torch.tensor(augmented_action_indices).reshape(-1, 1),
+            graph_validation=getattr(match, "graph_validation", True),
+            stats=getattr(match, "graph_validation_stats", None))
         for mode in args.intended_receiver_modes:
             for return_type in args.return_types:
                 label_lookup = {
@@ -1528,7 +1547,10 @@ def _save_action_type_all_match(
     valid_graphs = len(match.graph_features_0) - invalid_graphs
     if valid_graphs == 0:
         raise ValueError("No usable action graphs were constructed for this match.")
-    atomic_torch_save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    atomic_graph_save(
+        match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt", labels=match.labels,
+        graph_validation=getattr(match, "graph_validation", True),
+        stats=getattr(match, "graph_validation_stats", None))
     if invalid_graphs and show_progress:
         print(f"  Skipped {invalid_graphs} corrupted action frames while building graphs.")
 
@@ -1548,7 +1570,10 @@ def _save_action_type_all_match(
             add_separation_rate_edge_features=getattr(args, "add_separation_rate_edge_features", True),
             verbose=show_progress,
         )
-        atomic_torch_save(match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt")
+        atomic_graph_save(
+            match.graph_features_1, f"{paths.post_feature_dir}/{match_id}.pt", labels=match.labels,
+            graph_validation=getattr(match, "graph_validation", True),
+            stats=getattr(match, "graph_validation_stats", None))
 
     for mode in args.intended_receiver_modes:
         for return_type in args.return_types:
@@ -1567,7 +1592,10 @@ def _save_action_type_all_match(
             augmented_graph_features, augmented_labels = augment_blocked_actions(match, verbose=show_progress)
             augmented_feature_dir = str(get_augmented_feature_dir(mode, root=feature_root))
             augmented_label_dir = str(get_augmented_label_dir(mode, root=feature_root))
-            atomic_torch_save(augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt")
+            atomic_graph_save(
+                augmented_graph_features, f"{augmented_feature_dir}/{match_id}.pt", labels=augmented_labels,
+                graph_validation=getattr(match, "graph_validation", True),
+                stats=getattr(match, "graph_validation_stats", None))
             atomic_torch_save(augmented_labels, f"{augmented_label_dir}/{match_id}.pt")
             if show_progress:
                 print(f"Successfully saved {augmented_labels.shape[0]} augmented events for mode={mode}.")
@@ -1618,7 +1646,10 @@ def _save_non_all_match(
     if valid_graphs == 0:
         raise ValueError("No usable action graphs were constructed for this match.")
     atomic_torch_save(match.labels, f"{paths.label_dir}/{match_id}.pt")
-    atomic_torch_save(match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt")
+    atomic_graph_save(
+        match.graph_features_0, f"{paths.feature_dir}/{match_id}.pt", labels=match.labels,
+        graph_validation=getattr(match, "graph_validation", True),
+        stats=getattr(match, "graph_validation_stats", None))
     return MatchGenerationResult(
         match_id=match_id,
         summary=f"saved {len(match.graph_features_0)} action graphs",
@@ -1626,7 +1657,7 @@ def _save_non_all_match(
     )
 
 
-def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationResult:
+def _process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationResult:
     configure_worker_thread_limit(int(task.worker_thread_limit))
     args = SimpleNamespace(**task.args_dict)
     if args.pass_height_threshold is not None:
@@ -1659,6 +1690,8 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
         events = prepare_pass_events(events, tracking, task.match_id, getattr(args, "max_pass_duration", None))
         atomic_parquet_save(events, endpoint_path)
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    match.graph_validation = graph_validation_enabled(getattr(args, "graph_validation", True))
+    match.graph_validation_stats = args._graph_validation_stats
     match.runtime_feature_root = feature_root
     # Extensions retain the source run's action identities and membership.
     from datatools.pass_trajectory import PASS_DURATION
@@ -1733,6 +1766,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
     add_split_arguments(parser)
+    add_graph_validation_argument(parser)
     parser.add_argument(
         "--return_type",
         type=str,
@@ -1905,6 +1939,13 @@ def validate_args(args: argparse.Namespace) -> None:
         )[0]
 
 
+
+def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationResult:
+    stats = validation_stats(task.args_dict.get("graph_validation", True))
+    args_dict = dict(task.args_dict, _graph_validation_stats=stats)
+    result = _process_match_generation_task(replace(task, args_dict=args_dict))
+    return replace(result, graph_validation=stats)
+
 def aggregate_mode_stats(intended_receiver_modes: list[str]) -> dict[str, dict[str, int]]:
     return {
         mode: {
@@ -1979,6 +2020,7 @@ def run_match_generation(
     *,
     num_workers: int,
     intended_receiver_modes: list[str],
+    graph_validation_report=None,
 ) -> tuple[int, list[dict[str, str]], dict[str, dict[str, int]]]:
     successful_matches = 0
     skipped_matches: list[dict[str, str]] = []
@@ -1990,7 +2032,12 @@ def run_match_generation(
                 result = process_match_generation_task(task)
                 successful_matches += 1
                 accumulate_mode_stats(aggregate_stats, result.stats_by_mode)
+                if graph_validation_report is not None:
+                    graph_validation_report.update(merge_validation_stats([graph_validation_report, result.graph_validation],
+                        enabled=graph_validation_report["enabled"]))
                 emit_model_fallback_message(result.stats_by_mode)
+            except GraphValidationError:
+                raise
             except Exception as exc:
                 error_summary = summarize_exception(exc)
                 skipped_matches.append({"match_id": task.match_id, "error": error_summary})
@@ -2011,8 +2058,13 @@ def run_match_generation(
                     result = future.result()
                     successful_matches += 1
                     accumulate_mode_stats(aggregate_stats, result.stats_by_mode)
+                    if graph_validation_report is not None:
+                        graph_validation_report.update(merge_validation_stats([graph_validation_report, result.graph_validation],
+                            enabled=graph_validation_report["enabled"]))
                     progress.write(f"  DONE {result.match_id}: {result.summary}")
                     emit_model_fallback_message(result.stats_by_mode, writer=progress.write)
+                except GraphValidationError:
+                    raise
                 except Exception as exc:
                     error_summary = summarize_exception(exc)
                     skipped_matches.append({"match_id": task.match_id, "error": error_summary})
@@ -2056,11 +2108,15 @@ def main() -> None:
         paths,
         num_workers=num_workers,
     )
+    graph_report = validation_stats(args.graph_validation)
     successful_matches, skipped_matches, aggregate_stats = run_match_generation(
         tasks,
         num_workers=num_workers,
         intended_receiver_modes=args.intended_receiver_modes,
+        graph_validation_report=graph_report,
     )
+    from project_config import atomic_write_json
+    atomic_write_json(feature_root / "graph_validation" / f"{args.split}_{args.feature_variant}.json", graph_report)
 
     if successful_matches == 0:
         raise RuntimeError(f"No usable matches were processed for split={args.split}, feature_variant={args.feature_variant}.")

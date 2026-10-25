@@ -164,7 +164,7 @@ def original_input_fingerprint(graphs, labels):
 
 
 def predict_auxiliaries(match, model, device, *, graphs, labels, event_indices=None, post_action=False,
-                        feature_action_indices=None, precomputed_auxiliaries=None):
+                        feature_action_indices=None, precomputed_auxiliaries=None, graph_validation=True):
     """Reuse only identical original inputs and effective model preparations within a match."""
     from inference import inference_gnn
     from models.inference_masks import inference_mask_metadata
@@ -182,7 +182,7 @@ def predict_auxiliaries(match, model, device, *, graphs, labels, event_indices=N
         digest = hashlib.sha256()
         digest.update(json.dumps([auxiliary.args, inference_mask_metadata(auxiliary),
                                  list(event_indices) if event_indices is not None else None,
-                                 post_action, feature_action_indices], sort_keys=True, default=str).encode())
+                                 post_action, feature_action_indices, graph_validation], sort_keys=True, default=str).encode())
         digest.update(original_input_fingerprint(graphs, labels).encode())
         key = (task, id(auxiliary), digest.hexdigest())
         if key not in cache:
@@ -194,7 +194,7 @@ def predict_auxiliaries(match, model, device, *, graphs, labels, event_indices=N
                 source, source_labels = graphs, labels
             cache[key] = inference_gnn(match, auxiliary, device=device, post_action=post_action,
                                        event_indices=event_indices, graph_override=source,
-                                       label_override=source_labels, auxiliary_prediction=True)[0]
+                                       label_override=source_labels, auxiliary_prediction=True, graph_validation=graph_validation)[0]
         predictions[task] = cache[key]
     return predictions
 

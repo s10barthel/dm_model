@@ -43,6 +43,7 @@ BASE_PREPARATION_FILES = (
     "models/self_loops.py",
     "models/pass_height.py",
     "datatools/config.py",
+    "datatools/graph_validation.py",
     "datatools/utils.py",
     "datatools/trajectory.py",
     "datatools/pass_trajectory.py",
@@ -150,6 +151,8 @@ class PreparedActionDataset(IterableDataset):
         bound.apply_defaults()
         self.options = {k: v for k, v in bound.arguments.items()
                         if k not in {"self", "match_ids", "feature_dir", "label_dir"}}
+        from datatools.graph_validation import graph_validation_enabled, validation_stats
+        self.options["graph_validation"] = graph_validation_enabled(self.options["graph_validation"])
         if self.options.get("task") == "success_intent":
             from datatools.trajectory import directory_speed_definition, require_speed_definition
             require_speed_definition(directory_speed_definition(self.feature_dir),
@@ -181,7 +184,8 @@ class PreparedActionDataset(IterableDataset):
         self.skipped_matches, self.skipped_rows = {}, {}
         self.entries = []
         self.preparation = {"built": 0, "reused": 0, "bytes": 0, "packing_seconds": 0.0,
-                            "transform_seconds": 0.0, "save_and_hash_seconds": 0.0}
+                            "transform_seconds": 0.0, "save_and_hash_seconds": 0.0,
+                            "graph_validation": validation_stats(self.options["graph_validation"])}
         self.last_iteration_seconds = 0.0
         self.last_load_seconds = 0.0
         self._reconstruction_timing = {"seconds": 0.0}
@@ -284,6 +288,10 @@ class PreparedActionDataset(IterableDataset):
             dataset = ActionDataset([match_id], feature_dir=self.feature_dir,
                                     label_dir=self.label_dir, **self.options)
         self.preparation["transform_seconds"] += time.perf_counter() - transform_started
+        from datatools.graph_validation import merge_validation_stats
+        self.preparation["graph_validation"] = merge_validation_stats(
+            [self.preparation.get("graph_validation"), dataset.graph_validation_stats],
+            self.options.get("graph_validation", True))
         self.skipped_matches.update(dataset.skipped_matches)
         if match_id not in dataset.loaded_match_ids:
             return None  # Do not persist unreadable/missing matches; retry next run.

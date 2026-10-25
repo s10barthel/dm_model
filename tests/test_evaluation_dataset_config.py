@@ -451,12 +451,12 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
         pass_height_command = evaluate_relevant_models.add_task_evaluation_options(["test.py"], args, "pass_height")
         self.assertIn("--observed-pass-height-stratification", pass_command)
         self.assertEqual(scoring_command[-2:], ["--f1-outcome-threshold", "0.2"])
-        self.assertEqual(pass_height_command, ["test.py", "--classification-threshold", "0.5"])
+        self.assertEqual(pass_height_command, ["test.py", "--graph-validation", "on", "--classification-threshold", "0.5"])
 
         opted_out = evaluate_relevant_models.parse_args(["--no-observed-pass-height-stratification"])
         self.assertEqual(
             evaluate_relevant_models.add_task_evaluation_options(["test.py"], opted_out, "pass_success"),
-            ["test.py", "--classification-threshold", "0.5"],
+            ["test.py", "--graph-validation", "on", "--classification-threshold", "0.5"],
         )
 
     def test_xpass_evaluation_cli_validation_and_forwarding(self) -> None:
@@ -966,8 +966,8 @@ class WeightedPassSuccessEvaluationTests(unittest.TestCase):
             x[:, config.NODE_FEATURE_Y] = 34.0
             graph = Data(
                 x=x,
-                edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
-                edge_attr=torch.zeros((2, 2), dtype=torch.float32),
+                edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(),
+                edge_attr=torch.zeros((4, 2), dtype=torch.float32),
             )
             selected = torch.zeros((1, len(LABEL_COLUMNS) - 2), dtype=torch.float32)
             selected[0, LABEL_INDEX["action_index"]] = 7

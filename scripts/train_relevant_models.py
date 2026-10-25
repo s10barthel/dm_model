@@ -1332,7 +1332,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--graph-validation", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
             parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         if not any(token.split("=", 1)[0] == "--batch-loader" for token in supplied):
@@ -2161,6 +2161,8 @@ def run_refit_batch(args) -> None:
         payload["args"].update(training_step_index=index, training_step_total=len(jobs))
         path = root / "configs" / f"job_{index}.json"
         command = [sys.executable, "train.py", "--refit-config", str(path)]
+        from datatools.graph_validation import graph_validation_flags
+        command.extend(graph_validation_flags(args))
         job.update(status="running", command=command)
         write_run_metadata(root, metadata)
         try:
@@ -2213,6 +2215,8 @@ def _main(cli_args) -> None:
             return
         command = [sys.executable, "train.py", "--resume-checkpoint", str(checkpoint_path.resolve()),
                    "--monitoring", cli_args.monitoring]
+        from datatools.graph_validation import graph_validation_flags
+        command.extend(graph_validation_flags(cli_args))
         if cli_args.batch_loader is not None:
             command.extend(["--batch-loader", cli_args.batch_loader])
         if getattr(cli_args, "keep_cache", False):
@@ -2361,7 +2365,8 @@ def _main(cli_args) -> None:
             payload["args"].update(training_step_index=stage_index, training_step_total=total_stages)
             path = bundle_root / "refit_configs" / f"{task}.json"
             write_refit_config(path, payload)
-            execute([python, "train.py", "--refit-config", str(path)])
+            from datatools.graph_validation import graph_validation_flags
+            execute([python, "train.py", "--refit-config", str(path), *graph_validation_flags(cli_args)])
             stage_model_ids[task].append(f"{trained_model_ids[task]}/final_refit")
             write_run_metadata(bundle_root, progress)
 

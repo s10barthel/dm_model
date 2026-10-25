@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 from models.edge_schema import (edge_names, schema_for_names, generation_edge_names, add_interaction_arguments,
                                 generation_kwargs, interaction_values, CANONICAL_FEATURES, INTERACTION_GROUPS, EDGE_GROUPS)
 from scripts.feature_extension_diagnostics import ExtensionAttempt, extend_graph_files
+from datatools.graph_validation import add_graph_validation_argument, graph_validation_flags, graph_validation_enabled
 from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.xt_refresh import refresh_xt
@@ -111,6 +112,7 @@ class FeatureExtensionPlan:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_graph_validation_argument(parser)
     add_split_arguments(parser)
     parser.add_argument(
         "--return_type",
@@ -297,6 +299,7 @@ def parse_args() -> argparse.Namespace:
         supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
         allowed = {"--refresh-failed-pass-trajectories", "--extend-feature-run-id", "--run-id",
                    "--artifact-copy-mode", "--num-workers", "--worker-thread-limit", "--in-place", "--overwrite-feature-run"}
+        allowed.add("--graph-validation")
         if supplied - allowed:
             parser.error("Failed-pass refresh is dedicated; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.retire_elastic and args.extend_feature_run_id:
@@ -307,6 +310,7 @@ def parse_args() -> argparse.Namespace:
                    "--artifact-copy-mode", "--num-workers", "--worker-thread-limit",
                    "--refresh-trajectory", "--refresh-trajectory-speed", "--max-pass-duration"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
+        allowed.add("--graph-validation")
         if supplied - allowed:
             parser.error("Reception retirement inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.replace_carries:
@@ -316,6 +320,7 @@ def parse_args() -> argparse.Namespace:
         allowed = {"--replace-carries", "--retire-elastic", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
                    "--num-workers", "--worker-thread-limit", "--refresh-trajectory", "--refresh-trajectory-speed", "--max-pass-duration"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
+        allowed.add("--graph-validation")
         if supplied - allowed:
             parser.error("--replace-carries inherits source settings; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.refresh_trajectory:
@@ -326,6 +331,7 @@ def parse_args() -> argparse.Namespace:
                    "--run-id", "--artifact-copy-mode", "--num-workers", "--worker-thread-limit",
                    "--replace-carries", "--retire-elastic", "--max-pass-duration"}
         allowed.update("--carry-" + name.replace("_", "-") for name in asdict(CarryPolicy()))
+        allowed.add("--graph-validation")
         if supplied - allowed:
             parser.error("--refresh-trajectory is dedicated; unsupported combined options: "
                          + ", ".join(sorted(supplied - allowed)))
@@ -377,7 +383,14 @@ def run_generation_steps(steps: list[FeatureGenerationStep], attempt: ExtensionA
         print(f"Feature generation step {index}/{total}: {step.description}")
         if attempt is not None:
             attempt.begin_mutation("generating", current_command=step.command)
-        run_command(step.command)
+        command = list(step.command)
+        if attempt is not None:
+            value = "on" if attempt.data["target_settings"].get("graph_validation", True) else "off"
+            if "--graph-validation" in command:
+                command[command.index("--graph-validation") + 1] = value
+            else:
+                command.extend(["--graph-validation", value])
+        run_command(command)
         if attempt is not None:
             attempt.mutation_finished()
 
@@ -395,6 +408,7 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
     command.extend(split_cli_args(args))
     command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
     command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
+    command.extend(graph_validation_flags(args))
     command.append(next_action_conditions_flag(args.next_action_conditions_enabled))
     command.append("--v-edge-features" if bool(getattr(args, "add_v_edge_features", False)) else "--no-v-edge-features")
     command.append(
@@ -1024,7 +1038,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     command_steps = [
         FeatureGenerationStep(
             step.description,
-            [*step.command, *split_cli_args(args)],
+            [*step.command, *split_cli_args(args), *graph_validation_flags(args)],
         )
         for step in command_steps
     ]
@@ -1102,6 +1116,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "next_action_conditions_enabled": plan.next_action_conditions_enabled,
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+        "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
         "extension_commands": plan.commands,
         "intended_receiver_modes": plan.final_intended_receiver_modes,
         "intended_receiver_model_id": plan.intended_receiver_model_id,
@@ -1149,6 +1164,7 @@ def extension_history_entry(
         "intended_receiver_model_id": plan.intended_receiver_model_id,
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+        "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
         "commands": plan.commands,
         "pass_height_threshold_meters": extension_pass_height_threshold(args, plan),
     }
@@ -1218,6 +1234,7 @@ def mutating_metadata(
             "next_action_conditions_enabled": plan.next_action_conditions_enabled,
             "num_workers": str(getattr(args, "num_workers", "1")),
             "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+            "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
             "extension_commands": plan.commands,
             "intended_receiver_modes": intended_receiver_modes,
             "intended_receiver_model_id": intended_receiver_model_id,
@@ -1323,13 +1340,14 @@ def append_relative_speed_to_graph(graph: object) -> object:
 
 
 def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_modes: list[str],
-                                        attempt: ExtensionAttempt | None = None) -> list[Path]:
+                                        attempt: ExtensionAttempt | None = None, *, graph_validation=True) -> list[Path]:
     graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
                    for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
     attempt = attempt or ExtensionAttempt(feature_root, "relative_speed", EXTENSION_MODE_IN_PLACE, {})
-    result = extend_graph_files(graph_files, append_relative_speed_to_graph, ".relative_speed.tmp", attempt)
+    result = extend_graph_files(graph_files, append_relative_speed_to_graph, ".relative_speed.tmp", attempt,
+                                graph_validation=graph_validation)
     print(f"Extended relative-speed edge features in {len(result)} graph files.")
     return result
 
@@ -1358,13 +1376,14 @@ def append_interactions_to_graph(graph):
 
 
 def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes: list[str],
-                                     attempt: ExtensionAttempt | None = None) -> list[Path]:
+                                     attempt: ExtensionAttempt | None = None, *, graph_validation=True) -> list[Path]:
     graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
                    for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
     attempt = attempt or ExtensionAttempt(feature_root, "interaction", EXTENSION_MODE_IN_PLACE, {})
-    result = extend_graph_files(graph_files, append_interactions_to_graph, ".interactions.tmp", attempt)
+    result = extend_graph_files(graph_files, append_interactions_to_graph, ".interactions.tmp", attempt,
+                                graph_validation=graph_validation)
     print(f"Extended interaction edge features in {len(result)} graph files.")
     return result
 
@@ -1389,7 +1408,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
         return mutating_metadata(args, plan, status, error=error, advertise_final_state=final,
                                  history_status="failed" if error is not None else status)
 
-    target = dict(graph_schema=plan.graph_schema, return_types=plan.final_return_types,
+    target = dict(graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)), graph_schema=plan.graph_schema, return_types=plan.final_return_types,
                   intended_receiver_modes=plan.final_intended_receiver_modes,
                   intended_receiver_model_id=plan.intended_receiver_model_id,
                   relative_speed_edge_features=plan.extend_relative_speed_edge_features,
@@ -1423,9 +1442,11 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                                       intended_receiver_model_id=plan.intended_receiver_model_id)
                 run_generation_steps(carry_extension_steps(carry_args, carry_metadata, plan.target_run_id), attempt=attempt)
         if plan.extend_relative_speed_edge_features:
-            extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
+            extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
+                                                graph_validation=getattr(args, "graph_validation", True))
         if plan.extend_interaction_edge_features:
-            extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt)
+            extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
+                                                graph_validation=getattr(args, "graph_validation", True))
         attempt.finish()
     except BaseException as exc:
         attempt.fail(exc)
@@ -1515,6 +1536,7 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
     def metadata_factory(status, error, final):
         updated = copy.deepcopy(metadata)
         updated.update(run_id=output_run_id, status=status, last_extension_mode=mode,
+                       graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)),
                        command=subprocess.list2cmdline(sys.argv))
         if not args.in_place:
             updated["base_feature_run_id"] = base_run_id
@@ -1538,7 +1560,8 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
         return updated
 
     attempt = ExtensionAttempt(output_root, "carry_extension", mode,
-                               dict(graph_schema=final_schema, carry_variant=True,
+                               dict(graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)),
+                                    graph_schema=final_schema, carry_variant=True,
                                     interaction_edge_features=extend_interactions),
                                metadata_factory, lambda root, payload: write_run_metadata(root, payload))
     try:
@@ -1551,7 +1574,8 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
             attempt.enter("staging")
         run_generation_steps(steps, attempt=attempt)
         if extend_interactions:
-            extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata), attempt=attempt)
+            extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata), attempt=attempt,
+                                              graph_validation=getattr(args, "graph_validation", True))
         attempt.finish()
     except BaseException as exc:
         attempt.fail(exc)
@@ -1589,6 +1613,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "pass_height_threshold_meters": pass_height_threshold_meters(args),
         "num_workers": str(getattr(args, "num_workers", "1")),
         "worker_thread_limit": int(getattr(args, "worker_thread_limit", 1)),
+        "graph_validation": graph_validation_enabled(getattr(args, "graph_validation", True)),
         "splits": ["train", "test"],
         **split_metadata(args),
         "split_manifest_id": split_manifest["manifest_id"],

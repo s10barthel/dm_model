@@ -1403,7 +1403,7 @@ def drop_non_blocker_nodes(
     return drop_nodes(graph, labels, node_mask)
 
 
-def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max_dist=10) -> Data:
+def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max_dist=10, *, context=None) -> Data:
     if how == "distance":
         edge_index = graph.edge_index
         if possessor_index is not None:
@@ -1425,7 +1425,12 @@ def sparsify_edges(graph: Data, how="distance", possessor_index: int = None, max
 
         complete_edges = graph.edge_index.cpu().detach().numpy().T
         complete_edge_dict = {tuple(e): i for i, e in enumerate(complete_edges)}
-        tri_edge_index = np.sort([complete_edge_dict[tuple(e)] for e in tri_edges]).tolist()
+        try:
+            tri_edge_index = np.sort([complete_edge_dict[tuple(e)] for e in tri_edges]).tolist()
+        except KeyError as error:
+            from datatools.graph_validation import GraphValidationError
+            raise GraphValidationError(f"{context or 'Delaunay input graph'}: missing directed edge {error.args[0]}; "
+                                       f"nodes={graph.num_nodes}, edges={graph.num_edges}") from error
 
         graph.edge_index = graph.edge_index[:, tri_edge_index]
         graph.edge_attr = graph.edge_attr[tri_edge_index]
@@ -1523,8 +1528,14 @@ def filter_features_and_labels(
     args: Dict[str, Any],
     event_indices: np.ndarray = None,
     feature_action_indices: np.ndarray | torch.Tensor | list[int] | None = None,
-    *, validate_targets: bool = True,
+    *, validate_targets: bool = True, graph_validation: bool = True,
+    validation_context="stored graph inference inputs",
 ) -> Tuple[List[Data], torch.Tensor]:
+    from datatools.graph_validation import validate_graphs, graph_validation_enabled
+    if graph_validation_enabled(graph_validation):
+        validation_labels = (torch.as_tensor(feature_action_indices).reshape(-1, 1) if feature_action_indices is not None
+                             else labels if len(features) == len(labels) else None)
+        validate_graphs(features, context=validation_context, labels=validation_labels)
     if args.get("task") == "success_intent":
         from datatools.trajectory import speed_definition, validate_trajectory_graphs
         validate_trajectory_graphs(features, speed_definition(args), context="success_intent graph inputs")
@@ -1625,7 +1636,8 @@ def filter_features_and_labels(
             possessor_index = torch.nonzero(graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1).item()
             graph = sparsify_edges(graph, "distance", possessor_index, args["max_edge_dist"])
         elif args["sparsify"] == "delaunay" and graph.x.shape[0] > 3:
-            graph = sparsify_edges(graph, "delaunay")
+            graph = sparsify_edges(graph, "delaunay", context=f"{validation_context}; "
+                                   f"source row {feature_pos}; action index {graph_labels[0].item():g}")
 
         if validate_targets:
             validate_observed_goal_target(graph, graph_labels, args)

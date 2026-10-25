@@ -53,6 +53,41 @@ def atomic_parquet_save(frame, destination, **kwargs):
         temporary.replace(destination)
 
 
+def save_graph_stage(graphs, temporary, *, context=None, labels=None, graph_validation=True, stats=None, attempt=None):
+    """Close, read back and verify a graph file; the caller controls publication."""
+    from datatools.graph_validation import validate_graphs, graph_fingerprints, verify_graph_file
+    context = context or str(temporary)
+    validate_graphs(graphs, context=context, labels=labels, graph_validation=graph_validation, stats=stats)
+    expected = graph_fingerprints(graphs, graph_validation=graph_validation, stats=stats)
+    stream = Path(temporary).open("wb")
+    primary = None
+    try:
+        torch.save(graphs, stream)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            stream.close()
+        except BaseException as secondary:
+            if primary is None:
+                raise
+            if attempt is not None:
+                attempt.secondary("Closing temporary file failed", secondary, temporary)
+                primary.add_note(attempt.data["secondary_errors"][-1])
+            else:
+                primary.add_note(f"Closing temporary file failed: {temporary}: {secondary}")
+    verify_graph_file(temporary, expected, context=context, labels=labels,
+                      graph_validation=graph_validation, stats=stats)
+
+
+def atomic_graph_save(graphs, destination, *, context=None, labels=None, graph_validation=True, stats=None):
+    with staged_path(destination) as temporary:
+        save_graph_stage(graphs, temporary, context=context or str(destination), labels=labels,
+                         graph_validation=graph_validation, stats=stats)
+        temporary.replace(destination)
+
+
 def clone_feature_artifacts(source, destination, *, mode="hardlink", diagnostics=None, exclude=None, resume=False):
     """Clone without reading graph payloads; copy only independent control files."""
     source, destination = Path(source), Path(destination)

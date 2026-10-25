@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from datatools.graph_validation import graph_validation_flags
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from models.inference_masks import add_inference_mask_arguments, resolve_inference_mask_configurations
 from project_config import (
@@ -682,6 +683,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             args,
         )
         feature_command.extend(split_cli_args(args))
+        feature_command.extend(graph_validation_flags(args))
         if args.intended_receiver_model_id:
             feature_command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
         feature_command = append_generation_edge_feature_flag(feature_command, args)
@@ -738,6 +740,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             evaluate_command.extend(["--success-intent-model-id", args.success_intent_model_id])
         if getattr(args, "pass_height_threshold", None) is not None:
             evaluate_command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
+        evaluate_command.extend(graph_validation_flags(args))
         commands.append(evaluate_command)
 
     if not args.skip_run_relevant:

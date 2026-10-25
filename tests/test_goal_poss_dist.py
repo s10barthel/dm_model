@@ -44,7 +44,7 @@ def graph():
     delta = x[:, 3:5] - x[0, 3:5]
     distance = delta.norm(dim=1)
     x[:, GEOMETRY] = torch.cat([distance[:, None], delta / (distance[:, None] + 1e-6)], dim=1)
-    edges = torch.tensor([(i, j) for i in range(6) for j in range(6) if i != j]).T
+    edges = torch.tensor([(i, j) for i in range(6) for j in range(6)]).T
     return Data(x=x, edge_index=edges,
                 edge_attr=torch.stack([(x[edges[0], 3:5] - x[edges[1], 3:5]).norm(dim=1),
                                        (x[edges[0], 0] == x[edges[1], 0]).float()], dim=1),

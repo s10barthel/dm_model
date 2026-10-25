@@ -28,7 +28,9 @@ def test_match_refresh_preserves_success_and_other_inputs(tmp_path):
     tracking.to_parquet(data / "tracking_processed/m.parquet")
     pd.DataFrame({"stats_perform_match_id": ["m"]}).to_parquet(data / "lineup/line_up.parquet")
     (root / "metadata.json").write_text(json.dumps({KEY: VERSION}))
-    graphs = [Data(x=torch.ones((2, 24))) for _ in range(2)]
+    graphs = [Data(x=torch.ones((2, 24)),
+                   edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(),
+                   edge_attr=torch.ones((4, 2))) for _ in range(2)]
     torch.save(graphs, root / "action_graphs_success_intent/m.pt")
     torch.save(torch.tensor([[1.], [2.]]), root / "success_intent_labels/m.pt")
     match = SimpleNamespace(actions=actions, tracking=tracking, fps=25, match_id="m")
@@ -44,7 +46,9 @@ def test_match_refresh_preserves_success_and_other_inputs(tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(root / "pass_endpoints/m.parquet"), actions)
     # Rerunning must use the original cutoff, with identical results.
     with patch.object(refresh, "DATA_ROOT", data), patch("datatools.graph_feature.build_match_for_feature_generation", return_value=SimpleNamespace(actions=actions, tracking=tracking, fps=25, match_id="m")), patch("datatools.graph_feature.ensure_pass_endpoints", return_value=resolver), patch.object(refresh, "ensure_pass_endpoints", return_value=resolver):
-        assert refresh.refresh_match((str(root), "m", {}, 1)) == report
+        repeated = refresh.refresh_match((str(root), "m", {}, 1))
+        assert {k: v for k, v in repeated.items() if k != "graph_validation"} == {
+            k: v for k, v in report.items() if k != "graph_validation"}
     second = torch.load(root / "action_graphs_success_intent/m.pt", weights_only=False)
     torch.testing.assert_close(second[0].x, result[0].x)
 

@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 
 from project_config import atomic_write_json
+from datatools.graph_validation import (validation_stats, validate_graphs, graph_fingerprints, assert_preserved)
 
 
 def exception_chain(error):
@@ -125,8 +126,14 @@ class ExtensionAttempt:
             print("Leftover temporary files: " + ", ".join(self.data["leftover_temporary_paths"]), file=sys.stderr)
 
 
-def save_staged_graphs(graphs, path, attempt):
+def save_staged_graphs(graphs, path, attempt, *, graph_payload=True, graph_validation=True, labels=None, context=None):
     """Ensure our Python-owned handle closes even if PyTorch finalization raises."""
+    from datatools.artifact_storage import save_graph_stage
+    stats = attempt.data.setdefault("graph_validation", validation_stats(graph_validation))
+    context = context or str(path)
+    if graph_payload:
+        return save_graph_stage(graphs, path, context=context, labels=labels, graph_validation=graph_validation,
+                                stats=stats, attempt=attempt)
     stream = Path(path).open("wb")
     primary = None
     try:
@@ -175,7 +182,7 @@ def replace_staged_graphs(temporary, attempt):
         attempt.data["completed_replacements"] += 1
 
 
-def extend_graph_files(files, transform, suffix, attempt):
+def extend_graph_files(files, transform, suffix, attempt, *, graph_validation=True):
     """Stage all files first, then replace them; never resume or reuse old staging."""
     temporary = []
     primary = None
@@ -187,10 +194,16 @@ def extend_graph_files(files, transform, suffix, attempt):
             graphs = torch.load(path, weights_only=False)
             if not isinstance(graphs, list):
                 raise TypeError(f"Graph artifact {path} is not a list.")
+            stats = attempt.data.setdefault("graph_validation", validation_stats(graph_validation))
+            validate_graphs(graphs, context=path, graph_validation=graph_validation, stats=stats)
+            before = graph_fingerprints(graphs, graph_validation=graph_validation, stats=stats)
             upgraded = [transform(graph) for graph in graphs]
+            validate_graphs(upgraded, context=path, graph_validation=graph_validation, stats=stats)
+            assert_preserved(before, upgraded, context=path, allow_edge_extension=True,
+                             graph_validation=graph_validation, stats=stats)
             temp = path.with_name(path.name + suffix)
             temporary.append((path, temp))  # Register before opening or writing.
-            save_staged_graphs(upgraded, temp, attempt)
+            save_staged_graphs(upgraded, temp, attempt, graph_validation=graph_validation, context=path)
         replace_staged_graphs(temporary, attempt)
     except BaseException as error:
         primary = error

@@ -406,3 +406,39 @@ def test_refit_preserves_saved_resolved_and_historical_auto(sources):
         refit.prepare_refit("outcome_scoring/source", "wrong", operational={"dataset_loading": "memory"})
     assert wrapper.parse_args(["--resume-id", "outcome_scoring/source", "--keep-cache"]).keep_cache
     assert wrapper.parse_args(["--refit-source-model-id", "outcome_scoring/source", "--keep-cache"]).refit_operational == {"keep_cache": True}
+
+
+@pytest.mark.parametrize("mode", [True, False])
+def test_refit_graph_validation_is_operational_and_defaults_on(sources, mode):
+    create, _ = sources
+    directory, args, _ = create("pass_intent/source")
+    args["graph_validation"] = False
+    (directory / "args.json").write_text(json.dumps(args))
+    assert refit.prepare_refit("pass_intent/source", "new")["args"]["graph_validation"] is True
+    payload = refit.prepare_refit("pass_intent/source", "new", operational={"graph_validation": mode})
+    assert payload["args"]["graph_validation"] is mode
+
+
+@pytest.mark.parametrize("mode", [None, "off", "on"])
+def test_actual_refit_validation_uses_invocation_policy(synthetic_training, monkeypatch, mode):
+    run, _, _, _, root = synthetic_training
+    run("policy_source", ["--max-epochs", "2", "--no-early-stopping", "--graph-validation", "off"])
+    source = root / "saved/pass_intent/policy_source"
+    settings = json.loads((source / "args.json").read_text())
+    settings["feature_run_id"] = "fixture_feature"
+    (source / "args.json").write_text(json.dumps(settings))
+    monkeypatch.setattr(refit, "load_feature_run_metadata", lambda *a, **kw: {})
+    monkeypatch.setattr(refit, "resolve_artifact_split", lambda *a, **kw: (settings["split_manifest"], "fixture"))
+    payload = refit.prepare_refit("pass_intent/policy_source", "policy_refit", saved_root=root / "saved",
+                                 operational={"graph_validation": False})
+    config = root / "policy_recipe.json"
+    config.write_text(json.dumps(payload))
+    flags = [] if mode is None else ["--graph-validation", mode]
+    monkeypatch.setattr(sys, "argv", ["train.py", "--refit-config", str(config), *flags])
+    try:
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"), run_name="__main__")
+    finally:
+        faulthandler.disable()
+    result = load_checkpoint(root / "saved/pass_intent/policy_refit/final_refit" / CHECKPOINT_NAME)
+    assert result["args"]["graph_validation"] is (mode != "off")
+    assert result["metadata"]["dataset_loading"]["train"]["graph_validation"]["enabled"] is (mode != "off")
