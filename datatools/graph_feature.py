@@ -431,7 +431,8 @@ def summarize_ball_trajectory(
     resolver = ensure_pass_endpoints(match, annotate=False)
     endpoint = resolver.resolve(action)
     action = action.copy()
-    action["trajectory_end_frame_id"] = endpoint.trajectory
+    from datatools.failed_pass_trajectory import observation
+    action["trajectory_end_frame_id"] = observation(match, action, endpoint.trajectory)
     trajectory = trajectory_samples(match.tracking, action)
     if trajectory is None:
         return None
@@ -611,7 +612,10 @@ def construct_graph_for_action(
         graph.trajectory_speed_definition = TRAJECTORY_SPEED
         endpoint = ensure_pass_endpoints(match, annotate=False).resolve(match.actions.loc[action_index])
         graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
-        graph.trajectory_end_frame_id = endpoint.trajectory
+        from datatools.failed_pass_trajectory import observation, KEY, VERSION
+        graph.trajectory_end_frame_id = observation(match, match.actions.loc[action_index], endpoint.trajectory)
+        if getattr(match, "_failed_pass_cache_key", None) is not None:
+            setattr(graph, KEY, VERSION)
         graph.pass_endpoint_definition = PASS_DURATION
     return graph
 
@@ -797,6 +801,7 @@ def build_labels_by_mode_and_return(
                 "model_failed_passes_total",
                 "model_failed_passes_scored",
                 "model_angle_only_fallbacks",
+                "model_unavailable_predictions",
             ]
         }
         labels_by_key[(mode, primary_return_type)] = labels.clone()
@@ -1654,6 +1659,7 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
         events = prepare_pass_events(events, tracking, task.match_id, getattr(args, "max_pass_duration", None))
         atomic_parquet_save(events, endpoint_path)
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    match.runtime_feature_root = feature_root
     # Extensions retain the source run's action identities and membership.
     from datatools.pass_trajectory import PASS_DURATION
     for mode in ("original", "angle_only"):
@@ -1664,6 +1670,10 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
             if definitions is not None and definitions.fillna("").isin(["", PASS_DURATION]).all():
                 match.actions = pinned_actions.copy()
                 break
+    if getattr(args, "failed_pass_contact_detection", False):
+        from datatools.failed_pass_trajectory import prepare_new_match, VERSION
+        match.failed_pass_trajectory_policy = VERSION
+        prepare_new_match(match)
     if args.use_carries:
         from datatools.ball_carries import derive_carry_segments
         from datatools.carry_policy import run_policy
@@ -1719,6 +1729,7 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--failed-pass-contact-detection", action="store_true")
     parser.add_argument("--action_type", type=str, required=False, default="all", choices=["all", "shot_augment"])
     parser.add_argument("--split", type=str, required=False, default="train", choices=["train", "test"])
     add_split_arguments(parser)

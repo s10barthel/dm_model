@@ -300,12 +300,14 @@ class Match(ABC):
         failed_pass_indices = actions.index[
             (actions["action_type"] == "pass")
             & (~actions["success"])
-            & actions.get("frame_id", pd.Series(0, index=actions.index)).notna()
         ].tolist()
         stats = dict(actions.attrs.get("intended_receiver_stats", {}))
         stats["intended_receiver_model_id"] = intended_receiver_model_id
         stats["model_failed_passes_total"] = len(failed_pass_indices)
         stats["model_failed_passes_scored"] = 0
+        stats["model_unavailable_predictions"] = len(failed_pass_indices)
+        actions.loc[failed_pass_indices, "intent_id"] = None
+        actions.loc[failed_pass_indices, "model_receiver_reason"] = "unavailable_model_prediction"
 
         if not failed_pass_indices:
             stats["model_angle_only_fallbacks"] = 0
@@ -327,6 +329,9 @@ class Match(ABC):
         self.actions = actions
         try:
             for action_index in failed_pass_indices:
+                if "frame_id" in actions and pd.isna(actions.at[action_index, "frame_id"]):
+                    actions.at[action_index, "model_receiver_reason"] = "missing_launch_frame"
+                    continue
                 graph = construct_graph_for_action(
                     self,
                     action_index,
@@ -346,9 +351,15 @@ class Match(ABC):
                 dummy_label[0, config.LABEL_INDEX["n_players"]] = graph.num_nodes
                 dummy_label[0, config.LABEL_INDEX["intent_index"]] = -1
                 dummy_label[0, config.LABEL_INDEX["receiver_index"]] = -1
-                filtered_graphs, _ = utils.filter_features_and_labels(
-                    [graph], dummy_label, model.args, [action_index], validate_targets=False,
-                )
+                try:
+                    filtered_graphs, _ = utils.filter_features_and_labels(
+                        [graph], dummy_label, model.args, [action_index], validate_targets=False,
+                    )
+                except ValueError as error:
+                    if "No usable graph/label pairs remain" not in str(error):
+                        raise
+                    actions.at[action_index, "model_receiver_reason"] = "unusable_model_graph"
+                    continue
                 if not filtered_graphs:
                     continue
 
@@ -393,7 +404,7 @@ class Match(ABC):
                     (batch_graphs.batch == graph_index)
                     & candidate_mask(batch_graphs, model.args)
                 ]
-                if teammate_logits.numel() == 0:
+                if teammate_logits.numel() == 0 or not torch.isfinite(teammate_logits).all():
                     continue
 
                 teammates = graph_teammate_ids[graph_index]
@@ -402,9 +413,11 @@ class Match(ABC):
                 target_index = int(teammate_logits.argmax().item())
                 if 0 <= target_index < len(teammates):
                     actions.at[action_index, "intent_id"] = teammates[target_index]
+                    actions.at[action_index, "model_receiver_reason"] = None
                     stats["model_failed_passes_scored"] += 1
 
-        stats["model_angle_only_fallbacks"] = (
+        stats["model_angle_only_fallbacks"] = 0
+        stats["model_unavailable_predictions"] = (
             stats["model_failed_passes_total"] - stats["model_failed_passes_scored"]
         )
         actions.attrs["intended_receiver_stats"] = stats
@@ -661,20 +674,18 @@ class Match(ABC):
                 self.actions = self.actions[self.actions["training_sample_eligible"].map(sample_is_eligible)].copy()
         ensure_pass_endpoints(self)
         if resolved_actions is None and relabel_intended_receivers:
-            heuristic_mode = (
-                INTENDED_RECEIVER_MODE_ANGLE_ONLY
-                if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL
-                else intended_receiver_mode
-            )
-            self.actions = utils.label_intended_receivers(
-                self.actions,
-                self.tracking,
-                self.action_type,
-                intended_receiver_mode=heuristic_mode,
-                fps=self.fps,
-            )
             if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:
+                # Keep ordinary shot/carry/actual-receiver rules, without computing
+                # any heuristic receiver for an unsuccessful pass.
+                self.actions = utils.label_intended_receivers(
+                    self.actions, self.tracking, self.action_type,
+                    intended_receiver_mode="original", fps=self.fps,
+                    infer_failed_passes=False)
                 self.actions = self._apply_intended_receiver_model(self.actions, intended_receiver_model_id)
+            else:
+                self.actions = utils.label_intended_receivers(
+                    self.actions, self.tracking, self.action_type,
+                    intended_receiver_mode=intended_receiver_mode, fps=self.fps)
 
         self.intended_receiver_stats = dict(self.actions.attrs.get("intended_receiver_stats", {}))
         diagnostic_events = self._get_diagnostic_events()

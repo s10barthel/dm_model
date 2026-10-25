@@ -2932,3 +2932,5 @@ Prepared training caches use lossless packed CPU tensors with lazy graph
 reconstruction for all eight wrapper tasks. Version 1 caches rebuild once;
 `--keep-cache` and workflow cleanup retain their existing behavior. See
 [dataset loading and cache lifetime](docs/intent_dataset_loading.md).
+
+For model-only early-contact cutoffs, see [Failed-pass trajectory refresh](docs/failed_pass_trajectories.md).

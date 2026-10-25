@@ -26,6 +26,7 @@ def environment(tmp_path, monkeypatch):
     labels = root / "action_labels_disc_0.9"
     labels.mkdir()
     metadata = make_metadata(graph_schema={"node_in_dim": 25, **schema_for_names(BASE_FEATURES)})
+    metadata[generator.PASS_DURATION_KEY] = generator.PASS_DURATION
     (root / "metadata.json").write_text(json.dumps(metadata))
     for name in ("a", "b"):
         torch.save([graph(), None], graphs / f"{name}.pt")

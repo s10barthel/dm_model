@@ -145,6 +145,10 @@ def parse_args() -> argparse.Namespace:
                         help="Create a derived run reusing canonical artifacts and completely rebuilding carries; supports --extend-feature-run-id latest.")
     parser.add_argument("--max-pass-duration", type=positive_duration, default=None,
                         help="Reject pass endpoints exceeding this many seconds; disabled by default.")
+    parser.add_argument("--refresh-failed-pass-trajectories", action="store_true",
+                        help="Refresh model-only failed-pass observations using proximity-gated contacts; invalidate model mode for regeneration.")
+    parser.add_argument("--failed-pass-contact-detection", action="store_true",
+                        help="Enable model-only contact cutoffs for fresh generation. Existing runs use the dedicated refresh.")
     parser.add_argument("--retire-elastic", action="store_true",
                         help="Retire Elastic reception fallback (not launch timing); refresh height/receiver targets and post-action states. Combine with --replace-carries for carry-enabled sources.")
     for name, value in asdict(CarryPolicy()).items():
@@ -285,6 +289,16 @@ def parse_args() -> argparse.Namespace:
     args.intended_receiver_modes = resolve_generation_intended_receiver_modes(args.intended_receiver_model_id)
     args.refresh_target_families = normalize_refresh_target_families(args.refresh_target_family)
     args.refresh_trajectory_speed = args.refresh_trajectory  # Deprecated programmatic alias.
+    if args.failed_pass_contact_detection and args.extend_feature_run_id:
+        parser.error("Existing runs inherit detector policy; use --refresh-failed-pass-trajectories to enable it.")
+    if args.refresh_failed_pass_trajectories:
+        if not args.extend_feature_run_id:
+            parser.error("--refresh-failed-pass-trajectories requires --extend-feature-run-id.")
+        supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
+        allowed = {"--refresh-failed-pass-trajectories", "--extend-feature-run-id", "--run-id",
+                   "--artifact-copy-mode", "--num-workers", "--worker-thread-limit", "--in-place", "--overwrite-feature-run"}
+        if supplied - allowed:
+            parser.error("Failed-pass refresh is dedicated; unsupported options: " + ", ".join(sorted(supplied - allowed)))
     if args.retire_elastic and args.extend_feature_run_id:
         if args.in_place:
             parser.error("--retire-elastic creates a derived run; --in-place is unsupported.")
@@ -369,6 +383,8 @@ def run_generation_steps(steps: list[FeatureGenerationStep], attempt: ExtensionA
 
 
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
+    if getattr(args, "failed_pass_contact_detection", False):
+        command = [*command, "--failed-pass-contact-detection"]
     command = list(command)
     for return_type in args.return_types:
         command.extend(["--return_type", return_type])
@@ -1248,7 +1264,11 @@ def remove_model_mode_artifacts(output_root: Path, return_types: list[str]) -> N
             ]
         )
 
+    paths = [*paths, *(Path(str(path) + "_carries") for path in paths)]
+    resolved_root = output_root.resolve()
     for path in paths:
+        if not path.resolve().is_relative_to(resolved_root):
+            raise ValueError(f"Model artifact path escapes the target run: {path}")
         if path.is_dir():
             shutil.rmtree(path)
         elif path.exists():
@@ -1589,6 +1609,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
         }
     from datatools.reception_policy import KEY, RETIRED
     metadata[KEY] = RETIRED
+    if getattr(args, "failed_pass_contact_detection", False):
+        from datatools.failed_pass_trajectory import KEY as detector_key, VERSION, SETTINGS
+        metadata[detector_key] = VERSION
+        metadata["failed_pass_detector_settings"] = SETTINGS
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
     print(f"Feature run id: {args.run_id}")
@@ -1596,7 +1620,10 @@ def run_full_generation(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.refresh_trajectory and (args.retire_elastic or args.replace_carries):
+    if args.refresh_failed_pass_trajectories:
+        from datatools.failed_pass_refresh import run_failed_pass_refresh
+        run_failed_pass_refresh(args)
+    elif args.refresh_trajectory and (args.retire_elastic or args.replace_carries):
         from datatools.feature_refresh import run_combined_refresh
         run_combined_refresh(args)
     elif args.retire_elastic and args.extend_feature_run_id:

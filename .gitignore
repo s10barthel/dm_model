@@ -138,3 +138,5 @@ _vendor/defcon/saved
 !tests/test_reception_retirement.py
 
 !tests/test_canonical_pass_endpoints.py
+!tests/test_failed_pass_refresh.py
+!tests/test_failed_pass_trajectory.py

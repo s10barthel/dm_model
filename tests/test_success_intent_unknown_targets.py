@@ -73,18 +73,24 @@ def test_feature_generation_unknown_recipient(nodes):
     actions.loc[13] = actions.loc[12]
     actions.loc[14] = actions.loc[12]
     actions.at[14, "success"] = True
+    actions.loc[15] = actions.loc[12]
+    actions.at[15, "frame_id"] = float("nan")
     with (
         patch.object(match, "_get_cached_intended_receiver_model", return_value=(model, {"edge_in_dim": 2, "add_v_edge_features": False})),
         patch("datatools.graph_feature.construct_graph_for_action", side_effect=[graph.clone(), None]),
     ):
         result = match._apply_intended_receiver_model(actions, "success_intent/test")
     assert result.at[12, "intent_id"] == "home_4"
-    assert result.at[13, "intent_id"] == "home_3"
+    assert pd.isna(result.at[13, "intent_id"])
+    assert result.at[13, "model_receiver_reason"] == "unavailable_model_prediction"
     assert result.at[14, "intent_id"] == "home_3"
+    assert pd.isna(result.at[15, "intent_id"])
+    assert result.at[15, "model_receiver_reason"] == "missing_launch_frame"
     stats = result.attrs["intended_receiver_stats"]
-    assert stats["model_failed_passes_total"] == 2
+    assert stats["model_failed_passes_total"] == 3
     assert stats["model_failed_passes_scored"] == 1
-    assert stats["model_angle_only_fallbacks"] == 1
+    assert stats["model_angle_only_fallbacks"] == 0
+    assert stats["model_unavailable_predictions"] == 2
     pd.testing.assert_frame_equal(match.actions, original)
 
 

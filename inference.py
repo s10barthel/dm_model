@@ -907,6 +907,9 @@ def inference_gnn(
     else:
         match_graphs, feature_action_indices = graph_override, None
         source_labels = label_override
+    if model.args["task"] == "success_intent":
+        from datatools.failed_pass_trajectory import validate_graph_coverage
+        validate_graph_coverage(match, match_graphs, source_labels, feature_action_indices, event_indices)
     graphs, labels = filter_features_and_labels(
         match_graphs,
         source_labels,

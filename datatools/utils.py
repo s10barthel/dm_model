@@ -964,6 +964,7 @@ def label_intended_receivers(
     max_angle=45,
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     fps: int = 25,
+    infer_failed_passes: bool = True,
 ) -> pd.DataFrame:
     if intended_receiver_mode not in {INTENDED_RECEIVER_MODE_ORIGINAL, INTENDED_RECEIVER_MODE_ANGLE_ONLY}:
         raise ValueError(f"Unsupported heuristic intended receiver mode: {intended_receiver_mode}")
@@ -1034,6 +1035,8 @@ def label_intended_receivers(
 
         else:  # Failed passes use a validated shared endpoint for either heuristic.
             stats["failed_passes_total"] += 1
+            if not infer_failed_passes:
+                continue
             effective_receive_frame = (actions.at[i, "trajectory_end_frame_id"]
                                        if intended_receiver_mode == INTENDED_RECEIVER_MODE_ANGLE_ONLY
                                        else actions.at[i, "receive_frame_id"])
