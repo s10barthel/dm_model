@@ -19,6 +19,10 @@ from datatools import config
 from models.edge_schema import EDGE_GROUPS, edge_names, group_mode
 from models.input_scaling import node_schema, NODE_FEATURE_NAMES, OPTIONAL_NODE_FEATURE_NAMES
 from models.node_feature_config import resolve_speed_aware
+from models.feature_masks import (
+    ALIASES, BOOLEAN_FEATURES, NODE_FEATURES, EDGE_OPTIONS, NODE_MODES, EDGE_MODES,
+    MODE_ROLES, ROLES, feature_members, selection, node_permissions, node_roles, role_mask,
+)
 from models.edge_feature_config import (
     normalize_relative_speed_edge_feature_mode,
     normalize_v_edge_feature_mode,
@@ -64,6 +68,37 @@ INFERENCE_MASK_GROUPS = {
 }
 INFERENCE_MASK_GROUPS["v-edge-features-no-poss"] = INFERENCE_MASK_GROUPS["mask-possessor-v-edge-features"]
 INFERENCE_MASK_GROUPS["relative-speed-edge-features-no-poss"] = INFERENCE_MASK_GROUPS["mask-possessor-relative-speed-edge-features"]
+INFERENCE_MASK_GROUPS["goal-poss-geometry"] = tuple((name, "goal") for name in _POSS_GEOMETRY)
+INFERENCE_MASK_GROUPS["goal-edge-movement"] = tuple(("edge." + name, "goal_incident")
+    for group, members in EDGE_GROUPS.items() if group != "position_direction" for name in members)
+_GOAL_CONTROLS = {"goal-poss-geometry", "goal-edge-movement"}
+
+_SPECIAL_ALIASES = {
+    "poss-vel-aware": ("vel-node-features", "no-poss"),
+    "mask-possessor-v-edge-features": ("velocity-angle-edge-features", "no-poss"),
+    "v-edge-features-no-poss": ("velocity-angle-edge-features", "no-poss"),
+    "mask-possessor-relative-speed-edge-features": ("relative-speed-edge-features", "no-poss"),
+    "relative-speed-edge-features-no-poss": ("relative-speed-edge-features", "no-poss"),
+}
+
+
+def _assignment(token):
+    name, separator, value = token.partition("=")
+    name, default = _SPECIAL_ALIASES.get(name, (ALIASES.get(name, name), "none"))
+    if name.startswith("node.") and name[5:] in NODE_FEATURES:
+        name = name[5:]
+    edge = name in EDGE_OPTIONS or name.startswith("edge.") or name == "motion"
+    mode = selection(value if separator else default, edge=edge, boolean=name in BOOLEAN_FEATURES or name in _GOAL_CONTROLS)
+    return name, mode, bool(separator)
+
+
+def _members(name):
+    if name in INFERENCE_MASK_GROUPS:
+        return tuple(feature for feature, _ in INFERENCE_MASK_GROUPS[name])
+    try:
+        return feature_members(name)
+    except ValueError as exc:
+        raise ValueError(f"Unknown inference mask {name!r}. Use --list-inference-masks for supported names.") from exc
 
 
 def inference_mask_catalog() -> list[dict[str, Any]]:
@@ -73,6 +108,15 @@ def inference_mask_catalog() -> list[dict[str, Any]]:
     ]
     for name in [*(f"node.{key}" for key in NODE_FEATURE_NAMES), *(f"node.{key}" for key in OPTIONAL_NODE_FEATURE_NAMES), *(f"edge.{key}" for key in EDGE_FEATURE_NAMES)]:
         entries.append({"name": name, "expansion": [{"feature": name, "subset": "all"}]})
+    known = {entry["name"] for entry in entries}
+    for name in (*NODE_FEATURES, *EDGE_OPTIONS):
+        if name not in known:
+            entries.append({"name": name, "expansion": [{"feature": member, "subset": "all"} for member in feature_members(name)]})
+    for entry in entries:
+        canonical, _, _ = _assignment(entry["name"])
+        entry["selections"] = list(("all", "none") if canonical in BOOLEAN_FEATURES or canonical in _GOAL_CONTROLS else EDGE_MODES
+                                    if canonical in EDGE_OPTIONS or canonical.startswith("edge.") or canonical == "motion" else NODE_MODES)
+        entry["default"] = _assignment(entry["name"])[1]
     return entries
 
 
@@ -83,14 +127,14 @@ class _ListMasksAction(argparse.Action):
                 member["feature"] + (f" [{member['subset']}]" if member["subset"] != "all" else "")
                 for member in entry["expansion"]
             )
-            parser._print_message(f"{entry['name']}: {expanded}\n", sys.stdout)
+            parser._print_message(f"{entry['name']}: {expanded}; ={{{','.join(entry['selections'])}}} (bare: ={entry['default']})\n", sys.stdout)
         parser.exit()
 
 
 def add_inference_mask_arguments(parser: argparse.ArgumentParser, numbered: bool = False, argv=None) -> None:
     parser.add_argument(
         "--inference-mask", nargs="+", action="append", default=[], metavar="MASK",
-        help="Zero learned feature inputs; repeated flags combine. Optional task: or all: scope.",
+        help="Restrict learned inputs with FEATURE[=SELECTION]; bare names mean =none. Optional task: or all: scope.",
     )
     parser.add_argument(
         "--list-inference-masks", nargs=0, action=_ListMasksAction,
@@ -149,13 +193,15 @@ def resolve_inference_mask_configurations(args) -> list[dict[str, Any]]:
 
 
 def _expand_name(name: str) -> tuple[tuple[str, str], ...]:
-    if name in INFERENCE_MASK_GROUPS:
-        return INFERENCE_MASK_GROUPS[name]
-    if name.startswith("node.") and name[5:] in {*NODE_FEATURE_NAMES, *OPTIONAL_NODE_FEATURE_NAMES}:
-        return ((name, "all"),)
-    if name.startswith("edge.") and name[5:] in EDGE_FEATURE_NAMES:
-        return ((name, "all"),)
-    raise ValueError(f"Unknown inference mask {name!r}. Use --list-inference-masks for supported names.")
+    canonical, mode, _ = _assignment(name)
+    members = _members(canonical)
+    if canonical in _GOAL_CONTROLS:
+        return tuple((feature, subset if mode == "none" else "none")
+                     for feature, subset in INFERENCE_MASK_GROUPS[canonical])
+    subset = {"none": "all", "all": "none", "no-poss": "possessor",
+              "attacking": "except_attacking", "defending": "except_defending"}[mode]
+    return tuple((feature, "possessor_incident" if subset == "possessor" and feature.startswith("edge.") else subset)
+                 for feature in members)
 
 
 def resolve_scoped_masks(values, participating_tasks: Iterable[str]) -> dict[str, list[str]]:
@@ -284,10 +330,16 @@ class RuntimeInferenceMasks:
         for op in operations:
             if op.subset == "all":
                 masked[:, op.column] = 0
-            else:
+            elif op.subset == "possessor":
                 if identity is None:
                     identity = self._possessor(source, possessor_mask)
                 masked[identity, op.column] = 0
+            elif op.subset.startswith("except_"):
+                roles = node_roles(source, possessor_mask)
+                retained = MODE_ROLES[op.subset.removeprefix("except_")]
+                masked[~role_mask(roles, retained), op.column] = 0
+            elif op.subset == "goal":
+                masked[source[:, config.NODE_FEATURE_IS_GOAL] == 1, op.column] = 0
         return masked
 
     def mask_edges(self, source, edge_index, node_features, *, training=False, possessor_mask=None):
@@ -302,7 +354,10 @@ class RuntimeInferenceMasks:
         for op in operations:
             if op.subset == "all":
                 masked[:, op.column] = 0
-            else:
+            elif op.subset == "goal_incident":
+                goals = node_features[:, config.NODE_FEATURE_IS_GOAL] == 1
+                masked[goals[edge_index[0]] | goals[edge_index[1]], op.column] = 0
+            elif op.subset == "possessor_incident":
                 if incident is None:
                     identity = self._possessor(node_features, possessor_mask)
                     incident = identity[edge_index[0]] | identity[edge_index[1]]
@@ -314,21 +369,58 @@ def _resolve_runtime(args: Mapping[str, Any], names: list[str]) -> RuntimeInfere
     node_schema = _node_schema(args)
     edge_width = int(args.get("edge_in_dim", 0))
     edge_schema = {f"edge.{name}": index for index, name in enumerate(edge_names(args, edge_width))}
+    assignments = {}
+    for token in names:
+        name, mode, explicit = _assignment(token)
+        _members(name)
+        previous = assignments.get(name)
+        if previous is not None:
+            old_mode, old_explicit = previous
+            if explicit and old_explicit and mode != old_mode:
+                raise ValueError(f"Conflicting explicit inference selections for {name}.")
+            if old_explicit and not explicit:
+                continue
+            if not explicit and not old_explicit and old_mode == "none":
+                continue
+        assignments[name] = (mode, explicit)
     requested = {}
-    for name in names:
-        for feature, subset in _expand_name(name):
+    goal_requests = {}
+    for name in sorted(assignments, key=lambda name: (-len(_members(name)), name)):
+        mode, _ = assignments[name]
+        for feature, subset in _expand_name(name + "=" + mode):
             schema = node_schema if feature.startswith("node.") else edge_schema
-            if feature not in schema and name == "motion":
+            if feature not in schema and name in ("motion", "goal-edge-movement"):
                 continue
             if feature not in schema:
                 raise ValueError(f"Inference mask {name!r} requires {feature}, absent or ambiguous in checkpoint task={args.get('task')!r} schema (node={args.get('node_in_dim')}, edge={edge_width}).")
-            requested[(feature, subset)] = schema[feature]
-    # A full-column mask subsumes a subset mask of the same column.
+            if name in _GOAL_CONTROLS:
+                goal_requests[feature] = (subset, schema[feature])
+            else:
+                requested[feature] = (subset, schema[feature])
     operations = []
-    for (feature, subset), column in sorted(requested.items()):
-        if subset != "all" and (feature, "all") in requested:
+    permissions = node_permissions(args, node_schema)
+    for feature, (subset, column) in sorted(requested.items()):
+        reason = "selection retains the checkpoint's normal inputs" if subset == "none" else None
+        if reason is None and feature.startswith("node."):
+            removed = {"all": set(ROLES), "possessor": {"possessor"},
+                       "except_attacking": {"defending", "goal"},
+                       "except_defending": {"possessor", "attacking", "goal"}}[subset]
+            if not removed.intersection(permissions[feature]):
+                reason = "disabled in checkpoint training configuration"
+        elif reason is None:
+            reason = _disabled(args, feature, column, subset)
+        operations.append(ResolvedInferenceMask(feature, column, subset, "no additional effect" if reason else "applied", reason))
+    for feature, (subset, column) in sorted(goal_requests.items()):
+        if feature in requested and requested[feature][0] == "all":
             continue
-        reason = _disabled(args, feature, column, subset)
+        reason = "selection retains the checkpoint's normal inputs" if subset == "none" else None
+        if reason is None and feature.startswith("node."):
+            if "goal" not in permissions[feature]:
+                reason = "disabled in checkpoint training configuration"
+        elif reason is None:
+            reason = _disabled(args, feature, column, subset)
+            if args.get("goal_edge_movement", True) is False:
+                reason = "disabled in checkpoint training configuration"
         operations.append(ResolvedInferenceMask(feature, column, subset, "no additional effect" if reason else "applied", reason))
     return RuntimeInferenceMasks(tuple(names), tuple(operations), int(args.get("node_in_dim", 0)), edge_width)
 
@@ -344,8 +436,18 @@ def inference_mask_metadata(model) -> dict[str, Any]:
         return {"requested": [], "resolved": [], "status": "unmasked", "configuration_id": "unmasked"}
     signature = sorted({(op.feature, op.subset) for op in runtime.operations})
     identifier = "mask_" + hashlib.sha256(json.dumps(signature).encode("utf-8")).hexdigest()[:12]
+    selections = {"all": "none", "none": "all", "possessor": "no-poss", "possessor_incident": "no-poss",
+                  "except_attacking": "attacking", "except_defending": "defending"}
+    canonical = set()
+    for op in runtime.operations:
+        if op.subset in ("goal", "goal_incident"):
+            canonical.add(("goal-poss-geometry" if op.subset == "goal" else "goal-edge-movement") + "=none")
+        else:
+            canonical.add(op.feature + "=" + selections[op.subset])
     return {
+        "version": 1,
         "requested": list(runtime.requested),
+        "canonical": sorted(canonical),
         "resolved": [dict(feature=op.feature, column=op.column, subset=op.subset, status=op.status, reason=op.reason) for op in runtime.operations],
         "status": "applied" if any(op.status == "applied" for op in runtime.operations) else "no additional effect",
         "configuration_id": identifier,

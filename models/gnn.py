@@ -14,6 +14,7 @@ from models.input_scaling import scale_nodes, scale_edges, scale_destinations
 from datatools import config
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.inference_masks import RuntimeInferenceMasks
+from models.feature_masks import mask_node_inputs
 from physical_pass_model import (
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_VARIANTS,
@@ -30,6 +31,19 @@ def mask_pos_node_features(node_features: torch.Tensor | None, args: dict) -> to
     masked = node_features.clone()
     masked[:, config.NODE_FEATURE_X : config.NODE_FEATURE_Y + 1] = 0
     return masked
+
+
+def learned_node_inputs(node_features, args, possessor_mask=None):
+    if args.get("feature_selections"):
+        return mask_node_inputs(node_features, args, possessor_mask=possessor_mask)
+    return mask_goal_poss_features(mask_pos_node_features(node_features, args), args)
+
+
+def original_possessor_mask(node_features, preserved=None):
+    if preserved is not None or node_features is None:
+        return preserved
+    identity = node_features[:, config.NODE_FEATURE_IS_POSSESSOR] == 1
+    return identity if bool(identity.any()) else None
 
 
 class Encoder(nn.Module):
@@ -102,18 +116,17 @@ class Encoder(nn.Module):
         # Direct callers may supply the same raw feature superset used by auxiliaries.
         if self.args.get("edge_in_dim", 0) and edge_names(batch_graphs) != edge_names(self.args):
             batch_graphs = project_graph_edges(batch_graphs.clone(), edge_names(self.args))
-        node_features = mask_pos_node_features(batch_graphs.x, self.args)
-        node_features = mask_goal_poss_features(node_features, self.args)
+        possessor_mask = original_possessor_mask(batch_graphs.x, getattr(batch_graphs, "inference_possessor_mask", None))
+        node_features = learned_node_inputs(batch_graphs.x, self.args, possessor_mask)
         edge_features = batch_graphs.edge_attr
         edge_index = batch_graphs.edge_index
         if self.args["self_loop_policy"] == "explicit_v1":
             edge_index, edge_features = explicit_self_edges(batch_graphs, self.args)
         edge_features = mask_edge_inputs(edge_features, edge_index, batch_graphs.x, self.args,
                                         names=edge_names(self.args, edge_features.shape[1]),
-                                        possessor_mask=getattr(batch_graphs, "inference_possessor_mask", None))
+                                        possessor_mask=possessor_mask)
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
-            possessor_mask = getattr(batch_graphs, "inference_possessor_mask", None)
             node_features = runtime.mask_nodes(node_features, training=self.training, possessor_mask=possessor_mask)
             edge_features = runtime.mask_edges(
                 edge_features, edge_index, batch_graphs.x,
@@ -309,8 +322,8 @@ class Decoder(nn.Module):
                 out: [B] tensor.
         """
         original_node_features = node_features
-        node_features = mask_pos_node_features(node_features, self.args)
-        node_features = mask_goal_poss_features(node_features, self.args)
+        inference_possessor_mask = original_possessor_mask(node_features, inference_possessor_mask)
+        node_features = learned_node_inputs(node_features, self.args, inference_possessor_mask)
         runtime: RuntimeInferenceMasks | None = getattr(self, "inference_masks", None)
         if runtime is not None:
             node_features = runtime.mask_nodes(

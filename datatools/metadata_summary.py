@@ -60,6 +60,8 @@ SUMMARY_COLUMNS = [
     "batch_size",
     "xpass_metric",
     "xpass_weight",
+    "feature_selections",
+    "feature_masks",
 ]
 
 FEATURE_COLUMNS = [
@@ -88,6 +90,8 @@ FEATURE_COLUMNS = [
     "goal_edge_movement",
     "scaling",
     "scaling_profile",
+    "feature_selections",
+    "feature_masks",
 ]
 
 

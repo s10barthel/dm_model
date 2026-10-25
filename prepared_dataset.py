@@ -35,6 +35,8 @@ BASE_PREPARATION_FILES = (
     "dataset.py",
     "models/dataset_config.py",
     "models/node_feature_config.py",
+    "models/feature_masks.py",
+    "models/input_scaling.py",
     "models/goal_context.py",
     "models/edge_feature_config.py",
     "models/edge_schema.py",

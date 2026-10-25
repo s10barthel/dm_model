@@ -1151,6 +1151,14 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 
 ### Training input controls and automatic exclusions
 
+Explicit retained-input selectors are available on both training entry points:
+`--vx defending`, `--vy defending`, or `--vel-node-features no-poss`. See
+[feature selections](docs/feature_selections.md) for the complete interface,
+group overrides, inference selectors, and legacy compatibility. Omitting these
+selectors preserves current defaults. The table below documents the legacy
+controls and profiles; legacy masks remain cumulative, while explicit selectors
+override their selected columns.
+
 The table below describes **fresh training**, comparing direct `train.py` calls
 with `scripts/train_relevant_models.py`. Direct training does not inherit the
 wrapper's feature profile. Saved settings determine evaluation, inference,
@@ -2023,6 +2031,12 @@ python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-du
 - `--pass-height-threshold <meters>`: evaluate with relabelled observed height targets and cutoff-relative diagnostics. Omit it to use the checkpoint definition; this never changes the event predicted by the checkpoint.
 
 ### Shared inference masks
+
+Mask names also accept a retention selector, for example
+`--inference-mask all:vx=defending all:vy=defending`. Bare names default to `=none`;
+explicit selectors replace shorthand for the same feature/group. Existing names
+and checkpoints remain supported. See [feature selections](docs/feature_selections.md)
+for group precedence and the checkpoint restrictions that always apply.
 
 Evaluation, component inference, Hawkeye, action-component visualization, and EPV generation accept the same runtime feature masks. `scripts/main.py` forwards its combined mask configuration to learned evaluation/inference stages, including EPV generation, without changing feature generation or training. Unnumbered masks preserve single masked inference outside evaluation. The two inference visualizers also support numbered configurations for PNG comparison, as described below; other inference scripts accept only the combined unnumbered form.
 

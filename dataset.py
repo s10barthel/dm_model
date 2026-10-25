@@ -299,7 +299,11 @@ class ActionDataset(Dataset):
         trajectory_speed_definition=None,
         evaluation_filter=None,
         speed_aware=True,
+        feature_selections=None,
     ):
+        from models.feature_masks import mask_node_inputs
+        mask_settings = dict(locals())
+        mask_settings.pop("self")
         if evaluation_filter not in (None, "pass"):
             raise ValueError(f"Unknown evaluation filter: {evaluation_filter!r}.")
         if evaluation_filter is not None and train:
@@ -649,56 +653,10 @@ class ActionDataset(Dataset):
                     _increment_count(self.skipped_rows, "invalid_failure_receiver")
                     continue
 
-            if xy_only:  # Do not refer to handcrafted features
-                graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0
-                graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
-
-            if not possessor_aware:  # Do not refer to possessor-related features
-                assert not extend_features and not pass_lane_features
-                graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
-
-            if not poss_vel_aware:  # Ignore the ball possessor's own velocity features
-                if possessor_aware:
-                    graph.x[
-                        graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1,
-                        config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1,
-                    ] = 0
-
-            if not poss_rel_vel_aware:  # Ignore player velocity relative to the ball possessor's velocity
-                graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
-
-            if not poss_geometry_aware:  # Ignore player geometry relative to the ball possessor
-                graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
-
-            graph.x = mask_goal_poss_features(graph.x, {"goal_poss_dist": goal_poss_dist})
-
-            if not keeper_aware:  # Do not distinguish between goalkeepers and outfield players
-                graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
-
-            if not ball_z_aware:  # Set the ball height for every action as 0
-                graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
-
-            if not goal_features_aware:  # Ignore player geometry relative to the attacking goal
-                graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
-
-            if vel_node_features_aware is not None and not vel_node_features_aware:
-                graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
-
-            if speed_aware is not None and not speed_aware:
-                graph.x[:, config.NODE_FEATURE_SPEED] = 0
-
-            if not accel_aware:  # Ignore player-acceleration features without changing graph width
-                graph.x[:, config.NODE_FEATURE_ACCEL] = 0
-
-            apply_extended_node_feature_mask(
-                graph,
-                extend_features=bool(extend_features),
-                pass_lane_features=bool(pass_lane_features),
-                task=task,
+            graph.x = mask_node_inputs(
+                graph.x, mask_settings, possessor_mask=graph.inference_possessor_mask,
+                prepared=False, positions=False, identities=not bool(feature_selections),
             )
-
-            if not offside_aware:
-                _zero_offside_node_feature(graph)
 
             validate_source_goals(graph, policy, goal_input_nodes)
             if not input_goals:
@@ -871,6 +829,9 @@ class ActionDataset(Dataset):
             graph.evaluation_source_row = int(feature_source_indices[int(i)])
             if evaluation_diagnostic_label_dir is not None:
                 graph.evaluation_goal_diagnostic = evaluation_diagnostics[int(i)].clone()
+            if feature_selections:
+                graph.x = mask_node_inputs(graph.x, mask_settings,
+                                           possessor_mask=graph.inference_possessor_mask, positions=False, identities=False)
             self.features.append(graph)
             self.labels.append(graph_labels)
 

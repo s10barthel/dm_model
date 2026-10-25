@@ -18,6 +18,7 @@ from models.edge_schema import (add_interaction_arguments, input_setting_flags, 
 from datatools import config
 from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity, resolve_architecture
 from models.node_feature_config import resolve_pos_node_features
+from models.feature_masks import add_feature_selection_arguments, feature_selection_flags, normalize_feature_settings
 from models.goal_context import goal_policy, resolve_training_goal_settings
 from dataset_loading import add_dataset_loading_arguments, dataset_loading_flags
 from cache_lifetime import workflow_context
@@ -261,6 +262,8 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
     resolved_flags["lane_survival_mode"] = lane_survival_mode
     settings = normalize_input_settings(vars(args).copy(), fresh=True)
     resolved_flags.update({key: settings[key] for key in ("scaling", "scaling_profile", "goal_edge_movement", "position_direction_edge_feature_mode", "relative_velocity_edge_feature_mode", "separation_rate_edge_feature_mode")})
+    if getattr(args, "feature_selections", None):
+        resolved_flags["feature_selections"] = dict(args.feature_selections)
     return resolved_flags
 
 
@@ -280,6 +283,7 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
     else:
         command.extend(["--lane-survival", str(lane_survival_mode)])
     command.extend(input_setting_flags(feature_flags))
+    command.extend(feature_selection_flags(feature_flags))
     return command
 
 
@@ -1311,7 +1315,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     pc_versions.add_selection_argument(parser)
     add_pass_height_argument(parser)
+    add_feature_selection_arguments(parser)
     args = parser.parse_args(argv)
+    normalize_feature_settings(vars(args))
     supplied = sys.argv[1:] if argv is None else argv
     if args.refit_source_model_id:
         allowed = set(OPERATIONAL_OPTIONS) | {"--refit-source-model-id", "--final-refit"}
@@ -1326,7 +1332,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
             parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         if not any(token.split("=", 1)[0] == "--batch-loader" for token in supplied):

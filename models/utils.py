@@ -145,6 +145,8 @@ def should_stop_early(
 
 
 def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
+    from models.feature_masks import feature_signature, normalize_feature_settings
+    normalize_feature_settings(args)
     normalize_v_edge_feature_args(args)
     pos_node_features_aware = resolve_pos_node_features(args)
     v_edge_feature_mode = normalize_v_edge_feature_mode(
@@ -163,6 +165,7 @@ def extract_model_feature_signature(args: dict[str, Any]) -> dict[str, Any]:
     )
     validate_relative_speed_edge_feature_mode(v_edge_feature_mode, relative_speed_edge_feature_mode)
     signature = {
+        "feature_masks": feature_signature(args),
         "goal_context_version": goal_policy(args).version,
         "include_goals": goal_policy(args).include_goals,
         "xy_only": bool(args.get("xy_only", False)),
@@ -550,6 +553,8 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         model_path = get_model_path(model_id)
         with open(model_path / "args.json", "r", encoding="utf-8") as f:
             args = json.load(f)
+        from models.feature_masks import normalize_feature_settings
+        normalize_feature_settings(args)
         metadata = _read_json_if_exists(model_path / "metadata.json") or {}
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", "velocity_angle_cos" in edge_names(args))
@@ -1228,9 +1233,13 @@ def adapt_batch_graphs_for_model(
     # Model-specific transforms must not affect inputs reused by another model.
     batch_graphs = batch_graphs.clone()
     capture_self_attributes(batch_graphs)
-    if model_args.get("vel_node_features_aware") is not None and not model_args["vel_node_features_aware"]:
+    if model_args.get("feature_selections"):
+        from models.feature_masks import mask_node_inputs
+        batch_graphs.x = mask_node_inputs(batch_graphs.x, model_args, positions=False,
+                                         possessor_mask=getattr(batch_graphs, "inference_possessor_mask", None), identities=False)
+    elif model_args.get("vel_node_features_aware") is not None and not model_args["vel_node_features_aware"]:
         batch_graphs.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
-    if not resolve_speed_aware(model_args):
+    if not model_args.get("feature_selections") and not resolve_speed_aware(model_args):
         batch_graphs.x[:, config.NODE_FEATURE_SPEED] = 0
 
     required_node_dim = int(model_args.get("node_in_dim", 0) or 0)

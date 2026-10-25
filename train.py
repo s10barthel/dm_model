@@ -37,6 +37,7 @@ from models.graph_diagnostics import install_collation_diagnostics
 from models.edge_schema import add_interaction_arguments, normalize_input_settings, INTERACTION_GROUPS
 from datatools import config
 from models.node_feature_config import resolve_goal_poss_dist, resolve_pos_node_features, resolve_speed_aware
+from models.feature_masks import add_feature_selection_arguments, normalize_feature_settings, parse_boolean
 from datatools.endpoint_policy import nonnegative_duration
 from datatools.config import LABEL_INDEX
 from models.gnn import GNN
@@ -516,6 +517,7 @@ parser.add_argument("--training-step-index", type=int, default=None, help=argpar
 parser.add_argument("--training-step-total", type=int, default=None, help=argparse.SUPPRESS)
 
 pc_versions.add_selection_argument(parser)
+add_feature_selection_arguments(parser)
 resume_probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 resume_probe.add_argument("--resume-checkpoint")
 resume_probe.add_argument("--keep-cache", action="store_true")
@@ -525,8 +527,9 @@ resume_probe.add_argument("--batch-loader", choices=("auto", "pyg"))
 resume_nodes = resume_probe.add_mutually_exclusive_group()
 resume_nodes.add_argument("--goal-nodes-aware", dest="goal_nodes_aware", action="store_true")
 resume_nodes.add_argument("--no-goal-nodes", dest="goal_nodes_aware", action="store_false")
+resume_nodes.add_argument("--goal-nodes", dest="goal_nodes_aware", type=parse_boolean)
 resume_candidates = resume_probe.add_mutually_exclusive_group()
-resume_candidates.add_argument("--include-goals", dest="include_goals", action="store_true")
+resume_candidates.add_argument("--include-goals", dest="include_goals", nargs="?", const=True, type=parse_boolean)
 resume_candidates.add_argument("--no-include-goals", dest="include_goals", action="store_false")
 resume_probe.set_defaults(goal_nodes_aware=None, include_goals=None)
 resume_options, resume_extra = resume_probe.parse_known_args()
@@ -563,6 +566,7 @@ else:
         parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
 if not hasattr(args, "batch_loader"):
     args.batch_loader = "auto"
+normalize_feature_settings(vars(args))
 try:
     normalize_architecture(vars(args), fresh=resume_checkpoint is None and "--refit-config" not in sys.argv and not args.cont)
 except ValueError as exc:
@@ -809,6 +813,14 @@ def main(cache_session):
             resume_record = {**resume_args, **resume_meta}
         # The older --cont path also inherits new input settings from its source.
         saved_inputs = normalize_input_settings(dict(resume_record))
+        if args.cont:
+            requested_selections = getattr(args, "feature_selections", None)
+            saved_selections = resume_record.get("feature_selections") or {}
+            if requested_selections and requested_selections != saved_selections:
+                raise ValueError("Continuation restores saved feature selections; conflicting override.")
+            if saved_selections:
+                args.feature_selections = dict(saved_selections)
+                args.feature_mask_version = resume_record.get("feature_mask_version", 1)
         input_options = {"scaling": ("--scaling",), "goal_edge_movement": ("--no-goal-edge-movement",)}
         input_options.update({f"{group}_edge_feature_mode": (f"--{group.replace('_', '-')}-edge-features",
                               f"--no-{group.replace('_', '-')}-edge-features", f"--{group.replace('_', '-')}-edge-features-no-poss")

@@ -1601,56 +1601,9 @@ def filter_features_and_labels(
         graph.edge_attr = mask_edge_inputs(graph.edge_attr, graph.edge_index, graph.x, args, names=edge_names(graph),
                                            possessor_mask=getattr(graph, "inference_possessor_mask", None))
 
-        if args["xy_only"]:
-            graph.x[:, config.NODE_FEATURE_SPEED : config.NODE_FEATURE_BALL_Z] = 0
-            graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
-
-        if not args["possessor_aware"]:
-            assert not args["extend_features"] and not args.get("pass_lane_features", False)
-            graph.x[:, config.NODE_FEATURE_IS_POSSESSOR : config.NODE_FEATURE_CORE_DIM] = 0
-
-        if not args["poss_vel_aware"]:
-            if args["possessor_aware"]:
-                graph.x[
-                    graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] == 1,
-                    config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1,
-                ] = 0
-
-        if not args.get("poss_rel_vel_aware", False):
-            graph.x[:, config.NODE_FEATURE_POSS_VANGLE_COS : config.NODE_FEATURE_CORE_DIM] = 0
-
-        if not args.get("poss_geometry_aware", True):
-            graph.x[:, config.NODE_FEATURE_POSS_DIST : config.NODE_FEATURE_POSS_VANGLE_COS] = 0
-
-        graph.x = mask_goal_poss_features(graph.x, args)
-
-        if not args["keeper_aware"]:
-            graph.x[:, config.NODE_FEATURE_IS_KEEPER] = 0
-
-        if not args["ball_z_aware"]:
-            graph.x[:, config.NODE_FEATURE_BALL_Z] = 0
-
-        if not args.get("goal_features_aware", True):
-            graph.x[:, config.NODE_FEATURE_GOAL_DIST : config.NODE_FEATURE_BALL_Z] = 0
-
-        if args.get("vel_node_features_aware") is not None and not args["vel_node_features_aware"]:
-            graph.x[:, config.NODE_FEATURE_VX : config.NODE_FEATURE_ACCEL + 1] = 0
-
-        if not resolve_speed_aware(args):
-            graph.x[:, config.NODE_FEATURE_SPEED] = 0
-
-        if not args.get("accel_aware", True):
-            graph.x[:, config.NODE_FEATURE_ACCEL] = 0
-
-        apply_extended_node_feature_mask(
-            graph,
-            extend_features=bool(args["extend_features"]),
-            pass_lane_features=bool(args.get("pass_lane_features", False)),
-            task=args.get("task"),
-        )
-
-        if not args.get("offside_aware", True):
-            zero_offside_node_feature(graph)
+        from models.feature_masks import mask_node_inputs
+        graph.x = mask_node_inputs(graph.x, args, possessor_mask=graph.inference_possessor_mask,
+                                   prepared=False, positions=False, identities=not bool(args.get("feature_selections")))
 
         validate_source_goals(graph, policy)
         if not policy.input_goals:
@@ -1673,6 +1626,9 @@ def filter_features_and_labels(
 
         if validate_targets:
             validate_observed_goal_target(graph, graph_labels, args)
+        if args.get("feature_selections"):
+            graph.x = mask_node_inputs(graph.x, args, possessor_mask=graph.inference_possessor_mask,
+                                       prepared=False, positions=False, identities=False)
         filtered_features.append(graph)
         filtered_labels.append(graph_labels)
 

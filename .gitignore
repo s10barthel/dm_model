@@ -37,6 +37,7 @@ tests/*.py
 !tests/test_training_refit.py
 !tests/test_learning_curve.py
 !tests/test_inference_masks.py
+!tests/test_feature_selections.py
 !tests/test_inference_mask_integration.py
 !tests/test_model_comparison.py
 !tests/test_evaluation_membership_confirmation.py

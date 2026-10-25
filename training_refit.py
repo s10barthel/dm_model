@@ -170,6 +170,8 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
               "split_manifest_id": manifest["manifest_id"],
               "ipw_dependency_weights_sha256": metadata.get("ipw_dependency_weights_sha256")}
     args = copy.deepcopy(settings)
+    from models.feature_masks import normalize_feature_settings
+    normalize_feature_settings(args)
     from models.architecture import normalize_architecture
     normalize_architecture(args)
     from models.edge_schema import normalize_input_settings
