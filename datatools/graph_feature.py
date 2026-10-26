@@ -751,6 +751,7 @@ def build_labels_by_mode_and_return(
     match_id: str | None = None,
     prefer_existing_resolved_actions: bool = False,
     use_carries: bool = False,
+    receiver_extension_attempt: str | None = None,
 ) -> tuple[dict[str, pd.DataFrame], dict[tuple[str, str], torch.Tensor], dict[str, dict[str, int]]]:
     if not return_types:
         raise ValueError("At least one return_type must be requested.")
@@ -774,7 +775,8 @@ def build_labels_by_mode_and_return(
             if resolved_action_path.exists():
                 resolved_actions = pd.read_parquet(resolved_action_path)
 
-        if resolved_actions is not None:
+        loaded_existing = resolved_actions is not None
+        if loaded_existing:
             labels = match.construct_labels(
                 intended_receiver_mode=mode,
                 intended_receiver_model_id=intended_receiver_model_id,
@@ -783,10 +785,19 @@ def build_labels_by_mode_and_return(
                 return_type=primary_return_type,
             )
         else:
+            prediction_kwargs = {}
+            if mode == INTENDED_RECEIVER_MODE_MODEL and use_carries:
+                from datatools.receiver_reuse import prediction_provenance, reusable_predictions
+                source = get_resolved_action_path(match_id, intended_receiver_mode=mode, root=feature_root)
+                provenance = prediction_provenance(feature_root, match_id, intended_receiver_model_id,
+                                                   receiver_extension_attempt)
+                predictions = pd.read_parquet(source) if source.exists() else None
+                prediction_kwargs["precomputed_receiver_predictions"] = reusable_predictions(match.actions, predictions, provenance)
             labels = match.construct_labels(
                 intended_receiver_mode=mode,
                 intended_receiver_model_id=intended_receiver_model_id,
                 return_type=primary_return_type,
+                **prediction_kwargs,
             )
         if labels.numel() == 0:
             raise ValueError(f"No usable labels were constructed for intended_receiver_mode={mode}.")
@@ -794,6 +805,10 @@ def build_labels_by_mode_and_return(
         if resolved_actions is None:
             resolved_actions = match.actions.copy()
             resolved_actions.attrs["intended_receiver_stats"] = dict(match.intended_receiver_stats)
+            if mode == INTENDED_RECEIVER_MODE_MODEL and receiver_extension_attempt:
+                from datatools.receiver_reuse import PROVENANCE, prediction_provenance
+                resolved_actions.attrs[PROVENANCE] = prediction_provenance(
+                    feature_root, match_id, intended_receiver_model_id, receiver_extension_attempt)
         resolved_actions_by_mode[mode] = resolved_actions
         stats_by_mode[mode] = {
             key: int(match.intended_receiver_stats.get(key, 0) or 0)
@@ -805,8 +820,13 @@ def build_labels_by_mode_and_return(
                 "model_failed_passes_scored",
                 "model_angle_only_fallbacks",
                 "model_unavailable_predictions",
+                "model_predictions_reused",
+                "model_predictions_inferred",
             ]
         }
+        if loaded_existing and mode == INTENDED_RECEIVER_MODE_MODEL:
+            stats_by_mode[mode]["model_predictions_inferred"] = 0
+            stats_by_mode[mode]["model_predictions_reused"] = stats_by_mode[mode]["model_failed_passes_total"]
         labels_by_key[(mode, primary_return_type)] = labels.clone()
 
         for return_type in return_types[1:]:
@@ -874,9 +894,10 @@ def _validate_labels_only_base_artifacts(
     feature_variant: str = "base",
     intent_train_label_source_mode: str | None = None,
     intent_train_label_source_return_type: str | None = None,
+    use_carries: bool = False,
 ) -> None:
     if feature_variant == "base":
-        graph_path = get_action_graph_dir(feature_root) / f"{match_id}.pt"
+        graph_path = get_action_graph_dir(feature_root, use_carries=use_carries) / f"{match_id}.pt"
         if not graph_path.exists():
             raise FileNotFoundError(f"Base action graphs not found at {graph_path}.")
         return
@@ -907,12 +928,14 @@ def save_resolved_actions_if_missing(
     match_id: str,
     feature_root: Path,
     overwrite: bool = False,
+    use_carries: bool = False,
 ) -> None:
     for mode, resolved_actions in resolved_actions_by_mode.items():
         resolved_action_path = get_resolved_action_path(
             match_id,
             intended_receiver_mode=mode,
             root=feature_root,
+            use_carries=use_carries,
         )
         if resolved_action_path.exists() and not overwrite:
             continue
@@ -925,12 +948,14 @@ def save_action_labels_if_missing(
     match_id: str,
     feature_root: Path,
     overwrite: bool = False,
+    use_carries: bool = False,
 ) -> None:
     for (mode, return_type), labels in labels_by_key.items():
         label_dir = get_action_label_dir(
             return_type,
             intended_receiver_mode=mode,
             root=feature_root,
+            use_carries=use_carries,
         )
         label_path = label_dir / f"{match_id}.pt"
         if label_path.exists() and not overwrite:
@@ -1028,7 +1053,7 @@ def save_labels_only_artifacts(
     augment_blocks_from_existing_graphs: bool = False,
     overwrite_labels: bool = False,
     verbose: bool = True,
-    *, graph_validation: bool = True,
+    *, graph_validation: bool = True, use_carries: bool = False,
 ) -> None:
     _validate_labels_only_base_artifacts(
         match_id,
@@ -1036,6 +1061,7 @@ def save_labels_only_artifacts(
         feature_variant=feature_variant,
         intent_train_label_source_mode=intent_train_label_source_mode,
         intent_train_label_source_return_type=intent_train_label_source_return_type,
+        use_carries=use_carries,
     )
     primary_mode = intended_receiver_modes[0]
     primary_return_type = return_types[0]
@@ -1046,7 +1072,16 @@ def save_labels_only_artifacts(
         primary_mode,
         primary_return_type,
     )
-    save_resolved_actions_if_missing(resolved_actions_by_mode, match_id, feature_root)
+    if use_carries:
+        reference = match.carry_reference_labels
+        for labels in labels_by_key.values():
+            if not torch.equal(labels[:, 0], reference[:, 0]):
+                raise ValueError(f"Generated carry labels changed pinned action ordering: {match_id}")
+        from datatools.carry_label_extension import validate_retained_carry_graphs
+        validate_retained_carry_graphs(feature_root, match_id, reference, match.carry_reference_metadata,
+            graph_validation=graph_validation, stats=getattr(match, "graph_validation_stats", None))
+    save_resolved_actions_if_missing(resolved_actions_by_mode, match_id, feature_root,
+                                    overwrite=overwrite_labels, use_carries=use_carries)
     if feature_variant == "intent_train_augmented":
         save_intent_train_labels_from_existing_source(
             labels_by_key,
@@ -1059,7 +1094,7 @@ def save_labels_only_artifacts(
         if verbose:
             print("Successfully saved labels-only intent-training labels.")
     else:
-        save_action_labels_if_missing(labels_by_key, match_id, feature_root, overwrite=overwrite_labels)
+        save_action_labels_if_missing(labels_by_key, match_id, feature_root, overwrite=overwrite_labels, use_carries=use_carries)
         if augment_blocks_from_existing_graphs:
             save_augmented_blocks_from_existing_graphs(
                 match,
@@ -1281,6 +1316,7 @@ def args_to_worker_dict(args: argparse.Namespace) -> dict[str, object]:
         "pass_height_threshold": args.pass_height_threshold,
         "max_pass_duration": getattr(args, "max_pass_duration", None),
         "use_carries": bool(args.use_carries),
+        "receiver_extension_attempt": getattr(args, "receiver_extension_attempt", None),
         "add_v_edge_features": bool(args.add_v_edge_features),
         "add_relative_speed_edge_features": bool(args.add_relative_speed_edge_features),
         **schema_for_names(generation_edge_names(args.add_v_edge_features, args.add_relative_speed_edge_features,
@@ -1426,6 +1462,7 @@ def _save_action_type_all_match(
             feature_variant=args.feature_variant,
             intent_train_label_source_mode=args.intent_train_label_source_mode,
             intent_train_label_source_return_type=args.intent_train_label_source_return_type,
+            use_carries=args.use_carries,
         )
     resolved_actions_by_mode, labels_by_key, stats_by_mode = build_labels_by_mode_and_return(
         match,
@@ -1436,6 +1473,7 @@ def _save_action_type_all_match(
         match_id=match_id,
         prefer_existing_resolved_actions=args.labels_only,
         use_carries=args.use_carries,
+        receiver_extension_attempt=getattr(args, "receiver_extension_attempt", None),
     )
 
     if args.labels_only:
@@ -1454,6 +1492,7 @@ def _save_action_type_all_match(
             overwrite_labels=args.overwrite_labels,
             graph_validation=getattr(args, "graph_validation", True),
             verbose=show_progress,
+            use_carries=args.use_carries,
         )
         primary_mode = args.intended_receiver_modes[0]
         primary_return_type = args.return_types[0]
@@ -1707,7 +1746,10 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
         from datatools.failed_pass_trajectory import prepare_new_match, VERSION
         match.failed_pass_trajectory_policy = VERSION
         prepare_new_match(match)
-    if args.use_carries:
+    if args.use_carries and args.labels_only:
+        from datatools.carry_label_extension import load_carry_reference
+        match.actions, match.carry_reference_labels, match.carry_reference_metadata = load_carry_reference(feature_root, task.match_id)
+    elif args.use_carries:
         from datatools.ball_carries import derive_carry_segments
         from datatools.carry_policy import run_policy
         from project_config import CONTROL_EVENTS_SYNCED_DIR
@@ -1797,6 +1839,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument("--run-id", type=str, default=None)
+    parser.add_argument("--receiver-extension-attempt", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--labels-only",
         action="store_true",
@@ -1911,8 +1954,8 @@ def parse_args() -> argparse.Namespace:
 def validate_args(args: argparse.Namespace) -> None:
     if args.use_carries and (args.action_type != "all" or args.feature_variant != "base"):
         raise ValueError("--use-carries is supported only with --action_type all --feature_variant base.")
-    if args.use_carries and (args.labels_only or args.augment_blocks or args.augment_blocks_from_existing_graphs):
-        raise ValueError("Carry artifacts must be generated as standalone base graphs without label-only/block augmentation.")
+    if args.use_carries and (args.augment_blocks or args.augment_blocks_from_existing_graphs):
+        raise ValueError("Carry artifacts cannot use block augmentation.")
     if args.labels_only and args.post_action:
         raise ValueError("--labels-only cannot be combined with --post_action.")
     if args.labels_only and args.feature_variant == "success_intent":
@@ -1955,6 +1998,9 @@ def aggregate_mode_stats(intended_receiver_modes: list[str]) -> dict[str, dict[s
             "model_failed_passes_total": 0,
             "model_failed_passes_scored": 0,
             "model_angle_only_fallbacks": 0,
+            "model_unavailable_predictions": 0,
+            "model_predictions_reused": 0,
+            "model_predictions_inferred": 0,
         }
         for mode in intended_receiver_modes
     }
@@ -2116,7 +2162,11 @@ def main() -> None:
         graph_validation_report=graph_report,
     )
     from project_config import atomic_write_json
-    atomic_write_json(feature_root / "graph_validation" / f"{args.split}_{args.feature_variant}.json", graph_report)
+    report_name = f"{args.split}_{args.feature_variant}{'_carries' if args.use_carries else ''}"
+    atomic_write_json(feature_root / "graph_validation" / f"{report_name}.json", graph_report)
+    atomic_write_json(feature_root / "generation_reports" / f"{report_name}.json", dict(
+        receiver_extension_attempt=args.receiver_extension_attempt, expected_matches=match_ids,
+        successful_matches=successful_matches, skipped_matches=skipped_matches, receiver_stats=aggregate_stats))
 
     if successful_matches == 0:
         raise RuntimeError(f"No usable matches were processed for split={args.split}, feature_variant={args.feature_variant}.")
@@ -2126,7 +2176,13 @@ def main() -> None:
             print(f"  {item['match_id']}: {item['error']}")
         if len(skipped_matches) > 10:
             print(f"  ... and {len(skipped_matches) - 10} more")
+        if args.receiver_extension_attempt:
+            raise RuntimeError(f"Incomplete receiver extension stage {report_name}: {len(skipped_matches)} matches failed.")
     if INTENDED_RECEIVER_MODE_MODEL in aggregate_stats and aggregate_stats[INTENDED_RECEIVER_MODE_MODEL]["model_failed_passes_total"] > 0:
+        model_stats = aggregate_stats[INTENDED_RECEIVER_MODE_MODEL]
+        print(f"Receiver predictions: reused={model_stats['model_predictions_reused']}, "
+              f"inferred={model_stats['model_predictions_inferred']}, "
+              f"unavailable={model_stats['model_unavailable_predictions']}")
         print(
             "Intended-receiver model fallback summary: "
             f"{aggregate_stats[INTENDED_RECEIVER_MODE_MODEL]['model_angle_only_fallbacks']} / "

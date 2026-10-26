@@ -510,6 +510,12 @@ An `--extend-feature-run-id` run with both new `--return_type` values and `--int
 
 For `goal_distance` and `epv`, an `--extend-feature-run-id` run with `--refresh-target-family` uses labels-only generation for the existing return types and receiver modes with `--overwrite-labels`. The dedicated xT-only refresh updates xT columns across all existing variants, including carries, without loading tracking or graphs; run it separately from other operations. `--pass-height` uses labels-only generation to backfill `pass_max_ball_z` and `pass_high`; combine it with `--pass-height-threshold <meters>` for a per-run cutoff. The default destination is a derived run sharing unchanged artifacts. With `--in-place` (compatibility alias `--overwrite-feature-run`), the requested changes are applied to the existing run.
 
+When adding or replacing model-mode receivers in a carry-enabled run, two carry labels-only stages follow the ordinary label stages. A receiver-only extension therefore has five stages; adding new return types at the same time has eight. The complete ordered workload is printed before generation, with continuous stage numbering and per-stage/total elapsed times. Match progress and ETA refer to the current stage; no overall ETA is predicted.
+
+Carry label extensions retain the existing original/angle-only carry membership, action order, and pre-action/post-action graphs, including unavailable graphs. They do not derive carry segments or rebuild graph features. With graph validation enabled, retained carry graphs are checked once per match without rewriting or output readback. Missing or misaligned carry artifacts fail the extension. Full generation and adding carries for the first time still generate graphs.
+
+Failed-pass predictions can be reused from ordinary model-mode resolved actions produced earlier in the same extension attempt. Reuse requires matching checkpoint/input provenance and stable event, launch, player and observation identities. Unavailable predictions retain their diagnostic reasons; unmatched inputs are inferred normally. This is not a general cache across runs. Reuse/inference/unavailability counts and separate carry graph-validation reports are recorded. Completion is published only after expected model-label coverage and action alignment have been audited.
+
 
 Extension failures and manual repair:
 

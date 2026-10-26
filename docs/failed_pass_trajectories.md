@@ -9,6 +9,11 @@ Then use the existing `--extend-feature-run-id <refreshed-run>
 --intended-receiver-model-id <checkpoint>` workflow to regenerate model mode.
 Retraining success-intent is not required. The existing
 `--replace-intended-receiver-model` still replaces an already active model mode.
+If carries already exist, regenerating model mode extends their labels while
+retaining the pinned carry actions and graphs. Failed-pass predictions produced
+earlier in that extension are reused when their provenance and event observations
+match; missing predictions are inferred. The complete workload includes both
+carry-label stages, with continuous stage numbering and elapsed times.
 For fresh generation, enable `--failed-pass-contact-detection`; extensions inherit
 the selected run's policy. Legacy runs keep their recorded legacy policy.
 

@@ -422,7 +422,8 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
                     args = generator.parse_args()
                 metadata = (make_metadata(modes=["original", "angle_only", "model"], model_id="success_intent/old")
                             if "--replace-intended-receiver-model" in operation else DEFAULT_METADATA)
-                plans.append(self.build_plan(args, metadata))
+                with patch.object(generator, "uuid4", return_value=SimpleNamespace(hex="test-attempt")):
+                    plans.append(self.build_plan(args, metadata))
             self.assertEqual(plans[0], plans[1])
             self.assertEqual(plans[0].extension_mode, generator.EXTENSION_MODE_IN_PLACE)
             self.assertEqual(plans[0].target_run_id, "base")
@@ -936,7 +937,8 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
         self.assertEqual(metadata["num_workers"], "auto")
         self.assertEqual(metadata["worker_thread_limit"], 2)
 
-    def test_replacement_removes_only_copied_model_mode_artifacts(self) -> None:
+    @patch.object(generator, "audit_receiver_extension")
+    def test_replacement_removes_only_copied_model_mode_artifacts(self, audit) -> None:
         args = make_args(model_id="success_intent/new", run_id="derived", replace_model=True)
         metadata = make_metadata(
             modes=["original", "angle_only", "model"],
@@ -996,7 +998,8 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             self.assertEqual(run_command.call_count, 3)
             write_latest_run.assert_called_once_with("feature", "derived")
 
-    def test_in_place_replacement_removes_base_model_mode_artifacts(self) -> None:
+    @patch.object(generator, "audit_receiver_extension")
+    def test_in_place_replacement_removes_base_model_mode_artifacts(self, audit) -> None:
         args = make_args(
             model_id="success_intent/new",
             run_id=None,

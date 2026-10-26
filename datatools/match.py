@@ -291,6 +291,7 @@ class Match(ABC):
         self,
         actions: pd.DataFrame,
         intended_receiver_model_id: str = DEFAULT_INTENDED_RECEIVER_MODEL_ID,
+        precomputed_predictions: dict | None = None,
     ) -> pd.DataFrame:
         from torch_geometric.data import Batch
 
@@ -309,7 +310,18 @@ class Match(ABC):
         actions.loc[failed_pass_indices, "intent_id"] = None
         actions.loc[failed_pass_indices, "model_receiver_reason"] = "unavailable_model_prediction"
 
-        if not failed_pass_indices:
+        reused = precomputed_predictions or {}
+        reused = {index: decision for index, decision in reused.items() if index in failed_pass_indices}
+        for index, (receiver, reason) in reused.items():
+            actions.at[index, "intent_id"] = receiver
+            actions.at[index, "model_receiver_reason"] = reason
+        stats["model_predictions_reused"] = len(reused)
+        stats["model_failed_passes_scored"] = sum(receiver is not None for receiver, _ in reused.values())
+        pending_indices = [index for index in failed_pass_indices if index not in reused]
+        stats["model_predictions_inferred"] = len(pending_indices)
+        stats["model_unavailable_predictions"] = len(failed_pass_indices) - stats["model_failed_passes_scored"]
+
+        if not pending_indices:
             stats["model_angle_only_fallbacks"] = 0
             actions.attrs["intended_receiver_stats"] = stats
             return actions
@@ -328,7 +340,7 @@ class Match(ABC):
         previous_actions = self.actions
         self.actions = actions
         try:
-            for action_index in failed_pass_indices:
+            for action_index in pending_indices:
                 if "frame_id" in actions and pd.isna(actions.at[action_index, "frame_id"]):
                     actions.at[action_index, "model_receiver_reason"] = "missing_launch_frame"
                     continue
@@ -664,6 +676,7 @@ class Match(ABC):
         relabel_intended_receivers: bool = True,
         resolved_actions: pd.DataFrame | None = None,
         return_type: str | None = None,
+        precomputed_receiver_predictions: dict | None = None,
     ) -> torch.Tensor:
         if return_type is None:
             return_type = f"disc_{gamma}" if discount_xg else f"next_{lookahead_len}"
@@ -683,7 +696,9 @@ class Match(ABC):
                     self.actions, self.tracking, self.action_type,
                     intended_receiver_mode="original", fps=self.fps,
                     infer_failed_passes=False)
-                self.actions = self._apply_intended_receiver_model(self.actions, intended_receiver_model_id)
+                prediction_kwargs = ({"precomputed_predictions": precomputed_receiver_predictions}
+                                     if precomputed_receiver_predictions is not None else {})
+                self.actions = self._apply_intended_receiver_model(self.actions, intended_receiver_model_id, **prediction_kwargs)
             else:
                 self.actions = utils.label_intended_receivers(
                     self.actions, self.tracking, self.action_type,

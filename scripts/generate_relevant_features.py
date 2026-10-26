@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import shutil
 import subprocess
 import sys
+import time
+from uuid import uuid4
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -108,6 +111,7 @@ class FeatureExtensionPlan:
     commands: list[list[str]]
     command_steps: list[FeatureGenerationStep]
     extend_interaction_edge_features: bool = False
+    receiver_extension_attempt: str | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -379,8 +383,13 @@ def run_command(args: list[str]) -> None:
 
 def run_generation_steps(steps: list[FeatureGenerationStep], attempt: ExtensionAttempt | None = None) -> None:
     total = len(steps)
+    started = getattr(attempt, "started_monotonic", time.perf_counter())
+    print(f"Feature generation workload: {total} stages", flush=True)
     for index, step in enumerate(steps, start=1):
-        print(f"Feature generation step {index}/{total}: {step.description}")
+        print(f"  {index}/{total}: {step.description}", flush=True)
+    for index, step in enumerate(steps, start=1):
+        stage_started = time.perf_counter()
+        print(f"Feature generation step {index}/{total}: {step.description}", flush=True)
         if attempt is not None:
             attempt.begin_mutation("generating", current_command=step.command)
         command = list(step.command)
@@ -391,8 +400,13 @@ def run_generation_steps(steps: list[FeatureGenerationStep], attempt: ExtensionA
             else:
                 command.extend(["--graph-validation", value])
         run_command(command)
+        elapsed = time.perf_counter() - stage_started
+        print(f"Finished step {index}/{total} in {elapsed:.1f}s; total elapsed {time.perf_counter() - started:.1f}s", flush=True)
         if attempt is not None:
             attempt.mutation_finished()
+            attempt.data.setdefault("generation_stages", []).append(dict(
+                description=step.description, elapsed_seconds=elapsed,
+                total_elapsed_seconds=time.perf_counter() - started))
 
 
 def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
@@ -1048,6 +1062,25 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             FeatureGenerationStep(step.description, [*step.command, "--pass-height-threshold", threshold])
             for step in command_steps
         ]
+    receiver_attempt = uuid4().hex if "model" in added_modes or regenerate_model_mode else None
+    if receiver_attempt:
+        if (base_metadata.get("carry_variant") or {}).get("available"):
+            for split in ("train", "test"):
+                command = extension_graph_feature_command(python, target_run_id, split=split,
+                    return_types=final_return_types, intended_receiver_modes=["model"],
+                    intended_receiver_model_id=final_model_id,
+                    next_action_conditions_enabled=base_next_action_conditions_enabled,
+                    num_workers=getattr(args, "num_workers", "1"),
+                    worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
+                command = [*with_edge_schema_flags(command, graph_schema), "--use-carries",
+                           *split_cli_args(args), *graph_validation_flags(args),
+                           "--pass-height-threshold", str(extension_pass_height_threshold_from_base(args, base_metadata))]
+                command_steps.append(FeatureGenerationStep(f"{split} split carry model mode (labels-only)", command))
+        command_steps = [FeatureGenerationStep(step.description,
+            [*step.command, "--receiver-extension-attempt", receiver_attempt,
+             *([] if "--pass-height-threshold" in step.command else
+               ["--pass-height-threshold", str(extension_pass_height_threshold_from_base(args, base_metadata))])])
+            for step in command_steps]
     commands = [step.command for step in command_steps]
     if refresh_target_families == ["xt"]:
         command_steps, commands = [], []
@@ -1084,12 +1117,21 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         graph_schema=copy.deepcopy(final_graph_schema),
         commands=commands,
         command_steps=command_steps,
+        receiver_extension_attempt=receiver_attempt,
     )
+
+
+def extension_pass_height_threshold_from_base(args, metadata):
+    if getattr(args, "pass_height", False) or getattr(args, "pass_height_threshold", None) is not None:
+        return pass_height_threshold_meters(args)
+    return metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)
 
 
 def extension_pass_height_threshold(args, plan):
     if plan.refresh_target_families == ["xt"]:
         return plan.base_metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)
+    if plan.receiver_extension_attempt and not plan.refresh_pass_height_labels:
+        return extension_pass_height_threshold_from_base(args, plan.base_metadata)
     return pass_height_threshold_meters(args)
 
 
@@ -1389,6 +1431,7 @@ def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes
 
 
 def run_extension_generation(args: argparse.Namespace) -> None:
+    started = time.perf_counter()
     plan = build_extension_plan(args)
     derived = plan.extension_mode == EXTENSION_MODE_DERIVED
     target_root = get_feature_run_root(plan.target_run_id)
@@ -1418,6 +1461,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                   next_action_conditions_enabled=plan.next_action_conditions_enabled)
     attempt = ExtensionAttempt(target_root, "feature_extension", plan.extension_mode, target,
                                metadata_factory, lambda root, payload: write_run_metadata(root, payload))
+    attempt.started_monotonic = started
     try:
         if derived:
             attempt.begin_mutation("copying", current_file=target_root)
@@ -1435,12 +1479,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                        attempt=attempt)
         else:
             run_generation_steps(plan.command_steps, attempt=attempt)
-            if ((plan.base_metadata.get("carry_variant") or {}).get("available")
-                    and ("model" in plan.added_intended_receiver_modes or plan.regenerate_model_mode)):
-                carry_args = copy.copy(args)
-                carry_metadata = dict(plan.base_metadata, intended_receiver_modes=["model"],
-                                      intended_receiver_model_id=plan.intended_receiver_model_id)
-                run_generation_steps(carry_extension_steps(carry_args, carry_metadata, plan.target_run_id), attempt=attempt)
+            if plan.receiver_extension_attempt:
+                audit_receiver_extension(plan)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
                                                 graph_validation=getattr(args, "graph_validation", True))
@@ -1458,6 +1498,47 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     else:
         print(f"Updated feature run id: {plan.target_run_id}")
         print(f"Extension mode: {plan.extension_mode}")
+
+
+def audit_receiver_extension(plan):
+    """Only publish a receiver extension after every expected variant is aligned."""
+    import pandas as pd
+    from project_config import get_resolved_action_path
+    from datatools.receiver_reuse import PROVENANCE
+    root = get_feature_run_root(plan.target_run_id)
+    manifest = resolve_split_manifest(**split_selector(plan.base_metadata))
+    source_mode = next(mode for mode in ("original", "angle_only") if mode in plan.base_intended_receiver_modes)
+    has_carries = (plan.base_metadata.get("carry_variant") or {}).get("available")
+    for split in ("train", "test"):
+        match_ids = [str(value) for value in manifest[split]]
+        for variant, carries in (("base", False), ("base_carries", True), ("intent_train_augmented", False)):
+            if (carries and not has_carries) or (variant == "intent_train_augmented" and split == "test"):
+                continue
+            report_path = root / "generation_reports" / f"{split}_{variant}.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            if (report.get("receiver_extension_attempt") != plan.receiver_extension_attempt
+                    or sorted(map(str, report["expected_matches"])) != sorted(match_ids)
+                    or report["successful_matches"] != len(match_ids) or report["skipped_matches"]):
+                raise ValueError(f"Incomplete receiver extension coverage: {report_path}")
+            for match_id in match_ids:
+                intent = variant == "intent_train_augmented"
+                builder = get_intent_train_label_dir if intent else get_action_label_dir
+                kwargs = {} if intent else dict(use_carries=carries)
+                source_path = builder(plan.base_return_types[0], intended_receiver_mode=source_mode, root=root, **kwargs) / f"{match_id}.pt"
+                reference = torch.load(source_path, weights_only=False, map_location="cpu")
+                for return_type in plan.final_return_types:
+                    path = builder(return_type, intended_receiver_mode="model", root=root, **kwargs) / f"{match_id}.pt"
+                    labels = torch.load(path, weights_only=False, map_location="cpu")
+                    if labels.ndim != 2 or labels.shape[1] != reference.shape[1] or not torch.equal(labels[:, 0], reference[:, 0]):
+                        raise ValueError(f"Receiver extension label alignment failed: {path}")
+                if not intent:
+                    path = get_resolved_action_path(match_id, intended_receiver_mode="model", root=root, use_carries=carries)
+                    actions = pd.read_parquet(path)
+                    provenance = actions.attrs.get(PROVENANCE) or {}
+                    if (provenance.get("attempt_id") != plan.receiver_extension_attempt
+                            or provenance.get("model_id") != plan.intended_receiver_model_id
+                            or not torch.equal(torch.tensor(actions.index.to_numpy(), dtype=reference.dtype), reference[:, 0])):
+                        raise ValueError(f"Receiver extension resolved-action provenance/alignment failed: {path}")
 
 
 def carry_extension_steps(
