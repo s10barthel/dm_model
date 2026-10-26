@@ -20,6 +20,7 @@ from runtime_preparation import RuntimePreparation
 from models.edge_schema import generation_kwargs
 
 import reachability as reach
+import pc_xpass_acceleration as acceleration
 import pandas as pd
 import torch
 from tqdm import tqdm
@@ -408,6 +409,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         export_topmean=True,
     )
 
+    acceleration.add_arguments(parser)
     pc_versions.add_selection_argument(parser)
     reach.add_arguments(parser)
     args = parser.parse_args(argv)
@@ -421,8 +423,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error('--margin and --reachability-* require --pc-xpass')
     if args.pc_xpass:
         pc_versions.prepare_generation_args(parser, args, argv)
-    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id"} for token in (sys.argv[1:] if argv is None else argv)):
-        parser.error("--ball-dec and --pc-xpass-id require --pc-xpass")
+    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id", "--accel", "--accel-table-id"} for token in (sys.argv[1:] if argv is None else argv)):
+        parser.error("--ball-dec, --pc-xpass-id, --accel and --accel-table-id require --pc-xpass")
     explicit_pc_only_flags = [
         name
         for name in [
@@ -654,6 +656,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         resolve_physical_num_workers(args.num_workers, max_auto_workers=args.max_auto_workers)
     except ValueError as exc:
         parser.error(str(exc))
+    acceleration.configure_args(parser, args)
     return args
 
 
@@ -1124,6 +1127,9 @@ def merge_stats(target: dict[str, Any], source: dict[str, Any] | None) -> dict[s
     if compute_seconds > 0.0:
         target["rows_per_second"] = float(target.get("online_graphs", 0) or 0) / compute_seconds
         target["chunks_per_second"] = float(target.get("compute_chunks", 0) or 0) / compute_seconds
+    for key in ("acceleration_queries", "acceleration_fallbacks", "acceleration_fallback_seconds"):
+        if key in source:
+            target[key] = target.get(key, 0) + source[key]
     matches = dict(target.get("matches", {}))
     for match_id, source_match_stats in (source.get("matches", {}) or {}).items():
         current = dict(matches.get(str(match_id), {}))
@@ -1328,6 +1334,7 @@ def prewarm_runtime_items(
             reaction_time_mode=str(args.reaction_time_mode),
             margin=getattr(args, "margin", "tta"),
             reachability_config=getattr(args, "reachability_config", None),
+            acceleration_config=getattr(args, "acceleration_config", None),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),
@@ -1550,6 +1557,7 @@ def write_runtime_dataset_metadata(
             reaction_time_mode=str(args.reaction_time_mode),
             margin=getattr(args, "margin", "tta"),
             reachability_config=getattr(args, "reachability_config", None),
+            acceleration_config=getattr(args, "acceleration_config", None),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),

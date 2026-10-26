@@ -58,6 +58,7 @@ tests/AS_viz/
 !tests/test_graph_feature_regressions.py
 !tests/test_feature_run_extension.py
 !tests/test_physical_xpass.py
+!tests/test_pc_xpass_acceleration.py
 !tests/test_pc_xpass_versions.py
 !tests/test_pc_xpass_resume.py
 !tests/test_pc_xpass_auxiliary.py

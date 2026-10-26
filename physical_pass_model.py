@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 import numpy as np
 import reachability as reach
+import pc_xpass_acceleration as acceleration
 import pandas as pd
 import pc_xpass_match_cache as match_cache
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
@@ -408,6 +409,7 @@ def pc_xpass_metadata(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -491,6 +493,7 @@ def pc_xpass_metadata(
             "coordinate_system": "pc_xpass_centered_to_spadl_0_105_x_0_68",
         },
         **({"margin": margin, "reachability_config": reach.configuration(margin, reachability_config)} if margin != "tta" else {}),
+        **({"acceleration_config": acceleration_config} if acceleration_config else {}),
         "reaction_time_mode": reaction_time_mode,
         "reaction_time": reaction_time_value,
         "dist_pass_div": float(dist_pass_div),
@@ -573,6 +576,8 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
         payload["ball_drag"] = metadata.get("ball_drag")
     if metadata.get("margin", "tta") != "tta":
         payload.update(margin=metadata["margin"], reachability_config=metadata.get("reachability_config"))
+    if metadata.get("acceleration_config"):
+        payload["acceleration_config"] = metadata["acceleration_config"]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1158,7 +1163,7 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
     x_pass_version = normalize_x_pass_version(_get_arg(args, "x_pass_version", _get_arg(args, "xpass_version", None)))
     metric = physical_xpass_metric(args)
     selected_top_n = x_pass_version_top_n(x_pass_version)
-    return {
+    lookup = {
         "use_physical_xpass": bool(inference_uses_physical_xpass(args)),
         "pc_xpass": bool(pc_xpass_enabled(args)),
         "physical_cache_dir": None if cache_dir is None else str(cache_dir),
@@ -1191,6 +1196,17 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         "reaction_time": PC_XPASS_DEFAULT_REACTION_TIME if source == PC_XPASS_SOURCE else None,
         "max_player_speed": PC_XPASS_DEFAULT_MAX_PLAYER_SPEED if source == PC_XPASS_SOURCE else None,
     }
+
+    if source == PC_XPASS_SOURCE and cache_dir is not None:
+        metadata_path = Path(cache_dir) / "metadata.json"
+        if metadata_path.is_file():
+            recorded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            if recorded.get("acceleration_config"):
+                lookup.update(acceleration_config=recorded["acceleration_config"], reaction_time=0.,
+                              max_player_speed=recorded.get("max_player_speed"),
+                              max_player_speed_off=recorded.get("max_player_speed_off"),
+                              max_player_speed_def=recorded.get("max_player_speed_def"))
+    return lookup
 
 
 def model_uses_physical_xpass(args: Any) -> bool:
@@ -3181,6 +3197,7 @@ def compute_graph_pc_xpass_metrics(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3267,7 +3284,13 @@ def compute_graph_pc_xpass_metrics(
     else:
         raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
 
-    if margin == "reachability":
+    if acceleration_config:
+        if margin != "tta" or reaction_time_mode != "fixed" or reaction_times != 0.:
+            raise ValueError("Acceleration requires time-arrival margins and zero reaction time")
+        tta = acceleration.arrival_times(player_pos, target_x, target_y, max_player_speed_by_player,
+                                        acceleration_config, valid=valid_targets.any(axis=0))
+        margins = t_ball[np.newaxis, ...] - tta[:, np.newaxis, ...]
+    elif margin == "reachability":
         rc = reach.configuration(margin, reachability_config)
         margins = reach.spatial_margins(player_pos, target_x, target_y, t_ball, rc)
         lane_power, lane_inflection_point = rc["lane_power"], rc["lane_inflection_point"]
@@ -3483,6 +3506,7 @@ def compute_graphs_pc_xpass_metrics(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3522,6 +3546,7 @@ def compute_graphs_pc_xpass_metrics(
             reaction_time_mode=reaction_time_mode,
             margin=margin,
             reachability_config=reachability_config,
+            acceleration_config=acceleration_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4396,6 +4421,7 @@ def _runtime_cache_metadata(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4432,6 +4458,7 @@ def _runtime_cache_metadata(
             reaction_time_mode=reaction_time_mode,
             margin=margin,
             reachability_config=reachability_config,
+            acceleration_config=acceleration_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4524,6 +4551,7 @@ def _ensure_runtime_physical_xpass_cache(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4570,6 +4598,7 @@ def _ensure_runtime_physical_xpass_cache(
         reaction_time_mode=reaction_time_mode,
         margin=margin,
         reachability_config=reachability_config,
+        acceleration_config=acceleration_config,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -4597,6 +4626,8 @@ def _ensure_runtime_physical_xpass_cache(
                     atomic_json(metadata_path, metadata)
             if validate_pc_xpass_ball_motion_metadata(metadata) != parse_ball_dec(ball_dec):
                 raise ValueError("Cache ball deceleration differs; select matching settings or create a new pc-xPass version.")
+            if metadata.get("acceleration_config", {}) != (acceleration_config or {}):
+                raise ValueError("Incompatible acceleration settings/table; create a new pc-xPass version")
             mismatches = []
             for key in [
                 "source",
@@ -5039,6 +5070,9 @@ def _merge_runtime_physical_xpass_stats(target: dict[str, object], source: dict[
     target["physical_batch_size"] = source.get("physical_batch_size", target.get("physical_batch_size"))
     for key in ["cache_scan_seconds", "compute_seconds", "write_seconds"]:
         target[key] = float(target.get(key, 0.0) or 0.0) + float(source.get(key, 0.0) or 0.0)
+    for key in ("acceleration_queries", "acceleration_fallbacks", "acceleration_fallback_seconds"):
+        if key in source:
+            target[key] = target.get(key, 0) + source[key]
     target_matches = target.setdefault("matches", {})
     source_matches = source.get("matches", {})
     if isinstance(target_matches, dict) and isinstance(source_matches, dict):
@@ -5393,6 +5427,7 @@ def _pass_height_predictions_for_graphs(
 
 
 def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, object]:
+    acceleration_before = dict(acceleration.COUNTERS)
     misses = list(task["misses"])
     lane_records = [[] for _ in misses] if task.get("export_lane_control", False) else None
     source = str(task["source"])
@@ -5430,6 +5465,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     reaction_time_mode = str(task.get("reaction_time_mode", PC_XPASS_REACTION_TIME_MODE_FIXED))
     margin = task.get("margin", "tta")
     reachability_config = task.get("reachability_config")
+    acceleration_config = task.get("acceleration_config")
     dist_pass_div = float(task.get("dist_pass_div", PC_XPASS_DEFAULT_DIST_PASS_DIV))
     dist_pass_min = float(task.get("dist_pass_min", PC_XPASS_DEFAULT_DIST_PASS_MIN))
     dist_pass_max = float(task.get("dist_pass_max", PC_XPASS_DEFAULT_DIST_PASS_MAX))
@@ -5492,6 +5528,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             reaction_time_mode=reaction_time_mode,
             margin=margin,
             reachability_config=reachability_config,
+            acceleration_config=acceleration_config,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -5540,6 +5577,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
         rows.append(row)
     skipped_all_nan = sum(1 for row in rows if not _physical_xpass_row_has_finite_metric(row, enabled_metrics))
     result = {"rows": rows, "computed": len(rows), "skipped_all_nan": int(skipped_all_nan)}
+    if acceleration_config:
+        result["acceleration_stats"] = {
+            key: acceleration.COUNTERS[key] - acceleration_before[key] for key in acceleration_before
+        }
     if lane_records is not None:
         result["lane_control_records"] = [
             {**_lane_control_identity(item), **record}
@@ -5856,6 +5897,7 @@ def prewarm_physical_xpass_runtime_cache(
     reaction_time_mode: str = PC_XPASS_REACTION_TIME_MODE_FIXED,
     margin: str = "tta",
     reachability_config: dict | None = None,
+    acceleration_config: dict | None = None,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -5913,6 +5955,8 @@ def prewarm_physical_xpass_runtime_cache(
             raise ValueError("Reusable runtime compute sessions are PC-xPass only")
         if compute_session.num_workers != resolved_workers or compute_session.worker_thread_limit != int(worker_thread_limit):
             raise ValueError("Runtime compute session worker configuration differs from prewarming")
+    if acceleration_config and source != PC_XPASS_SOURCE:
+        raise ValueError("Acceleration is supported only for pc-xPass")
     cache_metadata = _ensure_runtime_physical_xpass_cache(
         cache_dir,
         source=source,
@@ -5946,6 +5990,7 @@ def prewarm_physical_xpass_runtime_cache(
         reaction_time_mode=reaction_time_mode,
         margin=margin,
         reachability_config=reachability_config,
+        acceleration_config=acceleration_config,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -5965,6 +6010,10 @@ def prewarm_physical_xpass_runtime_cache(
             reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
             if validate_pc_xpass_ball_motion_metadata(reuse_metadata) != parse_ball_dec(ball_dec):
                 raise ValueError("pc-xPass reuse cache has incompatible ball deceleration; create a new version.")
+            if acceleration_config and pc_xpass_lane_survival_metadata_fingerprint(reuse_metadata) != pc_xpass_lane_survival_metadata_fingerprint(cache_metadata):
+                raise ValueError("pc-xPass acceleration reuse cache has incompatible movement/scoring settings")
+            if reuse_metadata.get("acceleration_config", {}) != (acceleration_config or {}):
+                raise ValueError("pc-xPass reuse cache has incompatible acceleration settings/table")
             if (reuse_metadata.get("margin", "tta") != cache_metadata.get("margin", "tta")
                     or reuse_metadata.get("reachability_config", {}) != cache_metadata.get("reachability_config", {})):
                 raise ValueError("pc-xPass reuse cache has incompatible reachability/margin settings.")
@@ -5975,6 +6024,8 @@ def prewarm_physical_xpass_runtime_cache(
                 )
         elif ball_dec == "drag":
             raise ValueError("A drag reuse cache requires compatible ball-motion metadata.")
+        elif acceleration_config:
+            raise ValueError("An acceleration reuse cache requires matching metadata")
         elif margin == "reachability":
             raise ValueError("A reachability reuse cache requires metadata with matching artifact/settings.")
     pass_height_enabled = pass_height_model is not None
@@ -6319,6 +6370,7 @@ def prewarm_physical_xpass_runtime_cache(
             "reaction_time_mode": str(reaction_time_mode),
             "margin": margin,
             "reachability_config": reach.configuration(margin, reachability_config),
+            "acceleration_config": acceleration_config,
             "dist_pass_div": float(dist_pass_div),
             "dist_pass_min": float(dist_pass_min),
             "dist_pass_max": float(dist_pass_max),
@@ -6340,6 +6392,9 @@ def prewarm_physical_xpass_runtime_cache(
         compute_start = time.perf_counter()
 
         def handle_chunk_result(result: dict[str, object]) -> None:
+            for key, value in result.get("acceleration_stats", {}).items():
+                name = "acceleration_" + key
+                stats[name] = stats.get(name, 0) + value
             for record in result.get("lane_control_records", []):
                 pending_lane_records.setdefault(str(record["match_id"]), []).append(record)
             rows = list(result.get("rows") or [])

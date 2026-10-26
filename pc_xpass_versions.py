@@ -23,7 +23,8 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
     export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
-RESERVED = {"reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
+SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
+RESERVED = {"acceleration", "reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
 
 def validate_id(value: str) -> str:
@@ -90,6 +91,8 @@ def settings(args: Namespace) -> dict[str, Any]:
     if result.get("reaction_time_mode") == "dist_pass":
         result["reaction_time"] = "dist_pass"
     result.setdefault("export_lane_control", False)
+    if result.get("accel") is None or result.get("accel") == "off":
+        result = {k: v for k, v in result.items() if k not in {"accel", "accel_table_id", "accel_table_fingerprint"}}
     return result
 
 
@@ -115,10 +118,26 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
             metadata["generation_settings"].setdefault("export_lane_control", False)
+            from pc_xpass_acceleration import parse_accel
+            cached_accel = parse_accel(metadata["generation_settings"].get("accel"))
+            if "accel" in explicit and parse_accel(getattr(args, "accel", None)) != cached_accel:
+                if not location:
+                    raise ValueError("--accel differs from cached settings; create a new pc-xPass version")
+                warnings.warn("--accel differs from cached settings; using cached value.", stacklevel=2)
+            args.accel = cached_accel
+            if cached_accel is None:
+                if "accel_table_id" in explicit and getattr(args, "accel_table_id", None):
+                    if not location:
+                        raise ValueError("Selected cache uses acceleration off; cannot select an acceleration table")
+                    warnings.warn("Selected cache uses acceleration off; ignoring acceleration table override.", stacklevel=2)
+                args.accel_table_id = None
+                args.accel_table_fingerprint = None
             for key, value in metadata["generation_settings"].items():
                 if key not in SETTING_KEYS or (location and key == "pass_height_model_id"):
                     continue
                 requested = getattr(args, key, None)
+                if key == "accel":
+                    requested = parse_accel(requested)
                 if key == "reaction_time" and isinstance(requested, str) and requested != "dist_pass":
                     try:
                         requested = float(requested)
