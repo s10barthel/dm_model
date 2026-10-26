@@ -162,12 +162,102 @@ launch speeds. Repeated target coordinates, including the common origin of all
 polar rays, are evaluated once and expanded back to their original locations.
 No radius dimension is searched during normal prediction generation.
 
+## Compiled TTA lookup
+
+Acceleration-based point and disk TTA use a single-threaded Numba kernel for
+adaptive-table traversal and trilinear interpolation. This changes implementation
+cost, not the movement model, interpolation definition, raw-control parameters or
+solver tolerances. Existing movement tables, fingerprints and prediction caches
+remain compatible. No generation flag or table rebuild is needed. Acceleration-off
+TTA and the separate distance implementation retain their existing paths.
+
+Compilation/import is lazy and reused per worker, with native code cached on disk.
+Empty batches, analytic-only queries, preparation and cache-only inference do not
+initialize the TTA compiler. The existing project requirements already include
+Numba; if unavailable when lookup is needed, generation raises an installation
+error. The private NumPy reference is available to diagnostics, not as a public
+generation backend.
+
+The kernel returns a validity mask per query: trusted leaves interpolate, while
+out-of-coverage queries and fallback leaves retain the existing Python reference
+solver and unresolved-result handling. A fallback flag on an internal node does
+not invalidate its trusted descendants. Strict floating-point arithmetic is used
+without fastmath or parallel kernel threads.
+
+Add `--include-numpy` to the blocking benchmark below to compare complete prediction
+series at 1e-12 tolerance and measure both implementations. It reports first-state
+warmup (including compiler initialization), warmed numerical computation, fresh
+temporary-cache writes and warm-cache reuse separately. First-use compilation and
+process startup are excluded from warmed timings; persistent worker pools amortize
+initialization.
+
+Integrated verification on 26 October 2026 passed 758 regression tests and 49
+subtests. Three previously failing, unrelated visualization tests were excluded.
+The compiled and NumPy implementations match all complete prediction series on
+the 12 benchmark states and both Hawkeye examples, including NaN locations and
+selected-option fields. All three variants (point with 0.2 s offsets, point with
+zero offsets, and radius 1 m with zero offsets) agree at rtol=atol=1e-12; the
+largest absolute difference is 8.88e-16. Query and fallback counts match exactly.
+Windows spawn, partial tables, split boundaries, solver failures, lazy loading,
+distinct team caps, repeated/masked targets and existing cache compatibility are
+covered by regression tests. The 48 independent disk-arrival checks still have
+maximum deviation 7.61 ms from the tightened reference endpoints.
+
+Performance was measured while unrelated jobs used roughly 50-82% of host CPU;
+whole-batch timings varied substantially. A further comparison alternated the
+implementations for each individual state to reduce drift. Medians of three
+warmed repetitions over all 14 states were:
+
+| Numerical computation | NumPy | Compiled | Reduction |
+|---|---:|---:|---:|
+| Point TTA, 0.2 s offsets | 8.117 s | 6.555 s | 19.2% |
+| Disk TTA, radius 1 m, zero offsets | 8.272 s | 6.925 s | 16.3% |
+
+Lookup time within those predictions fell about 91% in both modes. An independent
+50,000-query point-table microbenchmark likewise fell from 54.76 ms to 5.04 ms
+(90.8%). The integrated measurements do **not** establish the planned 20% minimum
+numerical reduction; that target remains unmet on this shared-host run.
+
+Fresh temporary-cache creation and cache reuse were also measured separately on
+the 12 loaded benchmark states, with three repetitions using the diagnostic below:
+
+| Cache measurement | Point NumPy | Point compiled | Disk NumPy | Disk compiled |
+|---|---:|---:|---:|---:|
+| Fresh creation, median | 6.668 s | 7.114 s | 9.801 s | 5.805 s |
+| Reuse, median | 1.606 s | 1.882 s | 1.887 s | 1.524 s |
+
+The point fresh-cache median increased 6.7% in this run. Investigation with
+alternating backend order reversed that result (23.8% lower point cache time),
+while disk cache time changed from 40.8% lower to 15.5% higher. These inconsistent
+cache results track substantial shared-host timing variation; they do not
+establish a stable cache-creation improvement or regression. Recheck on an idle
+host before extrapolating these timings to full matches or seasons.
+
+A separate startup experiment used two fresh Python processes and an initially
+empty temporary native-code cache. Compiler-module import plus the first kernel
+call took 0.242 + 1.333 = **1.575 s** for fresh compilation, then 0.326 + 0.421 =
+**0.747 s** when loading cached native code in the next process. Warm single-query
+calls took about 2 microseconds. These figures exclude Python/NumPy startup and
+graph/table loading; first-state warmup reported by the full diagnostic includes
+additional model initialization. Startup costs depend on the machine and load.
+
+Detailed local reports and the state-interleaved investigation are in
+`out/tta_compiled_integration/benchmark_final.json`, `interleaved_benchmark.json`,
+`paired_benchmark.json`, `lookup_microbenchmark.json` and `startup_benchmark.json`
+in the same directory. All seven audited movement-table/metadata and latest-pointer
+files retained their original SHA-256 hashes. Prediction-cache writes used fresh
+temporary directories; normal prediction caches were not modified.
+
 Benchmark numerical compute, fresh temporary prediction-cache writes and independent
 reference checks using:
 
 ~~~powershell
 python scripts/diagnostics/benchmark_pc_xpass_blocking.py --point-table-id accel7_v8 --radius-table-id pc_disk_v1 --blocking-radius 1
 ~~~
+
+The integrated comparison above used the prepared radius table
+`accel7_v8_radius1_refined`, plus `--include-numpy --repeats 3` and
+`--output out/tta_compiled_integration/benchmark_final.json`.
 
 The optional `--hawkeye-graphs out/acceleration_lane_investigation/graphs.pt` adds
 the two previously investigated Hawkeye scenes to numerical timing/comparison.
@@ -185,7 +275,7 @@ to 1 ms solely for the validation measurement. Their largest lookup deviation fr
 either reference endpoint was 7.61 ms, within the 10 ms interpolation target. Normal
 reference solving still uses the agreed 10 ms bracket and 1 cm terminal-excess limits.
 
-Final local timing (26 October 2026), a=7, V=8, R=1, three repetitions and one
+Pre-compilation baseline (26 October 2026), a=7, V=8, R=1, three repetitions and one
 computation worker:
 
 | Measurement | Point TTA, 0.2 s offsets | Disk TTA, zero offsets |

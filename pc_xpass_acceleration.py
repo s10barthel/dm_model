@@ -586,6 +586,52 @@ def _interpolate(values, weights):
     return np.sum(np.prod(factors, axis=2)*values, axis=1)
 
 
+@lru_cache(maxsize=1)
+def _compiled_kernels():
+    # Keep compiler imports out of table preparation, analytic-only operations
+    # and cache-only inference. Each worker reuses its loaded native signatures.
+    try:
+        import pc_xpass_acceleration_numba as kernels
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == "numba" or exc.name.startswith("llvmlite")):
+            raise RuntimeError("Compiled pc-xPass TTA lookup requires Numba; "
+                               "install the project requirements in this Python environment.") from exc
+        raise
+    return kernels
+
+
+def _lookup_arrival_corrections(queries, arrays):
+    """Compiled traversal/interpolation, retaining per-query solver fallback."""
+    if not len(queries):
+        return np.empty(0), np.zeros(0, bool)
+    return _compiled_kernels().arrival_corrections(
+        queries, arrays["low"], arrays["high"], arrays["children"],
+        arrays["axis"], arrays["values"], arrays["fallback"])
+
+
+def _lookup_arrival_corrections_numpy(queries, arrays):
+    """Original NumPy lookup retained for equivalence tests and diagnostics."""
+    node = np.zeros(len(queries), dtype=int)
+    inside = np.all((queries >= arrays["low"][0]) & (queries <= arrays["high"][0]), axis=1)
+    while True:
+        active = inside & (arrays["children"][node, 0] >= 0)
+        if not active.any():
+            break
+        idx = np.flatnonzero(active)
+        axis = arrays["axis"][node[idx]]
+        midpoint = .5*(arrays["low"][node[idx], axis]+arrays["high"][node[idx], axis])
+        branch = (queries[idx, axis] >= midpoint).astype(int)
+        node[idx] = arrays["children"][node[idx], branch]
+    valid = inside & ~arrays["fallback"][node]
+    result = np.zeros(len(queries))
+    if valid.any():
+        ids = np.flatnonzero(valid)
+        leaves = node[ids]
+        weights = (queries[ids]-arrays["low"][leaves])/(arrays["high"][leaves]-arrays["low"][leaves])
+        result[ids] = _interpolate(arrays["values"][leaves], weights)
+    return result, valid
+
+
 def arrival_times(players, target_x, target_y, max_speeds, config, valid=None):
     """Player x target TTA, evaluated once independently of ball launch speed."""
     meta, arrays = load_table(config["table_id"])
@@ -639,23 +685,10 @@ def arrival_times(players, target_x, target_y, max_speeds, config, valid=None):
         theta = np.arccos(np.clip((delta @ direction)/np.maximum(distance, 1e-300), -1., 1.))
         normalized_distance = a*np.maximum(distance-radius, 0.)/cap**2
         queries = np.column_stack([np.full(len(indices), speed/cap), theta, np.log1p(normalized_distance)])
-        node = np.zeros(len(indices), dtype=int)
-        inside = np.all((queries >= arrays["low"][0]) & (queries <= arrays["high"][0]), axis=1)
-        while True:
-            active = inside & (arrays["children"][node, 0] >= 0)
-            if not active.any():
-                break
-            idx = np.flatnonzero(active)
-            axis = arrays["axis"][node[idx]]
-            midpoint = .5*(arrays["low"][node[idx], axis]+arrays["high"][node[idx], axis])
-            branch = (queries[idx, axis] >= midpoint).astype(int)
-            node[idx] = arrays["children"][node[idx], branch]
-        interpolated = inside & ~arrays["fallback"][node]
+        delay, interpolated = _lookup_arrival_corrections(queries, arrays)
         if interpolated.any():
-            ids = np.flatnonzero(interpolated); leaves = node[ids]
-            weights = (queries[ids]-arrays["low"][leaves])/(arrays["high"][leaves]-arrays["low"][leaves])
-            delay = _interpolate(arrays["values"][leaves], weights)
-            estimate = normalized_distance[ids]+delay
+            ids = np.flatnonzero(interpolated)
+            estimate = normalized_distance[ids]+delay[ids]
             output[i, indices[ids]] = (np.maximum(0., estimate) if radius else estimate)*cap/a
         for j in np.flatnonzero(~interpolated):
             start = time.perf_counter()

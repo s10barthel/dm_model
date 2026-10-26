@@ -146,3 +146,5 @@ _vendor/defcon/saved
 !tests/test_pc_xpass_distance.py
 
 !tests/test_pc_xpass_blocking.py
+
+!tests/test_pc_xpass_compiled_tta.py
