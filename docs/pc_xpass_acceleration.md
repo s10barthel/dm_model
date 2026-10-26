@@ -1,6 +1,8 @@
 # Acceleration-constrained pc-xPass
 
-Acceleration is optional and applies only to pc-xPass with the time-arrival margin.
+Acceleration is optional and applies only to pc-xPass. The original time-arrival
+margin is described here; [distance control](pc_xpass_distance.md) uses separate
+exact-time reachable-region tables.
 Omitting `--accel`, or supplying `--accel off`, preserves existing movement and
 legacy fingerprints. Original physical xPass and empirical reachability do not
 use this model.

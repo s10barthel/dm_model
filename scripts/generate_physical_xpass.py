@@ -418,12 +418,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     resolve_frame_selection_arguments(parser, args, pc_only=True)
     if args.sportec_feature_run_id and (not args.pc_xpass or args.feature_run_id):
         parser.error("--sportec-feature-run-id requires runtime --pc-xpass mode.")
-    if not args.pc_xpass and any(token.split('=', 1)[0] == '--margin' or token.startswith('--reachability-')
+    if not args.pc_xpass and any(token.split('=', 1)[0] == '--margin' or token.startswith('--reachability-') or token.startswith('--distance-')
                                 for token in (sys.argv[1:] if argv is None else argv)):
-        parser.error('--margin and --reachability-* require --pc-xpass')
+        parser.error('--margin, --reachability-* and --distance-* require --pc-xpass')
     if args.pc_xpass:
         pc_versions.prepare_generation_args(parser, args, argv)
-    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id", "--accel", "--accel-table-id"} for token in (sys.argv[1:] if argv is None else argv)):
+    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id", "--accel", "--accel-table-id", "--distance-power", "--distance-allowance"} for token in (sys.argv[1:] if argv is None else argv)):
         parser.error("--ball-dec, --pc-xpass-id, --accel and --accel-table-id require --pc-xpass")
     explicit_pc_only_flags = [
         name
@@ -1335,6 +1335,8 @@ def prewarm_runtime_items(
             margin=getattr(args, "margin", "tta"),
             reachability_config=getattr(args, "reachability_config", None),
             acceleration_config=getattr(args, "acceleration_config", None),
+            distance_power=getattr(args, "distance_power", 3.),
+            distance_allowance=getattr(args, "distance_allowance", 1.),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),
@@ -1558,6 +1560,8 @@ def write_runtime_dataset_metadata(
             margin=getattr(args, "margin", "tta"),
             reachability_config=getattr(args, "reachability_config", None),
             acceleration_config=getattr(args, "acceleration_config", None),
+            distance_power=getattr(args, "distance_power", 3.),
+            distance_allowance=getattr(args, "distance_allowance", 1.),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),

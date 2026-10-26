@@ -58,7 +58,7 @@ def load_model(model_id):
 
 
 def configuration(margin='tta', config=None):
-    if margin == 'tta':
+    if margin in ('tta', 'distance'):
         return {}
     if margin != 'reachability':
         raise ValueError('margin must be tta or reachability')
@@ -120,7 +120,7 @@ def spatial_margins(players, target_x, target_y, t_ball, config):
 
 
 def add_arguments(parser):
-    parser.add_argument('--margin', choices=['tta', 'reachability'], default='tta')
+    parser.add_argument('--margin', choices=['tta', 'reachability', 'distance'], default='tta')
     for key, default in DEFAULTS.items():
         parser.add_argument('--reachability-' + key.replace('_', '-'),
                             default=default, type=str if key in ('model_id', 'envelope') else float)

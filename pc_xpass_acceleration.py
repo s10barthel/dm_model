@@ -294,6 +294,8 @@ def _load(path, meta_stamp, array_stamp):
         raise ValueError("Corrupted acceleration table: " + path)
     with np.load(root/"table.npz", allow_pickle=False) as data:
         arrays = {k: data[k] for k in data.files}
+    if meta.get("spatial_version"):
+        raise ValueError("Distance acceleration table cannot be used for --margin tta")
     n = len(arrays["low"])
     if (arrays["low"].shape != (n, 3) or arrays["high"].shape != (n, 3) or
             arrays["values"].shape != (n, 8) or arrays["children"].shape != (n, 2) or
@@ -341,6 +343,8 @@ def configuration(accel=None, table_id=None, *, max_speeds=(5.,), fingerprint=No
 
 
 def add_arguments(parser):
+    parser.add_argument("--distance-power", type=float, default=3., help="Distance raw-control sigmoid slope in inverse metres (default 3)")
+    parser.add_argument("--distance-allowance", type=float, default=1., help="Distance raw-control 50%% shortfall in metres (default 1)")
     parser.add_argument("--accel", default="off", help="pc-xPass only: 'off' or maximum vector acceleration in m/s^2")
     parser.add_argument("--accel-table-id", help="Prepared acceleration lookup table; required when --accel is enabled")
 
@@ -349,14 +353,26 @@ def configure_args(parser, args):
     explicit = getattr(args, "_pc_explicit", set())
     # The ordinary physical path does not run pc_xpass_versions preparation.
     if not getattr(args, "pc_xpass", False):
-        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None):
+        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None) or explicit & {"distance_power", "distance_allowance"}:
             parser.error("--accel and --accel-table-id require --pc-xpass")
         args.accel, args.acceleration_config = None, {}
         return
     try:
+        margin = getattr(args, "margin", "tta")
+        distance_flags = explicit & {"distance_power", "distance_allowance"}
+        if margin != "distance" and distance_flags:
+            raise ValueError("--distance-power and --distance-allowance require --margin distance")
+        if margin == "distance":
+            if explicit & {"lane_power", "lane_inflection_point", "control_power", "control_inflection_point"}:
+                raise ValueError("Temporal sigmoid flags conflict with --margin distance; use --distance-power/--distance-allowance")
+            _positive(args.distance_power, "distance-power")
+            if not math.isfinite(args.distance_allowance) or args.distance_allowance < 0:
+                raise ValueError("--distance-allowance must be nonnegative and finite")
         a = parse_accel(getattr(args, "accel", None))
+        if margin == "distance" and a is None:
+            raise ValueError("--margin distance requires --accel <number>")
         if a is not None:
-            if getattr(args, "margin", "tta") != "tta":
+            if margin not in {"tta", "distance"}:
                 raise ValueError("--accel requires --margin tta; cannot combine with empirical reachability")
             if any(k in explicit for k in ("dist_pass_div", "dist_pass_min", "dist_pass_max")):
                 raise ValueError("--dist-pass-* cannot be combined with --accel")
@@ -369,7 +385,11 @@ def configure_args(parser, args):
         common = getattr(args, "max_player_speed", 5.)
         caps = [getattr(args, "max_player_speed_off", None) or common,
                 getattr(args, "max_player_speed_def", None) or common]
-        args.acceleration_config = configuration(a, getattr(args, "accel_table_id", None), max_speeds=caps,
+        if margin == "distance":
+            from pc_xpass_distance import configuration as configure
+        else:
+            configure = configuration
+        args.acceleration_config = configure(a, getattr(args, "accel_table_id", None), max_speeds=caps,
                                                 fingerprint=getattr(args, "accel_table_fingerprint", None))
         args.accel = a
         if a is not None:

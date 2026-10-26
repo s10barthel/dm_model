@@ -320,6 +320,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         dry_run=False,
     )
     add_top_pass_selector(parser)
+    import reachability as reach
+    reach.add_arguments(parser)
     acceleration.add_arguments(parser)
     pc_versions.add_selection_argument(parser)
     add_auxiliary_arguments(parser)
@@ -328,6 +330,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.prepare_generation_args(parser, args, argv, location=True)
     resolve_top_pass_selector(parser, args, pc_only=True)
     _validate_args(parser, args)
+    reach.configure_args(parser, args)
     acceleration.configure_args(parser, args)
     return args
 

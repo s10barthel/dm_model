@@ -18,12 +18,17 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 import pc_xpass_acceleration as accel
+import pc_xpass_distance as spatial
 from pc_xpass_versions import atomic_json
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--table-id", required=True)
+    p.add_argument("--margin", choices=["tta", "distance"], default="tta")
+    p.add_argument("--max-time", type=float, help="Distance-table time coverage in seconds; default covers max-distance at min-ball-speed")
+    p.add_argument("--min-ball-speed", type=float, default=3.)
+    p.add_argument("--ball-dec", default="drag", help="For automatic distance-table time coverage: drag or nonnegative deceleration")
     p.add_argument("--accel", required=True, type=float)
     p.add_argument("--source-table-id", help="Reuse a completed table and its preparation state in a new table ID")
     p.add_argument("--max-player-speed", type=float, default=5.)
@@ -31,16 +36,40 @@ def parse_args(argv=None):
     p.add_argument("--max-player-speed-def", type=float)
     p.add_argument("--max-distance", type=float, default=150.)
     p.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
-    p.add_argument("--max-cells", type=int, default=20000, help="Maximum tree nodes; difficult leaves use explicit solver fallback")
+    p.add_argument("--max-cells", type=int, default=None, help="Maximum tree nodes; difficult leaves use explicit solver fallback")
     p.add_argument("--max-depth", type=int, default=24)
     args = p.parse_args(argv)
-    for key in ("accel", "max_player_speed", "max_distance", "max_player_speed_off", "max_player_speed_def"):
+    for key in ("accel", "max_player_speed", "max_distance", "max_player_speed_off", "max_player_speed_def", "max_time", "min_ball_speed"):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value <= 0):
             p.error("--"+key.replace("_", "-")+" must be positive and finite")
+    if args.max_cells is None:
+        args.max_cells = 100000 if args.margin == "distance" else 20000
     if args.workers < 1 or args.max_cells < 1 or args.max_depth < 1:
         p.error("workers, max-cells, and max-depth must be positive")
+    if args.margin == "distance" and args.max_time is None:
+        from physical_pass_model import parse_ball_dec, pc_xpass_ball_arrival_times
+        dec = parse_ball_dec(args.ball_dec)
+        if dec == "drag":
+            times, _ = pc_xpass_ball_arrival_times(np.array([args.max_distance]), np.array([args.min_ball_speed]), dec)
+            args.max_time = float(times.max())
+        elif not math.isfinite(dec) or dec < 0:
+            p.error("--ball-dec must be drag or a nonnegative finite number")
+        elif dec == 0:
+            args.max_time = args.max_distance / args.min_ball_speed
+        else:
+            # Any reachable constant-deceleration trajectory takes at most V0/dec.
+            args.max_time = max(args.min_ball_speed / dec, math.sqrt(2*args.max_distance/dec))
     return args
+
+
+def _load_table(args):
+    return (spatial.load_table if getattr(args, "margin", "tta") == "distance" else accel.load_table)(args.table_id)
+
+
+def _baseline(points, distance=False):
+    t = np.expm1(np.asarray(points)[..., 2])
+    return spatial.standing_radius(t) if distance else t
 
 
 def _key(point):
@@ -70,8 +99,10 @@ def _split(nodes, index, axis):
 def _seed_from_source(args, root, caps):
     import shutil
     source = accel.table_path(args.source_table_id)
-    meta, arrays = accel.load_table(args.source_table_id)
+    meta, arrays = (spatial.load_table if getattr(args, "margin", "tta") == "distance" else accel.load_table)(args.source_table_id)
     requested = dict(accel=args.accel, speeds=caps, max_distance=args.max_distance)
+    if getattr(args, "margin", "tta") == "distance":
+        requested["max_time"] = args.max_time
     if any(meta["definition"].get(k) != value for k, value in requested.items()):
         raise ValueError("Source table must use the same preparation accel, speed caps and distance")
     if not (source/"checkpoint.json").exists() or not (source/"reference.sqlite").exists():
@@ -87,7 +118,14 @@ def _seed_from_source(args, root, caps):
     try:
         for index in range(original_count):
             node = nodes[index]
-            if node["children"][0] >= 0 or (node["fallback"] and not any(node["values"])):
+            if node["children"][0] >= 0:
+                continue
+            if getattr(args, "margin", "tta") == "distance" and node["fallback"]:
+                # Re-evaluate every unvalidated support interval, not only final
+                # holdout failures. Its reference probes are reused from SQLite.
+                pending.append(index)
+                continue
+            if node["fallback"] and not any(node["values"]):
                 continue
             rng = np.random.default_rng(42+index) if meta.get("holdout_seed") == "per_cell_index_42" else global_rng
             weights = rng.uniform(.05, .95, size=(2, 3))
@@ -100,8 +138,8 @@ def _seed_from_source(args, root, caps):
                 saved = db.execute("SELECT result FROM points WHERE key=?", (_key(point),)).fetchone()
                 if saved:
                     reference = json.loads(saved[0])
-                    estimate = float(accel._interpolate(np.array([node["values"]]), weight[None, :])[0]+math.expm1(point[2]))
-                    if "unresolved" in reference or max(abs(estimate-reference["lower"]), abs(estimate-reference["upper"])) > meta["time_error_normalized"]:
+                    estimate = float(accel._interpolate(np.array([node["values"]]), weight[None, :])[0]+_baseline(point, getattr(args, "margin", "tta") == "distance"))
+                    if "unresolved" in reference or max(abs(estimate-reference["lower"]), abs(estimate-reference["upper"])) > meta.get("distance_error_normalized", meta.get("time_error_normalized")):
                         node["failed_probes"].append(point)
             if len(nodes)+2 <= args.max_cells and node["depth"] < args.max_depth:
                 axis = int(np.argmax((hi-lo)/(np.array(nodes[0]["high"])-np.array(nodes[0]["low"]))))
@@ -116,7 +154,9 @@ def _build(args):
     root = accel.table_path(args.table_id)
     root.mkdir(parents=True, exist_ok=True)
     caps = [args.max_player_speed_off or args.max_player_speed, args.max_player_speed_def or args.max_player_speed]
-    tau = accel.TIME_TOL*args.accel/max(caps)
+    distance = getattr(args, "margin", "tta") == "distance"
+    worker = spatial.reference_point if distance else accel.reference_point
+    tau = spatial.LOOKUP_TOL*args.accel/max(caps)**2 if distance else accel.TIME_TOL*args.accel/max(caps)
     rho = accel.POSITION_TOL*args.accel/max(caps)**2
     radius_max = args.accel*args.max_distance/min(caps)**2
     # Polar coordinates and subtraction of the radial travel-time baseline make
@@ -128,6 +168,11 @@ def _build(args):
                       max_distance=args.max_distance, time_error_normalized=tau,
                       position_tolerance_normalized=rho, coordinates="speed_angle_log1p_radius",
                       max_cells=args.max_cells, max_depth=args.max_depth)
+    if distance:
+        low, high = [0., 0., 0.], [1., math.pi, math.log1p(args.max_time*args.accel/min(caps))]
+        definition.update(margin="distance", spatial_version=spatial.VERSION, max_time=args.max_time,
+                          distance_error_normalized=tau, coordinates="speed_normal_angle_log1p_time")
+        definition.pop("time_error_normalized")
     if args.source_table_id:
         definition["source_table_id"] = args.source_table_id
     meta_path = root/"metadata.json"
@@ -138,7 +183,7 @@ def _build(args):
         if existing.get("definition") != definition:
             raise ValueError("Table ID already has different preparation settings; use a new ID")
         if existing.get("status") == "complete":
-            accel.load_table(args.table_id)
+            _load_table(args)
             print("Reusing completed table " + str(root), flush=True)
             return existing
     atomic_json(meta_path, dict(status="preparing", movement_version=accel.VERSION, definition=definition))
@@ -183,7 +228,7 @@ def _build(args):
                     for point in sampled:
                         if _key(point) not in memo:
                             points[_key(point)] = point.tolist()
-                for point, result in pool.map(accel.reference_point,
+                for point, result in pool.map(worker,
                                               [(p, tau*.5, rho) for p in points.values()], chunksize=1):
                     key = _key(point); memo[key] = result
                     db.execute("INSERT OR REPLACE INTO points VALUES (?, ?)", (key, json.dumps(result)))
@@ -201,9 +246,9 @@ def _build(args):
                         curvature = np.eye(3)[node["depth"] % 3]
                     else:
                         center_times = np.array([.5*(r["lower"]+r["upper"]) for r in results])
-                        delays = center_times-np.expm1(all_points[:, 2])
+                        delays = center_times-_baseline(all_points, distance)
                         values = delays[:8]
-                        estimated = accel._interpolate(np.broadcast_to(values, (len(probe_weights), 8)), probe_weights)+np.expm1(all_points[8:, 2])
+                        estimated = accel._interpolate(np.broadcast_to(values, (len(probe_weights), 8)), probe_weights)+_baseline(all_points[8:], distance)
                         errors = np.array([max(abs(t-r["lower"]), abs(t-r["upper"])) for t, r in zip(estimated, results[8:])])
                         worst = float(errors.max())
                         validations += len(probes)
@@ -240,7 +285,7 @@ def _build(args):
     try:
         missing = { _key(point): point for _, _, point in holdouts if _key(point) not in memo }
         with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("spawn")) as pool:
-            for count, (point, result) in enumerate(pool.map(accel.reference_point,
+            for count, (point, result) in enumerate(pool.map(worker,
                     [(point, tau*.5, rho) for point in missing.values()], chunksize=1), 1):
                 key = _key(point); memo[key] = result
                 db.execute("INSERT OR REPLACE INTO points VALUES (?, ?)", (key, json.dumps(result)))
@@ -254,7 +299,7 @@ def _build(args):
         db.close()
     for index, weights, point in holdouts:
         reference = memo[_key(point)]
-        estimate = float(accel._interpolate(np.array([nodes[index]["values"]]), weights[None, :])[0]+math.expm1(point[2]))
+        estimate = float(accel._interpolate(np.array([nodes[index]["values"]]), weights[None, :])[0]+_baseline(point, getattr(args, "margin", "tta") == "distance"))
         if "unresolved" in reference or max(abs(estimate-reference["lower"]), abs(estimate-reference["upper"])) > tau:
             nodes[index]["fallback"] = True
             nodes[index].setdefault("failed_probes", []).append(point)
@@ -294,13 +339,26 @@ def _build(args):
         raise accel.UnresolvedArrival("No interpolation leaves met acceptance criteria; table remains unpublished")
     source_seconds = 0.
     if args.source_table_id:
-        source_meta, _ = accel.load_table(args.source_table_id)
+        source_meta, _ = (spatial.load_table if distance else accel.load_table)(args.source_table_id)
         source_seconds = source_meta.get("cumulative_preparation_seconds", source_meta["preparation_seconds"])
+    if distance:
+        meta.update(spatial_version=spatial.VERSION, margin="distance", supported_margins=["distance"],
+                    max_time=args.max_time, distance_error_normalized=tau,
+                    reference_bound_target_m=spatial.REFERENCE_TOL,
+                    combined_spatial_target_m=spatial.SPATIAL_TOL,
+                    angular_maximization="analytic_global_on_piecewise_linear_support_interpolant",
+                    reachability_time="exact")
+        meta.pop("time_error_normalized")
+        meta["reference_failures_seen"] = meta["unresolved_cells"]
+        meta["unresolved_cells"] = sum(
+            node["fallback"] and any("unresolved" in memo[_key(point)]
+                for point in list(np.array(node["low"])+(np.array(node["high"])-np.array(node["low"]))*np.vstack([corners, probes]))+node.get("failed_probes", []))
+            for node in leaves)
     meta["cumulative_preparation_seconds"] = source_seconds+meta["preparation_seconds"]
     from importlib.metadata import version
     meta["solver"] = {"name": "clarabel", "version": version("clarabel")}
     atomic_json(meta_path, meta)
-    accel.load_table(args.table_id)
+    _load_table(args)
     print(json.dumps(meta, indent=2), flush=True)
     return meta
 

@@ -1,7 +1,8 @@
 # pc-xPass deceleration and cache versions
 
 Optional player acceleration and separate movement-table preparation are described
-in [pc_xpass_acceleration.md](pc_xpass_acceleration.md).
+in [pc_xpass_acceleration.md](pc_xpass_acceleration.md). Acceleration-based
+[distance raw control](pc_xpass_distance.md) is available with `--margin distance`.
 
 pc-xPass models each speed-grid value as the initial release speed. Select its
 motion with `--ball-dec <number|drag>`; the default remains `0.45`.

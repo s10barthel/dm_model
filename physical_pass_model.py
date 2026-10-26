@@ -410,6 +410,8 @@ def pc_xpass_metadata(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -426,6 +428,11 @@ def pc_xpass_metadata(
             f"Unsupported teammate_policy={teammate_policy!r}. "
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
     )
+    if margin == "distance" and (not acceleration_config or acceleration_config.get("spatial_version") != "exact_time_support_v1"):
+        raise ValueError("Distance margin requires a compatible acceleration table")
+    if margin == "distance" and (not math.isfinite(distance_power) or distance_power <= 0 or
+                                 not math.isfinite(distance_allowance) or distance_allowance < 0):
+        raise ValueError("Invalid distance sigmoid parameters")
     legacy_ignore = teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
     ignore_lane = bool(legacy_ignore or bool(ignore_teammates_lane_survival))
     ignore_control = bool(legacy_ignore or bool(ignore_teammates_control))
@@ -493,6 +500,8 @@ def pc_xpass_metadata(
             "coordinate_system": "pc_xpass_centered_to_spadl_0_105_x_0_68",
         },
         **({"margin": margin, "reachability_config": reach.configuration(margin, reachability_config)} if margin != "tta" else {}),
+        **({"distance_power": float(distance_power), "distance_allowance": float(distance_allowance),
+            "distance_definition": "signed_euclidean_exact_time_reachable_region", "distance_units": "m"} if margin == "distance" else {}),
         **({"acceleration_config": acceleration_config} if acceleration_config else {}),
         "reaction_time_mode": reaction_time_mode,
         "reaction_time": reaction_time_value,
@@ -576,6 +585,9 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
         payload["ball_drag"] = metadata.get("ball_drag")
     if metadata.get("margin", "tta") != "tta":
         payload.update(margin=metadata["margin"], reachability_config=metadata.get("reachability_config"))
+    if metadata.get("margin") == "distance":
+        payload.update(distance_power=metadata.get("distance_power"), distance_allowance=metadata.get("distance_allowance"),
+                       distance_definition=metadata.get("distance_definition"))
     if metadata.get("acceleration_config"):
         payload["acceleration_config"] = metadata["acceleration_config"]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -1202,7 +1214,8 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         if metadata_path.is_file():
             recorded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
             if recorded.get("acceleration_config"):
-                lookup.update(acceleration_config=recorded["acceleration_config"], reaction_time=0.,
+                lookup.update(margin=recorded.get("margin", "tta"), distance_power=recorded.get("distance_power"),
+                              distance_allowance=recorded.get("distance_allowance"), acceleration_config=recorded["acceleration_config"], reaction_time=0.,
                               max_player_speed=recorded.get("max_player_speed"),
                               max_player_speed_off=recorded.get("max_player_speed_off"),
                               max_player_speed_def=recorded.get("max_player_speed_def"))
@@ -3198,6 +3211,8 @@ def compute_graph_pc_xpass_metrics(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3284,7 +3299,17 @@ def compute_graph_pc_xpass_metrics(
     else:
         raise ValueError(f"Unsupported pc-xPass reaction_time_mode={reaction_time_mode!r}.")
 
-    if acceleration_config:
+    if margin == "distance":
+        if not acceleration_config or reaction_time_mode != "fixed" or reaction_times != 0.:
+            raise ValueError("Distance margin requires acceleration and zero reaction time")
+        if not math.isfinite(distance_power) or distance_power <= 0 or not math.isfinite(distance_allowance) or distance_allowance < 0:
+            raise ValueError("Invalid distance sigmoid parameters")
+        import pc_xpass_distance as spatial
+        margins = -spatial.signed_distances(player_pos, target_x, target_y, t_ball,
+                    max_player_speed_by_player, acceleration_config, valid=valid_targets)
+        lane_power = control_power = distance_power
+        lane_inflection_point = control_inflection_point = distance_allowance
+    elif acceleration_config:
         if margin != "tta" or reaction_time_mode != "fixed" or reaction_times != 0.:
             raise ValueError("Acceleration requires time-arrival margins and zero reaction time")
         tta = acceleration.arrival_times(player_pos, target_x, target_y, max_player_speed_by_player,
@@ -3301,7 +3326,7 @@ def compute_graph_pc_xpass_metrics(
             max_player_speed=max_player_speed, max_player_speed_by_player=max_player_speed_by_player,
         )
     else:
-        raise ValueError("margin must be tta or reachability")
+        raise ValueError("margin must be tta, distance or reachability")
     lane_raw_all = pc_xpass_raw_control_with_params(
         margins,
         power=lane_power,
@@ -3507,6 +3532,8 @@ def compute_graphs_pc_xpass_metrics(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -3547,6 +3574,8 @@ def compute_graphs_pc_xpass_metrics(
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            distance_power=distance_power,
+            distance_allowance=distance_allowance,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4422,6 +4451,8 @@ def _runtime_cache_metadata(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4459,6 +4490,8 @@ def _runtime_cache_metadata(
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            distance_power=distance_power,
+            distance_allowance=distance_allowance,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -4552,6 +4585,8 @@ def _ensure_runtime_physical_xpass_cache(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -4599,6 +4634,8 @@ def _ensure_runtime_physical_xpass_cache(
         margin=margin,
         reachability_config=reachability_config,
         acceleration_config=acceleration_config,
+        distance_power=distance_power,
+        distance_allowance=distance_allowance,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -4647,6 +4684,9 @@ def _ensure_runtime_physical_xpass_cache(
                 raise ValueError("Incompatible margin; create a new pc-xPass version")
             if metadata.get("reachability_config", {}) != expected_metadata.get("reachability_config", {}):
                 raise ValueError("Incompatible reachability artifact/settings; create a new pc-xPass version")
+            if margin == "distance" and any(metadata.get(k) != expected_metadata.get(k) for k in
+                                             ("distance_power", "distance_allowance", "distance_definition")):
+                raise ValueError("Incompatible distance control settings; create a new pc-xPass version")
             actual_ranking_mode = metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
             if actual_ranking_mode != expected_metadata.get("ranking_mode"):
                 mismatches.append(
@@ -5466,6 +5506,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     margin = task.get("margin", "tta")
     reachability_config = task.get("reachability_config")
     acceleration_config = task.get("acceleration_config")
+    distance_power = float(task.get("distance_power", 3.))
+    distance_allowance = float(task.get("distance_allowance", 1.))
     dist_pass_div = float(task.get("dist_pass_div", PC_XPASS_DEFAULT_DIST_PASS_DIV))
     dist_pass_min = float(task.get("dist_pass_min", PC_XPASS_DEFAULT_DIST_PASS_MIN))
     dist_pass_max = float(task.get("dist_pass_max", PC_XPASS_DEFAULT_DIST_PASS_MAX))
@@ -5529,6 +5571,8 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            distance_power=distance_power,
+            distance_allowance=distance_allowance,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
             dist_pass_max=dist_pass_max,
@@ -5898,6 +5942,8 @@ def prewarm_physical_xpass_runtime_cache(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    distance_power: float = 3.,
+    distance_allowance: float = 1.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
     dist_pass_max: float = PC_XPASS_DEFAULT_DIST_PASS_MAX,
@@ -5955,7 +6001,7 @@ def prewarm_physical_xpass_runtime_cache(
             raise ValueError("Reusable runtime compute sessions are PC-xPass only")
         if compute_session.num_workers != resolved_workers or compute_session.worker_thread_limit != int(worker_thread_limit):
             raise ValueError("Runtime compute session worker configuration differs from prewarming")
-    if acceleration_config and source != PC_XPASS_SOURCE:
+    if (acceleration_config or margin == "distance") and source != PC_XPASS_SOURCE:
         raise ValueError("Acceleration is supported only for pc-xPass")
     cache_metadata = _ensure_runtime_physical_xpass_cache(
         cache_dir,
@@ -5991,6 +6037,8 @@ def prewarm_physical_xpass_runtime_cache(
         margin=margin,
         reachability_config=reachability_config,
         acceleration_config=acceleration_config,
+        distance_power=distance_power,
+        distance_allowance=distance_allowance,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
         dist_pass_max=dist_pass_max,
@@ -6371,6 +6419,8 @@ def prewarm_physical_xpass_runtime_cache(
             "margin": margin,
             "reachability_config": reach.configuration(margin, reachability_config),
             "acceleration_config": acceleration_config,
+            "distance_power": distance_power,
+            "distance_allowance": distance_allowance,
             "dist_pass_div": float(dist_pass_div),
             "dist_pass_min": float(dist_pass_min),
             "dist_pass_max": float(dist_pass_max),

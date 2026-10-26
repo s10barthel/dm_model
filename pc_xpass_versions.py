@@ -23,6 +23,7 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
     export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
+SETTING_KEYS.update({"distance_power", "distance_allowance"})
 SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
 RESERVED = {"acceleration", "reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
@@ -87,6 +88,8 @@ def settings(args: Namespace) -> dict[str, Any]:
     result = {key: getattr(args, key) for key in sorted(SETTING_KEYS - excluded) if hasattr(args, key)}
     if getattr(args, "margin", "tta") == "tta":
         result = {k: v for k, v in result.items() if k != "margin" and not k.startswith("reachability_")}
+    if getattr(args, "margin", "tta") != "distance":
+        result = {k: v for k, v in result.items() if k not in {"distance_power", "distance_allowance"}}
     # Store the CLI representation so existing validation can be reused on load.
     if result.get("reaction_time_mode") == "dist_pass":
         result["reaction_time"] = "dist_pass"
