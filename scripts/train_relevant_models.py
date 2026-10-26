@@ -269,6 +269,9 @@ def resolve_wrapper_feature_flags(args: argparse.Namespace) -> dict[str, bool]:
 
 def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, bool]) -> list[str]:
     command = list(command)
+    selections = feature_flags.get("feature_selections") or {}
+    # Keep inherited profile flags: awareness can affect more than the selected
+    # identity column. Only suppress settings owned entirely by a selector.
     for name, cli_flag in LOW_LEVEL_FEATURE_FLAGS.items():
         if feature_flags[name]:
             command.append(cli_flag)
@@ -276,13 +279,20 @@ def append_low_level_feature_flags(command: list[str], feature_flags: dict[str, 
         if not feature_flags[name]:
             command.append(cli_flag)
     for name, (enabled_flag, disabled_flag) in LOW_LEVEL_BOOL_OVERRIDE_FLAGS.items():
-        command.append(enabled_flag if feature_flags[name] else disabled_flag)
+        if enabled_flag[2:] not in selections:
+            command.append(enabled_flag if feature_flags[name] else disabled_flag)
     lane_survival_mode = feature_flags.get("lane_survival_mode")
-    if lane_survival_mode is None:
+    if "lane-survival" in selections:
+        if selections["lane-survival"] != "none":
+            # The selector and the cached feature's aggregation are independent.
+            command.extend(["--lane-survival-mode", str(lane_survival_mode or "max")])
+    elif lane_survival_mode is None:
         command.append("--no-lane-survival")
     else:
         command.extend(["--lane-survival", str(lane_survival_mode)])
-    command.extend(input_setting_flags(feature_flags))
+    excluded_groups = {group for group in INTERACTION_GROUPS
+                       if group.replace("_", "-") + "-edge-features" in selections}
+    command.extend(input_setting_flags(feature_flags, excluded_groups=excluded_groups))
     command.extend(feature_selection_flags(feature_flags))
     return command
 
@@ -390,10 +400,14 @@ def append_edge_feature_flag(
     command: list[str],
     v_edge_feature_mode: str,
     relative_speed_edge_feature_mode: str,
+    feature_selections: dict[str, str] | None = None,
 ) -> list[str]:
     command = list(command)
-    command.append(edge_feature_flag_for_mode(v_edge_feature_mode))
-    command.append(relative_speed_edge_feature_flag_for_mode(relative_speed_edge_feature_mode))
+    selections = feature_selections or {}
+    if "velocity-angle-edge-features" not in selections:
+        command.append(edge_feature_flag_for_mode(v_edge_feature_mode))
+    if "relative-speed-edge-features" not in selections:
+        command.append(relative_speed_edge_feature_flag_for_mode(relative_speed_edge_feature_mode))
     return command
 
 
@@ -1493,6 +1507,7 @@ def base_gnn_args(
     batch_size: int,
     v_edge_feature_mode: str,
     relative_speed_edge_feature_mode: str,
+    feature_selections: dict[str, str] | None = None,
 ) -> list[str]:
     _, run_id = str(model_id).split("/", 1)
     command = [
@@ -1530,7 +1545,7 @@ def base_gnn_args(
     ]
     if intended_receiver_mode:
         command.extend(["--intended-receiver-mode", intended_receiver_mode])
-    return append_edge_feature_flag(command, v_edge_feature_mode, relative_speed_edge_feature_mode)
+    return append_edge_feature_flag(command, v_edge_feature_mode, relative_speed_edge_feature_mode, feature_selections)
 
 
 def intent_command(
@@ -1559,6 +1574,7 @@ def intent_command(
             batch_size,
             v_edge_feature_mode,
             relative_speed_edge_feature_mode,
+            feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
         "0.5",
@@ -1599,6 +1615,7 @@ def success_intent_command(
             batch_size,
             v_edge_feature_mode,
             relative_speed_edge_feature_mode,
+            feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
         "0.5",
@@ -1649,6 +1666,7 @@ def pass_success_command(
             batch_size,
             v_edge_feature_mode,
             relative_speed_edge_feature_mode,
+            feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
         "0.5",
@@ -1697,6 +1715,7 @@ def outcome_command(
             batch_size,
             v_edge_feature_mode,
             relative_speed_edge_feature_mode,
+            feature_flags.get("feature_selections"),
         ),
         "--lambda_l1",
         "1e-6",
@@ -1742,6 +1761,7 @@ def failure_receiver_command(
             batch_size,
             v_edge_feature_mode,
             relative_speed_edge_feature_mode,
+            feature_flags.get("feature_selections"),
         ),
         "--augment_blocks",
         "--shot_success",

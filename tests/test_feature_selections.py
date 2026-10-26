@@ -2,6 +2,10 @@
 import argparse
 import copy
 import json
+from pathlib import Path
+import runpy
+import sys
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -10,9 +14,11 @@ from torch_geometric.data import Batch, Data
 from dataset import ActionDataset
 from datatools.utils import filter_features_and_labels
 from models.feature_masks import (
-    NODE_MODES, add_feature_selection_arguments, feature_signature, mask_node_inputs,
+    BOOLEAN_FEATURES, EDGE_MODES, EDGE_OPTIONS, NODE_FEATURES, NODE_MODES,
+    add_feature_selection_arguments, feature_signature, mask_node_inputs,
     normalize_feature_settings,
 )
+from models.edge_schema import group_mode
 from models.gnn import GNN
 from models.inference_masks import configure_inference_masks, resolve_model_masks
 from models.dataset_config import build_action_dataset_kwargs, build_ipw_dataset_kwargs
@@ -176,12 +182,182 @@ def test_wrapper_forwards_selections_and_preserves_defaults():
         assert command[command.index("--" + name) + 1] == mode
 
 
+# Portable feature settings from the failed 2026-10-26 bundle command.
+REPORTED_SELECTIONS = {
+    "accel": "no-poss", "ball-z": "all", "extended-node-features": "none",
+    "goal-features": "none", "keeper-id": "all", "lane-survival": "none",
+    "offside": "all", "pass-lane-features": "none", "pos-node-features": "all",
+    "position-direction-edge-features": "all", "poss-geometry": "all",
+    "poss-velocity-angles": "none", "possessor-id": "all",
+    "relative-speed-edge-features": "none", "relative-velocity-edge-features": "no-poss",
+    "separation-rate-edge-features": "no-poss", "speed": "no-poss",
+    "vel-node-features": "no-poss", "velocity-angle-edge-features": "none",
+    "vx": "no-poss", "vy": "no-poss",
+}
+COMPETING_FLAGS = {
+    **{name: ("--no-" + name,) for name in ("speed", "accel", "offside", "pass-lane-features", "lane-survival")},
+    "velocity-angle-edge-features": ("--v-edge-features", "--no-v-edge-features", "--v-edge-features-no-poss"),
+    **{name: ("--no-" + name, "--" + name + "-no-poss") for name in EDGE_OPTIONS
+       if name != "velocity-angle-edge-features"},
+}
+
+
+@pytest.fixture(scope="module")
+def training_parser():
+    """Build the actual train.py parser; stop before artifact access or training."""
+    class CapturedParser(Exception):
+        pass
+
+    original = argparse.ArgumentParser.parse_known_args
+
+    def capture(parser, args=None, namespace=None):
+        if "--task" in parser._option_string_actions:
+            raise CapturedParser(parser)
+        return original(parser, args, namespace)
+
+    with patch.object(sys, "argv", ["train.py"]), \
+         patch.object(argparse.ArgumentParser, "parse_known_args", capture), \
+         pytest.raises(CapturedParser) as captured:
+        runpy.run_path(str(Path(__file__).resolve().parents[1] / "train.py"), run_name="mask_parser_test")
+    return captured.value.args[0]
+
+
+def wrapper_commands(selections=None, **overrides):
+    from test_success_intent_mode_independent import make_training_args
+
+    args = make_training_args("feature_run", pass_success_ipw=False,
+                              feature_selections=selections, **overrides)
+    args.enabled_tasks.update(pass_height=True, failure_receiver=True)
+    with patch.object(wrapper, "resolve_feature_run_id", return_value="feature_run"), \
+         patch.object(wrapper, "resolve_feature_root", return_value=Path("fixture_features")):
+        return wrapper.build_training_commands(args)[0]
+
+
+def assert_single_selections(command, selections):
+    for name, mode in selections.items():
+        flag = "--" + name
+        assert command.count(flag) == 1
+        assert wrapper.get_cli_value(command, flag) == mode
+        assert not set(COMPETING_FLAGS.get(name, ())).intersection(command)
+
+
+@pytest.mark.parametrize("task", [spec[0] for spec in wrapper.MODEL_TOGGLE_SPECS])
+def test_reported_masks_parse_for_every_wrapper_task(training_parser, task):
+    commands = wrapper_commands(
+        REPORTED_SELECTIONS, use_v_edge_features=False, relative_speed_edge_feature_mode="none",
+        relative_velocity_edge_feature_mode="no_poss", separation_rate_edge_feature_mode="no_poss",
+        scaling=True, sparsify="delaunay", gnn_architecture="relationship-attention",
+    )
+    assert len(commands) == 8
+    command = next(command for command in commands if wrapper.get_cli_value(command, "--task") == task)
+    assert_single_selections(command, REPORTED_SELECTIONS)
+    args = normalize_feature_settings(vars(training_parser.parse_args(command)))
+    assert args["feature_selections"] == REPORTED_SELECTIONS
+    assert args["lane_survival_mode"] is None
+    for name, group in EDGE_OPTIONS.items():
+        assert group_mode(args, group) == REPORTED_SELECTIONS[name].replace("-", "_")
+
+
+@pytest.mark.parametrize("name,mode", [
+    (name, mode) for name in (*NODE_FEATURES, *EDGE_OPTIONS)
+    for mode in (("all", "none") if name in BOOLEAN_FEATURES else EDGE_MODES if name in EDGE_OPTIONS else NODE_MODES)
+])
+def test_wrapper_selector_values_round_trip(training_parser, name, mode):
+    selections = {name: mode}
+    settings = dict(speed_aware=False, accel_aware=False, offside_aware=False, pass_lane_features=False)
+    command = wrapper_commands(selections, **settings)[0]
+    assert_single_selections(command, selections)
+    args = normalize_feature_settings(vars(training_parser.parse_args(command)))
+    assert args["feature_selections"] == selections
+    if name in EDGE_OPTIONS:
+        assert group_mode(args, EDGE_OPTIONS[name]) == mode.replace("-", "_")
+    expected = wrapper.resolve_wrapper_feature_flags(argparse.Namespace(feature_selections=selections, **settings))
+    normalize_feature_settings(expected)
+    width = 26 + int(expected["lane_survival"])
+    args.update(task="pass_intent", node_in_dim=width)
+    expected.update(task="pass_intent", node_in_dim=width)
+    assert feature_signature(args) == feature_signature(expected)
+
+
+@pytest.mark.parametrize("mode", NODE_MODES)
+@pytest.mark.parametrize("aggregation", ["max", "top_10", "top_pass_10"])
+def test_wrapper_lane_selection_preserves_aggregation(training_parser, mode, aggregation):
+    selections = {"lane-survival": mode}
+    command = wrapper_commands(selections, lane_survival_mode=aggregation)[0]
+    assert_single_selections(command, selections)
+    args = normalize_feature_settings(vars(training_parser.parse_args(command)))
+    expected = None if mode == "none" else aggregation
+    assert args["lane_survival_mode"] == expected
+    assert args["lane_survival"] == (mode != "none")
+    assert command.count("--lane-survival-mode") == int(mode != "none")
+
+
+def test_wrapper_omitted_selectors_preserve_legacy_defaults(training_parser):
+    flags = wrapper.append_low_level_feature_flags([], wrapper.resolve_wrapper_feature_flags(argparse.Namespace()))
+    assert flags == [
+        "--possessor_aware", "--keeper_aware", "--ball_z_aware", "--poss_vel_aware",
+        "--speed", "--accel", "--offside", "--no-pass-lane-features", "--no-lane-survival",
+        "--position-direction-edge-features", "--relative-velocity-edge-features", "--separation-rate-edge-features",
+    ]
+    for command in wrapper_commands():
+        args = normalize_feature_settings(vars(training_parser.parse_args(command)))
+        assert not args.get("feature_selections")
+        assert args["speed_aware"] and args["accel_aware"] and args["offside_aware"]
+        assert args["lane_survival_mode"] is None
+
+
+@pytest.mark.parametrize("aggregation", ["max", "top_25", "top_pass_10"])
+def test_wrapper_legacy_only_flags_keep_their_behavior(training_parser, aggregation):
+    for command in wrapper_commands(speed_aware=False, accel_aware=False, offside_aware=False,
+                                    pass_lane_features=True, lane_survival_mode=aggregation,
+                                    v_edge_feature_mode="no_poss", relative_speed_edge_feature_mode="no_poss",
+                                    relative_velocity_edge_feature_mode="no_poss", separation_rate_edge_feature_mode="none"):
+        args = normalize_feature_settings(vars(training_parser.parse_args(command)))
+        assert not args.get("feature_selections")
+        assert args["lane_survival_mode"] == aggregation
+        assert args["pass_lane_features"]
+        assert not any(args[name + "_aware"] for name in ("speed", "accel", "offside"))
+        for group in ("v", "relative_speed", "relative_velocity"):
+            assert group_mode(args, group) == "no_poss"
+        assert group_mode(args, "separation_rate") == "none"
+        assert command.count("--lane-survival") == 1
+        assert "--lane-survival-mode" not in command
+        assert "--no-lane-survival" not in command
+
+
+@pytest.mark.parametrize("possessor_aware", [True, False])
+def test_wrapper_round_trip_preserves_inherited_profile_and_column_overrides(training_parser, possessor_aware):
+    selections = {"vel-node-features": "none", "vx": "defending", "vy": "defending", "possessor-id": "none"}
+    settings = dict(possessor_aware=possessor_aware, poss_vel_aware=False)
+    command = wrapper_commands(selections, **settings)[0]
+    assert_single_selections(command, selections)
+    assert ("--possessor_aware" in command) == possessor_aware
+    actual = normalize_feature_settings(vars(training_parser.parse_args(command)))
+    expected = wrapper.resolve_wrapper_feature_flags(argparse.Namespace(feature_selections=selections, **settings))
+    # Include the optional columns to compare inherited masks as well as vx/vy.
+    actual.update(task="pass_intent", node_in_dim=26)
+    expected.update(task="pass_intent", node_in_dim=26)
+    assert feature_signature(actual) == feature_signature(expected)
+    masks = feature_signature(actual)["node"]
+    assert masks["node.vx"] == masks["node.vy"] == ["defending"]
+    assert masks["node.speed"] == masks["node.accel"] == []
+    assert bool(masks["node.poss_dist"]) == possessor_aware
+
+
+def test_actual_training_parser_still_rejects_conflicting_flags(training_parser):
+    for flags in (["--lane-survival", "none", "--no-lane-survival"],
+                  ["--relative-speed-edge-features", "none", "--no-relative-speed-edge-features"],
+                  ["--vx", "attacking", "--vx", "defending"]):
+        with pytest.raises(SystemExit):
+            training_parser.parse_args(["--task", "pass_intent", *flags])
+
+
 def test_dataset_runtime_prepared_cache_and_auxiliary_configuration(tmp_path):
     source = graph()
     # No goal nodes for this task; preserve player goalkeepers.
     source.x = source.x[:4]
-    source.edge_index = torch.tensor([[0, 1, 1, 2, 2, 3], [1, 0, 2, 1, 3, 2]])
-    source.edge_attr = torch.ones((6, 5))
+    source.edge_index = torch.cartesian_prod(torch.arange(4), torch.arange(4)).T.contiguous()
+    source.edge_attr = torch.ones((16, 5))
     source.inference_possessor_mask = source.inference_possessor_mask[:4]
     features, labels = tmp_path / "features", tmp_path / "labels"
     features.mkdir()
@@ -220,6 +396,50 @@ def test_real_training_saves_resolved_selections(synthetic_training):
     assert masks["node"]["node.vy"] == ["defending"]
     assert masks["node"]["node.speed"] == []
     assert masks["node"]["node.accel"] == []
+
+
+def test_wrapper_generated_features_train_one_cpu_epoch(synthetic_training, monkeypatch):
+    import pandas as pd
+    import pc_xpass_versions
+    from physical_pass_model import pc_xpass_metadata, pc_xpass_lane_survival_column_for_mode
+
+    run, observations, _, _, root = synthetic_training
+    cache = root / "pc_xpass"
+    (cache / "matches").mkdir(parents=True)
+    metadata = pc_xpass_metadata("consider_teammates", top_pass_values=[10])
+    (cache / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    # Give the synthetic graphs aligned cache rows for real lane-survival loading.
+    for path in (root / "features").glob("*.pt"):
+        graphs = torch.load(path, weights_only=False)
+        source = graphs[0]
+        source.node_ids = [f"p{i}" for i in range(source.num_nodes)]
+        torch.save(graphs, path)
+        row = {"action_index": 0, **{
+            pc_xpass_lane_survival_column_for_mode(player, "top_pass_10"): .42
+            for player in source.node_ids
+        }}
+        pd.DataFrame([row]).to_parquet(cache / "matches" / (path.stem + ".parquet"), index=False)
+    monkeypatch.setattr(pc_xpass_versions, "cache_dir", lambda *a, **kw: cache)
+    selections = {
+        "vel-node-features": "none", "vx": "defending", "vy": "defending",
+        "lane-survival": "no-poss", "pass-lane-features": "none",
+        "relative-speed-edge-features": "none", "relative-velocity-edge-features": "no-poss",
+        "separation-rate-edge-features": "no-poss",
+    }
+    settings = wrapper.resolve_wrapper_feature_flags(argparse.Namespace(
+        feature_selections=selections, lane_survival_mode="top_pass_10"))
+    flags = wrapper.append_edge_feature_flag([], "none", "none", selections)
+    flags = wrapper.append_low_level_feature_flags(flags, settings)
+    checkpoint = run("wrapper_selected", ["--max-epochs", "1", *flags])
+    assert len(observations) == 1
+    assert checkpoint["args"]["device"] == "cpu"
+    assert checkpoint["args"]["feature_selections"] == selections
+    assert checkpoint["args"]["lane_survival_mode"] == "top_pass_10"
+    assert checkpoint["metadata"]["lane_survival"]["mode"] == "top_pass_10"
+    masks = checkpoint["metadata"]["feature_signature"]["feature_masks"]["node"]
+    assert masks["node.vx"] == masks["node.vy"] == ["defending"]
+    assert masks["node.speed"] == masks["node.accel"] == []
+    assert masks["node.lane_survival"] == ["attacking", "defending", "goal"]
 
 
 def test_old_and_new_checkpoint_masks_remain_usable(tmp_path, monkeypatch):

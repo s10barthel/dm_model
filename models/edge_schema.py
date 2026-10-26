@@ -135,9 +135,12 @@ def add_interaction_arguments(parser, *, training=True, default=True):
                             help="Zero movement attributes on every edge involving a goal; retain distance and positional direction.")
 
 
-def input_setting_flags(args):
+def input_setting_flags(args, *, excluded_groups=()):
+    """Serialize settings, omitting edge groups emitted by another caller."""
     flags = []
     for group in INTERACTION_GROUPS:
+        if group in excluded_groups:
+            continue
         mode = group_mode(args, group, fresh=True)
         name = group.replace("_", "-") + "-edge-features"
         flags.append("--no-" + name if mode == "none" else "--" + name + ("-no-poss" if mode == "no_poss" else ""))
