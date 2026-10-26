@@ -220,7 +220,7 @@ Checkpoint runs also write metadata:
 - `saved/<task>/<model_run_id>/best_weights.pt`
 - `saved/bundles/<bundle_id>/metadata.json`
 
-The run metadata records the relevant toggles used for that invocation. For component runs this includes the per-model feature signatures and graph schema, so settings such as `poss_vel_aware`, `poss_rel_vel_aware`, `ball_z_aware`, `extend_features`, `pass_lane_features`, `v_edge_feature_mode`, `edge_in_dim`, and `add_v_edge_features` are visible in the saved metadata.
+The run metadata records the settings used for that invocation. Checkpoints with explicit selectors save `feature_selections` and `feature_mask_version`; feature signatures include resolved per-feature role permissions under `feature_masks`. Component runs record each model's signature and graph schema, including edge modes and dimensions. Inference-mask metadata records the original request, canonical selections, resolved operations, effectiveness, and configuration identity. Historical feature fields remain readable for older checkpoints.
 
 ## Current Artifact Contract
 
@@ -229,7 +229,7 @@ The current pipeline now follows an explicit-artifact contract:
 - `scripts/generate_relevant_features.py` can include multiple `--return_type` values in one feature run and always writes the full velocity-angle edge-feature schema.
 - Each generated feature run always contains `original` and `angle_only` intended-receiver variants, and it additionally contains `model` only when `--intended-receiver-model-id <success_intent/model_run_id>` is supplied.
 - `scripts/train_relevant_models.py` now requires an explicit `--feature-run-id` and supports per-model toggles. `--target-family` and `--return_type` are required only when an outcome model is enabled, and `--intended-receiver-mode` is required only when a mode-dependent model is enabled.
-- Training decides whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; feature generation no longer has an `--add_v_edge_features` toggle.
+- Training selects stored velocity-angle edge inputs with `--velocity-angle-edge-features {all,no-poss,none}`; the default is `none`. Feature generation no longer has an `--add_v_edge_features` toggle. The older training spellings remain compatibility aliases.
 - `scripts/evaluate_relevant_models.py`, `scripts/run_relevant_models.py`, `scripts/run_hawkeye.py`, `scripts/run_benchmark.py`, `scripts/run_skillcorner.py`, and `scripts/visualize_action_components.py` now prefer `--bundle-id` or explicit model ids. Sportec runtime scripts can combine compatible checkpoints from different feature runs; they automatically choose the newest compatible source feature run unless `--feature-run-id` is supplied. Component exports with physical xPass and caching enabled instead select the cache's feature run and fail if it is unavailable or incompatible.
 - Visualization scripts write versioned run folders with `metadata.json`; component-based visualizers record the selected `component_run_id` or explicit component directory, and direct model-based visualizers record the model ids used.
 - `scripts/main.py` now threads explicit `feature_run_id` and `bundle_id` values between stages. It does not auto-bootstrap learned intended-receiver mode anymore; for `--intended-receiver-mode model`, provide or first create a `success_intent` checkpoint and pass it as `--intended-receiver-model-id`.
@@ -289,9 +289,8 @@ Useful options:
 - `--feature-run-id <feature_run_id>` to pin or reuse a feature run id
 - `--bundle-id <bundle_id>` to pin or reuse a model bundle id; required when `scripts/main.py` generates EPV artifacts
 - `--intended-receiver-model-id <success_intent/model_run_id>` when feature generation should also include the `model` intended-receiver variant
-- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` to control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely; default: off
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, and `--pass-lane-features` / `--no-pass-lane-features` to override the training feature profile passed into `scripts/train_relevant_models.py`
-- `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes` are available on `scripts/train_relevant_models.py` for targeted feature ablations; call the training wrapper directly when you need these switches. `--no-vel-node-features` zeros `vx`, `vy`, `speed`, and `accel` for every node without changing graph width.
+- `scripts/main.py` still forwards the legacy velocity-edge switches `--v-edge-features`, `--v-edge-features-no-poss`, and `--no-v-edge-features` (default: off), plus the older boolean feature-profile switches listed in its [CLI reference](#scriptsmainpy).
+- For explicit selections such as `--vel-node-features none --vx defending --vy defending`, call `scripts/train_relevant_models.py` directly. These selectors are shared with `train.py` and are not forwarded by `scripts/main.py`. Use `--skip-train --bundle-id <bundle_id>` when continuing the pipeline with a separately trained bundle. See [training input controls](#training-input-controls-and-automatic-exclusions).
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
 - `--overwrite` to rebuild supported preprocessing and target-artifact outputs
 - `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
@@ -549,7 +548,7 @@ Training and evaluation can select a different cutoff with `--pass-height-thresh
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family xt --return_type in_3 --intended-receiver-mode original --no-action-intent --no-pass-intent --no-success-intent --no-pass-success --no-failure-receiver --bundle-id model_bundle_20260414T123456_abcdef12
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --no-v-edge-features
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family goal_distance --return_type next_3 --intended-receiver-mode model --no-success-intent --velocity-angle-edge-features none
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --target-family epv --return_type next_5 --intended-receiver-mode angle_only
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --return_type disc_0.9 --intended-receiver-mode model --no-action-intent --no-pass-intent --no-success-intent --no-outcome-scoring --no-outcome-conceding --pass-intent-model-id pass_intent/<model_run_id>
 python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --intended-receiver-mode angle_only --only-pass-height
@@ -588,9 +587,9 @@ Behavior:
 - outcome model loss uses the selected `--target-family` and `--return_type`; outcome F1/ROC AUC/Brier diagnostics use canonical `goal next_10` labels for comparability across target families and return types
 - older feature runs without embedded `goal next_10` diagnostic columns can still be used if the selected run exposes `action_labels_next_10<intended_receiver_suffix>` or if you pass `--diagnostic-feature-run-id <feature_run_id>` pointing to compatible `next_10` labels
 - reusing `--bundle-id` updates the existing bundle manifest by replacing only the retrained task ids and preserving untouched task ids
-- training chooses whether to use the stored velocity-angle edge features via `--v-edge-features`, `--v-edge-features-no-poss`, or `--no-v-edge-features`; default: off
+- training selects stored velocity-angle edges with `--velocity-angle-edge-features {all,no-poss,none}`; default: `none`
 - wrapper batch-size defaults are `256` for `action_intent`, `pass_intent`, `success_intent`, and `failure_receiver`, and `512` for `pass_success`, `outcome_scoring`, and `outcome_conceding`; `--batch-size` overrides all defaults, and per-model `--<model>-batch-size` flags take highest precedence
-- unless you override them explicitly, wrapper-trained models use the shared defaults `possessor_aware`, `keeper_aware`, `ball_z_aware`, `poss_vel_aware`, `poss_geometry_aware`, `goal_features_aware`, and `goal_nodes_aware` on, with `poss_rel_vel_aware`, `extend_features`, `pass_lane_features`, and `xy_only` off
+- omitted selectors preserve the wrapper's existing profile: node motion, positions, keeper/possessor identity, ball height, player possessor geometry, goal geometry, offside, and goal-node context are enabled; possessor-relative velocity angles, goal-node possessor geometry, extended/pass-lane features, lane survival, and the `xy-only` preset are disabled. Direct `train.py` defaults differ; see [training input controls](#training-input-controls-and-automatic-exclusions).
 
 In the intended-receiver workflow, `success_intent` is the learned intended-receiver checkpoint. It is trained independently of the `original` / `angle_only` / `model` intended-receiver modes. `failure_receiver` is a separate auxiliary model used for failed-pass / opponent-receiver handling.
 
@@ -1071,42 +1070,52 @@ python train.py --task outcome_scoring --model gat --use_epv --return_type next_
 python train.py --task outcome_scoring --model gat --feature_run_id <feature_run_id> ...
 ```
 
-The existing low-level feature toggles on `train.py` are:
+Both training entry points accept the same explicit retained-input selectors:
 
-- `--xy_only`
-- `--possessor_aware`
-- `--keeper_aware`
-- `--ball_z_aware`
-- `--poss_vel_aware`
-- `--poss_rel_vel_aware`
-- `--no-pos-node-features`
-- `--no-vel-node-features`
-- `--no-poss-geometry`
-- `--no-goal-features`
-- `--no-goal-nodes`
-- `--speed` / `--no-speed`
-- `--accel` / `--no-accel`
-- `--offside` / `--no-offside`
-- `--extend_features`
-- `--pass-lane-features` / `--no-pass-lane-features`: retain only `nearest_opponent_to_pass` and `potential_interceptors` from the fixed-width extended block. This requires possessor-aware features. `--extend_features` takes precedence and retains all six extended features.
+- Node features/groups: `--vx`, `--vy`, `--speed`, `--accel`, `--pos-node-features`, `--vel-node-features`, `--goal-features`, `--poss-geometry`, `--poss-velocity-angles`, `--offside`, `--extended-node-features`, `--pass-lane-features`, and `--lane-survival`, each followed by `all`, `attacking`, `defending`, `no-poss`, or `none`.
+- Boolean inputs: `--possessor-id`, `--keeper-id`, `--ball-z`, and `--goal-poss-geometry`, each followed by `true` or `false`.
+- Edge groups: `--velocity-angle-edge-features`, `--relative-speed-edge-features`, `--position-direction-edge-features`, `--relative-velocity-edge-features`, and `--separation-rate-edge-features`, each followed by `all`, `no-poss`, or `none`.
+- Graph/edge policy: `--goal-nodes true/false` and `--goal-edge-movement true/false`.
 
-Most of these controls are exposed in the wrappers as hyphenated flags. `scripts/train_relevant_models.py` also exposes `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, and `--no-goal-nodes`; `scripts/main.py` exposes the older shared feature-profile switches and can be used with `--skip-train` when you want to run a separately configured training wrapper command. The wrappers keep the shared default profile described above, while `train.py` stays the low-level source of truth.
+Omitting selectors keeps the existing defaults for the chosen entry point. The
+wrapper and direct training profiles differ; they are listed in
+[training input controls](#training-input-controls-and-automatic-exclusions).
+Existing flags remain compatibility aliases. `scripts/main.py` retains its older
+boolean profile interface; use the training wrapper directly for explicit
+selectors, then resume the pipeline with `--skip-train --bundle-id <bundle_id>`.
+See [feature selections](docs/feature_selections.md) for the complete contract.
 
 ### Scaling and directed interaction edges
 
-Fresh feature generation and fresh model training enable positional direction, relative velocity, and separation rate. The legacy velocity-angle and relative-speed edge groups remain off by default. Each new training group has three mutually exclusive controls:
+Fresh feature generation and fresh model training enable positional direction,
+relative velocity, and separation rate. Velocity-angle and relative-speed edge
+inputs remain disabled by default in training. Each training group accepts one
+retention value:
 
-| Group | Enable (default) | Disable | Exclude possessor-incident edges |
-|---|---|---|---|
-| Positional direction | `--position-direction-edge-features` | `--no-position-direction-edge-features` | `--position-direction-edge-features-no-poss` |
-| Relative velocity | `--relative-velocity-edge-features` | `--no-relative-velocity-edge-features` | `--relative-velocity-edge-features-no-poss` |
-| Separation rate | `--separation-rate-edge-features` | `--no-separation-rate-edge-features` | `--separation-rate-edge-features-no-poss` |
+| Group | Training flag | Values | Fresh training default |
+| --- | --- | --- | --- |
+| Velocity angle | `--velocity-angle-edge-features` | `all`, `no-poss`, `none` | `none` |
+| Relative speed | `--relative-speed-edge-features` | `all`, `no-poss`, `none` | `none` |
+| Positional direction | `--position-direction-edge-features` | `all`, `no-poss`, `none` | `all` |
+| Relative velocity | `--relative-velocity-edge-features` | `all`, `no-poss`, `none` | `all` |
+| Separation rate | `--separation-rate-edge-features` | `all`, `no-poss`, `none` | `all` |
 
-These controls are available on `train.py` and `scripts/train_relevant_models.py`. Feature generation exposes the enable/disable controls on `datatools/graph_feature.py` and `scripts/generate_relevant_features.py`; the exclusions are applied to model inputs so stored artifacts remain reusable.
+These selectors are available on `train.py` and `scripts/train_relevant_models.py`.
+`all` uses every stored value in the group; `no-poss` zeros both incoming and
+outgoing possessor-incident values. `none` excludes the group from the selected
+training edge schema; runtime inference masks instead preserve checkpoint width
+and zero the corresponding inputs. Relative-speed inputs require velocity-angle
+inputs. Edge selectors do not accept `attacking` or `defending`.
+
+Feature generation keeps its existing enable/disable switches on
+`datatools/graph_feature.py` and `scripts/generate_relevant_features.py`, such as
+`--position-direction-edge-features` / `--no-position-direction-edge-features`.
+Training exclusions operate on learned inputs, allowing stored artifacts to be
+reused. Generation switches do not take the training retention values.
 
 For a directed edge from source i to destination j, define `r = position_j - position_i`, `d = ||r||`, and `u = velocity_j - velocity_i`. Positional direction stores `(r_x/d, r_y/d)`, relative velocity stores `(u_x, u_y)` in m/s, and separation rate stores `dot(r/d, u)` in m/s. Negative separation rate means approaching; positive means moving apart. Reversing the edge negates direction and relative velocity while preserving separation rate. Calculations use the existing graph coordinate frame. Goals are stationary points. At distances no greater than `1e-6` m, direction and separation rate are zero; relative velocity is retained. All five new self-edge attributes are zero.
 
-`--no-goal-edge-movement` zeros relative velocity, separation rate, legacy relative speed, and both legacy velocity-angle attributes on **every edge involving a goal**, including both player-to-goal and goal-to-player directions and goal self-edges. It preserves the edges, distance, positional direction, and teammate indicator. Movement on goal edges is enabled by default. This option is independent of `--goal-poss-dist`, which controls goal-node inputs. Possessor exclusions likewise affect both directions and combine with goal exclusions. Node-only awareness flags retain their existing scope; the runtime `motion` mask also covers relative velocity and separation rate.
+`--goal-edge-movement false` zeros relative velocity, separation rate, relative speed, and both velocity-angle attributes on **every edge involving a goal**, including player-to-goal, goal-to-player, and goal self-edges. It preserves edges, distance, positional direction, and the teammate indicator. The default is `true`. This is independent of `--goal-poss-geometry`, which controls goal-node inputs. Goal and possessor exclusions combine. Node selectors affect only their named columns; the runtime `motion` mask also covers velocity-derived edge inputs.
 
 `--scaling` enables the saved `physical_v1` input profile; it defaults off. Scaling divides copies of learned inputs without centering or clipping:
 
@@ -1133,82 +1142,137 @@ python scripts/generate_relevant_features.py --extend-feature-run-id <source_run
 
 Use the source run's split selector when it differs from the default. This creates a derived run by default, preserving labels, node identities, graph structure, existing edge attributes, and null graph placeholders. Use `--in-place` (compatibility alias `--overwrite-feature-run`) to apply the upgrade to the existing run. Upgrade covers action, post-action, intent-training, success-intent, augmented, and available carry graph families. Required raw coordinates and velocities must be present and finite; otherwise regenerate the feature run. Training reports missing requested attributes instead of substituting zeros. Prepared caches invalidate through the normal schema/options/fingerprint mechanism.
 
-`--goal-poss-dist` (available on `scripts/train_relevant_models.py` and `train.py`) enables `poss_dist`, `poss_dx_norm`, and `poss_dy_norm` (columns 14-16) on both goal nodes. New training runs zero these three values on goal nodes by default; player values, graph width, coordinates, and edge distances are preserved. Broader possessor-feature masks and `xy-only` take precedence. Evaluation, inference, resume, and refit follow the saved setting; older checkpoints without it retain their original enabled behavior. Existing resume checks still apply.
-
-`--no-pos-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `x` and `y` for every node, including the possessor and goal nodes, at the encoder and decoder inputs. Positions are enabled by default. Graph width stays unchanged, and original coordinates remain available for graph processing, physical calculations, and destination features. Other spatial features remain independently controlled. The setting is saved with the checkpoint for evaluation and inference. Combining it with `--xy-only` (`--xy_only` in `train.py`) is rejected.
-
-`--no-vel-node-features` (available on `scripts/train_relevant_models.py` and `train.py`) zeros `vx`, `vy`, `speed`, and `accel` for every node, including the possessor. It preserves graph width and cached features, overrides `--speed`, `--accel`, and possessor velocity enablement, and is saved with the checkpoint for evaluation and inference. Relative velocity-angle node features and velocity-related edge features remain independently controlled. Without this flag, existing behavior is preserved.
-
-`--speed` / `--no-speed` is available on `scripts/train_relevant_models.py` and `train.py`, with speed enabled by default. `--no-speed` zeros only scalar node column `7 speed` for every node, including the possessor, while preserving graph width, `vx`, `vy`, acceleration, stored edge inputs, and the separate `success_intent` pass-trajectory speed input. The checkpoint saves `speed_aware` for evaluation, inference, resume, and refit; older checkpoints without a setting (or with a null setting) retain speed. Auxiliary/IPW models use their own saved setting. Masks are cumulative, so `--speed` does not restore values zeroed by `--xy-only`, `--no-vel-node-features`, or possessor velocity masking. Existing feature artifacts can be reused.
-
-For example, train `success_intent` without scalar player speed using:
-
-```powershell
-python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent --no-speed
-```
-
-`--poss-vel-aware` / `--no-poss-vel-aware` controls the ball possessor node's own velocity/speed/acceleration slots and is on by default in the wrappers. `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware` controls the relative velocity-angle columns `17:19` and is off by default in the wrappers. `--no-poss-geometry` zeros possessor-relative geometry columns `14:17` while keeping `13 is_possessor`. `--no-goal-features` zeros goal-relative geometry columns `9:12` while keeping `12 ball_z`. `--no-goal-nodes` removes goal nodes and their incident edges regardless of task defaults. `--no-offside` zeros the appended `is_offside` node-feature slot when present without changing graph width or model input dimension.
-
 ### Training input controls and automatic exclusions
 
-Explicit retained-input selectors are available on both training entry points:
-`--vx defending`, `--vy defending`, or `--vel-node-features no-poss`. See
-[feature selections](docs/feature_selections.md) for the complete interface,
-group overrides, inference selectors, and legacy compatibility. Omitting these
-selectors preserves current defaults. The table below documents the legacy
-controls and profiles; legacy masks remain cumulative, while explicit selectors
-override their selected columns.
+Training flags describe **where inputs remain available**. Both
+`train.py` and `scripts/train_relevant_models.py` accept these node selections:
 
-The table below describes **fresh training**, comparing direct `train.py` calls
-with `scripts/train_relevant_models.py`. Direct training does not inherit the
-wrapper's feature profile. Saved settings determine evaluation, inference,
-resume, and source refit; fresh defaults do not overwrite checkpoints. Legacy
-checkpoints use the existing compatibility rules for missing settings, notably
-goal context, goal possessor geometry, edge schema, and self-loop policy.
-In particular, missing `goal_poss_dist` preserves enabled goal-node possessor
-geometry; missing goal-context version preserves version 1; missing self-loop
-policy preserves legacy behavior.
-Auxiliary/IPW models prepare inputs using their own saved feature settings.
+| Value | Retain the selected columns on |
+| --- | --- |
+| `all` | Every node |
+| `attacking` | Players on the possessing team, including the possessor |
+| `defending` | Players on the opposing team |
+| `no-poss` | Every node except the possessor |
+| `none` | No nodes |
 
-For node columns, slices below are zero-based and exclude the upper endpoint.
-Except for node/edge removal and selected edge-column widths, masks preserve
-input dimensions and zero the specified learned inputs.
+Both goalkeepers count as players. Team selections zero the selected columns on
+synthetic goal nodes. `true` and `false` are accepted aliases for `all` and `none`;
+boolean-only controls use `true`/`false`. Node masks preserve tensor width, source
+artifacts, and the original coordinates/identities needed by graph processing,
+physical inputs, and destination features. Independently controlled spatial and
+motion-derived inputs remain available unless selected separately.
 
-| Control (direct spelling; wrapper spelling where different) | Exact input effect | Direct default | Training wrapper default |
+Groups provide defaults; narrower groups and individual features override them,
+independent of argument order. For example, `--vel-node-features none --vx defending
+--vy defending` retains only defenders' node `vx`/`vy`, with scalar speed and
+acceleration zero everywhere. `--vel-node-features defending` instead retains all
+four motion columns for defenders. `--vel-node-features no-poss --accel none`
+retains motion for everyone except the possessor, with acceleration disabled
+throughout. Contradictory explicit assignments to the same flag are rejected.
+`pass-lane-features` is a narrower group within `extended-node-features`.
+
+Omitting selectors preserves each entry point's existing profile. The following
+defaults describe the effective inherited inputs; they are not automatically
+supplied selector arguments. Saved checkpoint settings determine evaluation,
+inference, resume, continuation, and source refit. Each auxiliary/IPW model uses
+its own saved settings.
+
+| Control | Named learned inputs | Direct default | Training wrapper default |
 | --- | --- | --- | --- |
-| `--xy_only`; `--xy-only` | Zero node columns `7:12` and `13:19`; this is **not literally x/y only** | Off | Off |
-| `--possessor_aware`; `--possessor-aware` | When off, zero `13:19`; extended/pass-lane features require awareness | Off | On |
-| `--keeper_aware`; `--keeper-aware` | When off, zero `1 is_keeper` | Off | On |
-| `--ball_z_aware`; `--ball-z-aware` | When off, zero `12 ball_z` | Off | On |
-| `--poss_vel_aware`; `--poss-vel-aware` | When off and possessor awareness is on, zero possessor-node `5:9` (vx, vy, speed, acceleration) | Off | On |
-| `--poss_rel_vel_aware`; `--poss-rel-vel-aware` | When off, zero all nodes' `17:19` possessor-relative velocity-angle components | Off | Off |
-| `--no-pos-node-features` | Zero all nodes' x/y at encoder and decoder inputs; preserve original geometry for other processing | Positions on | Positions on |
-| `--no-vel-node-features` | Zero all nodes' `5:9`, including the possessor | Velocity on | Velocity on |
-| `--speed` / `--no-speed` | When off, zero all nodes' `7 speed`; preserve graph width | On | On |
-| `--accel` / `--no-accel` | When off, zero all nodes' `8 accel` | On | On |
-| `--no-poss-geometry` | Zero all nodes' `14:17`; retain possessor indicator | Geometry on | Geometry on |
-| `--goal-poss-dist` | When off, zero only goal-node `14:17` (possessor distance **and direction**) | Off | Off |
-| `--no-goal-features` | Zero all nodes' `9:12` goal distance/direction; retain ball height | Goal features on | Goal features on |
-| `--offside` / `--no-offside` | When off, zero the appended offside indicator when present | On | On |
-| `--extend_features`; `--extend-features` | When off, zero the six extended handcrafted columns, except selective pass-lane mode; `success_intent` has a different appended block and is exempt | Off | Off |
-| `--pass-lane-features` | Retain only nearest-opponent-to-pass and potential-interceptor inputs from the extended block; full extended mode takes precedence | Off | Off |
-| `--goal-nodes-aware` / `--no-goal-nodes` | Retain/remove goal nodes and incident edges, independently of explicit goal geometry and prediction eligibility | On for new goal-context tasks | Same |
-| `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features` | Select stored velocity-angle edge columns; `no-poss` zeros them on both incoming and outgoing possessor edges | Off | Off |
-| `--relative-speed-edge-features` / `--relative-speed-edge-features-no-poss` / `--no-relative-speed-edge-features` | Select stored relative-speed edge input; `no-poss` zeros it on both incoming and outgoing possessor edges. Requires velocity-angle edges | Off | Off |
-| `--sparsify {none,distance,delaunay}` (direct); `--sparsify {none,delaunay}` (wrapper) | Remove edges according to the selected rule below | No filtering (unset) | `none`; optional `delaunay` applies to every selected task |
-| `--max_edge_dist <metres>` | Threshold for distance sparsification only; setting a threshold does not enable filtering | 10 m | 10 m, inactive |
-| `--filter_blockers` | Remove nodes and incident edges using the x-position/team rule below | Off | Off; no wrapper switch |
-| Task suffix `_oppo_agn` | Remove opposing-team nodes and incident edges automatically | Only for those tasks | Those tasks are not selected by the wrapper |
-| `--lane-survival [mode]` | Append cached pc-xPass lane-survival input for supported node tasks | Off | Off |
+| `--pos-node-features SELECTION` | `x`, `y` | `all` | `all` |
+| `--vel-node-features SELECTION` | `vx`, `vy`, `speed`, `accel` | `all`* | `all` |
+| `--vx SELECTION`, `--vy SELECTION` | Individual velocity component | `all`* | `all` |
+| `--speed SELECTION`, `--accel SELECTION` | Scalar speed or acceleration | `all`* | `all` |
+| `--possessor-id true/false` | Only `is_possessor` | `false`* | `true` |
+| `--keeper-id true/false` | Only `is_keeper` | `false` | `true` |
+| `--ball-z true/false` | Ball height | `false` | `true` |
+| `--poss-geometry SELECTION` | Possessor distance and normalized direction | `none`* | `all` on players |
+| `--poss-velocity-angles SELECTION` | Cosine/sine of velocity angle relative to possessor | `none` | `none` |
+| `--goal-features SELECTION` | Goal distance and normalized direction | `all` | `all` |
+| `--goal-poss-geometry true/false` | Allow possessor distance/direction on goal nodes | `false` | `false` |
+| `--offside SELECTION` | Appended offside indicator, when present | `all` | `all` |
+| `--extended-node-features SELECTION` | Six handcrafted features | `none`** | `none`** |
+| `--pass-lane-features SELECTION` | Nearest-opponent-to-pass and potential-interceptor inputs | `none` | `none` |
+| `--lane-survival SELECTION` | Cached lane-survival input on supported node tasks | `none` | `none` |
 
-`xy_only` alone leaves team/keeper/goal indicators, x/y, vx/vy, ball height,
-offside, and edge inputs untouched. Other masks still apply independently;
-for example, direct training's default keeper/ball-height masks can zero those
-columns. It does not itself disable extended inputs if they are separately
-requested. Node velocity masks do not disable stored velocity-related edge
-features. Disabling raw x/y does not disable independently controlled spatial
-features or physical calculations. Masks do not restore values removed by
-broader masks, and `xy_only` cannot be combined with disabled positional inputs.
+\* Direct training retains the legacy possessor-awareness profile: with no
+selectors, identity and possessor-relative geometry are disabled. Its legacy
+possessor-only motion switch defaults off but applies only when legacy possessor
+awareness is enabled. Explicit `--possessor-id` affects only identity; explicit
+feature/group selectors override the selected columns of the inherited profile.
+
+\*\* `success_intent` uses a separate pass-trajectory block, which retains its
+historical behavior and is not the six-feature extended group. `--speed none`
+does not disable its separate pass-trajectory speed input.
+
+`--goal-poss-geometry true` allows `poss_dist`, `poss_dx_norm`, and
+`poss_dy_norm` on goal nodes only where the possessor-geometry selection also
+retains them. Its fresh-run default is `false`; older checkpoints missing the
+setting preserve their historical enabled behavior. Node-velocity selections do
+not disable possessor-relative velocity angles or velocity-derived edge inputs.
+
+For example:
+
+```powershell
+# Keep defenders' vx/vy, with speed and acceleration zero for every node.
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent --vel-node-features none --vx defending --vy defending
+
+# Remove scalar speed only; preserve the other default inputs.
+python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only-success-intent --speed none
+```
+
+Lane-survival selection and computation are separate. Use
+`--lane-survival defending --lane-survival-mode top_pass_10` to keep that cached
+input for defenders. Computation defaults to `max` when enabled; `top_N` and
+`top_pass_N` require the corresponding metric in the selected pc-xPass cache.
+
+#### Legacy feature-flag compatibility
+
+Existing model IDs, checkpoint weights, saved outputs, and older command lines
+remain usable without retraining or rewriting. Legacy switches preserve their
+original defaults, cumulative masks, and coupled effects. Prefer explicit
+selectors for new configurations:
+
+| Legacy training spelling | Preferred spelling for new configurations |
+| --- | --- |
+| `--no-pos-node-features` | `--pos-node-features none` |
+| `--no-vel-node-features` | `--vel-node-features none` |
+| `--no-speed`, `--no-accel`, `--no-offside` | `--speed none`, `--accel none`, `--offside none` |
+| Wrapper `--poss-vel-aware` / `--no-poss-vel-aware`; direct `--poss_vel_aware` | `--vel-node-features all` to retain possessor motion, or `no-poss` to exclude it |
+| `--poss-rel-vel-aware`; direct `--poss_rel_vel_aware` | `--poss-velocity-angles all` or `none` |
+| `--keeper-aware`, `--ball-z-aware`; direct underscored spellings | `--keeper-id true/false`, `--ball-z true/false` |
+| `--no-poss-geometry`, `--no-goal-features` | `--poss-geometry none`, `--goal-features none` |
+| `--goal-poss-dist` | `--goal-poss-geometry true` |
+| `--extend-features`; direct `--extend_features` | `--extended-node-features all` or `none` |
+| `--v-edge-features`, `--v-edge-features-no-poss`, `--no-v-edge-features` | `--velocity-angle-edge-features all`, `no-poss`, or `none` |
+| Edge switches ending in `-no-poss` or starting with `--no-` | The corresponding edge flag followed by `no-poss` or `none` |
+| `--lane-survival [max/top_N/top_pass_N]`, `--no-lane-survival` | `--lane-survival all/none` plus `--lane-survival-mode MODE` |
+| `--goal-nodes-aware`, `--no-goal-nodes` | `--goal-nodes true/false` |
+
+Legacy `--possessor-aware` / direct `--possessor_aware` controls the entire
+historical block `13:19`, not just identity. The new `--possessor-id` is
+independent of `--poss-geometry` and `--poss-velocity-angles`. Legacy
+`--xy-only` / direct `--xy_only` remains a preset that zeros columns `7:12`
+and `13:19`; it is not literally x/y only. Its original interactions, including
+the rejection of the legacy `--no-pos-node-features` combination, remain intact.
+
+#### Graph structure and prediction candidates
+
+These controls affect structure or output eligibility rather than masking a
+learned feature column:
+
+| Control | Effect | Fresh default |
+| --- | --- | --- |
+| `--goal-nodes true/false` | Retain/remove goal nodes and incident edges | `true` for the eight retained tasks |
+| Wrapper `--action-intent-include-goals true/false`; direct `--include-goals true/false` | Include/exclude action-intent shot candidates and shot examples | `true` for action intent; excluded for other retained tasks |
+| `--sparsify {none,delaunay}` (wrapper); `{none,distance,delaunay}` (direct) | Filter edges | No filtering |
+| `--max_edge_dist <metres>` (direct) | Distance-sparsification threshold; does not enable filtering itself | 10 m, inactive |
+| `--filter_blockers` (direct) | Remove nodes behind the possessor by the x-position/team rule | Off |
+| Task suffix `_oppo_agn` | Remove opposing-team nodes automatically | Only for those direct-training tasks |
+
+Input goal nodes are independent of explicit goal geometry and prediction
+eligibility. Enabling action-intent goal predictions requires input goal nodes.
+Legacy task-dependent goal policies remain checkpoint-driven.
 
 The training wrapper accepts `--sparsify {none,delaunay}` and defaults to `none`.
 For example, train all selected components with Delaunay connectivity using:
@@ -1224,6 +1288,11 @@ source refit inherit saved settings and reject explicit `--sparsify` overrides;
 automatic final refits inherit their validation source's selection. This option
 is available on the training wrapper and direct `train.py`, not `scripts/main.py`.
 Distance filtering remains a direct-training option.
+
+Metadata summary CSVs include a `sparsify` column for saved models, bundles,
+component runs, and visualizations, using each row's saved model setting.
+Missing settings remain blank. Rebuild existing summaries with
+`python scripts/backfill_metadata_summaries.py`; retraining is unnecessary.
 
 Distance sparsification retains an edge when its raw distance is **at most**
 `max_edge_dist`, **or either endpoint is the possessor**, regardless of distance.
@@ -1614,9 +1683,9 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--success-intent-model-id <model_id>`: optional `success_intent` checkpoint forwarded to evaluation.
 - `--skip-preprocess`, `--skip-xt`, `--skip-goal-distance`, `--skip-epv`, `--skip-features`, `--skip-train`, `--skip-evaluate`, `--skip-run-relevant`, `--skip-hawkeye`, `--skip-benchmark`, `--skip-skillcorner`: skip individual stages.
 - `--benchmark-input-dir <path>`: local benchmark data root passed to `scripts/run_benchmark.py`.
-- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: off.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the training feature profile.
-- `--no-vel-node-features`, `--no-poss-geometry`, `--no-goal-features`, `--no-goal-nodes`: targeted ablations available on `scripts/train_relevant_models.py`, not on `scripts/main.py`. `--no-vel-node-features` zeros raw `vx`, `vy`, `speed`, and `accel` node features for every node while preserving graph width.
+- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: legacy pipeline switches forwarded to training for velocity-angle edge inputs. Default: off. The training entry points additionally accept `--velocity-angle-edge-features {all,no-poss,none}`.
+- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: legacy boolean switches forwarded to the training profile. These pipeline switches do not take retention values.
+- Explicit selectors such as `--vx defending`, `--vel-node-features none`, `--poss-geometry none`, `--goal-features none`, and `--goal-nodes false` are available on `scripts/train_relevant_models.py` and `train.py`, not on `scripts/main.py`. Train separately and use `--skip-train --bundle-id <bundle_id>` for later pipeline stages.
 - `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
 - `--device <device>`: device passed to evaluation and inference stages.
@@ -1877,17 +1946,37 @@ When split flags are omitted, training infers the selector from feature-run meta
 - `--max-epochs <int>`: hard epoch cap for each validation training stage, overriding minimum-duration and post-reduction protection requirements. Positive integer; default: `100`. Final refits use their source best epoch and recorded rates instead of this cap.
 - `--seed <int>`: seed Python, NumPy, and PyTorch for every selected model, including final refits. Range: `0` through `2**32 - 1`; default: `100`.
 - `--bundle-id <bundle_id>`: pin the training bundle manifest id.
-- `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: control whether training uses all stored velocity-angle edge features, masks possessor-incident velocity edge columns, or drops velocity edge columns entirely. Default: off.
-- `--lane-survival [{max,top_N,top_pass_N}]` / `--no-lane-survival`: append the cached pc-xPass lane-survival node feature or disable it. Lane survival is disabled by default; a bare `--lane-survival` selects `max`, `--lane-survival top_25` selects top-25, and `--lane-survival top_pass_10` selects top-pass 10. The selected aggregation must be available in the cache.
-- `--pc-xpass-id <run_id>`: pin the pc-xPass cache version used for lane survival, for example `--lane-survival top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without the `data/pc_xpass/` prefix; Sportec data is read from `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec caches require `match_physical_states_v3` and a canonical action manifest; older caches must be regenerated into a new version.
-- `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: override the wrapper training defaults. Pass-lane mode retains only `nearest_opponent_to_pass` and `potential_interceptors`; full extended mode takes precedence.
-- `--speed` / `--no-speed`: enable or zero scalar node speed (`7`) for every node, including the possessor, while preserving graph width. Default: enabled. Saved with the checkpoint; independent of acceleration, velocity components, edge movement features, and pass-trajectory speed.
-- `--no-vel-node-features`: zero raw `vx`, `vy`, `speed`, and `accel` node features for every node, including the possessor, while preserving graph width. It overrides `--speed`, `--accel`, and possessor velocity enablement; relative velocity-angle node features and velocity-related edge features remain independently controlled.
-- `--no-pos-node-features`: zero `x` and `y` at the encoder and decoder inputs for every node, including the possessor and goal nodes, while preserving graph width. Original coordinates remain available for graph processing, physical calculations, and destination features. Incompatible with `--xy-only`. Default: off, so positional node features are used.
-- `--no-poss-geometry`: zero possessor-relative geometry columns `14:17` while preserving `13 is_possessor`. Default: off, so possessor geometry is used.
-- `--no-goal-features`: zero goal-relative geometry columns `9:12` while preserving `12 ball_z`. Default: off, so goal features are used.
-- `--goal-nodes-aware` / `--no-goal-nodes`: retain or remove goal nodes and their incident edges as GNN input context. Default: enabled for new runs of `action_intent`, `pass_intent`, `success_intent`, `pass_success`, `pass_height`, `failure_receiver`, `outcome_scoring`, and `outcome_conceding`. Legacy checkpoints retain their historical task-dependent handling. Independent of `--no-goal-features` and prediction candidate selection.
-- `--action-intent-include-goals` / `--no-action-intent-include-goals`: include or exclude the shooting candidate for `action_intent` only. Default: enabled for new runs. Disabling it excludes shot-labelled training and evaluation examples and exports no goal prediction. Enabling it requires input goal nodes. The other seven goal-context tasks always exclude goals from prediction candidates. Resume inherits the checkpoint's settings and rejects conflicting overrides. See "Goal input context and prediction candidates" below.
+
+Mask selectors below are shared with direct `train.py`. Node `SELECTION` values
+are `all`, `attacking`, `defending`, `no-poss`, and `none`; edge selections are
+`all`, `no-poss`, and `none`. Boolean controls accept `true`/`false`. Omitted
+selectors preserve the current profile; [the defaults table](#training-input-controls-and-automatic-exclusions)
+compares wrapper and direct training. Groups provide defaults and individual
+features override them, independent of argument order.
+
+- `--vx SELECTION`, `--vy SELECTION`: retain an individual node-velocity component on the selected players. Default: `all` in the wrapper, including the possessor.
+- `--vel-node-features SELECTION`: group selection for `vx`, `vy`, `speed`, and `accel`. Default: `all`. For defenders' components only, use `--vel-node-features none --vx defending --vy defending`.
+- `--speed SELECTION`, `--accel SELECTION`: individual scalar motion inputs. Default: `all`. These do not control `success_intent` pass-trajectory speed or stored edge movement features.
+- `--pos-node-features SELECTION`: select learned `x`/`y` inputs. Default: `all`; original geometry remains available to graph processing, physical calculations, and destination features.
+- `--possessor-id true/false`: retain/zero only the possessor indicator. Default: `true` in the wrapper; independent of possessor geometry and relative velocity angles.
+- `--keeper-id true/false`, `--ball-z true/false`: retain/zero keeper identity or ball height. Both default to `true` in the wrapper.
+- `--poss-geometry SELECTION`: possessor-relative distance/direction, preserving the separate identity setting. Default: retained on players; goal values additionally require `--goal-poss-geometry true`.
+- `--poss-velocity-angles SELECTION`: cosine/sine of player velocity angle relative to the possessor. Default: `none`.
+- `--goal-features SELECTION`: goal-relative distance/direction; does not remove goal nodes or suppress ball height. Default: `all`.
+- `--goal-poss-geometry true/false`: allow/suppress possessor distance/direction on goal nodes. Default: `false` for new training; older checkpoints without the setting retain their original enabled behavior.
+- `--offside SELECTION`: select the appended offside input when available. Default: retained when present.
+- `--extended-node-features SELECTION`: select the six handcrafted features. Default: `none`; the separate `success_intent` trajectory block keeps its historical behavior.
+- `--pass-lane-features SELECTION`: select `nearest_opponent_to_pass` and `potential_interceptors`. Default: `none`. This narrower group overrides the corresponding members of `extended-node-features`.
+- `--velocity-angle-edge-features {all,no-poss,none}`: select stored velocity-angle edge inputs. Default: `none`.
+- `--relative-speed-edge-features {all,no-poss,none}`: select raw relative-speed edge input. Default: `none`; requires velocity-angle inputs.
+- `--position-direction-edge-features {all,no-poss,none}`, `--relative-velocity-edge-features {all,no-poss,none}`, `--separation-rate-edge-features {all,no-poss,none}`: select directed interaction groups. All default to `all`. `no-poss` zeros both incoming and outgoing possessor edges.
+- `--goal-edge-movement true/false`: allow/suppress movement inputs on all goal-incident edges while retaining distance and positional direction. Default: `true`.
+- `--lane-survival SELECTION`: enable/select the cached lane-survival input on supported node tasks. Default: `none`.
+- `--lane-survival-mode {max,top_N,top_pass_N}`: choose lane-survival computation, for example `top_25` or `top_pass_10`. Defaults to `max` when enabled. The selected metric must exist in the cache. Older `--lane-survival [MODE]` and `--no-lane-survival` forms remain accepted.
+- `--pc-xpass-id <run_id>`: pin the cache used for lane survival, for example `--lane-survival defending --lane-survival-mode top_pass_10 --pc-xpass-id <pc_xpass_run_id>`. Pass the version name without `data/pc_xpass/`; Sportec reads `data/pc_xpass/<run_id>/sportec`. Defaults to the latest pc-xPass version when lane survival is enabled. Cannot be combined with `--physical-cache-dir`. Sportec requires `match_physical_states_v3` and a canonical action manifest; older caches require regeneration into a new version.
+- `--goal-nodes true/false`: retain/remove goal nodes and incident edges as GNN context. Default: `true` for all eight retained tasks. Independent of `--goal-features` and prediction candidates; legacy checkpoints keep their historical policy.
+- `--action-intent-include-goals true/false`: include/exclude the action-intent shooting candidate. Default: `true` for new runs. `false` excludes shot-labelled training/evaluation examples and goal predictions; `true` requires input goal nodes. Other retained tasks always exclude goal predictions. Resume rejects conflicting changes.
+- `--xy-only` / `--no-xy-only`: legacy preset, off by default. It zeros `7:12` and `13:19`, rather than retaining only x/y. Older negative/awareness flags remain accepted with their historical effects; see [legacy compatibility](#legacy-feature-flag-compatibility).
 - `--use_physical_xpass` / `--use-physical-xpass`: enable physical xPass for `pass_success` only.
 - `--model-variant {gat_baseline,gat_plus_phys_feature,gat_phys_logit_offset,gat_phys_logit_offset_regularized}`: choose the pass-success physical xPass architecture. Default: `gat_phys_logit_offset`.
 - `--physical-cache-dir <path>`: physical xPass sidecar directory override. Default: `<feature_run_root>/physical_xpass`.
@@ -1913,6 +2002,11 @@ python scripts/train_relevant_models.py --feature-run-id <feature_run_id> --only
 ### `train.py`
 
 `train.py` is the low-level training entrypoint normally launched by `scripts/train_relevant_models.py`. Use the wrapper for new and resumed runs because it restores the complete saved configuration.
+
+- Feature/group selectors use the [same names and values as the training wrapper](#training-input-controls-and-automatic-exclusions), including `--vx`, `--vy`, `--vel-node-features`, the five edge-group flags, and `--lane-survival` / `--lane-survival-mode`. Direct training preserves its own default profile: keeper/ball-height/possessor awareness are off, unlike the wrapper. Omitting selectors does not replace that profile.
+- `--possessor-id true/false`, `--keeper-id true/false`, `--ball-z true/false`, `--goal-poss-geometry true/false`, `--goal-nodes true/false`, and `--goal-edge-movement true/false`: the same independent input/policy controls as the wrapper; see the defaults table.
+- `--include-goals true/false`: direct action-intent candidate control, corresponding to wrapper `--action-intent-include-goals true/false`. Default: `true` for new action-intent runs; goals cannot be candidates for other retained tasks. Input goal nodes must be enabled when goal predictions are enabled.
+- Legacy underscored awareness flags, negative masks, and `--xy_only` remain supported; see [legacy compatibility](#legacy-feature-flag-compatibility).
 
 - `--max-epochs <int>` / `--n_epochs <int>`: mutually exclusive aliases for the hard epoch cap. Default: `200` for direct launches; the wrapper supplies its own cap or selected refit duration.
 - `--seed <int>`: random seed from `0` through `2**32 - 1`. Default: `128` for direct launches.
@@ -1965,8 +2059,9 @@ For the July and October outcome models, use a shared pass population:
 python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-duration 0.1 --outcome-scoring-model-id outcome_scoring/outcome_scoring_20260731T153011_091203_ec216b1d --outcome-scoring-model-id outcome_scoring/outcome_scoring_20261016T100710_860045_d961f19d --diagnostic-feature-run-id feature_20261015T011549_082721_d5ab6c0a --season 24_25 --season-half second
 ```
 
-- `--inference-mask <name> [<name> ...]`: automatically compare the selected checkpoint without masks against one combined masked configuration. Repeating this argument adds names to that same configuration.
-- `--inference-mask-1 <name> ...`, `--inference-mask-2 <name> ...`: define independent configurations, compared with unmasked inference separately for each selected checkpoint. Numbered identifiers must be positive and unique; do not mix numbered and unnumbered forms. Multiple tasks/checkpoints are allowed, but masked evaluation never compares different checkpoint runs. Masks take precedence over an additional `--compare` flag.
+- `--inference-mask [TASK:|all:]FEATURE[=SELECTION] ...`: compare each selected checkpoint without additional masks against one combined inference configuration. Bare canonical names mean `=none`; explicit selectors such as `vx=defending` retain only the selected subset of the checkpoint's normal inputs. Repeating the flag adds selections to that configuration. See [shared inference masks](#shared-inference-masks) for scope, precedence, and legacy aliases.
+- `--inference-mask-1 [TASK:|all:]FEATURE[=SELECTION] ...`, `--inference-mask-2 ...`: define independent configurations using the same selectors, compared with normal checkpoint inference separately for each selected checkpoint. Numbered identifiers must be positive and unique; do not mix numbered and unnumbered forms. Multiple tasks/checkpoints are allowed, but masked evaluation never compares different checkpoint runs. Masks take precedence over an additional `--compare` flag.
+- `--list-inference-masks`: list supported groups, individual features, expansions, selectors, and bare-name defaults without loading a checkpoint.
 - `--comparison-bootstrap-resamples <N>` and `--comparison-bootstrap-seed <N>`: comparison whole-match bootstrap settings. Defaults: 2000 and 42. Zero resamples disables intervals; otherwise at least two contributing matches are required. Reports include all within-group pairwise differences and pointwise 95% intervals.
 - `--compare` and inference masks cannot be combined with learning-curve mode. Combined-v5 evaluation requires exactly one explicit pass-intent checkpoint as its shared auxiliary dependency.
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to evaluate.
@@ -2032,46 +2127,110 @@ python scripts/evaluate_relevant_models.py --compare --filter pass --min-pass-du
 
 ### Shared inference masks
 
-Mask names also accept a retention selector, for example
-`--inference-mask all:vx=defending all:vy=defending`. Bare names default to `=none`;
-explicit selectors replace shorthand for the same feature/group. Existing names
-and checkpoints remain supported. See [feature selections](docs/feature_selections.md)
-for group precedence and the checkpoint restrictions that always apply.
+Evaluation, component inference, Hawkeye, action-component visualization, and EPV
+generation accept `[TASK:|all:]FEATURE[=SELECTION]` after `--inference-mask`.
+`scripts/main.py` forwards these inference selections to learned evaluation and
+inference stages, including EPV generation; it does not change training or feature
+generation. Bare canonical names default to `=none`. Omitting inference masks
+entirely preserves normal checkpoint inference, including its saved training masks.
 
-Evaluation, component inference, Hawkeye, action-component visualization, and EPV generation accept the same runtime feature masks. `scripts/main.py` forwards its combined mask configuration to learned evaluation/inference stages, including EPV generation, without changing feature generation or training. Unnumbered masks preserve single masked inference outside evaluation. The two inference visualizers also support numbered configurations for PNG comparison, as described below; other inference scripts accept only the combined unnumbered form.
+Node selectors are `all`, `attacking`, `defending`, `no-poss`, and `none`, with the
+[same retained-player meanings as training](#training-input-controls-and-automatic-exclusions).
+Edge selectors are `all`, `no-poss`, and `none`; boolean-only input and goal controls
+accept `all`/`none` or `true`/`false`. `all` retains whatever inputs the checkpoint
+normally receives; it does not enable features excluded during training.
 
 ```powershell
-python scripts/evaluate_relevant_models.py --compare --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b
-python scripts/evaluate_relevant_models.py --pass-success-model-id pass_success/run_a --inference-mask-1 accel --inference-mask-2 goal-features
-python scripts/run_and_visualize_hawkeye.py --bundle-id BUNDLE --situation-id SITUATION --inference-mask pass_success:pos-node-features
+# Compare no additional masks against two independent motion configurations.
+python scripts/evaluate_relevant_models.py --pass-success-model-id pass_success/run_a --inference-mask-1 all:vel-node-features --inference-mask-2 all:vel-node-features=defending
+
+# Keep only defenders' node vx/vy; remove scalar speed/acceleration everywhere.
+python scripts/run_and_visualize_hawkeye.py --bundle-id BUNDLE --situation-id SITUATION --inference-mask all:vel-node-features all:vx=defending all:vy=defending
+
+# Restrict only the pass-success component; leave other participating tasks normal.
+python scripts/run_and_visualize_hawkeye.py --bundle-id BUNDLE --situation-id SITUATION --inference-mask pass_success:vel-node-features=no-poss
 ```
 
-Use a task prefix to select a component (`pass_success:accel`) or `all:` to select all participating components. Unscoped names are allowed only when one model task participates, including auxiliary models. A configuration scoped away from a checkpoint and its dependencies is skipped in evaluation and recorded in the manifest.
+Use `TASK:` to select a component or `all:` for every participating model task,
+including auxiliaries. Unscoped names are allowed only with one participating
+task. A configuration scoped away from a checkpoint and its dependencies is
+skipped in evaluation and recorded in the manifest. Outside evaluation, an
+unnumbered configuration runs one masked inference pipeline. The two inference
+visualizers also accept numbered configurations for PNG comparison; other inference
+scripts accept only the combined unnumbered form.
 
-`--list-inference-masks` lists every group, individual feature, and its exact expansion without loading checkpoints. Common groups use training vocabulary:
+Explicit selectors replace bare shorthand for the same feature/group, independent
+of order: `vx vx=defending` is the same as `vx=defending`. Broad groups provide
+defaults and narrower groups/individual features override them. For example,
+`vel-node-features vx=defending vy=defending` suppresses all motion columns except
+defenders' `vx`/`vy`. Conflicting explicit values for the same feature/group are
+rejected; identical assignments are deduplicated. Numbered configurations remain
+independent; do not mix numbered and unnumbered forms.
 
-| Mask | Learned input removed |
-|---|---|
-| `pos-node-features` | Node x and y |
+`--list-inference-masks` lists groups, semantic columns, expansions, accepted
+selectors, and bare-name defaults without loading checkpoints. Canonical names
+match the training interface:
+
+| Name | Learned inputs selected |
+| --- | --- |
+| `pos-node-features` | Node x/y |
 | `vel-node-features` | Node vx, vy, speed, and acceleration |
-| `speed` | Scalar node speed |
-| `accel` | Node acceleration |
-| `goal-features` | Goal distance and normalized goal-direction components |
-| `poss-geometry` | Possessor distance and normalized possessor-direction components |
-| `ball-z-aware`, `keeper-aware`, `offside` | The corresponding height or indicator feature |
-| `possessor-aware` | Possessor indicator, possessor-relative distance/direction, and relative velocity-angle components |
-| `poss-vel-aware` | Velocity features for the possessor node |
-| `poss-rel-vel-aware` | Cosine and sine of velocity angle relative to the possessor |
-| `extend-features`, `pass-lane-features`, `lane-survival` | Corresponding stored handcrafted or sidecar features |
-| `v-edge-features`, `relative-speed-edge-features` | Stored velocity-angle or relative-speed edge inputs |
-| `v-edge-features-no-poss`, `relative-speed-edge-features-no-poss` | Corresponding edge inputs on possessor-incident edges |
-| `motion` | Node velocity, possessor-relative velocity angles, velocity-angle edges, and relative-speed edges |
+| `vx`, `vy`, `speed`, `accel` | Individual motion input |
+| `goal-features` | Goal distance and normalized goal direction |
+| `poss-geometry` | Possessor distance and normalized possessor direction |
+| `poss-velocity-angles` | Cosine/sine of velocity angle relative to possessor |
+| `possessor-id`, `keeper-id`, `ball-z` | Only the named identity or ball-height input; boolean selections |
+| `offside` | Appended offside indicator |
+| `extended-node-features`, `pass-lane-features`, `lane-survival` | Corresponding stored handcrafted or sidecar inputs |
+| `velocity-angle-edge-features`, `relative-speed-edge-features` | Stored velocity-angle or relative-speed edge inputs |
+| `position-direction-edge-features`, `relative-velocity-edge-features`, `separation-rate-edge-features` | Directed interaction edge inputs |
+| `goal-poss-geometry` | Possessor geometry on goal nodes only; boolean selections |
+| `goal-edge-movement` | Movement inputs on goal-incident edges only; boolean selections |
+| `motion` | Node motion, possessor-relative velocity angles, velocity-angle/relative-speed/relative-velocity/separation-rate edges; `all`, `no-poss`, or `none` |
 
-Individual semantic names such as `node.vx` and `node.goal_dist` permit column-level investigation. Unknown masks, absent features, and ambiguous schemas fail validation. Features already disabled by training or unused by the architecture are recorded as having no additional effect. Structural options, such as removing goal nodes, are excluded.
+Individual schema-qualified names such as `node.vx`, `node.goal_dist`, and
+`edge.relative_speed` remain supported, including explicit selectors. Unknown
+names, absent required features, and ambiguous schemas fail validation. Inputs
+already excluded during training or unused by the architecture are recorded as
+having no additional effect. Structural options such as removing goal nodes are
+not inference feature masks.
 
-Masking occurs after feature derivation at encoder and decoder learned-input boundaries, including skip connections. Original positions still determine distances, angles, candidates, geometric control calculations, rendering, and physical/cache inputs. Graph topology and tensor widths remain unchanged. Masking x/y therefore measures reliance on those learned columns, not removal of every positional signal. Likewise, node-velocity masking leaves velocity edge inputs unless those are explicitly masked too.
+Inference selections **only further restrict saved training inputs**. For example,
+`vx=defending` on an attacking-only checkpoint leaves zero `vx` everywhere. New
+selectors also work with older checkpoints: the resolver reconstructs their legacy
+settings and schema, with no retraining or rewriting required.
 
-Physical xPass values remain unchanged. Masked learned predictions can change the blended result, and masked pass-intent predictions may change v5 blending weights. Output metadata records mask names, expansions, and effectiveness; evaluation artifacts and summaries distinguish configurations. Ordinary Hawkeye inference retains its existing visualization layout; comparison layouts are described below.
+Legacy inference aliases retain their historical effects:
+
+| Legacy name | Canonical selection or effect |
+| --- | --- |
+| `v-edge-features` | `velocity-angle-edge-features=none` |
+| `poss-rel-vel-aware` | `poss-velocity-angles=none` |
+| `ball-z-aware`, `keeper-aware`, `extend-features` | `ball-z=none`, `keeper-id=none`, `extended-node-features=none` |
+| `poss-vel-aware` | `vel-node-features=no-poss` |
+| `v-edge-features-no-poss`, `mask-possessor-v-edge-features` | `velocity-angle-edge-features=no-poss` |
+| `relative-speed-edge-features-no-poss`, `mask-possessor-relative-speed-edge-features` | `relative-speed-edge-features=no-poss` |
+| `possessor-aware` | Remove all six legacy possessor-awareness inputs (`13:19`), not just identity |
+
+The legacy subset aliases above retain their exclusions when bare; the `=none`
+shorthand rule applies to canonical names. Old saved visualization metadata remains
+readable. Equivalent shorthand and explicit canonical forms share a configuration
+identity; metadata records original requests, canonical selections, operations,
+and effectiveness.
+
+Masking occurs after feature derivation at encoder and decoder learned-input
+boundaries, including skip connections and grid decoding. Original geometry and
+identities still determine graph processing, candidates, rendering, and physical
+or cache inputs. Graph topology and tensor widths remain unchanged. Masking x/y
+measures reliance on those columns while other spatial inputs remain independently
+controlled; likewise, node-velocity selection leaves velocity-derived edges unless
+those are selected separately.
+
+Physical xPass values remain unchanged. Masked learned predictions can change the
+blended result, and masked pass-intent predictions may change v5 blending weights.
+Evaluation exports and summaries distinguish inference configurations. Ordinary
+Hawkeye inference retains its layout; PNG comparison layouts are described below.
+For the complete shared contract, see [feature selections](docs/feature_selections.md).
 
 ### Carry availability in inference visualizations
 
@@ -2157,7 +2316,7 @@ The inference visualizers `scripts/visualize_action_components.py` and
 # Compare two checkpoints, applying the same mask to both.
 python scripts/run_and_visualize_hawkeye.py --compare `
   --pass-success-model-id pass_success/run_a --pass-success-model-id pass_success/run_b `
-  --inference-mask accel vel-node-features --situation-id SITUATION --only-pass-success
+  --inference-mask all:vel-node-features=defending --situation-id SITUATION --only-pass-success
 
 # Compare two complete outcome configurations. First scoring pairs with first conceding.
 python scripts/run_and_visualize_hawkeye.py --compare `
@@ -2165,10 +2324,10 @@ python scripts/run_and_visualize_hawkeye.py --compare `
   --outcome-scoring-model-id outcome_scoring/run_b --outcome-conceding-model-id outcome_conceding/run_b `
   --situation-id SITUATION --only-outcome-success --only-outcome-failure
 
-# A single numbered mask is enough to compare against unmasked inference.
+# Compare each numbered configuration against normal checkpoint inference.
 python scripts/visualize_action_components.py --match-id MATCH --action-id 10 `
   --pass-success-model-id pass_success/run_a --only-pass-success `
-  --inference-mask-1 accel --inference-mask-2 pos-node-features
+  --inference-mask-1 all:vel-node-features --inference-mask-2 all:vel-node-features=defending
 ```
 
 Alternative checkpoints must vary one model task or the scoring/conceding outcome pair. Paired
@@ -2860,21 +3019,23 @@ New training runs for `action_intent`, `pass_intent`, `success_intent`, `pass_su
 `pass_height`, `failure_receiver`, `outcome_scoring`, and `outcome_conceding` save
 `goal_context_version: 2`.
 `goal_nodes_aware` controls goal nodes and their incident edges in the GNN input.
-Use `--goal-nodes-aware` (the new-run default) or `--no-goal-nodes` in direct
-training or the training wrapper. `--no-goal-features` independently zeros explicit
-goal-relative geometry; it does not remove nodes.
+Use `--goal-nodes true` (the new-run default) or `--goal-nodes false` in direct
+training or the training wrapper. `--goal-features none` independently zeros
+explicit goal-relative geometry; it does not remove nodes.
 
 `include_goals` controls prediction candidates only. Direct action-intent training
-accepts `--include-goals` (default) and `--no-include-goals`. The multi-model wrapper
-accepts `--action-intent-include-goals` and `--no-action-intent-include-goals`, applied
+accepts `--include-goals true/false` (default: `true`). The multi-model wrapper
+accepts `--action-intent-include-goals true/false` (default: `true`), applied
 only to action intent. The other seven tasks require `include_goals=False`: goals
 can supply context but never receive predictions or enter their softmax.
 
 Action intent with goal predictions disabled excludes shot-labelled training and
 evaluation examples and records `shot_candidate_disabled` counts. Enabling goal
 predictions while disabling input goal nodes is an error. For example, train
-pass/carry-only action intent without goals using both `--no-goal-nodes` and
-`--no-include-goals` (the action-specific candidate flag in the wrapper).
+pass/carry-only action intent without goals using `--goal-nodes false` and
+`--include-goals false` in direct training, or `--goal-nodes false` and
+`--action-intent-include-goals false` in the wrapper. Legacy positive/negative
+spellings remain accepted.
 
 Checkpoints without a version marker retain version-1 task-dependent node removal
 and prediction behavior. Resume restores the saved settings and rejects conflicts.
