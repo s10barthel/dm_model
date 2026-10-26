@@ -58,6 +58,7 @@ def model_metadata(**overrides: object) -> dict[str, object]:
             "offside_aware": True,
             "extend_features": False,
             "lane_survival": True,
+            "sparsify": "none",
             "v_edge_feature_mode": "all",
         },
         "training_args": {
@@ -94,6 +95,7 @@ def test_saved_model_summary_includes_training_metrics_and_feature_flags(tmp_pat
     assert row["goal_features_aware"] == "false"
     assert row["goal_nodes_aware"] == "true"
     assert row["lane_survival"] == "true"
+    assert row["sparsify"] == "none"
     assert row["v_edge_feature_mode"] == "all"
     assert row["model_name"] == "gat"
     assert row["ipw_model_id"] == "pass_intent/pass_intent_1"
@@ -101,6 +103,30 @@ def test_saved_model_summary_includes_training_metrics_and_feature_flags(tmp_pat
     assert row["best_loss"] == "0.3"
     assert row["best_acc"] == "0.8"
     assert row["batch_size"] == "256"
+
+
+@pytest.mark.parametrize(
+    "signature, training_args, expected",
+    [
+        ({"sparsify": "none"}, {"sparsify": "delaunay"}, "none"),
+        ({"sparsify": "delaunay"}, {"sparsify": "none"}, "delaunay"),
+        ({"sparsify": "distance"}, {}, "distance"),
+        ({}, {"sparsify": "delaunay"}, "delaunay"),
+        (None, {"sparsify": "none"}, "none"),
+        ({}, {}, ""),
+        ({"sparsify": None}, {}, ""),
+        (None, None, ""),
+    ],
+)
+def test_saved_model_summary_sparsify_sources(tmp_path, monkeypatch, signature, training_args, expected) -> None:
+    saved, _, _ = patch_summary_roots(monkeypatch, tmp_path)
+    run_root = saved / "pass_success" / "pass_success_1"
+    write_json(run_root / "metadata.json", model_metadata(
+        feature_signature=signature, training_args=training_args))
+
+    path = metadata_summary.refresh_summary_for_parent(run_root.parent)
+
+    assert read_summary(path)[0]["sparsify"] == expected
 
 
 def test_bundle_summary_emits_one_row_per_model_with_bundle_id(tmp_path, monkeypatch) -> None:
@@ -112,6 +138,7 @@ def test_bundle_summary_emits_one_row_per_model_with_bundle_id(tmp_path, monkeyp
             model_id="pass_intent/pass_intent_1",
             task="pass_intent",
             run_id="pass_intent_1",
+            feature_signature={"sparsify": "delaunay"},
             training_args={"model": "gat", "batch_size": 128},
         ),
     )
@@ -133,6 +160,7 @@ def test_bundle_summary_emits_one_row_per_model_with_bundle_id(tmp_path, monkeyp
     assert {row["bundle_id"] for row in rows} == {"bundle_1"}
     assert {row["run_id"] for row in rows} == {"bundle_1"}
     assert {row["summary_scope"] for row in rows} == {"saved_bundle"}
+    assert [row["sparsify"] for row in rows] == ["delaunay", "none"]
 
 
 def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
@@ -157,6 +185,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
                         "goal_features_aware": True,
                         "goal_nodes_aware": False,
                         "lane_survival": True,
+                        "sparsify": "delaunay",
                         "v_edge_feature_mode": "no_poss",
                     },
                     "status": "running",
@@ -182,6 +211,7 @@ def test_component_summary_uses_model_records(tmp_path, monkeypatch) -> None:
     assert row["goal_features_aware"] == "true"
     assert row["goal_nodes_aware"] == "false"
     assert row["lane_survival"] == "true"
+    assert row["sparsify"] == "delaunay"
     assert row["v_edge_feature_mode"] == "no_poss"
     assert row["status"] == "running"
     assert row["xpass_metric"] == "None"
@@ -256,7 +286,8 @@ def test_component_summary_records_max_physical_xpass_from_cache_summary(tmp_pat
 
 def test_visualization_summary_prefers_selected_model_ids_and_falls_back_to_source_models(tmp_path, monkeypatch) -> None:
     saved, _, visualizations = patch_summary_roots(monkeypatch, tmp_path)
-    write_json(saved / "pass_success" / "selected" / "metadata.json", model_metadata(model_id="pass_success/selected", run_id="selected"))
+    write_json(saved / "pass_success" / "selected" / "metadata.json", model_metadata(
+        model_id="pass_success/selected", run_id="selected", feature_signature={"sparsify": "delaunay"}))
     write_json(saved / "pass_success" / "fallback" / "metadata.json", model_metadata(model_id="pass_success/fallback", run_id="fallback"))
     write_json(
         visualizations / "hawkeye" / "viz_selected" / "metadata.json",
@@ -280,6 +311,7 @@ def test_visualization_summary_prefers_selected_model_ids_and_falls_back_to_sour
     rows = read_summary(summary_path)
     assert [row["model_id"] for row in rows] == ["pass_success/fallback", "pass_success/selected"]
     assert {row["summary_scope"] for row in rows} == {"visualization"}
+    assert [row["sparsify"] for row in rows] == ["none", "delaunay"]
     assert {row["xpass_metric"] for row in rows} == {"None"}
     assert {row["xpass_weight"] for row in rows} == {""}
 
@@ -352,7 +384,7 @@ def test_stage_publication_refreshes_only_matching_summary(staged_model, stage) 
         model_id="action_intent/action_intent_1", task="action_intent", run_id="action_intent_1"))
     unrelated_summary = summary_path(unrelated.parent)
     original = (unrelated_summary.read_bytes(), unrelated_summary.stat().st_mtime_ns)
-    directory = create(stage, last_epoch=42, best_loss=0.111)
+    directory = create(stage, last_epoch=42, best_loss=0.111, feature_signature={"sparsify": "delaunay"})
 
     publish_stage_artifacts(directory)
 
@@ -361,6 +393,7 @@ def test_stage_publication_refreshes_only_matching_summary(staged_model, stage) 
     assert rows[0]["run_id"] == run_root.name
     assert rows[0]["status"] == "completed"
     assert rows[0]["last_epoch"] == "42"
+    assert rows[0]["sparsify"] == "delaunay"
     assert float(rows[0]["best_loss"]) == 0.111
     assert json.loads((run_root / "metadata.json").read_text())["artifact_stage"] == stage
     assert (run_root / "best_weights.pt").read_bytes() == stage.encode()
@@ -413,6 +446,7 @@ def test_completed_checkpoint_recreates_summary_without_changing_stage(staged_mo
     assert len(rows) == 1
     assert rows[0]["status"] == "completed"
     assert rows[0]["last_epoch"] == "12"
+    assert rows[0]["sparsify"] == "none"
     assert original == {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in directory.iterdir()}
 
 
@@ -562,3 +596,9 @@ def test_backfill_rebuilds_deterministically_and_skips_malformed_metadata(tmp_pa
     ]
     rows = read_summary(summary_path(saved / "pass_success"))
     assert [row["run_id"] for row in rows] == ["pass_success_1"]
+    assert rows[0]["sparsify"] == "none"
+    assert read_summary(summary_path(visualizations / "hawkeye"))[0]["sparsify"] == "none"
+    original = {path: path.read_bytes() for path in paths}
+
+    assert metadata_summary.refresh_all_summaries() == paths
+    assert {path: path.read_bytes() for path in paths} == original
