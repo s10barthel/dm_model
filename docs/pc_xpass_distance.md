@@ -67,6 +67,22 @@ explicit reaction delay. `--margin tta` remains the overall default. Original
 physical xPass and empirical `--margin reachability` do not use distance control.
 Hawkeye location/freeze generation accepts the same distance settings.
 
+Distance generation uses Numba (`numba>=0.68,<0.69`, included in
+`requirements.txt`) to compile support interpolation and the analytic angular
+maximum. Install project requirements in the environment used for generation.
+No additional CLI flag is needed. Fully validated tables use the compiled path;
+tables with unresolved cells retain the general NumPy lookup and its reference
+fallback rules. The same movement table and prediction-cache settings remain
+compatible because the model and interpolation definition are unchanged.
+
+Each worker loads Numba on its first nonanalytic distance batch. Native kernels
+compile or load their on-disk cache once per signature, then stay available for
+subsequent chunks and graphs. Initial compilation can add several seconds per
+worker; persistent worker pools amortize it. Numba's cache is stored under the
+module's `__pycache__` directory (or `NUMBA_CACHE_DIR` when configured). Kernels
+use one thread and strict floating-point arithmetic. TTA, original physical
+xPass, table preparation and cache-only reads do not initialize these kernels.
+
 Distance power must be positive and finite; allowance must be nonnegative and
 finite, including zero. Explicit temporal sigmoid flags (`--lane-power`,
 `--lane-inflection-point`, `--control-power`, `--control-inflection-point`) conflict
@@ -133,13 +149,17 @@ zero reaction delay, 3-degree/1 m pass grid, release speeds 3..25 m/s, and top-p
 separate fresh-cache writes in temporary directories, and warm cache reuse.
 Normal prediction caches and latest pointers are not changed by this diagnostic.
 Its output directory defaults to out/pc_xpass_distance.
+Use `--include-numpy` to compare the compiled implementation with the original
+distance lookup as well as TTA. The diagnostic checks final prediction
+equivalence, records first-state warmup separately, and times fresh cache writes.
 
 Distance queries depend on ball-arrival time and are materially more expensive
 than TTA lookup. Use the recorded benchmark rather than assuming the earlier
 constant-acceleration TTA overhead applies to this mode.
 
 
-Local measurement on 26 October 2026 (one computation worker):
+Original NumPy implementation, measured on 26 October 2026 (one computation
+worker; retained as the pre-optimization baseline):
 
 | Measurement | Acceleration TTA | Distance | Ratio |
 |---|---:|---:|---:|
@@ -173,3 +193,40 @@ For the two previously investigated top-pass-10 receiver scores:
 
 Reports: out/pc_xpass_distance/benchmark.json, validation.json and predictions.csv.
 The original prediction caches and their latest pointers were not modified.
+
+## Compiled implementation measurements
+
+The integrated Numba implementation was measured with one worker and two
+benchmark states, at the same movement, ball-flight and pass-grid settings:
+
+| Measurement | Acceleration TTA | Compiled distance | NumPy distance |
+|---|---:|---:|---:|
+| Numerical computation, one timed repetition after warmup | 1.440 s | 3.936 s | 33.606 s |
+| Fresh caches, median of three writes | 1.200 s | 3.461 s | 36.874 s |
+
+Fresh distance caches were **10.65 times faster** than the NumPy version and
+took **2.88 times** the TTA cache time. Warm distance-cache reuse took
+0.19-0.27 s. Graph loading, preparation and first-state warmup are excluded from
+these times; fresh-cache timings include cache writes. Absolute times vary with
+background load. These measurements do not establish whole-dataset throughput
+or parallel scaling.
+
+The diagnostic checked complete prediction-series equivalence with NumPy at
+1e-12 tolerance. All 96 independently solved spatial queries passed the 1 cm
+target; the largest error against either reference-bracket endpoint was
+4.72 mm. The focused distance/acceleration/version/reachability regression suite
+passed 140 tests, including Windows spawn, one-sided adaptive faces, and
+unresolved-table fallback behavior.
+All 140 saved receiver predictions across 14 states, including both Hawkeye
+examples, also matched the original implementation; maximum difference was
+2.22e-16.
+
+Reproduce the comparison in a separate output directory:
+
+~~~powershell
+python scripts/diagnostics/benchmark_pc_xpass_distance.py `
+  --table-id distance_accel7_v8_v1 --states 2 --include-numpy `
+  --output-dir out/distance_compiled_integration
+~~~
+
+Results: out/distance_compiled_integration/benchmark.json and validation.json.

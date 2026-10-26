@@ -34,6 +34,7 @@ def main():
     p.add_argument('--cache-states',type=int,default=2)
     p.add_argument('--cache-repeats',type=int,default=3)
     p.add_argument('--validation-points',type=int,default=96)
+    p.add_argument('--include-numpy',action='store_true',help='Also time the original NumPy distance lookup and check prediction equivalence')
     p.add_argument('--hawkeye-graphs',type=Path,help='Optional previously reconstructed graph dictionary, keyed by situation ID')
     p.add_argument('--output-dir',type=Path,default=ROOT/'out/pc_xpass_distance')
     args=p.parse_args()
@@ -58,9 +59,15 @@ def main():
                 table_bytes=(movement.table_path(args.table_id)/'table.npz').stat().st_size,
                 table_independent_holdouts=meta['independent_holdout_points'],variants={})
     scores={};comparisons=[]
-    for name,config in [('tta',tta_config),('distance',spatial_config)]:
-        options={**settings,'acceleration_config':config,'margin':name}
+    compiled_lookup=spatial._lookup_distances
+    variants=[('tta',tta_config),('distance',spatial_config)]
+    if args.include_numpy:variants.append(('distance_numpy',spatial_config))
+    for name,config in variants:
+        spatial._lookup_distances=spatial._lookup_distances_numpy if name=='distance_numpy' else compiled_lookup
+        options={**settings,'acceleration_config':config,'margin':'tta' if name=='tta' else 'distance'}
+        warmup_started=time.perf_counter()
         physics.compute_graph_pc_xpass_metrics(graphs[0][1],**options)
+        warmup_seconds=time.perf_counter()-warmup_started
         elapsed=[];before=movement.COUNTERS.copy()
         for repeat in range(args.repeats):
             started=time.perf_counter();rows=[]
@@ -70,9 +77,16 @@ def main():
             elapsed.append(time.perf_counter()-started)
         scores[name]=rows
         report['variants'][name]=dict(seconds=elapsed,median_seconds=float(np.median(elapsed)),
+            warmup_including_one_full_state_seconds=warmup_seconds,
             counters={k:movement.COUNTERS[k]-before[k] for k in before},
             measurement='numerical computation; graph loading/cache writes/table preparation excluded')
         atomic_json(args.output_dir/'benchmark.json',report)
+    spatial._lookup_distances=compiled_lookup
+    if args.include_numpy:
+        for compiled,original in zip(scores['distance'],scores['distance_numpy']):
+            pd.testing.assert_series_equal(compiled,original,check_exact=False,rtol=1e-12,atol=1e-12)
+        report['compiled_numpy_predictions_match']=True
+        report['distance_speedup_over_numpy']=report['variants']['distance_numpy']['median_seconds']/report['variants']['distance']['median_seconds']
     for (label,_),a,b in zip(graphs,scores['tta'],scores['distance']):
         for key in a.index:
             if key.endswith('__top_pass10_xpass') and np.isfinite(a[key]):comparisons.append(dict(state=label,receiver=key.split('__')[0],tta=float(a[key]),distance=float(b[key])))
@@ -110,8 +124,11 @@ def main():
             '--reaction-time','0','--ball-dec','drag','--top-pass','10','--top-xt','--use-position-discount','false','--num-workers','1',
             '--max-speed','25','--min-speed','3','--speed-step','2','--angle-step','3','--radial-gridsize','1']
     report['fresh_caches']=dict(states=min(args.cache_states,len(items)),repeats=args.cache_repeats,variants={})
-    for name,table in [('tta',args.tta_table_id),('distance',args.table_id)]:
-        flags=generate.parse_args(common+['--margin',name,'--accel-table-id',table])
+    cache_variants=[('tta',args.tta_table_id),('distance',args.table_id)]
+    if args.include_numpy:cache_variants.append(('distance_numpy',args.table_id))
+    for name,table in cache_variants:
+        spatial._lookup_distances=spatial._lookup_distances_numpy if name=='distance_numpy' else compiled_lookup
+        flags=generate.parse_args(common+['--margin','tta' if name=='tta' else 'distance','--accel-table-id',table])
         elapsed=[];warm=[]
         for repeat in range(args.cache_repeats):
             with tempfile.TemporaryDirectory(prefix='pc_distance_cache_') as temporary:
@@ -122,7 +139,10 @@ def main():
             print('cache',name,repeat,elapsed[-1],flush=True)
         report['fresh_caches']['variants'][name]=dict(seconds=elapsed,median_seconds=float(np.median(elapsed)),warm_cache_seconds=warm)
         atomic_json(args.output_dir/'benchmark.json',report)
+    spatial._lookup_distances=compiled_lookup
     report['fresh_cache_runtime_ratio']=report['fresh_caches']['variants']['distance']['median_seconds']/report['fresh_caches']['variants']['tta']['median_seconds']
+    if args.include_numpy:
+        report['fresh_cache_speedup_over_numpy']=report['fresh_caches']['variants']['distance_numpy']['median_seconds']/report['fresh_caches']['variants']['distance']['median_seconds']
     memory=psutil.Process().memory_info()
     report['process_peak_memory_bytes_including_loaded_graphs']=getattr(memory,'peak_wset',memory.rss)
     atomic_json(args.output_dir/'benchmark.json',report)

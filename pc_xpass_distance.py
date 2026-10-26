@@ -249,15 +249,57 @@ def configuration(accel,table_id,*,max_speeds,fingerprint=None):
                 spatial_tolerance=SPATIAL_TOL,reachability_time='exact')
 
 
+def _angle_grid(arrays):
+    if '_angles' not in arrays:
+        arrays['_angles']=np.unique(np.r_[arrays['low'][:,1],arrays['high'][:,1]])
+        arrays['_cosines']=np.cos(arrays['_angles'])
+        arrays['_sines']=np.sin(arrays['_angles'])
+    return arrays['_angles']
+
+
+@lru_cache(maxsize=1)
+def _compiled_kernels():
+    # Lazy per-process import: cache-only inference, TTA and preparation do not
+    # initialize Numba. Native signatures compile/load once on first use, then
+    # persist for every subsequent chunk and graph in that worker.
+    try:
+        import pc_xpass_distance_numba as kernels
+    except ModuleNotFoundError as exc:
+        if exc.name and (exc.name == 'numba' or exc.name.startswith('llvmlite')):
+            raise RuntimeError(
+                'Compiled pc-xPass distance control requires Numba; '
+                'install the project requirements in this Python environment.'
+            ) from exc
+        raise
+    return kernels
+
+
 def _lookup_distances(queries,targets,arrays,table_error=0.):
+    """Compiled lookup for validated uniform-speed batches; preserve fallbacks."""
+    if not len(queries):
+        return np.empty(0),np.zeros(0,bool)
+    # signed_distances batches one player at a time. Keep the general NumPy
+    # implementation for mixed-speed callers and tables needing reference
+    # fallback, including its conservative unknown-interval bounds.
+    leaves=arrays['children'][:,0]<0
+    if np.any(arrays['fallback'][leaves]) or not np.all(queries[:,0]==queries[0,0]):
+        return _lookup_distances_numpy(queries,targets,arrays,table_error)
+    angles=_angle_grid(arrays)
+    kernels=_compiled_kernels()
+    times,inverse=np.unique(queries[:,2],return_inverse=True)
+    left,right=kernels.support_profiles(queries[0,0],times,angles,arrays['low'],arrays['high'],
+                                       arrays['children'],arrays['axis'],arrays['values'])
+    result=kernels.angular_maxima(targets,inverse,left,right,angles,arrays['_cosines'],arrays['_sines'])
+    return result,np.zeros(len(result),bool)
+
+
+def _lookup_distances_numpy(queries,targets,arrays,table_error=0.):
     """Analytic global angular maximum, reusing each speed/time support slice.
 
     The union of table angular knots includes every piecewise-linear boundary,
     so subdividing onto this common grid changes no interpolated values.
     """
-    if '_angles' not in arrays:
-        arrays['_angles']=np.unique(np.r_[arrays['low'][:,1],arrays['high'][:,1]])
-    angles=arrays['_angles'];lo,hi=angles[:-1],angles[1:];width=len(lo)
+    angles=_angle_grid(arrays);lo,hi=angles[:-1],angles[1:];width=len(lo)
     unique,inverse=np.unique(queries[:,[0,2]],axis=0,return_inverse=True)
     points=np.column_stack([np.repeat(unique[:,0],width),np.tile(.5*(lo+hi),len(unique)),np.repeat(unique[:,1],width)])
     nodes=np.zeros(len(points),int)

@@ -257,3 +257,74 @@ def test_one_sided_angular_limits_at_adaptive_faces():
                 fallback=np.array([False,False,False]),values=np.array([[0]*8,[.2]*8,[.8]*8]))
     value,bad=spatial._lookup_distances(np.array([[.3,0,1.]]),np.array([[0.,2.]]),arrays)
     assert not bad.item() and value.item()==pytest.approx(1.8)
+
+
+def _angular_table():
+    arrays=dict(low=np.array([[0,0,0],[0,0,0],[0,math.pi/2,0]],float),
+                high=np.array([[1,math.pi,2],[1,math.pi/2,2],[1,math.pi,2]],float),
+                children=np.array([[1,2],[-1,-1],[-1,-1]]),axis=np.array([1,-1,-1]),
+                # Internal nodes may be marked fallback in real artifacts.
+                fallback=np.array([True,False,False]),values=np.zeros((3,8)))
+    for i in [1,2]:
+        pts=arrays['low'][i]+(arrays['high'][i]-arrays['low'][i])*motion._CORNERS
+        arrays['values'][i]=.2*pts[:,0]+.1*pts[:,2]+.1*np.abs(pts[:,1]-math.pi/2)
+    return arrays
+
+
+@pytest.mark.parametrize('beta',[0.,.37,1.])
+def test_compiled_lookup_matches_numpy_at_boundaries_and_reuses_kernels(beta,monkeypatch):
+    arrays=_angular_table();rng=np.random.default_rng(123)
+    times=np.r_[0.,2.,rng.uniform(0,2,98)]
+    queries=np.column_stack([np.full(len(times),beta),np.zeros(len(times)),times])
+    targets=rng.normal(size=(len(times),2));targets[:,1]=abs(targets[:,1])
+    targets[:5]=[[0,0],[1,0],[-1,0],[0,2],[0,.01]]
+    expected,bad=spatial._lookup_distances_numpy(queries,targets,arrays)
+    monkeypatch.setattr(spatial,'_lookup_distances_numpy',lambda *a,**kw:pytest.fail('Expected compiled lookup'))
+    actual,actual_bad=spatial._lookup_distances(queries,targets,arrays)
+    np.testing.assert_allclose(actual,expected,atol=1e-13,rtol=0)
+    np.testing.assert_array_equal(actual_bad,bad)
+    kernels=spatial._compiled_kernels()
+    signatures=(tuple(kernels.support_profiles.signatures),tuple(kernels.angular_maxima.signatures))
+    assert all(signatures)
+    spatial._lookup_distances(queries,targets,arrays)
+    assert spatial._compiled_kernels() is kernels
+    assert signatures==(tuple(kernels.support_profiles.signatures),tuple(kernels.angular_maxima.signatures))
+
+
+@pytest.mark.parametrize('partial_table',[False,True])
+def test_general_lookup_retains_unknown_interval_bounds(partial_table,monkeypatch):
+    arrays=_angular_table()
+    queries=np.array([[.1,0,1.],[.1 if partial_table else .8,0,1.]])
+    targets=np.array([[100.,0.],[-100.,0.]])
+    if partial_table:arrays['fallback'][2]=True
+    expected,bad=spatial._lookup_distances_numpy(queries,targets,arrays,.0001)
+    monkeypatch.setattr(spatial,'_compiled_kernels',lambda:pytest.fail('Expected general lookup'))
+    actual,actual_bad=spatial._lookup_distances(queries,targets,arrays,.0001)
+    np.testing.assert_array_equal(actual,expected)
+    np.testing.assert_array_equal(actual_bad,bad)
+    if partial_table:np.testing.assert_array_equal(actual_bad,[False,True])
+
+
+def _compiled_lookup_process():
+    arrays=_angular_table();q=np.array([[.3,0,1.]])
+    value,bad=spatial._lookup_distances(q,np.array([[0.,2.]]),arrays)
+    kernels=spatial._compiled_kernels()
+    return value,bad,bool(kernels.support_profiles.signatures and kernels.angular_maxima.signatures)
+
+
+def test_spawn_worker_uses_compiled_lookup():
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+    expected,bad,compiled=_compiled_lookup_process()
+    assert compiled
+    with ProcessPoolExecutor(max_workers=1,mp_context=multiprocessing.get_context('spawn')) as pool:
+        actual,actual_bad,worker_compiled=pool.submit(_compiled_lookup_process).result()
+    assert worker_compiled
+    np.testing.assert_array_equal(actual,expected)
+    np.testing.assert_array_equal(actual_bad,bad)
+
+
+def test_empty_lookup_needs_no_compiler(monkeypatch):
+    monkeypatch.setattr(spatial,'_compiled_kernels',lambda:pytest.fail('Empty query'))
+    values,bad=spatial._lookup_distances(np.empty((0,3)),np.empty((0,2)),_angular_table())
+    assert values.shape==bad.shape==(0,)
