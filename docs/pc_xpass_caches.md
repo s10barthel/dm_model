@@ -3,6 +3,8 @@
 Optional player acceleration and separate movement-table preparation are described
 in [pc_xpass_acceleration.md](pc_xpass_acceleration.md). Acceleration-based
 [distance raw control](pc_xpass_distance.md) is available with `--margin distance`.
+TTA raw control also supports an optional
+[blocking radius](pc_xpass_acceleration.md#tta-with-a-blocking-radius), default 0.
 
 pc-xPass models each speed-grid value as the initial release speed. Select its
 motion with `--ball-dec <number|drag>`; the default remains `0.45`.

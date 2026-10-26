@@ -24,6 +24,7 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
 SETTING_KEYS.update({"distance_power", "distance_allowance"})
+SETTING_KEYS.add("blocking_radius")
 SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
 RESERVED = {"acceleration", "reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
@@ -96,6 +97,8 @@ def settings(args: Namespace) -> dict[str, Any]:
     result.setdefault("export_lane_control", False)
     if result.get("accel") is None or result.get("accel") == "off":
         result = {k: v for k, v in result.items() if k not in {"accel", "accel_table_id", "accel_table_fingerprint"}}
+    if not result.get("blocking_radius", 0.):
+        result.pop("blocking_radius", None)
     return result
 
 
@@ -121,6 +124,12 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
             if "generation_settings" not in metadata:
                 raise ValueError(f"Not a versioned pc-xPass cache: {root}")
             metadata["generation_settings"].setdefault("export_lane_control", False)
+            recorded_radius = float(metadata["generation_settings"].get("blocking_radius", 0.))
+            if "blocking_radius" in explicit and getattr(args, "blocking_radius", 0.) != recorded_radius:
+                if not location:
+                    raise ValueError("--blocking-radius differs from cached settings; create a new pc-xPass version")
+                warnings.warn("--blocking-radius differs from cached settings; using cached value.", stacklevel=2)
+            args.blocking_radius = recorded_radius
             from pc_xpass_acceleration import parse_accel
             cached_accel = parse_accel(metadata["generation_settings"].get("accel"))
             if "accel" in explicit and parse_accel(getattr(args, "accel", None)) != cached_accel:
@@ -222,6 +231,10 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     atomic_json(root / "metadata.json", metadata)
     args._pc_generation_started = True
     print(f"pc-xPass cache version: {args.pc_xpass_id} ({args.pc_xpass_namespace})")
+    if effective.get("blocking_radius", 0.):
+        print(f"TTA raw control: radius={effective['blocking_radius']:g} m; "
+              f"lane offset={effective['lane_inflection_point']:g} s; "
+              f"endpoint offset={effective['control_inflection_point']:g} s")
 
 
 def finish_generation(args: Namespace, *, success: bool = True, coverage: dict[str, Any] | None = None) -> None:

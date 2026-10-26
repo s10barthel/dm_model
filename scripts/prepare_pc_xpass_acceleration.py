@@ -11,6 +11,8 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
+import copy
+from functools import partial
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -30,6 +32,7 @@ def parse_args(argv=None):
     p.add_argument("--min-ball-speed", type=float, default=3.)
     p.add_argument("--ball-dec", default="drag", help="For automatic distance-table time coverage: drag or nonnegative deceleration")
     p.add_argument("--accel", required=True, type=float)
+    p.add_argument("--blocking-radius", type=float, default=0., help="TTA disk radius in metres (default 0)")
     p.add_argument("--source-table-id", help="Reuse a completed table and its preparation state in a new table ID")
     p.add_argument("--max-player-speed", type=float, default=5.)
     p.add_argument("--max-player-speed-off", type=float)
@@ -39,6 +42,10 @@ def parse_args(argv=None):
     p.add_argument("--max-cells", type=int, default=None, help="Maximum tree nodes; difficult leaves use explicit solver fallback")
     p.add_argument("--max-depth", type=int, default=24)
     args = p.parse_args(argv)
+    try:
+        accel.validate_blocking_radius(args.blocking_radius, args.margin)
+    except ValueError as exc:
+        p.error(str(exc))
     for key in ("accel", "max_player_speed", "max_distance", "max_player_speed_off", "max_player_speed_def", "max_time", "min_ball_speed"):
         value = getattr(args, key)
         if value is not None and (not math.isfinite(value) or value <= 0):
@@ -64,6 +71,8 @@ def parse_args(argv=None):
 
 
 def _load_table(args):
+    if getattr(args, "_table_root", None):
+        return accel._load_path(Path(args._table_root))
     return (spatial.load_table if getattr(args, "margin", "tta") == "distance" else accel.load_table)(args.table_id)
 
 
@@ -98,11 +107,15 @@ def _split(nodes, index, axis):
 
 def _seed_from_source(args, root, caps):
     import shutil
-    source = accel.table_path(args.source_table_id)
-    meta, arrays = (spatial.load_table if getattr(args, "margin", "tta") == "distance" else accel.load_table)(args.source_table_id)
+    source = Path(args._source_root) if getattr(args, "_source_root", None) else accel.table_path(args.source_table_id)
+    meta, arrays = accel._load_path(source) if getattr(args, "_source_root", None) else (spatial.load_table if getattr(args, "margin", "tta") == "distance" else accel.load_table)(args.source_table_id)
     requested = dict(accel=args.accel, speeds=caps, max_distance=args.max_distance)
     if getattr(args, "margin", "tta") == "distance":
         requested["max_time"] = args.max_time
+    if getattr(args, "_blocking_normalized_radius", 0.):
+        requested["blocking_radius_normalized"] = args._blocking_normalized_radius
+    elif meta.get("blocking_radius_normalized"):
+        raise ValueError("Source disk-arrival slice cannot refine a point table")
     if any(meta["definition"].get(k) != value for k, value in requested.items()):
         raise ValueError("Source table must use the same preparation accel, speed caps and distance")
     if not (source/"checkpoint.json").exists() or not (source/"reference.sqlite").exists():
@@ -120,8 +133,9 @@ def _seed_from_source(args, root, caps):
             node = nodes[index]
             if node["children"][0] >= 0:
                 continue
-            if getattr(args, "margin", "tta") == "distance" and node["fallback"]:
-                # Re-evaluate every unvalidated support interval, not only final
+            if (getattr(args, "margin", "tta") == "distance" or
+                    getattr(args, "_blocking_normalized_radius", 0.)) and node["fallback"]:
+                # Re-evaluate every unvalidated leaf, not only final
                 # holdout failures. Its reference probes are reused from SQLite.
                 pending.append(index)
                 continue
@@ -151,11 +165,12 @@ def _seed_from_source(args, root, caps):
 
 
 def _build(args):
-    root = accel.table_path(args.table_id)
+    root = Path(args._table_root) if getattr(args, "_table_root", None) else accel.table_path(args.table_id)
     root.mkdir(parents=True, exist_ok=True)
     caps = [args.max_player_speed_off or args.max_player_speed, args.max_player_speed_def or args.max_player_speed]
     distance = getattr(args, "margin", "tta") == "distance"
-    worker = spatial.reference_point if distance else accel.reference_point
+    blocking = getattr(args, "_blocking_normalized_radius", 0.)
+    worker = spatial.reference_point if distance else partial(accel.reference_point, blocking_radius=blocking) if blocking else accel.reference_point
     tau = spatial.LOOKUP_TOL*args.accel/max(caps)**2 if distance else accel.TIME_TOL*args.accel/max(caps)
     rho = accel.POSITION_TOL*args.accel/max(caps)**2
     radius_max = args.accel*args.max_distance/min(caps)**2
@@ -163,11 +178,15 @@ def _build(args):
     # large-distance cells inexpensive without changing the motion model.
     if any(not math.isfinite(value) or value <= 0 for value in (tau, rho, radius_max)):
         raise ValueError("Preparation settings exceed finite normalized numerical scales")
-    low, high = [0., 0., math.log1p(min(1e-4, radius_max/1024))], [1., math.pi, math.log1p(radius_max)]
+    gap_max = max(1e-4, radius_max-blocking) if blocking else radius_max
+    low, high = [0., 0., math.log1p(min(1e-4, gap_max/1024))], [1., math.pi, math.log1p(gap_max)]
     definition = dict(movement_version=accel.VERSION, accel=args.accel, speeds=caps,
                       max_distance=args.max_distance, time_error_normalized=tau,
                       position_tolerance_normalized=rho, coordinates="speed_angle_log1p_radius",
                       max_cells=args.max_cells, max_depth=args.max_depth)
+    if blocking:
+        definition.update(blocking_version=accel.BLOCKING_VERSION, blocking_radius_normalized=blocking,
+                          coordinates="speed_angle_log1p_distance_beyond_disk")
     if distance:
         low, high = [0., 0., 0.], [1., math.pi, math.log1p(args.max_time*args.accel/min(caps))]
         definition.update(margin="distance", spatial_version=spatial.VERSION, max_time=args.max_time,
@@ -339,7 +358,7 @@ def _build(args):
         raise accel.UnresolvedArrival("No interpolation leaves met acceptance criteria; table remains unpublished")
     source_seconds = 0.
     if args.source_table_id:
-        source_meta, _ = (spatial.load_table if distance else accel.load_table)(args.source_table_id)
+        source_meta, _ = accel._load_path(Path(args._source_root)) if getattr(args, "_source_root", None) else (spatial.load_table if distance else accel.load_table)(args.source_table_id)
         source_seconds = source_meta.get("cumulative_preparation_seconds", source_meta["preparation_seconds"])
     if distance:
         meta.update(spatial_version=spatial.VERSION, margin="distance", supported_margins=["distance"],
@@ -354,6 +373,8 @@ def _build(args):
             node["fallback"] and any("unresolved" in memo[_key(point)]
                 for point in list(np.array(node["low"])+(np.array(node["high"])-np.array(node["low"]))*np.vstack([corners, probes]))+node.get("failed_probes", []))
             for node in leaves)
+    if blocking:
+        meta.update(blocking_version=accel.BLOCKING_VERSION, blocking_radius_normalized=blocking)
     meta["cumulative_preparation_seconds"] = source_seconds+meta["preparation_seconds"]
     from importlib.metadata import version
     meta["solver"] = {"name": "clarabel", "version": version("clarabel")}
@@ -361,6 +382,61 @@ def _build(args):
     _load_table(args)
     print(json.dumps(meta, indent=2), flush=True)
     return meta
+
+
+def _build_bundle(args):
+    """A fixed-radius 3-D slice for each distinct team speed cap."""
+    root = accel.table_path(args.table_id)
+    caps = [args.max_player_speed_off or args.max_player_speed, args.max_player_speed_def or args.max_player_speed]
+    definition = dict(blocking_version=accel.BLOCKING_VERSION, movement_version=accel.VERSION,
+                      accel=args.accel, speeds=caps, blocking_radius=args.blocking_radius,
+                      max_distance=args.max_distance, max_cells=args.max_cells, max_depth=args.max_depth)
+    if args.source_table_id:
+        definition["source_table_id"] = args.source_table_id
+    meta_path = root/"metadata.json"
+    if meta_path.exists():
+        existing = json.loads(meta_path.read_text())
+        if existing.get("definition") != definition:
+            raise ValueError("Table ID already has different preparation settings; use a new ID")
+        if existing.get("status") == "complete":
+            return accel.load_table(args.table_id)[0]
+    source_root = None
+    if args.source_table_id:
+        source_meta, _ = accel.load_table(args.source_table_id)
+        if any(source_meta.get("definition", {}).get(k) != definition[k]
+               for k in ("blocking_version", "accel", "speeds", "blocking_radius", "max_distance")):
+            raise ValueError("Source bundle must have matching acceleration, speed caps, radius and coverage")
+        source_root = accel.table_path(args.source_table_id)
+    atomic_json(meta_path, dict(status="preparing", definition=definition))
+    slices, child_metadata = [], []
+    for index, cap in enumerate(dict.fromkeys(caps)):
+        child = copy.copy(args)
+        child.max_player_speed = child.max_player_speed_off = child.max_player_speed_def = cap
+        child._table_root = str(root/f"slice_{index}")
+        child._blocking_normalized_radius = args.accel*args.blocking_radius/cap**2
+        if not math.isfinite(child._blocking_normalized_radius) or child._blocking_normalized_radius <= 0:
+            raise ValueError("Blocking radius exceeds finite normalized numerical scales")
+        if source_root:
+            child._source_root = str(source_root/f"slice_{index}")
+        meta = _build(child)
+        child_metadata.append(meta)
+        slices.append(dict(normalized_radius=child._blocking_normalized_radius, fingerprint=meta["fingerprint"]))
+    temporary = root/"table.tmp.npz"
+    np.savez_compressed(temporary, radii=np.array([s["normalized_radius"] for s in slices]),
+                        fingerprints=np.array([s["fingerprint"] for s in slices]))
+    temporary.replace(root/"table.npz")
+    metadata = dict(status="complete", definition=definition, movement_version=accel.VERSION,
+                    blocking_version=accel.BLOCKING_VERSION, blocking_slices=slices,
+                    blocking_radius=args.blocking_radius, fingerprint=accel._digest(root/"table.npz"),
+                    max_distance=args.max_distance, preparation_seconds=time.time()-root.stat().st_ctime,
+                    validation="Per-slice sampled reference/holdout validation; not an exhaustive proof")
+    for key in ("reference_points", "validation_points", "independent_holdout_points", "independent_holdout_failed_leaves", "leaves", "fallback_leaves", "unresolved_cells"):
+        metadata[key] = sum(m[key] for m in child_metadata)
+    metadata["cumulative_preparation_seconds"] = sum(m["cumulative_preparation_seconds"] for m in child_metadata)
+    atomic_json(meta_path, metadata)
+    accel.load_table(args.table_id)
+    print(json.dumps(metadata, indent=2), flush=True)
+    return metadata
 
 
 def build(args):
@@ -379,7 +455,7 @@ def build(args):
             except OSError as exc:
                 raise RuntimeError("Another process is preparing this table ID") from exc
             try:
-                return _build(args)
+                return _build_bundle(args) if getattr(args, "blocking_radius", 0.) else _build(args)
             finally:
                 handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
@@ -390,7 +466,7 @@ def build(args):
             except OSError as exc:
                 raise RuntimeError("Another process is preparing this table ID") from exc
             try:
-                return _build(args)
+                return _build_bundle(args) if getattr(args, "blocking_radius", 0.) else _build(args)
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 

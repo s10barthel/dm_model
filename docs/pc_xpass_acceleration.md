@@ -62,7 +62,8 @@ table nor the solver: it consumes stored predictions.
 Players retain their full tracked velocity, with magnitude clipped to the cap.
 The solver minimizes time to a stationary point with dr/dt=v, dv/dt=u,
 ||u||<=a and ||v||<=V. There is no reaction delay, terminal stopping requirement,
-interception radius, body orientation, obstacle, or pitch-boundary path constraint.
+body orientation, obstacle, or pitch-boundary path constraint. The default
+interception radius is zero; optional disk arrival is described below.
 Braking and turning share the vector acceleration budget. This reconstructs
 Spearman et al. (2017)'s constraints/objective, not an unpublished implementation.
 Acceleration 7 m/s² is an experiment setting, not a verified value from that paper.
@@ -99,6 +100,115 @@ guarantee. Stationary players and coincident targets use analytic solutions.
 Outside coverage and in failed validation cells, generation uses the reference
 solver; it never extrapolates or drops distant players. Statistics report
 acceleration_queries, acceleration_fallbacks and acceleration_fallback_seconds.
+
+## TTA with a blocking radius
+
+`--margin tta --blocking-radius R` changes raw control to use the earliest time
+the player's tracked centre can reach the closed disk of radius R metres around
+each target. It applies to **all players**, for both lane and endpoint raw control.
+Lane aggregation, endpoint competition, xT ranking and averaging retain their
+existing definitions. Radius defaults to zero, preserving old results, metadata
+fingerprints and cache reuse. The option is pc-xPass only and conflicts with
+distance and empirical-reachability margins.
+
+For a positive radius, omitted lane/control temporal offsets default to **zero**.
+Explicit `--lane-inflection-point` and `--control-inflection-point` values are
+respected; specifying 0.2 would retain a temporal allowance in addition to the disk.
+Resumed prediction caches inherit their recorded offsets and radius. Power 15
+retains its units of inverse seconds. Raw control is
+`sigmoid(power * (ball_time - disk_arrival_time + offset))`.
+
+With zero offset, 50% means disk arrival coincides with ball arrival. A player
+initially in/on the disk has arrival time zero, including when moving away. This
+is an **earliest-contact model**, not guaranteed occupancy at the later ball time.
+Terminal stopping is not required. A radius is distinct from spatial uncertainty.
+
+Prepare a separate bundle for accelerated disk arrival:
+
+~~~powershell
+python scripts/prepare_pc_xpass_acceleration.py --table-id pc_disk_v1 --margin tta --accel 7 --max-player-speed 8 --blocking-radius 1 --max-cells 22000
+python scripts/generate_physical_xpass.py --pc-xpass --accel 7 --accel-table-id pc_disk_v1 --max-player-speed 8 --blocking-radius 1 --reaction-time 0 --lane-inflection-point 0 --control-inflection-point 0
+~~~
+
+A bundle contains a three-dimensional slice for each distinct normalized radius
+`accel * R / V^2` needed by the attacking/defending speed caps. Preparation uses
+the same speed flags as generation. The slice coordinates are initial speed ratio,
+relative target angle, and log1p of normalized distance **beyond the disk**. Inside
+the disk is handled exactly. The normal 150 m player-target coverage is retained;
+targets outside table coverage and unsuitable cells use explicit reference solving.
+
+`--source-table-id` can refine a bundle into a new ID with matching preparation
+acceleration, caps, radius and coverage. Point tables and positive-radius bundles
+are not interchangeable. Other physical settings may reuse a bundle only if all
+normalized radii match and scaled time/position tolerances still pass. Cache
+identity records the actual physical radius and bundle checksum. Cache-only
+inference does not load the bundle or optimizer.
+
+The disk reference solver minimizes arrival time over all admissible trajectories,
+including sideways movement and reversal. It does not subtract R/V from point TTA
+or shrink the target along the initial radial line. Fixed-time trajectory residuals
+and continuous support bounds certify disk intersection/exclusion. Numerical
+acceptance remains a 10 ms arrival bracket and at most 1 cm terminal excess beyond
+the disk. Independent interpolation validation retains its separate 10 ms target.
+Unresolved probes never become trusted interpolation entries.
+
+With acceleration off, a positive radius also works under the existing fixed
+initial trajectory during reaction, then instantaneous capped-speed movement.
+Contact during that reaction segment is detected analytically. Radius zero retains
+the original reaction-time calculation exactly.
+
+Runtime looks up disk TTA once per player and target and reuses it across ball
+launch speeds. Repeated target coordinates, including the common origin of all
+polar rays, are evaluated once and expanded back to their original locations.
+No radius dimension is searched during normal prediction generation.
+
+Benchmark numerical compute, fresh temporary prediction-cache writes and independent
+reference checks using:
+
+~~~powershell
+python scripts/diagnostics/benchmark_pc_xpass_blocking.py --point-table-id accel7_v8 --radius-table-id pc_disk_v1 --blocking-radius 1
+~~~
+
+The optional `--hawkeye-graphs out/acceleration_lane_investigation/graphs.pt` adds
+the two previously investigated Hawkeye scenes to numerical timing/comparison.
+Input loading and one-time table preparation are excluded from generation timings.
+
+The local example bundle **accel7_v8_radius1_refined** is ready for a=7 m/s²,
+V=8 m/s and R=1 m. Preparing its source and refining it took 300.3 s in total
+with eight workers. Its compressed lookup files occupy 905,029 bytes. It contains
+22,000 leaves; unvalidated leaves use reference solving. Of 22,224 independent
+holdout probes, four leaves failed and were retained as explicit fallback rather
+than trusted interpolation. Validation is sampled, not an exhaustive error proof.
+
+An additional 48 real-state queries were checked with reference brackets tightened
+to 1 ms solely for the validation measurement. Their largest lookup deviation from
+either reference endpoint was 7.61 ms, within the 10 ms interpolation target. Normal
+reference solving still uses the agreed 10 ms bracket and 1 cm terminal-excess limits.
+
+Final local timing (26 October 2026), a=7, V=8, R=1, three repetitions and one
+computation worker:
+
+| Measurement | Point TTA, 0.2 s offsets | Disk TTA, zero offsets |
+|---|---:|---:|
+| Numerical computation, 12 benchmark states + two Hawkeye scenes | 3.869 s | 3.904 s |
+| Fresh cache creation, 12 loaded benchmark states | 3.715 s | 3.653 s |
+
+The measured numerical overhead is about 0.9%; cache-write timings are comparable.
+This is a small-state benchmark, not a whole-season runtime guarantee. Cached
+prediction reuse took about 1.00 s in both modes. The disk run had 60 reference
+fallbacks across 4,604,666 unique player-target evaluations including warmup and
+repetitions; fallback solving took 0.012 s in total. Scale-aware machine-precision
+contact comparisons prevent numerical roundoff at the closed-disk boundary from
+triggering expensive solves. They do not add a centimetre-scale physical radius.
+
+The two investigated Hawkeye top-pass-10 values change from 0.902 to 0.511
+(right-back, time_norm 0) and 0.886 to 0.856 (CM, time_norm 1). Both radius and the
+removal of temporal offsets participate in that comparison. The diagnostic also
+records a point-TTA variant with zero offsets to separate their effects.
+
+Numerical results, temporary fresh-cache timings, movement settings and the 48
+independent arrival checks are saved in
+`out/pc_xpass_blocking_benchmark_ready.json`.
 
 ## Benchmark
 

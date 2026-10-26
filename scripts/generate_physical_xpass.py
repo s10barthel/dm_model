@@ -423,7 +423,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error('--margin, --reachability-* and --distance-* require --pc-xpass')
     if args.pc_xpass:
         pc_versions.prepare_generation_args(parser, args, argv)
-    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id", "--accel", "--accel-table-id", "--distance-power", "--distance-allowance"} for token in (sys.argv[1:] if argv is None else argv)):
+    elif any(token.split("=", 1)[0] in {"--ball-dec", "--pc-xpass-id", "--accel", "--accel-table-id", "--distance-power", "--distance-allowance", "--blocking-radius"} for token in (sys.argv[1:] if argv is None else argv)):
         parser.error("--ball-dec, --pc-xpass-id, --accel and --accel-table-id require --pc-xpass")
     explicit_pc_only_flags = [
         name
@@ -1337,6 +1337,7 @@ def prewarm_runtime_items(
             acceleration_config=getattr(args, "acceleration_config", None),
             distance_power=getattr(args, "distance_power", 3.),
             distance_allowance=getattr(args, "distance_allowance", 1.),
+            blocking_radius=getattr(args, "blocking_radius", 0.),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),
@@ -1562,6 +1563,7 @@ def write_runtime_dataset_metadata(
             acceleration_config=getattr(args, "acceleration_config", None),
             distance_power=getattr(args, "distance_power", 3.),
             distance_allowance=getattr(args, "distance_allowance", 1.),
+            blocking_radius=getattr(args, "blocking_radius", 0.),
             dist_pass_div=float(args.dist_pass_div),
             dist_pass_min=float(args.dist_pass_min),
             dist_pass_max=float(args.dist_pass_max),

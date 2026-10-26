@@ -18,6 +18,7 @@ from itertools import product
 import numpy as np
 
 VERSION = "vector_acceleration_v1"
+BLOCKING_VERSION = "disk_arrival_v1"
 TIME_TOL = 0.01
 POSITION_TOL = 0.01
 ROOT = Path(__file__).resolve().parent / "data" / "pc_xpass" / "acceleration"
@@ -60,6 +61,20 @@ def _positive(value, name):
     if not math.isfinite(value) or value <= 0:
         raise ValueError(name + " must be positive and finite")
     return value
+
+
+def validate_blocking_radius(value, margin="tta"):
+    value = float(value)
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("--blocking-radius must be nonnegative and finite")
+    if value and margin != "tta":
+        raise ValueError("--blocking-radius requires --margin tta")
+    return value
+
+
+def disk_roundoff(position, targets, radius):
+    """Arithmetic-scale guard for contact with a closed disk, in metres."""
+    return 16*np.finfo(float).eps*(1+np.max(np.abs(position))+np.max(np.abs(targets), axis=-1)+radius)
 
 
 def _straight(distance, initial, accel, cap):
@@ -168,8 +183,12 @@ def _fixed_time(v0, target, duration, intervals):
 
 def solve_arrival(position, velocity, target, accel, max_speed, *,
                   time_tol=TIME_TOL, position_tol=POSITION_TOL,
-                  max_intervals=4096, max_evaluations=4000):
+                  max_intervals=4096, max_evaluations=4000, blocking_radius=0.):
     """Bracket the first arrival, not merely the first root found by bisection."""
+    radius = validate_blocking_radius(blocking_radius)
+    if radius:
+        return _solve_disk_arrival(position, velocity, target, accel, max_speed, radius,
+                                  time_tol, position_tol, max_intervals, max_evaluations)
     a = _positive(accel, "accel"); cap = _positive(max_speed, "max_speed")
     time_tol = _positive(time_tol, "time_tol"); position_tol = _positive(position_tol, "position_tol")
     origin, initial, destination = [np.asarray(x, dtype=float) for x in (position, velocity, target)]
@@ -271,6 +290,110 @@ def solve_arrival(position, velocity, target, accel, max_speed, *,
                    upper_velocity*cap, residual_upper*length_scale, largest_mesh, evaluations)
 
 
+def _solve_disk_arrival(position, velocity, target, accel, max_speed, radius,
+                        time_tol, position_tol, max_intervals, max_evaluations):
+    """Earliest contact with a disk, with continuous-time exclusion bounds."""
+    a, cap = _positive(accel, "accel"), _positive(max_speed, "max_speed")
+    time_tol = _positive(time_tol, "time_tol")
+    position_tol = _positive(position_tol, "position_tol")
+    origin, initial, destination = [np.asarray(x, float) for x in (position, velocity, target)]
+    if any(x.shape != (2,) or not np.isfinite(x).all() for x in (origin, initial, destination)):
+        raise ValueError("Movement position, velocity, and target must be finite 2-vectors")
+    initial = initial*min(1., cap/max(float(np.linalg.norm(initial)), 1e-300))
+    if np.linalg.norm(destination-origin) <= radius+disk_roundoff(origin, destination, radius):
+        return Arrival(0., 0., np.array([0.]), initial[None, :], 0., 0)
+    length, scale = cap*cap/a, cap/a
+    q, v0, r = (destination-origin)/length, initial/cap, radius/length
+    distance = float(np.linalg.norm(q))
+    if distance <= r:
+        return Arrival(0., 0., np.array([0.]), initial[None, :], 0., 0)
+    direction = q/distance
+    if np.linalg.norm(v0-(v0@direction)*direction) < 1e-12:
+        t = _straight(distance-r, float(v0@direction), 1., 1.)
+        knots = np.unique([0., min(t, 1.-float(v0@direction)), t])
+        velocities = np.minimum(float(v0@direction)+knots, 1.)[:, None]*direction
+        return Arrival(t*scale, t*scale, knots*scale, velocities*cap, 0., len(knots)-1)
+    # Before the cap binds, the two disks touch at the first positive root.
+    roots = np.roots([.25, 0., r-float(v0@v0), 2*float(q@v0), r*r-distance*distance])
+    positive = sorted(float(x.real) for x in roots if x.real > 0 and abs(x.imag) < 1e-7)
+    unbounded = positive[0] if positive else 0.
+    if unbounded:
+        offset = q-v0*unbounded
+        endpoint = q-r*offset/np.linalg.norm(offset)
+        control = 2*(endpoint-v0*unbounded)/unbounded**2
+        final = v0+control*unbounded
+        if np.linalg.norm(final) <= 1+1e-10 and np.linalg.norm(control) <= 1+1e-8:
+            return Arrival(unbounded*scale, unbounded*scale, np.array([0., unbounded*scale]),
+                           np.array([v0, final])*cap, 0., 1)
+    stop = .5*np.linalg.norm(v0)*v0
+    delta = q-stop
+    endpoint = stop if np.linalg.norm(delta) <= r else q-r*delta/np.linalg.norm(delta)
+    upper_times, upper_velocity = _stop_path(v0, endpoint)
+    upper = float(upper_times[-1])
+    lower = max(distance-r, unbounded, _straight(distance-r, float(v0@direction), 1., 1.))
+    # A capped acceleration arc followed by cruising is a feasible path, often
+    # far tighter than braking to a stop. It does not constrain the optimizer.
+    from scipy.optimize import brentq
+    speed2 = float(v0@v0)
+    def arc(duration):
+        offset = q-v0*duration
+        norm = float(np.linalg.norm(offset))
+        unit = offset/max(norm, 1e-300)
+        projection = float(v0@unit)
+        ramp = -projection+math.sqrt(max(0., projection**2+1-speed2))
+        return ramp*duration-.5*ramp*ramp-(norm-r), ramp, unit
+    if arc(lower)[0] <= 0 and arc(upper)[0] >= 0:
+        candidate = brentq(lambda t: arc(t)[0], lower, upper, xtol=1e-12)
+        _, ramp, unit = arc(candidate)
+        if 0 < ramp <= candidate and np.linalg.norm(v0+unit*ramp) <= 1+1e-8:
+            upper = candidate
+            upper_times = np.array([0., ramp, candidate])
+            upper_velocity = np.array([v0, v0+unit*ramp, v0+unit*ramp])
+    queue = [(-(upper-lower), lower, upper)]
+    t_eps, excess_goal = time_tol/scale, min(position_tol/length, 1e-8)
+    residual_upper, evaluations, largest_mesh = 0., 0, 32
+    while queue:
+        earliest = min(upper, min(left for _, left, _ in queue))
+        if upper-earliest <= t_eps:
+            break
+        _, left, right = heapq.heappop(queue)
+        right = min(right, upper)
+        if left >= upper:
+            continue
+        midpoint, n = .5*(left+right), 32
+        while True:
+            evaluations += 1
+            if evaluations > max_evaluations:
+                raise UnresolvedArrival("Disk arrival search exceeded evaluation budget")
+            residual, bound, trial = _fixed_time(v0, q, midpoint, n)
+            largest_mesh = max(largest_mesh, n)
+            if residual <= r+excess_goal:
+                upper, upper_velocity = midpoint, trial
+                upper_times = np.linspace(0., midpoint, n+1)
+                residual_upper = max(0., residual-r)
+                break
+            if bound-r > .5*(right-left):
+                break
+            if n >= max_intervals or right-left > 4*t_eps or residual-bound <= t_eps/16:
+                break
+            n *= 2
+        if bound-r > .5*(right-left):
+            continue
+        if right-left <= np.finfo(float).eps*max(1., upper):
+            raise UnresolvedArrival("Could not certify earliest disk arrival")
+        if left < min(midpoint, upper):
+            end = min(midpoint, upper)
+            heapq.heappush(queue, (-(end-left), left, end))
+        if midpoint < min(right, upper):
+            end = min(right, upper)
+            heapq.heappush(queue, (-(end-midpoint), midpoint, end))
+    earliest = min(upper, min((left for _, left, _ in queue), default=upper))
+    if upper-earliest > t_eps*(1+1e-8):
+        raise UnresolvedArrival("Disk arrival bracket exceeds tolerance")
+    return Arrival(earliest*scale, upper*scale, upper_times*scale, upper_velocity*cap,
+                   residual_upper*length, largest_mesh, evaluations)
+
+
 def table_path(table_id):
     from pc_xpass_versions import validate_id
     return ROOT / validate_id(table_id)
@@ -294,6 +417,22 @@ def _load(path, meta_stamp, array_stamp):
         raise ValueError("Corrupted acceleration table: " + path)
     with np.load(root/"table.npz", allow_pickle=False) as data:
         arrays = {k: data[k] for k in data.files}
+    if meta.get("blocking_slices"):
+        if meta.get("blocking_version") != BLOCKING_VERSION:
+            raise ValueError("Incompatible disk-arrival bundle")
+        slices = meta["blocking_slices"]
+        if (arrays.get("radii", np.array([])).tolist() != [s["normalized_radius"] for s in slices] or
+                arrays.get("fingerprints", np.array([])).tolist() != [s["fingerprint"] for s in slices]):
+            raise ValueError("Invalid disk-arrival bundle manifest")
+        loaded = []
+        for i, entry in enumerate(slices):
+            sm, sa = _load_path(root/f"slice_{i}")
+            if (sm["fingerprint"] != entry["fingerprint"] or
+                    sm.get("blocking_radius_normalized") != entry["normalized_radius"] or
+                    sm.get("blocking_version") != BLOCKING_VERSION):
+                raise ValueError("Disk-arrival slice differs from manifest")
+            loaded.append((sm, sa))
+        return meta, {"slices": loaded}
     if meta.get("spatial_version"):
         raise ValueError("Distance acceleration table cannot be used for --margin tta")
     n = len(arrays["low"])
@@ -315,14 +454,38 @@ def _load(path, meta_stamp, array_stamp):
 def load_table(table_id):
     root = table_path(table_id)
     try:
-        return _load(str(root), (root/"metadata.json").stat().st_mtime_ns,
-                     (root/"table.npz").stat().st_mtime_ns)
+        return _load_path(root)
     except FileNotFoundError as exc:
         raise ValueError(f"Missing acceleration table {table_id!r}; run scripts/prepare_pc_xpass_acceleration.py "
                          f"--table-id {table_id} --accel <a> --max-player-speed <V> first") from exc
 
 
-def configuration(accel=None, table_id=None, *, max_speeds=(5.,), fingerprint=None):
+def _load_path(root):
+    meta, arrays = _load(str(root), (root/"metadata.json").stat().st_mtime_ns,
+                         (root/"table.npz").stat().st_mtime_ns)
+    if meta.get("blocking_slices"):
+        # Check child stamps as well: the parent manifest may be unchanged.
+        children = []
+        for i, entry in enumerate(meta["blocking_slices"]):
+            child = _load_path(root/f"slice_{i}")
+            if (child[0]["fingerprint"] != entry["fingerprint"] or
+                    child[0].get("blocking_radius_normalized") != entry["normalized_radius"]):
+                raise ValueError("Disk-arrival slice differs from manifest")
+            children.append(child)
+        arrays = {"slices": children}
+    return meta, arrays
+
+
+def _disk_slice(meta, arrays, radius, accel, cap):
+    normalized = radius*accel/cap**2
+    for entry, loaded in zip(meta.get("blocking_slices", []), arrays.get("slices", [])):
+        if math.isclose(normalized, entry["normalized_radius"], rel_tol=1e-12, abs_tol=1e-14):
+            return loaded
+    raise ValueError("Acceleration table has no matching normalized blocking radius; prepare a compatible table")
+
+
+def configuration(accel=None, table_id=None, *, max_speeds=(5.,), fingerprint=None, blocking_radius=0.):
+    radius = validate_blocking_radius(blocking_radius)
     a = parse_accel(accel)
     if a is None:
         if table_id is not None:
@@ -331,18 +494,26 @@ def configuration(accel=None, table_id=None, *, max_speeds=(5.,), fingerprint=No
     if not table_id:
         raise ValueError("--accel-table-id is required with --accel <number>")
     caps = [_positive(v, "max_player_speed") for v in max_speeds]
-    meta, _ = load_table(table_id)
+    meta, arrays = load_table(table_id)
     if fingerprint is not None and fingerprint != meta["fingerprint"]:
         raise ValueError("Acceleration table fingerprint differs from recorded cache")
-    if (meta["time_error_normalized"]*max(caps)/a > TIME_TOL*(1+1e-10) or
-            meta["position_tolerance_normalized"]*max(caps)**2/a > POSITION_TOL*(1+1e-10)):
-        raise ValueError("Acceleration table is too coarse for requested accel/speed; prepare a compatible table")
-    return dict(accel=a, table_id=table_id, fingerprint=meta["fingerprint"], movement_version=VERSION,
+    if bool(radius) != bool(meta.get("blocking_slices")):
+        raise ValueError("Point-arrival and positive blocking-radius tables are not interchangeable")
+    for cap in caps:
+        sm = _disk_slice(meta, arrays, radius, a, cap)[0] if radius else meta
+        if (sm["time_error_normalized"]*cap/a > TIME_TOL*(1+1e-10) or
+                sm["position_tolerance_normalized"]*cap**2/a > POSITION_TOL*(1+1e-10)):
+            raise ValueError("Acceleration table is too coarse for requested accel/speed; prepare a compatible table")
+    result = dict(accel=a, table_id=table_id, fingerprint=meta["fingerprint"], movement_version=VERSION,
                 initial_speed="clip_preserve_direction", reaction_time=0., time_tolerance=TIME_TOL,
                 position_tolerance=POSITION_TOL)
+    if radius:
+        result.update(blocking_radius=radius, blocking_version=BLOCKING_VERSION)
+    return result
 
 
 def add_arguments(parser):
+    parser.add_argument("--blocking-radius", type=float, default=0., help="TTA raw control: earliest arrival within this radius in metres, for all players (default 0); positive radius defaults omitted temporal offsets to zero")
     parser.add_argument("--distance-power", type=float, default=3., help="Distance raw-control sigmoid slope in inverse metres (default 3)")
     parser.add_argument("--distance-allowance", type=float, default=1., help="Distance raw-control 50%% shortfall in metres (default 1)")
     parser.add_argument("--accel", default="off", help="pc-xPass only: 'off' or maximum vector acceleration in m/s^2")
@@ -353,12 +524,20 @@ def configure_args(parser, args):
     explicit = getattr(args, "_pc_explicit", set())
     # The ordinary physical path does not run pc_xpass_versions preparation.
     if not getattr(args, "pc_xpass", False):
-        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None) or explicit & {"distance_power", "distance_allowance"}:
+        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None) or explicit & {"distance_power", "distance_allowance", "blocking_radius"} or getattr(args, "blocking_radius", 0.):
             parser.error("--accel and --accel-table-id require --pc-xpass")
         args.accel, args.acceleration_config = None, {}
         return
     try:
         margin = getattr(args, "margin", "tta")
+        radius = validate_blocking_radius(getattr(args, "blocking_radius", 0.), margin)
+        if "blocking_radius" in explicit and margin != "tta":
+            raise ValueError("--blocking-radius requires --margin tta")
+        recorded = getattr(args, "_pc_existing_metadata", {}).get("generation_settings", {})
+        if radius:
+            for key in ("lane_inflection_point", "control_inflection_point"):
+                if key not in explicit and key not in recorded:
+                    setattr(args, key, 0.)
         distance_flags = explicit & {"distance_power", "distance_allowance"}
         if margin != "distance" and distance_flags:
             raise ValueError("--distance-power and --distance-allowance require --margin distance")
@@ -389,8 +568,9 @@ def configure_args(parser, args):
             from pc_xpass_distance import configuration as configure
         else:
             configure = configuration
+        extra = {"blocking_radius": radius} if margin == "tta" else {}
         args.acceleration_config = configure(a, getattr(args, "accel_table_id", None), max_speeds=caps,
-                                                fingerprint=getattr(args, "accel_table_fingerprint", None))
+                                                fingerprint=getattr(args, "accel_table_fingerprint", None), **extra)
         args.accel = a
         if a is not None:
             args.accel_table_fingerprint = args.acceleration_config["fingerprint"]
@@ -415,13 +595,26 @@ def arrival_times(players, target_x, target_y, max_speeds, config, valid=None):
     a = _positive(config["accel"], "accel")
     if caps.shape != (len(players),) or not np.isfinite(caps).all() or np.any(caps <= 0):
         raise ValueError("Acceleration needs one positive finite speed cap per player")
-    if (meta["time_error_normalized"]*caps.max()/a > TIME_TOL*(1+1e-10) or
-            meta["position_tolerance_normalized"]*caps.max()**2/a > POSITION_TOL*(1+1e-10)):
-        raise ValueError("Acceleration table is too coarse for requested player speeds")
+    radius = validate_blocking_radius(config.get("blocking_radius", 0.))
+    if bool(radius) != bool(meta.get("blocking_slices")):
+        raise ValueError("Blocking radius differs from acceleration table")
+    if radius and config.get("blocking_version") != BLOCKING_VERSION:
+        raise ValueError("Disk-arrival movement version changed")
+    root_meta, root_arrays = meta, arrays
     targets = np.column_stack([np.asarray(target_x).ravel(), np.asarray(target_y).ravel()])
     selected = np.ones(len(targets), bool) if valid is None else np.asarray(valid, bool).ravel()
+    if radius:
+        # Every polar ray repeats its origin. Solve identical targets once,
+        # particularly when that origin falls in an expensive fallback cell.
+        target_count, selected_indices = len(targets), np.flatnonzero(selected)
+        targets, inverse = np.unique(targets[selected], axis=0, return_inverse=True)
+        selected = np.ones(len(targets), bool)
     output = np.zeros((len(players), len(targets)))
     for i, (state, cap) in enumerate(zip(players, caps)):
+        meta, arrays = _disk_slice(root_meta, root_arrays, radius, a, cap) if radius else (root_meta, root_arrays)
+        if (meta["time_error_normalized"]*cap/a > TIME_TOL*(1+1e-10) or
+                meta["position_tolerance_normalized"]*cap**2/a > POSITION_TOL*(1+1e-10)):
+            raise ValueError("Acceleration table is too coarse for requested player speeds")
         position, velocity = np.asarray(state[:2], float), np.asarray(state[2:4], float)
         if not np.isfinite(state).all():
             raise ValueError("Nonfinite player input for acceleration")
@@ -431,15 +624,21 @@ def arrival_times(players, target_x, target_y, max_speeds, config, valid=None):
         speed = min(float(np.linalg.norm(velocity)), cap)
         indices = np.flatnonzero(selected)
         COUNTERS["queries"] += len(indices)
+        if radius:
+            outside = distance > radius+disk_roundoff(position, targets[selected], radius)
+            indices, delta, distance = indices[outside], delta[outside], distance[outside]
+            if not len(indices):
+                continue
         if speed == 0:
             ramp_distance = cap*cap/(2*a)
-            output[i, indices] = np.where(distance <= ramp_distance, np.sqrt(2*distance/a),
-                                           cap/a+(distance-ramp_distance)/cap)
+            travel = np.maximum(distance-radius, 0.)
+            output[i, indices] = np.where(travel <= ramp_distance, np.sqrt(2*travel/a),
+                                           cap/a+(travel-ramp_distance)/cap)
             continue
         direction = velocity/np.linalg.norm(velocity)
         theta = np.arccos(np.clip((delta @ direction)/np.maximum(distance, 1e-300), -1., 1.))
-        radius = a*distance/cap**2
-        queries = np.column_stack([np.full(len(indices), speed/cap), theta, np.log1p(radius)])
+        normalized_distance = a*np.maximum(distance-radius, 0.)/cap**2
+        queries = np.column_stack([np.full(len(indices), speed/cap), theta, np.log1p(normalized_distance)])
         node = np.zeros(len(indices), dtype=int)
         inside = np.all((queries >= arrays["low"][0]) & (queries <= arrays["high"][0]), axis=1)
         while True:
@@ -456,26 +655,31 @@ def arrival_times(players, target_x, target_y, max_speeds, config, valid=None):
             ids = np.flatnonzero(interpolated); leaves = node[ids]
             weights = (queries[ids]-arrays["low"][leaves])/(arrays["high"][leaves]-arrays["low"][leaves])
             delay = _interpolate(arrays["values"][leaves], weights)
-            output[i, indices[ids]] = (radius[ids]+delay)*cap/a
+            estimate = normalized_distance[ids]+delay
+            output[i, indices[ids]] = (np.maximum(0., estimate) if radius else estimate)*cap/a
         for j in np.flatnonzero(~interpolated):
             start = time.perf_counter()
-            result = solve_arrival(position, velocity, targets[indices[j]], a, cap)
+            result = solve_arrival(position, velocity, targets[indices[j]], a, cap, blocking_radius=radius)
             output[i, indices[j]] = result.time
             COUNTERS["fallbacks"] += 1
             COUNTERS["fallback_seconds"] += time.perf_counter()-start
         output[i, indices[distance == 0]] = 0.
+    if radius:
+        expanded = np.zeros((len(players), target_count))
+        expanded[:, selected_indices] = output[:, inverse]
+        output = expanded
     return output.reshape((len(players), *np.asarray(target_x).shape))
 
 
-def reference_point(task):
+def reference_point(task, blocking_radius=0.):
     """Picklable preparation worker, solving in normalized units."""
     point, time_tol, position_tol = task
     speed, theta, log_radius = point
-    radius = math.expm1(log_radius)
+    radius = blocking_radius+math.expm1(log_radius)
     target = radius*np.array([math.cos(theta), math.sin(theta)])
     try:
         result = solve_arrival([0., 0.], [speed, 0.], target, 1., 1.,
-                               time_tol=time_tol, position_tol=position_tol)
+                               time_tol=time_tol, position_tol=position_tol, blocking_radius=blocking_radius)
         return point, dict(lower=result.lower, upper=result.upper, residual=result.position_error,
                            intervals=result.intervals, evaluations=result.evaluations)
     except UnresolvedArrival as exc:
