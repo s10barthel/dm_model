@@ -230,3 +230,55 @@ def test_failed_completion_audit_does_not_publish_latest(tmp_path,monkeypatch):
     result=json.loads((tmp_path/'derived/metadata.json').read_text())
     assert result['status']=='failed' and 'model' not in result['intended_receiver_modes']
     latest.assert_not_called()
+
+
+@pytest.mark.parametrize(('split', 'variant', 'carries'), [
+    ('train', 'base', False),
+    ('test', 'base', False),
+    ('train', 'intent_train_augmented', False),
+    ('train', 'base', True),
+    ('test', 'base', True),
+])
+def test_main_serializes_numpy_split_ids_in_completion_report(tmp_path, monkeypatch, split, variant, carries):
+    train_ids = np.array(['train_b', 'train_a'], dtype=np.str_)
+    test_ids = np.array(['test_c'], dtype=np.str_)
+    selected_ids = train_ids if split == 'train' else test_ids
+    argv = ['graph_feature.py', '--run-id', 'report-test', '--split', split,
+            '--train-count', '2', '--labels-only', '--return_type', 'next_10',
+            '--only-intended-receiver-mode', 'model',
+            '--intended-receiver-model-id', 'success_intent/test',
+            '--receiver-extension-attempt', 'report-attempt', '--feature_variant', variant]
+    if carries:
+        argv.append('--use-carries')
+    if variant == 'intent_train_augmented':
+        argv.extend(['--intent-train-label-source-mode', 'original',
+                     '--intent-train-label-source-return-type', 'next_10'])
+    monkeypatch.setattr(gf.sys, 'argv', argv)
+    monkeypatch.setattr(gf, 'get_feature_run_root', lambda _: tmp_path)
+    monkeypatch.setattr(gf, 'load_base_splits', lambda **_: (train_ids, test_ids))
+    monkeypatch.setattr(gf.pd, 'read_parquet', lambda _: pd.DataFrame({
+        'stats_perform_match_id': ['train_b', 'train_a', 'test_c'],
+        'game_date': ['2026-01-01'] * 3,
+    }))
+    monkeypatch.setattr(gf, 'configure_worker_thread_limit', lambda _: None)
+
+    def finish_matches(tasks, **kwargs):
+        assert [task.match_id for task in tasks] == selected_ids.tolist()
+        assert all(type(task.match_id) is str for task in tasks)
+        assert all(task.args_dict['use_carries'] == carries for task in tasks)
+        return len(tasks), [], {}
+
+    monkeypatch.setattr(gf, 'run_match_generation', finish_matches)
+    gf.main()
+
+    report_name = f"{split}_{variant}{'_carries' if carries else ''}"
+    report = json.loads((tmp_path / 'generation_reports' / f'{report_name}.json').read_text())
+    assert report == {
+        'receiver_extension_attempt': 'report-attempt',
+        'expected_matches': selected_ids.tolist(),
+        'successful_matches': len(selected_ids),
+        'skipped_matches': [],
+        'receiver_stats': {},
+    }
+    graph_report = json.loads((tmp_path / 'graph_validation' / f'{report_name}.json').read_text())
+    assert graph_report['enabled'] is True

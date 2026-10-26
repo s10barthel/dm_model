@@ -2146,8 +2146,9 @@ def main() -> None:
     else:
         _, match_ids = load_base_splits(**split_selector(args))
 
+    match_ids = [str(match_id) for match_id in match_ids]
     tasks = build_match_tasks(
-        [str(match_id) for match_id in match_ids],
+        match_ids,
         lineups,
         args,
         feature_root,
