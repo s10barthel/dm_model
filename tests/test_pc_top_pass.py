@@ -37,6 +37,32 @@ def test_xt_changes_endpoint_and_pair_order_but_mean_uses_xpass():
     assert values.ravel()[indices].mean() == pytest.approx(0.3)
 
 
+def test_elevations_and_matching_ground_speed_share_one_pair():
+    values = np.array([[[.9, .89, .88], [.3, .2, .1]],
+                       [[.95, .8, np.nan], [.8, .6, .4]],
+                       [[.7, .6, .5], [np.nan, np.nan, np.nan]],
+                       [[.95, .8, .7], [.85, .8, .7]]])
+    speeds = [20., 20., 22., 20.]
+    assert ppm._pc_xpass_ranked_pass_indices(values, values, speeds=speeds).tolist() == [6, 21, 12]
+    # Stable tie chooses the earlier elevation; a ground/aerial tie chooses ground.
+    values[0, 0, 0] = .95
+    assert ppm._pc_xpass_ranked_pass_indices(values, values, speeds=speeds).tolist() == [0, 21, 12]
+    # Nearby but unequal speeds remain separate; no rounding or binning.
+    assert len(ppm._pc_xpass_ranked_pass_indices(values, values, speeds=[20., 20.+1e-10, 22., 20.])) == 5
+    assert ppm._pc_xpass_ranked_pass_indices(values*np.nan, values, speeds=speeds).size == 0
+
+
+def test_grouped_xt_selection_and_nonfinite_candidates():
+    values = np.array([[[.9, .4]], [[.8, .2]], [[.6, .3]]])
+    ranking = values * np.array([[[.1, 1.]], [[.1, 4.]], [[1., 1.]]])
+    speeds = [20., 20., 22.]
+    indices = ppm._pc_xpass_ranked_pass_indices(values, ranking, speeds=speeds)
+    assert indices.tolist() == [3, 4]
+    assert values.ravel()[indices].mean() == pytest.approx(.4)
+    ranking[1, 0, 1] = np.inf
+    assert ppm._pc_xpass_ranked_pass_indices(values, ranking, speeds=speeds).tolist() == [4, 1]
+
+
 @pytest.mark.parametrize("top_xt", [False, True])
 def test_compute_multiple_counts_matches_single_and_diagnostics(top_xt):
     graph = make_graph()

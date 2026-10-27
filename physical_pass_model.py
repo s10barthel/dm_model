@@ -601,7 +601,9 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
     if metadata.get("acceleration_config"):
         payload["acceleration_config"] = metadata["acceleration_config"]
     if metadata.get("high_pass_config"):
-        payload["high_pass_config"] = high_pass.validate(metadata["high_pass_config"])
+        payload["high_pass_config"] = high_pass.validate(metadata["high_pass_config"], allow_legacy=True)
+        if not high_pass.is_legacy(metadata["high_pass_config"]):
+            payload["top_pass_definition"] = metadata.get("top_pass_definition")
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -1226,7 +1228,7 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         if metadata_path.is_file():
             recorded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
             if recorded.get("high_pass_config"):
-                lookup["high_pass_config"] = high_pass.validate(recorded["high_pass_config"])
+                lookup["high_pass_config"] = high_pass.validate(recorded["high_pass_config"], allow_legacy=True)
             if recorded.get("blocking_radius", 0.):
                 lookup["blocking_radius"] = recorded["blocking_radius"]
             if recorded.get("acceleration_config"):
@@ -3032,15 +3034,29 @@ def _pc_xpass_top_option_indices(values: np.ndarray, ranking: np.ndarray, n: int
     return flat_indices[order]
 
 
-def _pc_xpass_ranked_pass_indices(values: np.ndarray, ranking: np.ndarray) -> np.ndarray:
-    """Rank distinct speed-angle pairs, retaining each pair's best finite endpoint."""
+def _pc_xpass_ranked_pass_indices(values: np.ndarray, ranking: np.ndarray, *, speeds=None) -> np.ndarray:
+    """Rank each speed/azimuth's best endpoint, across profiles with that speed."""
     finite = np.isfinite(values) & np.isfinite(ranking)
     valid_pairs = finite.any(axis=-1).ravel()
     endpoints = np.argmax(np.where(finite, ranking, -np.inf), axis=-1).ravel()
     pairs = np.flatnonzero(valid_pairs)
     indices = pairs * values.shape[-1] + endpoints[pairs]
     order = np.argsort(-ranking.ravel()[indices], kind="stable")
-    return indices[order]
+    indices = indices[order]
+    if speeds is None:
+        return indices
+    speeds = np.asarray(speeds, dtype=float)
+    if speeds.shape != (values.shape[0],):
+        raise ValueError("One release speed is required per candidate profile")
+    seen = set()
+    representatives = []
+    for index in indices:
+        profile, angle = divmod(int(index) // values.shape[-1], values.shape[1])
+        key = (float(speeds[profile]), angle)
+        if key not in seen:
+            representatives.append(index)
+            seen.add(key)
+    return np.asarray(representatives, dtype=int)
 
 
 def _pc_xpass_top_mean(values: np.ndarray, n: int) -> float:
@@ -3194,12 +3210,13 @@ def validate_pc_xpass_ball_motion_metadata(metadata: Mapping[str, Any]) -> BallD
         raise ValueError("Incompatible pc-xPass physics_version; create a new version.")
     if metadata.get("ball_drag") != expected.get("ball_drag"):
         raise ValueError("Incompatible pc-xPass ball_drag definition; create a new version.")
-    high_pass.validate(metadata.get("high_pass_config"))
+    high_config = high_pass.validate(metadata.get("high_pass_config"), allow_legacy=True)
+    if high_config and "top_pass_definition" in metadata:
+        if metadata["top_pass_definition"] != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION):
+            raise ValueError("Incompatible high-pass top_pass_definition; create a new version")
     recorded = metadata.get("generation_settings", {})
     if "high_pass" in recorded:
-        effective_high = high_pass.configuration(
-            **{key: recorded.get(key, default) for key, default in high_pass.DEFAULTS.items()},
-            speed_step=recorded.get("speed_step", PC_XPASS_DEFAULT_SPEED_STEP))
+        effective_high = high_pass.configuration_from_settings(recorded, legacy=high_pass.is_legacy(high_config))
         if effective_high != metadata.get("high_pass_config"):
             raise ValueError("Cache high-pass configuration differs from generation settings; create a new version")
     if "ball_dec" in recorded and parse_ball_dec(recorded["ball_dec"]) != value:
@@ -3401,10 +3418,8 @@ def compute_graph_pc_xpass_metrics(
             inflection_point=control_inflection_point,
         )
     if high_pass_config:
-        eligible = ball_heights[np.newaxis, ...] <= high_pass_config["cutoff"]
-        shared = control_raw_all is lane_raw_all
-        lane_raw_all = np.where(eligible, lane_raw_all, 0.)
-        control_raw_all = lane_raw_all if shared else np.where(eligible, control_raw_all, 0.)
+        lane_raw_all = np.where(ball_heights[np.newaxis, ...] <= high_pass_config["lane_cutoff"], lane_raw_all, 0.)
+        control_raw_all = np.where(ball_heights[np.newaxis, ...] <= high_pass_config["control_cutoff"], control_raw_all, 0.)
     shared_control = control_raw_all is lane_raw_all
     lane_raw_all = np.where(valid_targets[np.newaxis, ...], lane_raw_all, np.nan)
     control_raw_all = lane_raw_all if shared_control else np.where(valid_targets[np.newaxis, ...], control_raw_all, np.nan)
@@ -3549,7 +3564,8 @@ def compute_graph_pc_xpass_metrics(
                 )
         pass_metrics = [metric for metric in enabled_metrics if metric.startswith("top_pass")]
         if pass_metrics:
-            pass_indices = _pc_xpass_ranked_pass_indices(score, ranking)
+            pass_indices = (_pc_xpass_ranked_pass_indices(score, ranking, speeds=speeds) if high_pass_config
+                            else _pc_xpass_ranked_pass_indices(score, ranking))
             for metric in pass_metrics:
                 n = int(metric[len("top_pass"):-len("_xpass")])
                 indices = pass_indices[:n]
@@ -4746,6 +4762,7 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
+            high_pass.validate(metadata.get("high_pass_config"))
             if ("ball_dec" in metadata or "ball_drag" in metadata
                     or metadata.get("physics_version") == PC_XPASS_DRAG_PHYSICS_VERSION):
                 cached_dec = validate_pc_xpass_ball_motion_metadata(metadata)
@@ -6183,6 +6200,7 @@ def prewarm_physical_xpass_runtime_cache(
         reuse_metadata_path = Path(reuse_cache_dir) / "metadata.json"
         if reuse_metadata_path.is_file():
             reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
+            high_pass.validate(reuse_metadata.get("high_pass_config"))
             if validate_pc_xpass_ball_motion_metadata(reuse_metadata) != parse_ball_dec(ball_dec):
                 raise ValueError("pc-xPass reuse cache has incompatible ball deceleration; create a new version.")
             if acceleration_config and pc_xpass_lane_survival_metadata_fingerprint(reuse_metadata) != pc_xpass_lane_survival_metadata_fingerprint(cache_metadata):

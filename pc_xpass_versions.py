@@ -103,6 +103,7 @@ def settings(args: Namespace) -> dict[str, Any]:
         result.pop("blocking_radius", None)
     if result.get("high_pass", "off") == "off":
         result = {key: value for key, value in result.items() if key not in high_pass.KEYS}
+    result.pop("high_pass_cutoff", None)
     return result
 
 
@@ -111,6 +112,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
     check_selectors(args)
     tokens = list(sys.argv[1:] if argv is None else argv)
     explicit = {action.dest for token in tokens for action in [parser._option_string_actions.get(token.split("=", 1)[0])] if action}
+    explicit = high_pass.normalize_cutoff_args(parser, args, explicit)
     args._pc_explicit = explicit
     if "high_pass_angle" in explicit:
         args.high_pass_angle = sorted(set(args.high_pass_angle))
@@ -122,6 +124,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
         root = version_root(run_id, location)
         if location or root.exists():
             metadata = read_metadata(root)
+            high_pass.validate(metadata.get("high_pass_config"))
             if metadata.get("physical_input_contract") != PHYSICAL_INPUT_CONTRACT:
                 raise ValueError("Incompatible pc-xPass physical input contract; create a new cache version.")
             if not location:
@@ -186,6 +189,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
         root = Path(directory)
         if (root / "metadata.json").exists():
             legacy = read_metadata(root)
+            high_pass.validate(legacy.get("high_pass_config"))
             cached_dec = parse_ball_dec(legacy.get("ball_dec", 0.0))
             if "ball_dec" in explicit and parse_ball_dec(args.ball_dec) != cached_dec:
                 raise ValueError("Explicit cache directory uses different ball deceleration; create a new version.")
@@ -219,6 +223,7 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     if getattr(args, "dry_run", False):
         return
     old = read_metadata(root) if (root / "metadata.json").exists() else {}
+    high_pass.validate(old.get("high_pass_config"))
     if "generation_settings" in old:
         old["generation_settings"].setdefault("export_lane_control", False)
         old["generation_settings"].pop("pass_height_model_id", None)
@@ -234,6 +239,7 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
                     updated_at=now, status="running")
     if getattr(args, "high_pass_config", None):
         metadata["high_pass_config"] = high_pass.validate(args.high_pass_config)
+        metadata["top_pass_definition"] = high_pass.TOP_PASS_DEFINITION
     history = list(old.get("invocations", []))
     history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items()
                     if not k.startswith("_") and not k.startswith("pass_height")

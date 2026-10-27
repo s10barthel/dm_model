@@ -1,8 +1,10 @@
 # Best-pass opponent lane-control export
 
 [Aerial-enabled runs](pc_xpass_high_pass.md) use schema 2 and also export
-`elevation`, `target_z`, and `flight_time` for the selected pass. The contact
+`elevation`, `target_z`, and `flight_time` for the selected pass. The lane
 cutoff (default 2 m, inclusive) is applied before each opponent's lane maximum.
+The separate endpoint control cutoff defaults to 0.5 m; both thresholds and the
+ranking definition enter the cache identity. Export columns are unchanged.
 Schema 1 and its original columns remain in use for ground-only runs.
 
 Use a fresh pc-xPass run:

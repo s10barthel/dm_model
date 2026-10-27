@@ -1,6 +1,32 @@
 # Aerial PC xPass validation and local measurements
 
-27 October 2026. Implementation uses the user-approved configuration: aerial
+## Separate cutoffs and speed/azimuth grouping revision
+
+27 October 2026. The relevant physical/control/cache/visualization regression
+suite passed **966 tests and 49 subtests** after introducing separate 2 m lane
+and 0.5 m control cutoffs and grouping top-pass across elevations. Two additional
+cases, with and without xT ranking, verified aggregation when N exceeds the
+available speed/azimuth pairs, bringing the checked total to **968 tests**.
+
+Coverage includes exact cutoff boundaries on ascent and descent, independent
+lane/control masks with shared underlying formulas, all five endpoint
+normalizations, exact speed grouping, stable ties, and xT representative
+selection. CLI alias resolution, new-cache generation/resume, legacy stored-score
+and visualization reads, and rejection of legacy numerical work are checked.
+Windows two-worker output matches serial output with nondefault independent
+cutoffs. Production CLI generation/resume and existing lane-sidecar schemas pass.
+
+Ground-only behavior was compared directly against the pre-revision Git HEAD:
+all scores, metadata and lane-survival fingerprints matched exactly across the
+five endpoint normalization modes, both with and without xT (10 comparisons).
+
+## Initial implementation record
+
+The initial measurements below describe the first implementation, before the
+separate cutoffs and speed/azimuth grouping revision. See the
+[current behavior and cache compatibility](pc_xpass_high_pass.md).
+
+27 October 2026. The initial implementation used the user-approved configuration: aerial
 elevations 15/20/25/30 degrees, total release speeds 20..30 m/s, inherited speed
 step, a 2 m inclusive contact cutoff, ground-level launches, zero spin and the
 authors' 25 Hz flight/bounce/rolling updates. Ground candidates retain their

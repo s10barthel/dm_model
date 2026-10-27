@@ -1,6 +1,9 @@
 # Implementation plan: optional aerial candidates for PC xPass
 
-Status: all recommendations approved by the user and implemented on 27 October 2026. See [usage and validation](pc_xpass_high_pass.md). The following records the agreed implementation plan.
+Status: the initial plan was implemented on 27 October 2026. The following
+records that historical design. A subsequent approved revision separates lane
+and control cutoffs (2 m and 0.5 m) and groups top-pass by speed/azimuth across
+elevations. See [current usage and compatibility](pc_xpass_high_pass.md).
 
 ## Agreed behavior
 

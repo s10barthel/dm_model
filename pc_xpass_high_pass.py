@@ -3,13 +3,16 @@ from functools import lru_cache
 import hashlib
 import math
 from pathlib import Path
+import warnings
 import numpy as np
 
 DEFAULTS = dict(high_pass="off", high_pass_angle=[15., 20., 25., 30.],
                 high_pass_max_speed=30., high_pass_min_speed=20.,
-                high_pass_speed_step=None, high_pass_cutoff=2.)
+                high_pass_speed_step=None, high_pass_cutoff=None,
+                high_pass_lane_cutoff=2., high_pass_control_cutoff=.5)
 KEYS = set(DEFAULTS)
-TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_elevation_v2"
+LEGACY_TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_elevation_v2"
+TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_over_elevation_v3"
 DETAIL_SUFFIXES = ["__elevation", "__target_z", "__flight_time"]
 LANE_DETAILS = ["elevation", "target_z", "flight_time"]
 REVISION = "cc6af7b00769fc780d890eca49f530c2dce97e4b"
@@ -22,13 +25,19 @@ def add_arguments(parser):
     parser.add_argument("--high-pass-min-speed", type=float, default=20.)
     parser.add_argument("--high-pass-speed-step", type=float, default=None,
                         help="Aerial total release-speed spacing; inherits --speed-step.")
-    parser.add_argument("--high-pass-cutoff", type=float, default=2.,
-                        help="Maximum contact height in metres, inclusive; default 2.")
+    parser.add_argument("--high-pass-lane-cutoff", type=float, default=2.,
+                        help="Maximum lane interception height in metres, inclusive; default 2.")
+    parser.add_argument("--high-pass-control-cutoff", type=float, default=.5,
+                        help="Maximum endpoint control height in metres, inclusive; default 0.5.")
+    parser.add_argument("--high-pass-cutoff", type=float, default=None,
+                        help="Deprecated: explicitly set both height cutoffs to this value.")
 
 
 def configuration(high_pass="off", high_pass_angle=None, high_pass_max_speed=30.,
                   high_pass_min_speed=20., high_pass_speed_step=None,
-                  high_pass_cutoff=2., *, speed_step=2.):
+                  high_pass_cutoff=None, *, speed_step=2.,
+                  high_pass_lane_cutoff=None, high_pass_control_cutoff=None):
+    lane_cutoff, control_cutoff = _cutoffs(high_pass_cutoff, high_pass_lane_cutoff, high_pass_control_cutoff)
     if high_pass not in ("on", "off"):
         raise ValueError("--high-pass must be on or off")
     if high_pass == "off":
@@ -38,13 +47,41 @@ def configuration(high_pass="off", high_pass_angle=None, high_pass_max_speed=30.
         raise ValueError("--high-pass-angle requires finite angles strictly between 0 and 90 degrees")
     low, high = float(high_pass_min_speed), float(high_pass_max_speed)
     step = float(speed_step if high_pass_speed_step is None else high_pass_speed_step)
-    cutoff = float(high_pass_cutoff)
-    if any(not math.isfinite(v) or v <= 0 for v in (low, high, step, cutoff)) or low > high:
-        raise ValueError("High-pass speeds, step and cutoff must be positive and finite; min speed must not exceed max")
+    if any(not math.isfinite(v) or v <= 0 for v in (low, high, step, lane_cutoff, control_cutoff)) or low > high:
+        raise ValueError("High-pass speeds, step and cutoffs must be positive and finite; min speed must not exceed max")
     speeds = np.arange(low, high + step*.5, step)
     speeds = speeds[speeds <= high + 1e-9]
-    return dict(angles=angles, min_speed=low, max_speed=high, speed_step=step,
-                cutoff=cutoff, speeds=speeds.tolist(), physics=physics_metadata())
+    return dict(schema_version=2, angles=angles, min_speed=low, max_speed=high, speed_step=step,
+                lane_cutoff=lane_cutoff, control_cutoff=control_cutoff,
+                speeds=speeds.tolist(), physics=physics_metadata())
+
+
+def _cutoffs(alias, lane, control):
+    if alias is not None:
+        if lane is not None or control is not None:
+            raise ValueError("--high-pass-cutoff cannot be combined with --high-pass-lane-cutoff or --high-pass-control-cutoff")
+        warnings.warn("--high-pass-cutoff is deprecated; use --high-pass-lane-cutoff and --high-pass-control-cutoff. "
+                      "The alias sets both cutoffs.", FutureWarning, stacklevel=3)
+        return float(alias), float(alias)
+    return (float(DEFAULTS["high_pass_lane_cutoff"] if lane is None else lane),
+            float(DEFAULTS["high_pass_control_cutoff"] if control is None else control))
+
+
+def normalize_cutoff_args(parser, args, explicit):
+    """Resolve the alias before cached settings are compared or inherited."""
+    explicit = set(explicit)
+    if "high_pass_cutoff" in explicit:
+        try:
+            lane, control = _cutoffs(args.high_pass_cutoff,
+                args.high_pass_lane_cutoff if "high_pass_lane_cutoff" in explicit else None,
+                args.high_pass_control_cutoff if "high_pass_control_cutoff" in explicit else None)
+        except (ValueError, TypeError) as exc:
+            parser.error(str(exc))
+        args.high_pass_lane_cutoff, args.high_pass_control_cutoff = lane, control
+        args.high_pass_cutoff = None
+        explicit.remove("high_pass_cutoff")
+        explicit.update({"high_pass_lane_cutoff", "high_pass_control_cutoff"})
+    return explicit
 
 
 def physics_metadata():
@@ -64,16 +101,42 @@ def _source_digest():
     return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
 
 
-def validate(config):
+def is_legacy(config):
+    return config is not None and "schema_version" not in config and "cutoff" in config
+
+
+def _legacy_configuration(config):
+    result = {key: value for key, value in config.items()
+              if key not in {"schema_version", "lane_cutoff", "control_cutoff"}}
+    result["cutoff"] = config["lane_cutoff"]
+    return result
+
+
+def configuration_from_settings(settings, *, legacy=False):
+    selected = {key: settings.get(key, default) for key, default in DEFAULTS.items()}
+    if legacy:
+        cutoff = settings.get("high_pass_cutoff", 2.)
+        selected.update(high_pass_cutoff=None, high_pass_lane_cutoff=cutoff, high_pass_control_cutoff=cutoff)
+    result = configuration(**selected, speed_step=settings.get("speed_step", 2.))
+    return _legacy_configuration(result) if legacy and result else result
+
+
+def validate(config, *, allow_legacy=False):
     if config is None:
         return None
     try:
+        legacy = is_legacy(config)
         expected = configuration("on", config["angles"], config["max_speed"], config["min_speed"],
-                                 config["speed_step"], config["cutoff"])
+            config["speed_step"], high_pass_lane_cutoff=config["cutoff"] if legacy else config["lane_cutoff"],
+            high_pass_control_cutoff=config["cutoff"] if legacy else config["control_cutoff"])
+        if legacy:
+            expected = _legacy_configuration(expected)
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Invalid high-pass configuration; create a new pc-xPass version") from exc
     if config != expected:
         raise ValueError("Incompatible high-pass configuration or physics; create a new pc-xPass version")
+    if legacy and not allow_legacy:
+        raise ValueError("Legacy high-pass caches are read-only; create a new pc-xPass version")
     return config
 
 
@@ -87,11 +150,12 @@ def cli_settings(config):
     validate(config)
     return dict(high_pass="on", high_pass_angle=config["angles"],
                 high_pass_max_speed=config["max_speed"], high_pass_min_speed=config["min_speed"],
-                high_pass_speed_step=config["speed_step"], high_pass_cutoff=config["cutoff"])
+                high_pass_speed_step=config["speed_step"], high_pass_cutoff=None,
+                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"])
 
 
 def configure_args(parser, args):
-    explicit = getattr(args, "_pc_explicit", set())
+    explicit = normalize_cutoff_args(parser, args, getattr(args, "_pc_explicit", set()))
     selected = kwargs(args)
     try:
         if explicit & KEYS and not getattr(args, "pc_xpass", False):
@@ -147,4 +211,7 @@ def candidates(distances, ground_speeds, ground_times, ground_reachable, config)
 
 
 def top_pass_definition(metadata, legacy):
-    return TOP_PASS_DEFINITION if metadata.get("high_pass_config") else legacy
+    config = metadata.get("high_pass_config")
+    if not config:
+        return legacy
+    return LEGACY_TOP_PASS_DEFINITION if is_legacy(config) else TOP_PASS_DEFINITION

@@ -1384,8 +1384,11 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 PC-xPass generation can add aerial candidates with `--high-pass on`. The default
 elevations are `--high-pass-angle 15 20 25 30`, total release speeds range from
 `--high-pass-min-speed 20` to `--high-pass-max-speed 30`, and
-`--high-pass-speed-step` inherits `--speed-step`. Contact is eligible at or below
-`--high-pass-cutoff 2` metres. See [aerial PC-xPass](docs/pc_xpass_high_pass.md)
+`--high-pass-speed-step` inherits `--speed-step`. Lane interception uses
+`--high-pass-lane-cutoff 2` metres and endpoint control uses
+`--high-pass-control-cutoff 0.5` metres. Top-pass retains one representative per
+speed and horizontal angle, selecting its best elevation and endpoint. Use a
+fresh cache ID for this revision. See [aerial PC-xPass](docs/pc_xpass_high_pass.md)
 for physics, combined ranking, cache compatibility and measurement commands.
 
 Physical xPass is now a precompute-first runtime signal from Jonas Bischofberger's `accessible-space` package. Generate the runtime caches once, then inference and visualization read those caches without running the expensive physical simulation.

@@ -3,7 +3,8 @@
 Optional [aerial candidates](pc_xpass_high_pass.md) reuse immutable 25 Hz flight
 profiles per worker. `--high-pass on` adds elevations 15/20/25/30 degrees and
 20..30 m/s total speeds by default; the aerial step inherits `--speed-step`.
-The shared contact cutoff defaults to 2 m. Measure the additional player/time
+Lane interception defaults to a 2 m height cutoff; endpoint control uses 0.5 m.
+Measure the additional player/time
 queries with `scripts/diagnostics/benchmark_pc_xpass_high_pass.py`.
 
 PC-xPass generation uses one lazy, reusable compute session per dataset. Sportec
