@@ -3216,7 +3216,8 @@ def validate_pc_xpass_ball_motion_metadata(metadata: Mapping[str, Any]) -> BallD
             raise ValueError("Incompatible high-pass top_pass_definition; create a new version")
     recorded = metadata.get("generation_settings", {})
     if "high_pass" in recorded:
-        effective_high = high_pass.configuration_from_settings(recorded, legacy=high_pass.is_legacy(high_config))
+        effective_high = high_pass.configuration_from_settings(recorded,
+            schema_version=high_config.get("schema_version") if high_config else 3)
         if effective_high != metadata.get("high_pass_config"):
             raise ValueError("Cache high-pass configuration differs from generation settings; create a new version")
     if "ball_dec" in recorded and parse_ball_dec(recorded["ball_dec"]) != value:

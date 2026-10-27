@@ -1,6 +1,34 @@
 # Aerial PC xPass validation and local measurements
 
+## Explicit speed-list revision
+
+27 October 2026. New runs use aerial configuration schema 3, with default
+speeds 21/23/25/27/29 m/s and elevations 20/25/30 degrees: 15 profiles per
+azimuth, independent of the ground speed step. Current usage and compatibility
+are documented in [aerial PC xPass](pc_xpass_high_pass.md).
+
+The relevant physical/control/cache/visualization regression suite passed
+**989 tests and 49 subtests**. This includes production CLI generation/resume
+and actual Windows worker consistency. Ground-only scores, metadata and
+fingerprints matched the pre-list Git HEAD exactly across all five endpoint
+normalization modes, with and without xT (10 comparisons).
+
+The frozen reference fixture was extended using the original pinned upstream
+function, executed separately from the adapted simulator. All 24 historical
+arrays were reproduced and preserved exactly; 15 new default trajectories were
+added, giving 39 references. Provenance, source/function hashes, coefficients
+and generation parameters are in `tests/fixtures/high_pass_upstream.json`.
+
+Both historical range formats retain their recorded grids and ranking semantics
+for read-only consumers. Tests cover historical defaults and inherited speed
+steps, stored-score/visualization reads, and rejection of numerical work without
+changing historical metadata. New-run tests cover canonical list ordering,
+custom irregular/single-value lists, obsolete-option rejection, speed-step
+independence and shared ground/aerial top-pass groups.
+
 ## Separate cutoffs and speed/azimuth grouping revision
+
+This preceding revision used the former 24-profile range grid.
 
 27 October 2026. The relevant physical/control/cache/visualization regression
 suite passed **966 tests and 49 subtests** after introducing separate 2 m lane

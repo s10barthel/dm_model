@@ -6,9 +6,8 @@ from pathlib import Path
 import warnings
 import numpy as np
 
-DEFAULTS = dict(high_pass="off", high_pass_angle=[15., 20., 25., 30.],
-                high_pass_max_speed=30., high_pass_min_speed=20.,
-                high_pass_speed_step=None, high_pass_cutoff=None,
+DEFAULTS = dict(high_pass="off", high_pass_angle=[20., 25., 30.],
+                high_pass_speed=[21., 23., 25., 27., 29.], high_pass_cutoff=None,
                 high_pass_lane_cutoff=2., high_pass_control_cutoff=.5)
 KEYS = set(DEFAULTS)
 LEGACY_TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_elevation_v2"
@@ -21,10 +20,8 @@ REVISION = "cc6af7b00769fc780d890eca49f530c2dce97e4b"
 def add_arguments(parser):
     parser.add_argument("--high-pass", choices=["on", "off"], default="off")
     parser.add_argument("--high-pass-angle", nargs="+", type=float, default=DEFAULTS["high_pass_angle"].copy())
-    parser.add_argument("--high-pass-max-speed", type=float, default=30.)
-    parser.add_argument("--high-pass-min-speed", type=float, default=20.)
-    parser.add_argument("--high-pass-speed-step", type=float, default=None,
-                        help="Aerial total release-speed spacing; inherits --speed-step.")
+    parser.add_argument("--high-pass-speed", nargs="+", type=float, default=DEFAULTS["high_pass_speed"].copy(),
+                        help="Total 3D release speeds in m/s; independent of --speed-step.")
     parser.add_argument("--high-pass-lane-cutoff", type=float, default=2.,
                         help="Maximum lane interception height in metres, inclusive; default 2.")
     parser.add_argument("--high-pass-control-cutoff", type=float, default=.5,
@@ -33,9 +30,7 @@ def add_arguments(parser):
                         help="Deprecated: explicitly set both height cutoffs to this value.")
 
 
-def configuration(high_pass="off", high_pass_angle=None, high_pass_max_speed=30.,
-                  high_pass_min_speed=20., high_pass_speed_step=None,
-                  high_pass_cutoff=None, *, speed_step=2.,
+def configuration(high_pass="off", high_pass_angle=None, *, high_pass_speed=None, high_pass_cutoff=None,
                   high_pass_lane_cutoff=None, high_pass_control_cutoff=None):
     lane_cutoff, control_cutoff = _cutoffs(high_pass_cutoff, high_pass_lane_cutoff, high_pass_control_cutoff)
     if high_pass not in ("on", "off"):
@@ -45,15 +40,12 @@ def configuration(high_pass="off", high_pass_angle=None, high_pass_max_speed=30.
     angles = sorted(set(float(x) for x in (DEFAULTS["high_pass_angle"] if high_pass_angle is None else high_pass_angle)))
     if not angles or any(not math.isfinite(a) or not 0 < a < 90 for a in angles):
         raise ValueError("--high-pass-angle requires finite angles strictly between 0 and 90 degrees")
-    low, high = float(high_pass_min_speed), float(high_pass_max_speed)
-    step = float(speed_step if high_pass_speed_step is None else high_pass_speed_step)
-    if any(not math.isfinite(v) or v <= 0 for v in (low, high, step, lane_cutoff, control_cutoff)) or low > high:
-        raise ValueError("High-pass speeds, step and cutoffs must be positive and finite; min speed must not exceed max")
-    speeds = np.arange(low, high + step*.5, step)
-    speeds = speeds[speeds <= high + 1e-9]
-    return dict(schema_version=2, angles=angles, min_speed=low, max_speed=high, speed_step=step,
+    speeds = sorted(set(float(x) for x in (DEFAULTS["high_pass_speed"] if high_pass_speed is None else high_pass_speed)))
+    if not speeds or any(not math.isfinite(v) or v <= 0 for v in (*speeds, lane_cutoff, control_cutoff)):
+        raise ValueError("High-pass speeds and cutoffs must be positive and finite; speed list must not be empty")
+    return dict(schema_version=3, angles=angles,
                 lane_cutoff=lane_cutoff, control_cutoff=control_cutoff,
-                speeds=speeds.tolist(), physics=physics_metadata())
+                speeds=speeds, physics=physics_metadata())
 
 
 def _cutoffs(alias, lane, control):
@@ -102,23 +94,47 @@ def _source_digest():
 
 
 def is_legacy(config):
+    """The original single-cutoff format also used a different ranking definition."""
     return config is not None and "schema_version" not in config and "cutoff" in config
 
 
-def _legacy_configuration(config):
-    result = {key: value for key, value in config.items()
-              if key not in {"schema_version", "lane_cutoff", "control_cutoff"}}
-    result["cutoff"] = config["lane_cutoff"]
+def _range_configuration(angles, low, high, step, lane, control, *, legacy=False):
+    """Reconstruct historical range formats for validation, never generation."""
+    low, high, step = float(low), float(high), float(step)
+    if any(not math.isfinite(v) or v <= 0 for v in (low, high, step)) or low > high:
+        raise ValueError("Invalid historical high-pass speed range")
+    speeds = np.arange(low, high + step*.5, step)
+    speeds = speeds[speeds <= high + 1e-9]
+    result = configuration("on", angles, high_pass_speed=speeds,
+                           high_pass_lane_cutoff=lane, high_pass_control_cutoff=control)
+    result.update(schema_version=2, min_speed=low, max_speed=high, speed_step=step)
+    if legacy:
+        result.pop("schema_version")
+        result["cutoff"] = result.pop("lane_cutoff")
+        result.pop("control_cutoff")
     return result
 
 
-def configuration_from_settings(settings, *, legacy=False):
+def configuration_from_settings(settings, *, schema_version=3):
+    if schema_version in (None, 2):
+        # Historical defaults must not follow changes to today's CLI defaults.
+        if settings.get("high_pass", "off") == "off":
+            return None
+        if settings.get("high_pass") != "on":
+            raise ValueError("Invalid historical high-pass mode")
+        step = settings.get("high_pass_speed_step")
+        if step is None:
+            step = settings.get("speed_step", 2.)
+        legacy = schema_version is None
+        lane = settings.get("high_pass_cutoff", 2.) if legacy else settings.get("high_pass_lane_cutoff", 2.)
+        control = lane if legacy else settings.get("high_pass_control_cutoff", .5)
+        return _range_configuration(settings.get("high_pass_angle", [15., 20., 25., 30.]),
+            settings.get("high_pass_min_speed", 20.), settings.get("high_pass_max_speed", 30.),
+            step, lane, control, legacy=legacy)
+    if schema_version != 3:
+        raise ValueError("Unsupported high-pass configuration schema; create a new pc-xPass version")
     selected = {key: settings.get(key, default) for key, default in DEFAULTS.items()}
-    if legacy:
-        cutoff = settings.get("high_pass_cutoff", 2.)
-        selected.update(high_pass_cutoff=None, high_pass_lane_cutoff=cutoff, high_pass_control_cutoff=cutoff)
-    result = configuration(**selected, speed_step=settings.get("speed_step", 2.))
-    return _legacy_configuration(result) if legacy and result else result
+    return configuration(**selected)
 
 
 def validate(config, *, allow_legacy=False):
@@ -126,17 +142,22 @@ def validate(config, *, allow_legacy=False):
         return None
     try:
         legacy = is_legacy(config)
-        expected = configuration("on", config["angles"], config["max_speed"], config["min_speed"],
-            config["speed_step"], high_pass_lane_cutoff=config["cutoff"] if legacy else config["lane_cutoff"],
-            high_pass_control_cutoff=config["cutoff"] if legacy else config["control_cutoff"])
-        if legacy:
-            expected = _legacy_configuration(expected)
-    except (KeyError, TypeError, ValueError) as exc:
+        version = config.get("schema_version")
+        if legacy or version == 2:
+            expected = _range_configuration(config["angles"], config["min_speed"], config["max_speed"],
+                config["speed_step"], config["cutoff"] if legacy else config["lane_cutoff"],
+                config["cutoff"] if legacy else config["control_cutoff"], legacy=legacy)
+        elif version == 3:
+            expected = configuration("on", config["angles"], high_pass_speed=config["speeds"],
+                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"])
+        else:
+            raise ValueError("Unsupported high-pass configuration schema")
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("Invalid high-pass configuration; create a new pc-xPass version") from exc
     if config != expected:
         raise ValueError("Incompatible high-pass configuration or physics; create a new pc-xPass version")
-    if legacy and not allow_legacy:
-        raise ValueError("Legacy high-pass caches are read-only; create a new pc-xPass version")
+    if version != 3 and not allow_legacy:
+        raise ValueError("Range-based high-pass caches are read-only; create a new pc-xPass version")
     return config
 
 
@@ -149,8 +170,7 @@ def cli_settings(config):
         return dict(DEFAULTS)
     validate(config)
     return dict(high_pass="on", high_pass_angle=config["angles"],
-                high_pass_max_speed=config["max_speed"], high_pass_min_speed=config["min_speed"],
-                high_pass_speed_step=config["speed_step"], high_pass_cutoff=None,
+                high_pass_speed=config["speeds"], high_pass_cutoff=None,
                 high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"])
 
 
@@ -162,10 +182,10 @@ def configure_args(parser, args):
             raise ValueError("High-pass options require --pc-xpass")
         if selected["high_pass"] == "off" and explicit & (KEYS - {"high_pass"}):
             raise ValueError("Explicit high-pass tuning requires --high-pass on")
-        args.high_pass_config = configuration(**selected, speed_step=args.speed_step)
+        args.high_pass_config = configuration(**selected)
         if args.high_pass_config:
             args.high_pass_angle = args.high_pass_config["angles"]
-            args.high_pass_speed_step = args.high_pass_config["speed_step"]
+            args.high_pass_speed = args.high_pass_config["speeds"]
     except (ValueError, TypeError) as exc:
         parser.error(str(exc))
 

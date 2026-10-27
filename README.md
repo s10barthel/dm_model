@@ -1382,9 +1382,9 @@ If you also need additional return semantics, repeat `--return_type` on the exte
 ## physical_xpass_workflow
 
 PC-xPass generation can add aerial candidates with `--high-pass on`. The default
-elevations are `--high-pass-angle 15 20 25 30`, total release speeds range from
-`--high-pass-min-speed 20` to `--high-pass-max-speed 30`, and
-`--high-pass-speed-step` inherits `--speed-step`. Lane interception uses
+elevations are `--high-pass-angle 20 25 30`, and total release speeds are
+`--high-pass-speed 21 23 25 27 29`, independently of ground `--speed-step`.
+These lists add 15 aerial trajectories per horizontal angle. Lane interception uses
 `--high-pass-lane-cutoff 2` metres and endpoint control uses
 `--high-pass-control-cutoff 0.5` metres. Top-pass retains one representative per
 speed and horizontal angle, selecting its best elevation and endpoint. Use a

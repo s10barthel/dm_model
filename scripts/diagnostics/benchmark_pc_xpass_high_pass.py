@@ -112,7 +112,10 @@ def main():
                 assert stats["cache_misses"] == 0
                 reuse.append(seconds)
                 reuse_stats.append({key: stats[key] for key in ("cache_hits", "cache_misses", "copied_from_reuse")})
-        report["variants"][name] = dict(first_state_seconds=first, computation_seconds=durations,
+        report["variants"][name] = dict(high_pass_config=config,
+            aerial_profiles_per_azimuth=len(config["angles"])*len(config["speeds"]) if config else 0,
+            top_pass_definition=hp.TOP_PASS_DEFINITION if config else physics.PC_XPASS_TOP_PASS_DEFINITION,
+            first_state_seconds=first, computation_seconds=durations,
             median_computation_seconds=float(np.median(durations)), fresh_cache_seconds=caches,
             median_fresh_cache_seconds=float(np.median(caches)), cache_reuse_seconds=reuse,
             median_cache_reuse_seconds=float(np.median(reuse)), peak_working_set_bytes=peak,

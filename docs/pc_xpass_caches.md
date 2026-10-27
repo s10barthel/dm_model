@@ -2,9 +2,9 @@
 
 [Aerial candidate generation](pc_xpass_high_pass.md) is optional and defaults
 off. Enabled runs retain `--ball-dec` for ground candidates and fingerprint a
-separate Kang aerial-physics block, grid, 2 m lane cutoff, 0.5 m control cutoff
+separate Kang aerial-physics block, explicit speed/angle lists, 2 m lane cutoff, 0.5 m control cutoff
 and ranking definition. Use a fresh cache ID for this revision or changed aerial
-settings. Historical single-cutoff aerial caches remain readable but cannot be
+settings. Both historical range-based aerial formats remain readable but cannot be
 resumed, repaired or numerically reused. Missing aerial metadata means off.
 Saved-cache inference and visualization read these results without loading
 the flight simulator; normal/location resume precedence follows existing rules.

@@ -4,10 +4,9 @@ Enable aerial alternatives during generation with `--high-pass on`. The default
 is `off`. Ground and aerial options are ranked together for each receiver.
 
 ```powershell
-python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_v2 `
-  --high-pass on --high-pass-angle 15 20 25 30 `
-  --high-pass-min-speed 20 --high-pass-max-speed 30 `
-  --speed-step 2 --high-pass-lane-cutoff 2 `
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_v3 `
+  --high-pass on --high-pass-angle 20 25 30 `
+  --high-pass-speed 21 23 25 27 29 --high-pass-lane-cutoff 2 `
   --high-pass-control-cutoff 0.5 --top-pass 5 10
 ```
 
@@ -18,19 +17,23 @@ selected cache's configuration and require no aerial-generation flags.
 | Option | Default | Definition |
 |---|---|---|
 | `--high-pass {on,off}` | `off` | Add aerial alternatives. |
-| `--high-pass-angle FLOAT [FLOAT ...]` | `15 20 25 30` | Elevations above the pitch, degrees. |
-| `--high-pass-min-speed FLOAT` | `20` | Minimum total 3D release speed, m/s. |
-| `--high-pass-max-speed FLOAT` | `30` | Maximum total 3D release speed, m/s. |
-| `--high-pass-speed-step FLOAT` | Resolved `--speed-step` | Aerial speed spacing, m/s. |
+| `--high-pass-angle FLOAT [FLOAT ...]` | `20 25 30` | Elevations above the pitch, degrees. |
+| `--high-pass-speed FLOAT [FLOAT ...]` | `21 23 25 27 29` | Total 3D release speeds, m/s. |
 | `--high-pass-lane-cutoff FLOAT` | `2` | Maximum lane interception height, metres, inclusive. |
 | `--high-pass-control-cutoff FLOAT` | `0.5` | Maximum endpoint control height, metres, inclusive. |
 | `--high-pass-cutoff FLOAT` | Unset | Deprecated alias explicitly setting both cutoffs. |
 
-Angles are sorted/deduplicated and must be strictly between 0 and 90 degrees.
-Speeds, spacing and both cutoffs must be finite and positive. Minimum speed may equal
-maximum speed. A speed grid includes `min + k*step <= max`; step 3 yields
-20, 23, 26, 29. Explicit aerial tuning requires `--high-pass on` and all flags
-require PC xPass. With step 2 the default grid adds 24 trajectories per azimuth.
+Angle and speed lists are nonempty, sorted and deduplicated. Angles must be
+finite and strictly between 0 and 90 degrees. Speeds and both cutoffs must be
+finite and positive. Speeds may be irregularly spaced or contain a single value,
+for example `--high-pass-speed 19.5 24 28`. Ground `--speed-step` does not affect
+aerial speeds. Explicit aerial tuning requires `--high-pass on` and all flags
+require PC xPass. The defaults add 15 trajectories per azimuth.
+
+The former `--high-pass-min-speed`, `--high-pass-max-speed` and
+`--high-pass-speed-step` options have been removed and are rejected. The Python
+configuration API accepts `high_pass_speed` and no longer accepts range or step
+parameters; arguments after the enable/angle parameters are keyword-only.
 
 The deprecated alias emits a warning and cannot be combined with either new
 cutoff option. For example, `--high-pass-cutoff 2` explicitly sets both thresholds
@@ -68,8 +71,8 @@ Max and top-N selection operate over all candidate cells. Top-pass retains the
 best elevation and endpoint per `(initial total speed, azimuth)` pair, then
 selects across those distinct pairs. Ground and aerial profiles with the same
 speed compete within one pair. Speeds are compared exactly, without binning:
-the default ground grid (3, 5, ..., 25) and aerial grid (20, 22, ..., 30) do not
-overlap. Ties retain canonical ground-first, elevation and distance order. xT ranking still
+the default ground grid (3, 5, ..., 25) shares speeds 21, 23 and 25 with aerial
+profiles. Ties retain canonical ground-first, elevation and distance order. xT ranking still
 selects by xPass times endpoint xT, so raw selected xPass need not increase.
 
 Enabled wide tables add `<receiver>__elevation`, `__target_z`, and `__flight_time`.
@@ -82,21 +85,24 @@ Enabled lane-control sidecars use schema 2 and add `elevation`, `target_z` and
 `flight_time`. The product of `1 - lane_control` across opponents still gives
 the selected pass's lane survival.
 
-Enabled configurations (schema 2, with separate `lane_cutoff` and
-`control_cutoff`), physics coefficients/source checksum, interpolation,
+Enabled configurations (schema 3, with explicit `angles`/`speeds` lists and
+separate `lane_cutoff`/`control_cutoff`), physics coefficients/source checksum, interpolation,
 termination and ranking definitions enter cache identities. The aerial top-pass
 definition is `best_endpoint_per_speed_azimuth_over_elevation_v3`.
-Use a fresh cache ID for this revision or to change either cutoff. Normal
+Use a fresh cache ID for this revision or any speed, angle or cutoff change. Normal
 resumes reject incompatible overrides; location
 resumes retain their cached-setting precedence. Missing aerial metadata means
 off, preserving old ground-only cache identities and output schemas.
 
-Historical aerial caches with a single `cutoff` remain readable for stored-score
-inference and visualization. Their shared height cutoff and
-`best_endpoint_per_speed_azimuth_elevation_v2` ranking are retained as recorded;
-loading does not recalculate or reinterpret their scores. Generation, repair,
-resume and numerical reuse of those caches are rejected. The aerial export
-columns and lane-sidecar schema 2 are unchanged by this revision.
+Both historical range-based aerial formats remain readable for stored-score
+inference and visualization. Schema 2 retains its separate cutoffs and current
+speed/azimuth ranking. The original single-`cutoff` format retains its shared
+height threshold and `best_endpoint_per_speed_azimuth_elevation_v2` ranking.
+Historical grids are validated using their recorded settings and original
+defaults; loading does not recalculate, reinterpret or rewrite scores or
+metadata. Generation, repair, resume and numerical reuse of either historical
+format are rejected. Use a fresh cache ID for list-based generation. The aerial
+export columns and lane-sidecar schema 2 are unchanged by this revision.
 
 ## Validation and runtime measurement
 

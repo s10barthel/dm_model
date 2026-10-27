@@ -33,27 +33,46 @@ def obstructed_graph():
     return g
 
 
-def test_cli_defaults_and_inheritance():
+def test_cli_defaults_and_independent_speed_step():
     off = generate.parse_args(["--pc-xpass"])
     assert off.high_pass_config is None
     assert not (hp.KEYS & versions.settings(off).keys())
     for parse in (generate.parse_args, location.parse_args):
         prefix = ["--pc-xpass"] if parse == generate.parse_args else []
-        args = parse([*prefix, "--high-pass", "on", "--speed-step", "3",
-                      "--high-pass-angle", "30", "15", "15", "20", "25"])
-        assert args.high_pass_config["angles"] == [15, 20, 25, 30]
-        assert args.high_pass_config["speeds"] == [20, 23, 26, 29]
-        assert args.high_pass_speed_step == 3
-        assert args.high_pass_cutoff is None
-        assert args.high_pass_lane_cutoff == 2
-        assert args.high_pass_control_cutoff == .5
-        assert args.high_pass_config["schema_version"] == 2
-        explicit = parse([*prefix, "--high-pass", "on", "--speed-step", "3", "--high-pass-speed-step", "2"])
-        assert explicit.high_pass_config["speeds"] == [20, 22, 24, 26, 28, 30]
+        for step in (1, 2, 3):
+            args = parse([*prefix, "--high-pass", "on", "--speed-step", str(step)])
+            assert args.high_pass_angle == args.high_pass_config["angles"] == [20, 25, 30]
+            assert args.high_pass_speed == args.high_pass_config["speeds"] == [21, 23, 25, 27, 29]
+            assert args.high_pass_cutoff is None
+            assert args.high_pass_lane_cutoff == 2
+            assert args.high_pass_control_cutoff == .5
+            assert args.high_pass_config["schema_version"] == 3
+            assert not {"min_speed", "max_speed", "speed_step"} & args.high_pass_config.keys()
+            assert not any(hasattr(args, key) for key in ("high_pass_min_speed", "high_pass_max_speed", "high_pass_speed_step"))
+        explicit = parse([*prefix, "--high-pass", "on", "--high-pass-angle", "30", "15", "15", "20", "25",
+                          "--high-pass-speed", "29", "21", "21", "24.5"])
+        assert explicit.high_pass_config["angles"] == [15, 20, 25, 30]
+        assert explicit.high_pass_speed == explicit.high_pass_config["speeds"] == [21, 24.5, 29]
+        assert versions.settings(explicit)["high_pass_speed"] == [21, 24.5, 29]
+        single = parse([*prefix, "--high-pass", "on", "--high-pass-speed", "17.5"])
+        assert single.high_pass_config["speeds"] == [17.5]
+
+
+def test_default_candidate_grid_and_ground_speed_overlap():
+    distances = np.array([0., 1., 2.])
+    ground_speeds = np.arange(3., 26., 2.)
+    ground_times, reachable = ppm.pc_xpass_ball_arrival_times(distances, ground_speeds)
+    speeds, angles, times, heights, valid = hp.candidates(distances, ground_speeds, ground_times, reachable, hp.configuration("on"))
+    assert len(speeds) == 12 + 15
+    assert times.shape == heights.shape == valid.shape == (27, 1, 3)
+    assert list(zip(speeds[12:], angles[12:])) == [(v, a) for a in [20, 25, 30] for v in [21, 23, 25, 27, 29]]
+    # Three default speeds compete with ground profiles in the same top-pass group.
+    assert set(speeds[:12]) & set(speeds[12:]) == {21., 23., 25.}
+    assert len(ppm._pc_xpass_ranked_pass_indices(np.ones_like(times), np.ones_like(times), speeds=speeds)) == 14
 
 
 @pytest.mark.parametrize("flags", [
-    ["--high-pass", "on"], ["--high-pass", "off"], ["--high-pass-angle", "20"],
+    ["--high-pass", "on"], ["--high-pass", "off"], ["--high-pass-angle", "20"], ["--high-pass-speed", "21"],
 ])
 def test_non_pc_rejected(flags):
     with pytest.raises(SystemExit):
@@ -63,18 +82,29 @@ def test_non_pc_rejected(flags):
 @pytest.mark.parametrize("flags", [
     ["--high-pass-angle", "0"], ["--high-pass-angle", "90"],
     ["--high-pass-angle", "nan"], ["--high-pass-angle"],
-    ["--high-pass-speed-step", "0"], ["--high-pass-max-speed", "19"],
-    ["--high-pass-min-speed", "-1"], ["--high-pass-cutoff", "0"],
-    ["--high-pass-cutoff", "inf"], ["--high-pass-max-speed", "nan"],
+    ["--high-pass-speed", "0"], ["--high-pass-speed", "-1"],
+    ["--high-pass-speed", "nan"], ["--high-pass-speed", "inf"], ["--high-pass-speed"],
+    ["--high-pass-cutoff", "0"], ["--high-pass-cutoff", "inf"],
 ])
 def test_invalid_grid(flags):
-    with pytest.raises(SystemExit):
-        generate.parse_args(["--pc-xpass", "--high-pass", "on", *flags])
+    for parse in (generate.parse_args, location.parse_args):
+        prefix = ["--pc-xpass"] if parse == generate.parse_args else []
+        with pytest.raises(SystemExit):
+            parse([*prefix, "--high-pass", "on", *flags])
+
+
+@pytest.mark.parametrize("option", ["--high-pass-min-speed", "--high-pass-max-speed", "--high-pass-speed-step"])
+def test_obsolete_speed_flags_rejected(option):
+    for parse in (generate.parse_args, location.parse_args):
+        prefix = ["--pc-xpass"] if parse == generate.parse_args else []
+        with pytest.raises(SystemExit):
+            parse([*prefix, "--high-pass", "on", option, "20"])
 
 
 def test_explicit_tuning_requires_enabled():
-    with pytest.raises(SystemExit):
-        generate.parse_args(["--pc-xpass", "--high-pass-cutoff", "2"])
+    for option in ("--high-pass-cutoff", "--high-pass-speed"):
+        with pytest.raises(SystemExit):
+            generate.parse_args(["--pc-xpass", option, "2"])
 
 
 @pytest.mark.parametrize("parse", [generate.parse_args, location.parse_args])
@@ -104,6 +134,14 @@ def test_configuration_api_alias():
             hp.configuration("on", high_pass_cutoff=2., **{option: 2.})
 
 
+@pytest.mark.parametrize("option", ["high_pass_min_speed", "high_pass_max_speed", "high_pass_speed_step", "speed_step"])
+def test_configuration_api_rejects_old_speed_parameters(option):
+    with pytest.raises(TypeError):
+        hp.configuration("on", **{option: 20.})
+    with pytest.raises(TypeError):
+        hp.configuration("on", [20.], 20., 20.)
+
+
 @pytest.mark.parametrize("option", ["--high-pass-lane-cutoff", "--high-pass-control-cutoff"])
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
 def test_invalid_independent_cutoffs(option, value):
@@ -118,20 +156,22 @@ def test_all_default_profiles_match_pinned_upstream_and_stop_bound():
     # per profile; contains flight, first/subsequent impacts, and rolling tail.
     expected = np.load(Path(__file__).parent / "fixtures/high_pass_upstream.npz")
     config = hp.configuration("on")
-    for angle in config["angles"]:
-        for speed in config["speeds"]:
-            path = hp.profile(speed, angle)
-            reference = expected[f"v{int(speed)}_a{int(angle)}"]
-            n = len(path)
-            np.testing.assert_array_equal(path[:, [0, 2]].astype(np.float32), reference[:n, [0, 2]])
-            assert not path.flags.writeable
-            assert (np.diff(path[:, 0]) > 0).all()
-            assert (path[:, 2] >= 0).all()
-            assert path[:, 2].max() > .5
-            assert path[-1, 0] >= 150 or abs(float(reference[-1, 0])-path[-1, 0]) <= .00101
-            # At least one visible bounce after the first descending ground contact.
-            ground = np.flatnonzero((path[:, 2] == 0) & (path[:, 1] > .1))
-            assert len(ground) and np.any(path[ground[0]+1:, 2] > 0)
+    profiles = {(v, a) for a in config["angles"] for v in config["speeds"]}
+    profiles.update((v, a) for a in [15, 20, 25, 30] for v in range(20, 31, 2))
+    assert len(profiles) == 39
+    for speed, angle in sorted(profiles):
+        path = hp.profile(speed, angle)
+        reference = expected[f"v{int(speed)}_a{int(angle)}"]
+        n = len(path)
+        np.testing.assert_array_equal(path[:, [0, 2]].astype(np.float32), reference[:n, [0, 2]])
+        assert not path.flags.writeable
+        assert (np.diff(path[:, 0]) > 0).all()
+        assert (path[:, 2] >= 0).all()
+        assert path[:, 2].max() > .5
+        assert path[-1, 0] >= 150 or abs(float(reference[-1, 0])-path[-1, 0]) <= .00101
+        # At least one visible bounce after the first descending ground contact.
+        ground = np.flatnonzero((path[:, 2] == 0) & (path[:, 1] > .1))
+        assert len(ground) and np.any(path[ground[0]+1:, 2] > 0)
     assert hp.profile(20., 15.) is hp.profile(20., 15.)
 
 
@@ -168,7 +208,7 @@ def test_cutoff_before_prefix_and_endpoint_normalization(monkeypatch, mode, shar
     # Cross both boundaries on ascent and descent, including exact equality.
     heights = np.array([0., .5, .5001, 2., 2.0001, 2., .5001, .5, 0.])
     monkeypatch.setattr(hp, "profile", lambda *args: np.column_stack((np.arange(9)*5., np.arange(9), heights)))
-    config = hp.configuration("on", [20], 20, 20)
+    config = hp.configuration("on", [20], high_pass_speed=[20])
     details = {}
     ppm.compute_graph_pc_xpass_metrics(make_graph(), high_pass_config=config,
         min_speed=20, max_speed=20, speed_step=2, angle_step=90, radial_gridsize=5,
@@ -247,7 +287,7 @@ def test_top_pass_larger_than_number_of_speed_angle_pairs(xt):
     details = {}
     opts = {**settings(top_xt=xt), "angle_step": 90, "top_pass_values": [1, 100]}
     row = ppm.compute_graph_pc_xpass_metrics(obstructed_graph(),
-        high_pass_config=hp.configuration("on", high_pass_min_speed=20, high_pass_max_speed=20),
+        high_pass_config=hp.configuration("on", high_pass_speed=[20]),
         diagnostic_details=details, **opts)
     score = details["lane_survival"] * details["receiver_control"]["home_2"]
     ranking = score * ppm._pc_xpass_xt_values(details["target_x"], details["target_y"]) if xt else score
@@ -273,9 +313,15 @@ def test_metadata_fingerprints_and_corruption():
     a = ppm.pc_xpass_metadata(policy, high_pass_config=hp.configuration("on"))
     b = ppm.pc_xpass_metadata(policy, high_pass_config=hp.configuration("on", high_pass_lane_cutoff=3))
     c = ppm.pc_xpass_metadata(policy, high_pass_config=hp.configuration("on", high_pass_control_cutoff=1))
+    other_speeds = ppm.pc_xpass_metadata(policy, high_pass_config=hp.configuration("on", high_pass_speed=[21, 24.5, 29]))
     assert a["top_pass_definition"] == hp.TOP_PASS_DEFINITION
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) != ppm.pc_xpass_lane_survival_metadata_fingerprint(b)
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) != ppm.pc_xpass_lane_survival_metadata_fingerprint(c)
+    assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) != ppm.pc_xpass_lane_survival_metadata_fingerprint(other_speeds)
+    noncanonical = copy.deepcopy(a)
+    noncanonical["high_pass_config"]["speeds"] = [29, 21, 21]
+    with pytest.raises(ValueError, match="high-pass"):
+        ppm.validate_pc_xpass_ball_motion_metadata(noncanonical)
     altered_ranking = {**a, "top_pass_definition": "different"}
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) != ppm.pc_xpass_lane_survival_metadata_fingerprint(altered_ranking)
     with pytest.raises(ValueError, match="top_pass_definition"):
@@ -302,7 +348,7 @@ def test_normal_and_location_resume(tmp_path, monkeypatch):
     versions.start_generation(legacy)
     with pytest.raises(ValueError, match="high-pass"):
         generate.parse_args(["--pc-xpass", "--pc-xpass-id", "ground", "--high-pass", "on"])
-    loc = location.parse_args(["--high-pass", "on", "--high-pass-speed-step", "4"])
+    loc = location.parse_args(["--high-pass", "on", "--high-pass-speed", "21", "25", "29"])
     loc.pc_xpass_id = "loc"
     versions.start_generation(loc, location=True)
     with pytest.warns(UserWarning, match="cached"):
@@ -310,23 +356,76 @@ def test_normal_and_location_resume(tmp_path, monkeypatch):
     assert resumed.high_pass_config == loc.high_pass_config
 
 
-def legacy_aerial_metadata(metadata):
+@pytest.mark.parametrize("location_mode", [False, True])
+def test_list_resume_canonicalization_and_mismatches(tmp_path, monkeypatch, location_mode):
+    monkeypatch.setattr(versions.config, "PC_XPASS_DIR", tmp_path)
+    parse = location.parse_args if location_mode else generate.parse_args
+    prefix = [] if location_mode else ["--pc-xpass"]
+    args = parse([*prefix, "--high-pass", "on", "--high-pass-speed", "29", "21", "21", "24.5",
+                  "--high-pass-angle", "30", "20", "20"])
+    args.pc_xpass_id = "lists"
+    versions.start_generation(args, location=location_mode)
+    opts = [*prefix, "--pc-xpass-id", "lists"]
+    inherited = parse(opts)
+    equivalent = parse([*opts, "--high-pass-speed", "24.5", "21", "29", "29", "--high-pass-angle", "20", "30"])
+    assert inherited.high_pass_config == equivalent.high_pass_config == args.high_pass_config
+    assert versions.settings(equivalent)["high_pass_speed"] == [21, 24.5, 29]
+    if location_mode:
+        directory = parse(["--pc-xpass-cache-dir", str(versions.version_root("lists", True)),
+                           "--high-pass-speed", "24.5", "29", "21"])
+        assert directory.high_pass_config == args.high_pass_config
+        with pytest.warns(UserWarning, match="cached"):
+            different = parse([*opts, "--high-pass-speed", "22"])
+        assert different.high_pass_config == args.high_pass_config
+    else:
+        with pytest.raises(ValueError, match="high-pass-speed"):
+            parse([*opts, "--high-pass-speed", "22"])
+
+
+def legacy_aerial_metadata(metadata, schema_version=None):
     """Represent the pre-revision on-disk contract, without changing its meaning."""
     metadata = copy.deepcopy(metadata)
     config = metadata["high_pass_config"]
-    config.pop("schema_version")
-    config["cutoff"] = config.pop("lane_cutoff")
-    config.pop("control_cutoff")
-    metadata["top_pass_definition"] = hp.LEGACY_TOP_PASS_DEFINITION
+    config.update(schema_version=2, angles=[15., 20., 25., 30.], min_speed=20., max_speed=30.,
+                  speed_step=2., speeds=[20., 22., 24., 26., 28., 30.])
+    if schema_version is None:
+        config.pop("schema_version")
+        config["cutoff"] = config.pop("lane_cutoff")
+        config.pop("control_cutoff")
+    metadata["top_pass_definition"] = hp.LEGACY_TOP_PASS_DEFINITION if schema_version is None else hp.TOP_PASS_DEFINITION
     if "generation_settings" in metadata:
         saved = metadata["generation_settings"]
-        saved["high_pass_cutoff"] = saved.pop("high_pass_lane_cutoff")
-        saved.pop("high_pass_control_cutoff")
+        saved.pop("high_pass_speed")
+        saved.update(high_pass_angle=config["angles"], high_pass_min_speed=20., high_pass_max_speed=30., high_pass_speed_step=2.)
+        if schema_version is None:
+            saved["high_pass_cutoff"] = saved.pop("high_pass_lane_cutoff")
+            saved.pop("high_pass_control_cutoff")
     return metadata
 
 
+@pytest.mark.parametrize("schema_version", [None, 2])
+def test_historical_defaults_and_config_validation(schema_version):
+    metadata = legacy_aerial_metadata(ppm.pc_xpass_metadata(
+        ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, high_pass_config=hp.configuration("on")), schema_version)
+    # Missing historical settings retain the original defaults, not today's lists.
+    metadata["generation_settings"] = {"high_pass": "on"}
+    ppm.validate_pc_xpass_ball_motion_metadata(metadata)
+    assert metadata["high_pass_config"]["angles"] == [15, 20, 25, 30]
+    assert metadata["high_pass_config"]["speeds"] == [20, 22, 24, 26, 28, 30]
+    altered = copy.deepcopy(metadata)
+    altered["high_pass_config"]["speeds"] = [21, 23, 25, 27, 29]
+    with pytest.raises(ValueError, match="high-pass"):
+        ppm.validate_pc_xpass_ball_motion_metadata(altered)
+    recorded = copy.deepcopy(metadata)
+    recorded["high_pass_config"].update(angles=[17.], speeds=[20., 23., 26., 29.], speed_step=3.)
+    recorded["generation_settings"] = {"high_pass": "on", "high_pass_angle": [17.], "speed_step": 3.,
+                                        "high_pass_speed_step": None}
+    ppm.validate_pc_xpass_ball_motion_metadata(recorded)
+
+
 @pytest.mark.parametrize("location_mode", [False, True])
-def test_legacy_version_readable_but_cannot_resume(tmp_path, monkeypatch, location_mode):
+@pytest.mark.parametrize("schema_version", [None, 2])
+def test_legacy_version_readable_but_cannot_resume(tmp_path, monkeypatch, location_mode, schema_version):
     monkeypatch.setattr(versions.config, "PC_XPASS_DIR", tmp_path)
     parse = location.parse_args if location_mode else generate.parse_args
     prefix = [] if location_mode else ["--pc-xpass"]
@@ -337,10 +436,10 @@ def test_legacy_version_readable_but_cannot_resume(tmp_path, monkeypatch, locati
         args = parse([*prefix, "--pc-xpass-id", "legacy", "--high-pass", "on"])
     versions.start_generation(args, location=location_mode)
     root = versions.version_root("legacy", location_mode)
-    old = legacy_aerial_metadata(versions.read_metadata(root))
+    old = legacy_aerial_metadata(versions.read_metadata(root), schema_version)
     versions.atomic_json(root / "metadata.json", old)
     before = (root / "metadata.json").read_bytes()
-    assert versions.read_metadata(root)["high_pass_config"]["cutoff"] == 2.
+    assert versions.read_metadata(root) == old
     with pytest.raises(ValueError, match="read-only.*new pc-xPass version"):
         parse([*prefix, "--pc-xpass-id", "legacy"])
     with pytest.raises(ValueError, match="read-only"):
@@ -351,10 +450,11 @@ def test_legacy_version_readable_but_cannot_resume(tmp_path, monkeypatch, locati
     assert (root / "metadata.json").read_bytes() == before
 
 
-def test_legacy_stored_scores_and_visualization_without_simulation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("schema_version", [None, 2])
+def test_legacy_stored_scores_and_visualization_without_simulation(tmp_path, monkeypatch, schema_version):
     metadata = legacy_aerial_metadata(ppm.pc_xpass_metadata(
         ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, high_pass_config=hp.configuration("on"),
-        top_n=None, top_pass_values=[5]))
+        top_n=None, top_pass_values=[5]), schema_version)
     versions.atomic_json(tmp_path / "metadata.json", metadata)
     (tmp_path / "matches").mkdir()
     row = pd.DataFrame([{"action_index": 7, "home_2__top_pass5_xpass": .371,
@@ -377,15 +477,18 @@ def test_legacy_stored_scores_and_visualization_without_simulation(tmp_path, mon
     payload = {key: metadata.get(key) for key in ppm.PC_XPASS_LANE_SURVIVAL_FINGERPRINT_KEYS
                if key not in {"ball_dec", "physics_version"} or key in metadata}
     payload["high_pass_config"] = metadata["high_pass_config"]
+    if schema_version == 2:
+        payload["top_pass_definition"] = metadata["top_pass_definition"]
     expected = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(metadata) == expected
 
 
 @pytest.mark.parametrize("operation", ["compute", "generate", "repair", "reuse"])
-def test_legacy_aerial_rejects_numerical_work(tmp_path, operation):
+@pytest.mark.parametrize("schema_version", [None, 2])
+def test_legacy_aerial_rejects_numerical_work(tmp_path, operation, schema_version):
     current = hp.configuration("on")
     metadata = legacy_aerial_metadata(ppm.pc_xpass_metadata(
-        ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, high_pass_config=current, **settings()))
+        ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER, high_pass_config=current, **settings()), schema_version)
     source = tmp_path / "legacy"
     versions.atomic_json(source / "metadata.json", metadata)
     before = (source / "metadata.json").read_bytes()
@@ -481,6 +584,10 @@ def test_production_cli_writes_metadata_and_resumes(tmp_path, monkeypatch):
     assert metadata["status"] == "completed"
     dataset = json.loads((root / "benchmark/metadata.json").read_text())
     assert dataset["high_pass_config"] == metadata["high_pass_config"]
+    assert metadata["high_pass_config"]["schema_version"] == 3
+    assert metadata["high_pass_config"]["angles"] == [20, 25, 30]
+    assert metadata["generation_settings"]["high_pass_speed"] == [21, 23, 25, 27, 29]
+    assert not {"high_pass_min_speed", "high_pass_max_speed", "high_pass_speed_step"} & metadata["generation_settings"].keys()
     assert metadata["high_pass_config"]["lane_cutoff"] == 2.
     assert metadata["high_pass_config"]["control_cutoff"] == .5
     assert metadata["top_pass_definition"] == hp.TOP_PASS_DEFINITION
@@ -508,7 +615,7 @@ def test_movement_modes_receive_all_flight_times(accel_table, distance_table, re
     else:
         options["reachability_config"] = reachability.configuration("reachability", {"model_id": "test"})
     details = {}
-    config = hp.configuration("on", [20], 20, 20)
+    config = hp.configuration("on", [20], high_pass_speed=[20])
     opts = {**settings(), **options, "angle_step": 90, "radial_gridsize": 10}
     row = ppm.compute_graph_pc_xpass_metrics(obstructed_graph(), high_pass_config=config, diagnostic_details=details, **opts)
     assert details["ball_times"].shape[0] == 2

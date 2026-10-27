@@ -114,8 +114,9 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
     explicit = {action.dest for token in tokens for action in [parser._option_string_actions.get(token.split("=", 1)[0])] if action}
     explicit = high_pass.normalize_cutoff_args(parser, args, explicit)
     args._pc_explicit = explicit
-    if "high_pass_angle" in explicit:
-        args.high_pass_angle = sorted(set(args.high_pass_angle))
+    for key in ("high_pass_angle", "high_pass_speed"):
+        if key in explicit:
+            setattr(args, key, sorted(set(getattr(args, key))))
     args._pc_location = location
     args.pc_xpass_overrides = []
     run_id = getattr(args, "pc_xpass_id", None)

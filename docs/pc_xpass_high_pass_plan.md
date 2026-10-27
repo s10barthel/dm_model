@@ -4,6 +4,9 @@ Status: the initial plan was implemented on 27 October 2026. The following
 records that historical design. A subsequent approved revision separates lane
 and control cutoffs (2 m and 0.5 m) and groups top-pass by speed/azimuth across
 elevations. See [current usage and compatibility](pc_xpass_high_pass.md).
+The next revision replaces speed ranges with explicit lists, defaulting to
+speeds 21/23/25/27/29 m/s and elevations 20/25/30 degrees. The range-based CLI
+examples below record the original design and are no longer accepted.
 
 ## Agreed behavior
 
