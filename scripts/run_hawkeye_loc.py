@@ -248,7 +248,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10"
     )
-    parser.add_argument("--xpass-weight", "--xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3")
+    parser.add_argument("--xpass-weight", "--xpass_weight", choices=["v0", "v1", "v2", "v3", "v4", "v5"], default="v3")
     parser.add_argument("--v4-power", type=float)
     parser.add_argument("--v4-zero", type=float)
     parser.add_argument("--discount", dest="v4_discount", type=parse_bool_text, default=None)

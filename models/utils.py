@@ -57,6 +57,7 @@ from physical_pass_model import (
     EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     EVALUATION_XPASS_PASS_HEIGHT_ATTR,
     EVALUATION_XPASS_PROB_ATTR,
+    EVALUATION_XPASS_RAW_PROB_ATTR,
     PHYSICAL_XPASS_DISTANCE_ATTR,
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
@@ -2029,19 +2030,21 @@ def run_epoch(
                 evaluate_xpass = bool(getattr(args, "evaluate_xpass", False))
                 evaluate_combined = bool(getattr(args, "evaluate_combined_success", False))
                 if (evaluate_xpass or evaluate_combined) and pass_diagnostic_mask.any():
-                    xpass_values = getattr(batch_graphs, EVALUATION_XPASS_PROB_ATTR, None)
+                    pure_xpass = evaluate_combined and str(getattr(args, "xpass_weight", "")).lower() == "v0"
+                    xpass_values = getattr(batch_graphs, EVALUATION_XPASS_RAW_PROB_ATTR if pure_xpass else EVALUATION_XPASS_PROB_ATTR, None)
                     distance_values = getattr(batch_graphs, EVALUATION_XPASS_DISTANCE_ATTR, None)
                     nearest_values = getattr(batch_graphs, EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
-                    if xpass_values is None or distance_values is None:
+                    if xpass_values is None or (not pure_xpass and distance_values is None):
                         raise ValueError("Physical xPass evaluation requires cached xPass and pass-distance tensors.")
                     pass_positions = observed_positions[batch_labels[:, config.LABEL_INDEX["is_pass"]].bool()]
                     observed_xpass = xpass_values[pass_positions]
-                    observed_distance = distance_values[pass_positions]
+                    observed_distance = (distance_values[pass_positions] if distance_values is not None
+                                         else torch.full_like(observed_xpass, float("nan")))
                     observed_nearest = nearest_values[pass_positions] if nearest_values is not None else []
                     observed_height = observed_auxiliary_height
                     xpass_array = observed_xpass.detach().cpu().numpy().astype(float)
                     distance_array = observed_distance.detach().cpu().numpy().astype(float)
-                    if not np.isfinite(xpass_array).all() or not np.isfinite(distance_array).all():
+                    if not np.isfinite(xpass_array).all() or (not pure_xpass and not np.isfinite(distance_array).all()):
                         raise ValueError("Physical xPass evaluation requires finite observed-target xPass and distance values.")
                     # The combined diagnostic needs the raw physical component as well.
                     if evaluate_xpass or evaluate_combined:
@@ -2080,7 +2083,9 @@ def run_epoch(
                             **blend_kwargs,
                         )
                         combined_success_predictions.append(np.asarray(combined, dtype=float))
-                        if weight_version == "v2":
+                        if weight_version == "v0":
+                            learning_weight = np.zeros_like(xpass_array)
+                        elif weight_version == "v2":
                             learning_weight = physical_xpass_blend_weight_v2(
                                 distance_array, blend_kwargs["distance_to_nearest_opponent"]
                             )

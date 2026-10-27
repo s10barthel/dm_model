@@ -279,7 +279,7 @@ New generation and resumes use `physical_input_contract = pc_xpass_physical_inpu
 
 ## Height and intent auxiliaries
 
-For active v4 blending and height-weighted evaluation, supply `--xpass-pass-height-model-id pass_height/<id>`. V5 additionally requires `--xpass-pass-intent-model-id pass_intent/<id>`, even with `--v5-discount false`. V1-v3 reject unused auxiliary selectors. Ordinary component selectors and bundles do not select these auxiliary roles.
+For active v4 blending and height-weighted evaluation, supply `--xpass-pass-height-model-id pass_height/<id>`. V5 additionally requires `--xpass-pass-intent-model-id pass_intent/<id>`, even with `--v5-discount false`. V0-v3 reject unused auxiliary selectors. Ordinary component selectors and bundles do not select these auxiliary roles.
 
 ```powershell
 python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id states_v3 --sportec-feature-run-id FEATURE_RUN --top-pass 10 --scope actions --no-skillcorner --no-benchmark --no-hawkeye

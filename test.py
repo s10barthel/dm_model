@@ -797,7 +797,7 @@ def main():
     parser.add_argument("--evaluate-xpass", action="store_true")
     parser.add_argument("--evaluate-combined-success", action="store_true")
     parser.add_argument("--xpass-version", default=None)
-    parser.add_argument("--xpass-weight", choices=["v1", "v2", "v3", "v4", "v5"], default=None)
+    parser.add_argument("--xpass-weight", choices=["v0", "v1", "v2", "v3", "v4", "v5"], default=None)
     parser.add_argument("--observed-pass-height-stratification", action="store_true")
     parser.add_argument("--classification-threshold", type=probability_threshold, default=0.5)
     parser.add_argument("--f1-outcome-threshold", type=probability_threshold, default=None)

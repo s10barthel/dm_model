@@ -56,11 +56,13 @@ PHYSICAL_XPASS_SOURCES = {PHYSICAL_XPASS_SOURCE, PHYSICAL_XPASS_LEGACY_SOURCE, P
 PHYSICAL_XPASS_NEUTRAL_PROB = 0.5
 PHYSICAL_XPASS_LOGIT_ATTR = "physical_xpass_logit"
 PHYSICAL_XPASS_PROB_ATTR = "physical_xpass"
+PHYSICAL_XPASS_RAW_PROB_ATTR = "physical_xpass_raw"
 PHYSICAL_XPASS_DISTANCE_ATTR = "physical_xpass_pass_distance"
 PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "physical_xpass_nearest_opponent_distance"
 PHYSICAL_XPASS_BALL_Z_ATTR = "physical_xpass_ball_z"
 PHYSICAL_XPASS_PASS_HEIGHT_ATTR = "physical_xpass_pass_height"
 EVALUATION_XPASS_PROB_ATTR = "evaluation_physical_xpass"
+EVALUATION_XPASS_RAW_PROB_ATTR = "evaluation_physical_xpass_raw"
 EVALUATION_XPASS_DISTANCE_ATTR = "evaluation_physical_xpass_pass_distance"
 EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR = "evaluation_physical_xpass_nearest_opponent_distance"
 EVALUATION_XPASS_PASS_HEIGHT_ATTR = "evaluation_physical_xpass_pass_height"
@@ -106,7 +108,7 @@ PC_XPASS_METRIC_TOP25 = "top25_xpass"
 X_PASS_VERSION_MAX = "max"
 X_PASS_VERSION_NOISE_KERNEL = "noise-kernel"
 X_PASS_VERSION_DEFAULT = "top10"
-XPASS_WEIGHT_VERSIONS = {"v1", "v2", "v3", "v4", "v5"}
+XPASS_WEIGHT_VERSIONS = {"v0", "v1", "v2", "v3", "v4", "v5"}
 PHYSICAL_XPASS_DEFAULT_V4_POWER = 2.0
 PHYSICAL_XPASS_DEFAULT_V4_ZERO = 0.8
 PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD = 0.01
@@ -1122,7 +1124,7 @@ def physical_xpass_weight_version(args: Any) -> str:
         value = _get_arg(args, "xpass_weight_version", None)
     version = "v3" if value is None else str(value).strip().lower()
     if version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError("--xpass-weight must be one of v1, v2, v3, v4, or v5.")
+        raise ValueError("--xpass-weight must be one of v0, v1, v2, v3, v4, or v5.")
     return version
 
 
@@ -1195,6 +1197,8 @@ def physical_xpass_ball_z_limit(args: Any) -> float | None:
     limit = float(value)
     if not math.isfinite(limit):
         raise ValueError("--ball-z-limit must be a finite float or 'none'.")
+    if physical_xpass_weight_version(args) == "v0":
+        raise ValueError("--ball-z-limit cannot be used with --xpass-weight v0; v0 always uses physical xPass.")
     return limit
 
 
@@ -1496,7 +1500,7 @@ def blend_physical_xpass_predictions(
     *,
     pass_success_model: np.ndarray | torch.Tensor | float,
     xpass: np.ndarray | torch.Tensor | float,
-    pass_distance: np.ndarray | torch.Tensor | float,
+    pass_distance: np.ndarray | torch.Tensor | float | None,
     distance_to_nearest_opponent: np.ndarray | torch.Tensor | float | None = None,
     pass_height: np.ndarray | torch.Tensor | float | None = None,
     pass_intent: np.ndarray | torch.Tensor | float | None = None,
@@ -1509,9 +1513,21 @@ def blend_physical_xpass_predictions(
     v5_intent_threshold: float = PHYSICAL_XPASS_DEFAULT_V5_INTENT_THRESHOLD,
     v5_discount: bool = True,
 ) -> np.ndarray | torch.Tensor | float:
+    """Blend physical and learned probabilities, or copy physical values directly for v0."""
     weight_version = str(weight_version or "v3").lower()
     if weight_version not in XPASS_WEIGHT_VERSIONS:
-        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v1', 'v2', 'v3', 'v4', or 'v5'.")
+        raise ValueError(f"Unsupported physical xPass weight_version={weight_version!r}. Expected 'v0', 'v1', 'v2', 'v3', 'v4', or 'v5'.")
+    if weight_version == "v0":
+        if ball_z_limit is not None:
+            raise ValueError("--ball-z-limit cannot be used with --xpass-weight v0; v0 always uses physical xPass.")
+        # Copy directly: even 0 * NaN from an unused learned prediction would contaminate xPass.
+        if isinstance(xpass, torch.Tensor):
+            return xpass.clone()
+        if isinstance(pass_success_model, torch.Tensor):
+            return torch.as_tensor(np.asarray(xpass), device=pass_success_model.device).clone()
+        if np.isscalar(xpass):
+            return float(xpass)
+        return np.array(xpass, copy=True)
     if weight_version == "v2" and distance_to_nearest_opponent is None:
         raise ValueError("weight_version='v2' requires distance_to_nearest_opponent.")
     if weight_version in {"v4", "v5"} and pass_height is None:
@@ -6930,6 +6946,8 @@ def attach_physical_xpass_to_graph(
     else:
         fill_value = float(missing_player_value)
     probs = torch.full((len(node_ids),), fill_value, dtype=torch.float32)
+    # Keep the cache's precision and endpoints separately from clipped model inputs.
+    raw_probs = torch.full((len(node_ids),), fill_value, dtype=torch.float64)
     nearest_opponent_distances = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
     pass_heights = torch.full((len(node_ids),), float("nan"), dtype=torch.float32)
     ball_z_value = float("nan")
@@ -6945,6 +6963,7 @@ def attach_physical_xpass_to_graph(
     for node_index, node_id in enumerate(node_ids):
         if bool(graph.x[node_index, config.NODE_FEATURE_IS_GOAL] == 1):
             probs[node_index] = 0.5  # Neutral physical logit for context-only nodes.
+            raw_probs[node_index] = 0.5
             continue
         value_columns = physical_xpass_metric_columns(str(node_id), selected_metric, default_metric=default_metric)
         value_column = next((column for column in value_columns if column in row.index), None)
@@ -6955,6 +6974,7 @@ def attach_physical_xpass_to_graph(
         if pd.isna(value):
             continue
         probs[node_index] = float(value)
+        raw_probs[node_index] = float(value)
         nearest_column = physical_xpass_nearest_opponent_distance_column(str(node_id))
         if nearest_column in row.index and not pd.isna(row[nearest_column]):
             nearest_opponent_distances[node_index] = float(row[nearest_column])
@@ -6995,6 +7015,7 @@ def attach_physical_xpass_to_graph(
                     f"in match {match_id}, action_index={action_index}."
                 )
     setattr(graph, PHYSICAL_XPASS_PROB_ATTR, probs)
+    setattr(graph, PHYSICAL_XPASS_RAW_PROB_ATTR, raw_probs)
     setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, logits)
     setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, pass_distances)
     setattr(graph, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, nearest_opponent_distances)
@@ -7029,6 +7050,7 @@ def attach_evaluation_xpass_to_graph(
         frame_scope=frame_scope,
     )
     setattr(graph, EVALUATION_XPASS_PROB_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_PROB_ATTR))
+    setattr(graph, EVALUATION_XPASS_RAW_PROB_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_RAW_PROB_ATTR))
     setattr(graph, EVALUATION_XPASS_DISTANCE_ATTR, getattr(sidecar_graph, PHYSICAL_XPASS_DISTANCE_ATTR))
     setattr(
         graph,

@@ -86,7 +86,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with cached runtime physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for pass-success blending.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version: max, noise-kernel, top<N>, or pc-only top-pass<N>/uncertainty.")
-    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
+    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v0", "v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model weighting version; v0 copies raw physical xPass.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
     parser.add_argument("--discount", dest="v4_discount", type=parse_physical_xpass_bool, default=None, help="For --xpass-weight v4, enable/disable the distance cosine discount. Default: true.")

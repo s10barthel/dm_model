@@ -36,6 +36,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
+    PHYSICAL_XPASS_RAW_PROB_ATTR,
     attach_physical_xpass_cached_online_to_graphs,
     attach_physical_xpass_online_to_graphs,
     attach_physical_xpass_read_only_to_graphs,
@@ -152,7 +153,7 @@ def _aligned_auxiliary_values(table, event_index, player_indices, role):
 def _physical_xpass_blend_finite_mask(
     *,
     xpass: np.ndarray,
-    pass_distance: np.ndarray,
+    pass_distance: np.ndarray | None,
     offside: np.ndarray,
     weight_version: str,
     candidate_eligibility: np.ndarray | None = None,
@@ -174,7 +175,11 @@ def _physical_xpass_blend_finite_mask(
             raise ValueError("Physical xPass candidate eligibility must match prediction shape.")
         blend_eligible = blend_eligible & eligible_values
 
-    if weight_version == "v2":
+    if weight_version == "v0":
+        if ball_z_limit is not None:
+            raise ValueError("--ball-z-limit cannot be used with --xpass-weight v0.")
+        finite_mask = blend_eligible & np.isfinite(xpass_values)
+    elif weight_version == "v2":
         nearest_values = np.asarray(distance_to_nearest_opponent, dtype=float)
         missing_nearest_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(nearest_values)
         if bool(missing_nearest_mask.any()):
@@ -466,6 +471,7 @@ def attach_physical_xpass_for_inference(
             dtype = graph.x.dtype
             device = graph.x.device
             setattr(graph, PHYSICAL_XPASS_PROB_ATTR, torch.full((node_count,), 0.5, dtype=dtype, device=device))
+            setattr(graph, PHYSICAL_XPASS_RAW_PROB_ATTR, torch.full((node_count,), 0.5, dtype=torch.float64, device=device))
             setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, torch.zeros(node_count, dtype=dtype, device=device))
             setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
             for name in (
@@ -672,7 +678,9 @@ def _validate_required_pc_row(row, graph, model, *, metric, default_metric):
         player = players[index]
         fields = physical_xpass_metric_columns(player, metric, default_metric=default_metric)
         column = next((key for key in fields if key in row.index), None)
-        required = {"xpass": row.get(column, np.nan), "pass_distance": distances[index]}
+        required = {"xpass": row.get(column, np.nan)}
+        if version != "v0":
+            required["pass_distance"] = distances[index]
         if version == "v2":
             required["nearest_opponent_distance"] = row.get(player + "__distance_to_nearest_opponent", np.nan)
         if physical_xpass_ball_z_limit(model.args) is not None:
@@ -733,7 +741,8 @@ def _validate_pc_attachments(match, model, graphs, labels):
     if not pc_blending_required(model):
         return
     with blending_guard(model, "attachment", match):
-        attributes = [PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_DISTANCE_ATTR]
+        attributes = ([PHYSICAL_XPASS_RAW_PROB_ATTR] if physical_xpass_weight_version(model.args) == "v0"
+                      else [PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_DISTANCE_ATTR])
         if physical_xpass_weight_version(model.args) == "v2":
             attributes.append(PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR)
         if physical_xpass_ball_z_limit(model.args) is not None:
@@ -1112,7 +1121,7 @@ def inference_gnn(
         attached = {int(label[0]): graph for graph, label in zip(graphs, labels)}
         # PyG requires identical attribute sets across the batch. These placeholders
         # are never model inputs or blended for an excluded state.
-        physical_attrs = (PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_LOGIT_ATTR,
+        physical_attrs = (PHYSICAL_XPASS_PROB_ATTR, PHYSICAL_XPASS_RAW_PROB_ATTR, PHYSICAL_XPASS_LOGIT_ATTR,
                           PHYSICAL_XPASS_DISTANCE_ATTR, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
                           PHYSICAL_XPASS_BALL_Z_ATTR, PHYSICAL_XPASS_PASS_HEIGHT_ATTR)
         templates = {name: getattr(graphs[0], name) for name in physical_attrs
@@ -1169,7 +1178,10 @@ def inference_gnn(
             out = model(graphs)
             node_outputs_out = out[graphs.num_nodes:]
             offside_out_mask = offside_node_mask
-            physical_xpass_out = getattr(graphs, PHYSICAL_XPASS_PROB_ATTR, None)
+            xpass_attribute = (PHYSICAL_XPASS_RAW_PROB_ATTR
+                               if inference_uses_physical_xpass(model.args) and physical_xpass_weight_version(model.args) == "v0"
+                               else PHYSICAL_XPASS_PROB_ATTR)
+            physical_xpass_out = getattr(graphs, xpass_attribute, None)
             physical_distance_out = getattr(graphs, PHYSICAL_XPASS_DISTANCE_ATTR, None)
             physical_nearest_opponent_out = getattr(graphs, PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR, None)
             physical_ball_z_out = getattr(graphs, PHYSICAL_XPASS_BALL_Z_ATTR, None)
@@ -1315,9 +1327,9 @@ def inference_gnn(
                     continue
                 is_carry = bool(labels[i, config.LABEL_INDEX["is_dribble"]].item())
                 if inference_uses_physical_xpass(model.args) and not is_carry:
-                    if physical_xpass_out is None or physical_distance_out is None:
-                        raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                     weight_version = physical_xpass_weight_version(model.args)
+                    if physical_xpass_out is None or (weight_version != "v0" and physical_distance_out is None):
+                        raise ValueError("Inference physical xPass blending requires attached physical_xpass and pass-distance tensors.")
                     v4_power = physical_xpass_v4_power(model.args)
                     v4_zero = physical_xpass_v4_zero(model.args)
                     v4_discount = physical_xpass_v4_discount(model.args)
@@ -1329,7 +1341,8 @@ def inference_gnn(
                     if ball_z_limit is not None and physical_ball_z_out is None:
                         raise ValueError("Inference physical xPass ball_z_limit requires attached cached ball_z tensors.")
                     xpass_i = physical_xpass_out[batch == i].cpu().detach().numpy().astype(float)
-                    distance_i = physical_distance_out[batch == i].cpu().detach().numpy().astype(float)
+                    distance_i = (physical_distance_out[batch == i].cpu().detach().numpy().astype(float)
+                                  if weight_version != "v0" else np.full(xpass_i.shape, np.nan))
                     nearest_i = (
                         physical_nearest_opponent_out[batch == i].cpu().detach().numpy().astype(float)
                         if physical_nearest_opponent_out is not None

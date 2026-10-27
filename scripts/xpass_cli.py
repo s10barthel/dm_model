@@ -3,7 +3,7 @@
 import argparse
 import math
 
-from physical_pass_model import normalize_x_pass_version
+from physical_pass_model import normalize_x_pass_version, physical_xpass_ball_z_limit
 
 
 class XPassVersionSelection(argparse.Action):
@@ -19,6 +19,14 @@ class XPassVersionSelection(argparse.Action):
 
 def _selection_list(value):
     return [] if value is None else value if isinstance(value, list) else [value]
+
+
+def _validate_v0_ball_z_limit(parser, args):
+    if "v0" in _selection_list(getattr(args, "xpass_weight", None)):
+        try:
+            physical_xpass_ball_z_limit({"xpass_weight": "v0", "ball_z_limit": getattr(args, "ball_z_limit", None)})
+        except ValueError as exc:
+            parser.error(str(exc))
 
 
 def add_top_pass_selector(parser, *, repeatable=False):
@@ -64,6 +72,7 @@ def resolve_top_pass_selector(parser, args, *, pc_only=False):
         version = normalized
     setattr(args, dest, version if version is not None else args._xpass_version_default)
     del args._xpass_version_default
+    _validate_v0_ball_z_limit(parser, args)
     return args
 
 
@@ -95,6 +104,7 @@ def _resolve_repeatable_versions(parser, args, *, pc_only):
     del args._xpass_version_default, args._xpass_repeatable
     if hasattr(args, "_xpass_version_selections"):
         del args._xpass_version_selections
+    _validate_v0_ball_z_limit(parser, args)
     return args
 
 

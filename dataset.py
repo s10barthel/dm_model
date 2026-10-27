@@ -29,6 +29,7 @@ from physical_pass_model import (
     EVALUATION_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     EVALUATION_XPASS_PASS_HEIGHT_ATTR,
     EVALUATION_XPASS_PROB_ATTR,
+    EVALUATION_XPASS_RAW_PROB_ATTR,
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     PHYSICAL_XPASS_BALL_Z_ATTR,
     PHYSICAL_XPASS_DISTANCE_ATTR,
@@ -36,6 +37,7 @@ from physical_pass_model import (
     PHYSICAL_XPASS_NEAREST_OPPONENT_DISTANCE_ATTR,
     PHYSICAL_XPASS_PASS_HEIGHT_ATTR,
     PHYSICAL_XPASS_PROB_ATTR,
+    PHYSICAL_XPASS_RAW_PROB_ATTR,
     append_pc_xpass_lane_survival_to_graph,
     attach_evaluation_xpass_to_graph,
     attach_pass_height_to_graph,
@@ -80,6 +82,7 @@ def _attach_neutral_physical_xpass(graph: Data) -> Data:
     dtype = graph.x.dtype
     device = graph.x.device
     setattr(graph, PHYSICAL_XPASS_PROB_ATTR, torch.full((node_count,), 0.5, dtype=dtype, device=device))
+    setattr(graph, PHYSICAL_XPASS_RAW_PROB_ATTR, torch.full((node_count,), 0.5, dtype=torch.float64, device=device))
     setattr(graph, PHYSICAL_XPASS_LOGIT_ATTR, torch.zeros(node_count, dtype=dtype, device=device))
     setattr(graph, PHYSICAL_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
     for name in (
@@ -107,6 +110,7 @@ def _attach_empty_evaluation_xpass(graph: Data) -> Data:
     dtype = graph.x.dtype
     device = graph.x.device
     setattr(graph, EVALUATION_XPASS_PROB_ATTR, torch.full((node_count,), float("nan"), dtype=dtype, device=device))
+    setattr(graph, EVALUATION_XPASS_RAW_PROB_ATTR, torch.full((node_count,), float("nan"), dtype=torch.float64, device=device))
     setattr(graph, EVALUATION_XPASS_DISTANCE_ATTR, graph_pass_distances(graph))
     setattr(
         graph,
