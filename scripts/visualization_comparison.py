@@ -65,13 +65,40 @@ def validate_comparison_args(parser, args, *, inference=False):
         if len(cache_ids) != len(set(cache_ids)):
             raise ValueError("Duplicate pc-xPass cache selection.")
         cache_comparison = len(cache_ids) > 1
-        if cache_comparison:
+        dimension = "cache_id" if cache_comparison else None
+        if inference:
+            versions = selection_list(args.x_pass_version)
+            weights = selection_list(args.xpass_weight)
+            for label, values in (("xPass version", versions), ("xPass weight", weights)):
+                if len(values) != len(set(values)):
+                    raise ValueError(f"Duplicate {label} selection.")
+            dimensions = [name for name, values in (("cache_id", cache_ids), ("version", versions), ("weight", weights))
+                          if len(values) > 1]
+            if len(dimensions) > 1:
+                raise ValueError("pc-xPass comparison must vary exactly one of cache ID, version, or weight.")
+            dimension = dimensions[0] if dimensions else None
+            if dimension in {"version", "weight"} and len(cache_ids) != 1:
+                raise ValueError("pc-xPass version/weight comparisons require one explicit --pc-xpass-id.")
+            args.comparison_dimension = dimension
+        pc_comparison = dimension is not None
+        if pc_comparison:
             if not args.compare:
-                raise ValueError("Repeated --pc-xpass-id selections require --compare.")
+                raise ValueError("Repeated pc-xPass selectors require --compare.")
             if getattr(args, "only_tracking", False):
                 raise ValueError("--compare cannot be combined with --only-tracking.")
             if getattr(args, "no_physical_cache", False):
                 raise ValueError("pc-xPass comparison requires caches; omit --no-physical-cache.")
+            if inference:
+                from physical_pass_model import physical_xpass_metric_for_version
+                for version in versions:
+                    physical_xpass_metric_for_version(version, pc_xpass=True)
+                if dimension == "weight":
+                    from scripts.visualization_selection import resolve_component_selection
+                    selection = resolve_component_selection(args, include_success_intent=inference)
+                    if not args.use_physical_xpass:
+                        raise ValueError("pc-xPass weight comparisons require --use-physical-xpass.")
+                    if not {"pass_success", "pass_score"}.intersection(selection.rendered_components):
+                        raise ValueError("pc-xPass weight comparisons require final pass-success or pass-score output.")
             mode = "pc_xpass"
         if inference:
             configurations = resolve_inference_mask_configurations(args)
@@ -93,7 +120,7 @@ def validate_comparison_args(parser, args, *, inference=False):
                 if repeated:
                     raise ValueError("Numbered masks require one checkpoint per task, including fixed supporting models.")
                 mode = "masks"
-            elif cache_comparison:
+            elif pc_comparison:
                 if repeated:
                     raise ValueError("pc-xPass comparison cannot be combined with model comparisons.")
             elif args.compare:
@@ -153,6 +180,7 @@ class Variant:
     masks: list[str] = field(default_factory=list)
     models: dict = field(default_factory=dict)
     runtime_model_args: dict = field(default_factory=dict)
+    pc_xpass_settings: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -2289,6 +2289,26 @@ They support PNG only and export the usual aligned prediction tables and per-var
 cache provenance (`comparison_mode: pc_xpass`). Missing cache inputs fail with the
 cache ID and scene; no fallback cache is selected and no cache is generated.
 
+The inference visualizers `run_and_visualize_hawkeye.py` and
+`visualize_action_components.py` additionally accept repeated `--xpass-version`
+(including `uncertainty`) or repeated `--xpass-weight` with one explicit
+`--pc-xpass-id`. Exactly one of cache ID, version, or weight may vary.
+`--top-pass N` / `--top_pass N` adds `top-passN` to the ordered version list and
+can be mixed with `--xpass-version`. Duplicate normalized values and repeated
+selectors without `--compare` are rejected. Unvaried defaults remain `top10` and
+`v3`; `--pc-xpass` is implied for all pc-xPass comparisons.
+
+Weight comparisons require explicit `--use-physical-xpass` and a final
+pass-success or pass-score output. v4/v5 require one explicit height auxiliary;
+v5 also requires intent. Auxiliaries load once and bind only to variants needing
+them; v4/v5 tuning flags apply to their respective variants. Raw physical panels
+stay identical when only weights vary. Metadata adds `comparison_dimension`
+(`cache_id`, `version`, or `weight`) and each variant's effective settings.
+All existing comparison restrictions still apply. See
+[pc-xPass comparison details](docs/pc_xpass_caches.md) for examples and validation.
+Saved-component visualizers retain cache-only comparisons; `--uncertainty`
+remains a generation option, while inference uses `--xpass-version uncertainty`.
+
 ```powershell
 # Compare raw cached probabilities without loading models or a component source.
 python scripts/visualize_hawkeye.py --compare `
@@ -2300,6 +2320,18 @@ python scripts/run_and_visualize_hawkeye.py --compare `
   --pc-xpass-id cache_a --pc-xpass-id cache_b --bundle-id BUNDLE `
   --situation-id SITUATION --use-physical-xpass --xpass-version top25 --xpass-weight v3 `
   --only-pass-success --only-pass-score --show-physical-xpass
+
+# Compare max, top-pass10, and uncertainty within one cache.
+python scripts/run_and_visualize_hawkeye.py --compare --pc-xpass-id CACHE_ID `
+  --xpass-version max --top-pass 10 --xpass-version uncertainty `
+  --situation-id SITUATION --only-physical-xpass
+
+# Compare v5 and v4 with the same metric and fixed auxiliary checkpoints.
+python scripts/run_and_visualize_hawkeye.py --compare --pc-xpass-id CACHE_ID `
+  --xpass-version max --xpass-weight v5 --xpass-weight v4 `
+  --use-physical-xpass --pass-success-model-id pass_success/MODEL `
+  --xpass-pass-height-model-id pass_height/HEIGHT --xpass-pass-intent-model-id pass_intent/INTENT `
+  --situation-id SITUATION --only-pass-success
 ```
 
 Inference commands recompute blended pass success and dependent pass score when

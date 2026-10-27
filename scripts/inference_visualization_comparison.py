@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 from models.inference_masks import configure_inference_masks, flatten_mask_values, resolve_inference_mask_configurations
-from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata
+from pc_xpass_auxiliary import configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 from models.edge_schema import generation_kwargs
 from models.membership import explicit_split_provenance
 from physical_pass_model import (
@@ -33,6 +33,28 @@ from scripts.visualization_carries import carry_visualization_warnings
 
 
 DERIVED_OUTCOMES = {"outcome_success", "outcome_failure", "pass_score"}
+
+
+def pc_xpass_specifications(args):
+    """Expand only the varied selector, retaining scalar settings for every pipeline."""
+    dimension = getattr(args, "comparison_dimension", None) or "cache_id"
+    selector = {"cache_id": "pc_xpass_id", "version": "x_pass_version", "weight": "xpass_weight"}[dimension]
+    base = {key: selection_list(getattr(args, key))[0]
+            for key in ("pc_xpass_id", "x_pass_version", "xpass_weight")}
+    specifications = {}
+    for value in selection_list(getattr(args, selector)):
+        settings = {**base, selector: value}
+        identifier = value if dimension == "cache_id" else f"{dimension}:{value}"
+        label = f"{value}\n{settings['pc_xpass_id']} | {settings['x_pass_version']} | {settings['xpass_weight']}"
+        specifications[identifier] = (label, settings)
+    return specifications
+
+
+def variant_context(variant, scene=None):
+    settings = {**variant.pc_xpass_settings, **variant.provenance}
+    location = f"{scene}, " if scene else ""
+    return (f"pc-xPass cache {settings.get('pc_xpass_id', variant.identifier)!r}, {location}"
+            f"version {settings.get('x_pass_version')!r}, weight {settings.get('xpass_weight')!r}")
 
 
 def resolve_variants(args, mod, sportec):
@@ -65,9 +87,11 @@ def resolve_variants(args, mod, sportec):
             raise ValueError(f"Missing --{task.replace('_', '-')}-model-id or bundle checkpoint for selected components.")
         base[task] = identifiers[0]
     common_masks = flatten_mask_values(args.inference_mask)
+    physical_specs = {}
     if args.visualization_comparison == "pc_xpass":
-        specifications = [(identifier, identifier, base, common_masks)
-                          for identifier in selection_list(args.pc_xpass_id)]
+        physical_specs = pc_xpass_specifications(args)
+        specifications = [(identifier, label, base, common_masks)
+                          for identifier, (label, _) in physical_specs.items()]
     elif args.visualization_comparison == "checkpoints":
         if paired:
             specifications = [("outcome_pair:" + json.dumps(pair, separators=(",", ":")),
@@ -111,20 +135,32 @@ def resolve_variants(args, mod, sportec):
             require_intended_receiver_mode=False, require_return_type=False, require_target_family=False,
             allow_pass_only_success=True) if pipeline_records else {})
         contexts.append(context)
-        if args.visualization_comparison == "pc_xpass" and shared_auxiliaries is not None:
-            auxiliaries = shared_auxiliaries
+        if args.visualization_comparison == "pc_xpass":
+            if shared_auxiliaries is None:
+                auxiliary_options = copy(args)
+                weights = selection_list(args.xpass_weight)
+                auxiliary_options.xpass_weight = "v5" if "v5" in weights else "v4" if "v4" in weights else weights[0]
+                auxiliary_models = {}
+                if not pipeline_models:
+                    validate_auxiliary_selectors(auxiliary_options, active=False)
+                shared_auxiliaries = (configure_auxiliary_models(auxiliary_options, auxiliary_models,
+                    "cpu" if not torch.cuda.is_available() else args.device,
+                    active=bool(args.use_physical_xpass and "pass_success" in pipeline_models)) if pipeline_models else {})
+                args._xpass_auxiliary_records = getattr(auxiliary_options, "_xpass_auxiliary_records", {})
+            weight = physical_specs[identifier][1]["xpass_weight"]
+            roles = {"pass_height", "pass_intent"} if weight == "v5" else {"pass_height"} if weight == "v4" else set()
+            auxiliaries = {role: model for role, model in shared_auxiliaries.items() if role in roles}
             pipeline_models.update({f"xpass_{role}": model for role, model in auxiliaries.items()})
         else:
             auxiliaries = (configure_auxiliary_models(args, pipeline_models, "cpu" if not torch.cuda.is_available() else args.device)
                            if pipeline_models else {})
-            if args.visualization_comparison == "pc_xpass":
-                shared_auxiliaries = auxiliaries
         for role, auxiliary in auxiliaries.items():
             models[f"auxiliary:{identifier}:{role}"] = auxiliary
         variant_schema = validate_model_graph_schemas(pipeline_models)
         variants.append(Variant(identifier, label, {"model_ids": ids, "models": pipeline_records,
             "source_splits": {task: explicit_split_provenance(record) for task, record in pipeline_records.items()},
-            "source_context": context, "graph_schema": variant_schema}, masks, pipeline_models))
+            "source_context": context, "graph_schema": variant_schema}, masks, pipeline_models,
+            pc_xpass_settings=physical_specs[identifier][1] if physical_specs else {}))
     shared = {key: value if all(item.get(key) == value for item in contexts) else None
               for key, value in contexts[0].items()}
     shared["source_feature_run_ids"] = {identifier: record.get("feature_run_id") for identifier, record in records.items()}
@@ -132,7 +168,10 @@ def resolve_variants(args, mod, sportec):
         shared["bundle_feature_run_id"] = bundle.get("feature_run_id")
         for key in ("feature_run_id", "intended_receiver_mode", "return_type", "target_family"):
             shared[key] = shared.get(key) or bundle.get(key)
-    schema = variants[0].provenance["graph_schema"]
+    schema = validate_model_graph_schemas(models) if physical_specs else variants[0].provenance["graph_schema"]
+    if physical_specs:
+        for variant in variants:
+            variant.provenance["graph_schema"] = schema
     return variants, selection, shared, bundle, schema
 
 
@@ -171,22 +210,38 @@ def configure_physical(args, mod, variants, dataset):
 
 def configure_cache_variants(args, mod, variants, dataset):
     """Resolve caches independently and capture settings without mutating shared models."""
-    metric = physical_xpass_metric_for_version(args.x_pass_version, pc_xpass=True)
     for variant in variants:
         options = copy(args)
-        options.pc_xpass_id = variant.identifier
+        settings = variant.pc_xpass_settings or dict(pc_xpass_id=variant.identifier,
+            x_pass_version=args.x_pass_version, xpass_weight=args.xpass_weight)
+        vars(options).update(settings)
+        variant.pc_xpass_settings = settings
         options.visualization_comparison = None
         options.physical_cache_dir = None
         try:
+            metric = physical_xpass_metric_for_version(options.x_pass_version, pc_xpass=True)
             cache = mod.pc_versions.cache_dir(dataset, options)
             metadata = validate_physical_xpass_cache_metadata(cache, expected_source=PC_XPASS_SOURCE)
             validate_x_pass_version_available(cache, source=PC_XPASS_SOURCE,
-                                              x_pass_version=args.x_pass_version, metric=metric)
+                                              x_pass_version=options.x_pass_version, metric=metric)
             originals = {key: model.args for key, model in variant.models.items()}
             try:
                 for model in variant.models.values():
                     model.args = deepcopy(model.args)
                 configure_physical(options, mod, [variant], dataset)
+                primary = variant.models.get("pass_success")
+                if primary is not None and hasattr(args, "_xpass_auxiliary_records"):
+                    records = {role: deepcopy(record) for role, record in args._xpass_auxiliary_records.items()
+                               if f"xpass_{role}" in variant.models}
+                    primary.args["xpass_auxiliary_models"] = records
+                    primary.args.pop("xpass_pass_height_definition", None)
+                    if "pass_height" in records:
+                        primary.args["xpass_pass_height_definition"] = records["pass_height"]["pass_height_definition"]
+                if primary is not None and args.use_physical_xpass:
+                    irrelevant = ("v4_power", "v4_zero", "v4_discount") if options.xpass_weight != "v4" else ()
+                    irrelevant += ("v5_intent_threshold", "v5_discount") if options.xpass_weight != "v5" else ()
+                    for key in irrelevant:
+                        primary.args.pop(key, None)
                 for key, model in variant.models.items():
                     if model.args.get("lane_survival"):
                         validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, model.args.get("lane_survival_mode"))
@@ -196,18 +251,18 @@ def configure_cache_variants(args, mod, variants, dataset):
                                                   or mod.inference_uses_physical_xpass(model.args)):
                         model.args["pc_xpass"] = True
                     if model.args.get("lane_survival") or key == "pass_success":
-                        model.args["pc_xpass_id"] = variant.identifier
+                        model.args["pc_xpass_id"] = options.pc_xpass_id
                         model.args["pc_xpass_namespace"] = options.pc_xpass_namespace
                 variant.runtime_model_args = {key: deepcopy(model.args) for key, model in variant.models.items()}
             finally:
                 for key, model in variant.models.items():
                     model.args = originals[key]
-            variant.provenance.update(pc_xpass_id=variant.identifier, physical_cache_dir=str(cache),
+            variant.provenance.update(**settings, physical_cache_dir=str(cache),
                 pc_xpass_namespace=options.pc_xpass_namespace, physical_xpass_runtime_source=PC_XPASS_SOURCE,
-                x_pass_version=args.x_pass_version, physical_xpass_metric=metric,
+                physical_xpass_metric=metric,
                 effective_model_args=variant.runtime_model_args)
         except (ValueError, FileNotFoundError) as exc:
-            raise type(exc)(f"pc-xPass cache {variant.identifier!r}: {exc}") from exc
+            raise type(exc)(f"{variant_context(variant)}: {exc}") from exc
 
 
 @contextmanager
@@ -231,11 +286,13 @@ def active_variant(variant, scene):
         _configure_variant(variant)
         yield
     except PCXPassBlendingError as exc:
-        raise PCXPassBlendingError(f"pc-xPass cache {variant.identifier!r}, {scene}: {exc}",
-                                  stage=exc.stage, context={**exc.context, "cache_id": variant.identifier,
+        raise PCXPassBlendingError(f"{variant_context(variant, scene)}: {exc}",
+                                  stage=exc.stage, context={**exc.context, "cache_id": variant.provenance["pc_xpass_id"],
+                                                            "version": variant.provenance["x_pass_version"],
+                                                            "weight": variant.provenance["xpass_weight"],
                                                             "scene": scene}) from exc
     except (ValueError, KeyError, FileNotFoundError) as exc:
-        raise type(exc)(f"pc-xPass cache {variant.identifier!r}, {scene}: {exc}") from exc
+        raise type(exc)(f"{variant_context(variant, scene)}: {exc}") from exc
     finally:
         for model, original in originals:
             model.args = original
@@ -289,11 +346,13 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
                         selection.rendered_components, prediction_cache=cache) if variant.models else {})
                     if "physical_xpass" in selection.rendered_components:
                         directory = variant.provenance.get("physical_cache_dir", args.physical_cache_dir)
-                        if directory not in physical_tables:
-                            physical_tables[directory] = mod.load_runtime_physical_xpass_visualization_table(
-                                directory, str(subject.match_id), frames, metric=mod.physical_xpass_metric(args),
-                                x_pass_version=args.x_pass_version)
-                        values["physical_xpass"] = physical_tables[directory].copy(deep=True)
+                        version = variant.provenance.get("x_pass_version", args.x_pass_version)
+                        metric = variant.provenance.get("physical_xpass_metric") or mod.physical_xpass_metric(args)
+                        physical_key = (directory, metric, version)
+                        if physical_key not in physical_tables:
+                            physical_tables[physical_key] = mod.load_runtime_physical_xpass_visualization_table(
+                                directory, str(subject.match_id), frames, metric=metric, x_pass_version=version)
+                        values["physical_xpass"] = physical_tables[physical_key].copy(deep=True)
                     tables.append(values)
             scores, labels, stats = mod.build_situation_overlays(overlays, str(identifier), scene_tracking, subject,
                                                                selection_format=args.selection_format)
@@ -352,7 +411,8 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                     values = mod.collect_action_components(subject, variant.models, feature_root, device, action_index,
                         display_id, Path(args.output_dir), show_trajectories=args.show_trajectories,
                         show_physical_xpass=args.show_physical_xpass, physical_cache_dir=variant.provenance.get("physical_cache_dir", args.physical_cache_dir),
-                        physical_xpass_metric_name=mod.physical_xpass_metric(args), physical_xpass_version_name=args.x_pass_version,
+                        physical_xpass_metric_name=variant.provenance.get("physical_xpass_metric") or mod.physical_xpass_metric(args),
+                        physical_xpass_version_name=variant.provenance.get("x_pass_version", args.x_pass_version),
                         rendered_components=selection.rendered_components, prediction_cache=cache,
                         possession_states=possession_states)
                 mod.prepare_action_overlays(
@@ -394,17 +454,17 @@ def run_comparison(args, mod):
     variants, selection, shared, bundle, schema = resolve_variants(args, mod, sportec)
     with cli_blending_guard(args):
         configure_physical(args, mod, variants, dataset)
-    for variant in variants:
-        validate_pc_xpass_startup(variant.models.get("pass_success"))
     # Validate all scopes/schemas before any expensive inference or artifact output.
     for variant in variants:
         with active_variant(variant, "preflight"):
-            pass
+            validate_pc_xpass_startup(variant.models.get("pass_success"))
     names = list(selection.rendered_components)
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
+    if args.visualization_comparison == "pc_xpass":
+        report.metadata["comparison_dimension"] = getattr(args, "comparison_dimension", None) or "cache_id"
     if "physical_xpass" in names and args.visualization_comparison != "pc_xpass":
         report.metadata.update(physical_cache_dir=args.physical_cache_dir,
             physical_xpass_runtime_source=mod.physical_xpass_panel_source(args, args.physical_cache_dir),

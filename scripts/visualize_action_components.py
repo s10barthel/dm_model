@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 from copy import copy
-import math
 import sys
 import warnings
 from datetime import datetime
@@ -53,7 +52,8 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from models.membership import attach_membership_report
-from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+from scripts.xpass_cli import (add_top_pass_selector, resolve_top_pass_selector,
+                               XPassVersionSelection, validate_xpass_weight_options)
 from physical_pass_model import (
     PHYSICAL_XPASS_FRAME_SCOPE_ACTION,
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -104,8 +104,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
-    parser.epilog = ("Use --compare with repeated --pc-xpass-id for fixed-model cache comparisons with shared settings, "
-                     "or repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
+    parser.epilog = ("Use --compare with repeated --pc-xpass-id, --xpass-version/--top-pass, or --xpass-weight "
+                     "to vary exactly one pc-xPass setting with fixed models; version/weight comparisons require an explicit cache ID. "
+                     "Alternatively compare repeated same-task model IDs or equal-length lists of outcome scoring/conceding IDs. "
                      "Outcome IDs pair by selection order; repeat a fixed counterpart explicitly for each pair. "
                      "Varying outcomes for derived outputs requires pairs. Optionally apply one combined --inference-mask. "
                      "Use --inference-mask-1 MASK ... --inference-mask-2 MASK ... to compare independent masks "
@@ -178,8 +179,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lane-survival-cache-dir", help="Runtime pc-xPass lane-survival cache directory override.")
     parser.add_argument("--use-physical-xpass", "--use_physical_xpass", dest="use_physical_xpass", action="store_true", help="Blend pass-success inference with physical xPass.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true", help="Use pc-xPass cache values for inference blending and physical xPass rendering.")
-    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", default="top10", help="Cached xPass version: max, noise-kernel, top<N>, or pc-only top-pass<N>/uncertainty.")
-    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", choices=["v1", "v2", "v3", "v4", "v5"], default="v3", help="Physical xPass/model blend weighting version.")
+    parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version", dest="x_pass_version", action=XPassVersionSelection, default="top10", help="Cached xPass version: max, noise-kernel, top<N>, or pc-only top-pass<N>/uncertainty. Repeat with --compare.")
+    parser.add_argument("--xpass-weight", "--xpass_weight", dest="xpass_weight", action=RepeatableSelection, choices=["v1", "v2", "v3", "v4", "v5"], default=None, help="Physical xPass/model blend weight (default v3). Repeat with --compare and --use-physical-xpass.")
     parser.add_argument("--v4-power", dest="v4_power", type=float, default=None, help="Power for --xpass-weight v4. Default: 2.0.")
     parser.add_argument("--v4-zero", dest="v4_zero", type=float, default=None, help="Zero point for --xpass-weight v4 distance discount. Default: 0.8.")
     parser.add_argument("--discount", dest="v4_discount", type=parse_physical_xpass_bool, default=None, help="For --xpass-weight v4, enable/disable the distance cosine discount. Default: true.")
@@ -201,7 +202,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add_component_selection_args(parser, include_success_intent=True)
     parser.add_argument("--run-id", help="Pin the created visualization run id. Default: auto-generate one.")
     parser.add_argument("--output-dir", default=str(SPORTEC_VISUALIZATION_DIR))
-    add_top_pass_selector(parser)
+    add_top_pass_selector(parser, repeatable=True)
     pc_versions.add_selection_argument(parser, repeatable=True)
     add_auxiliary_arguments(parser)
     args = parser.parse_args(argv)
@@ -221,26 +222,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--physical-worker-thread-limit must be positive.")
     if args.physical_batch_size < 1:
         parser.error("--physical-batch-size must be positive.")
-    if args.v4_power is not None:
-        if not math.isfinite(args.v4_power) or args.v4_power <= 0:
-            parser.error("--v4-power must be positive.")
-        if args.xpass_weight != "v4":
-            parser.error("--v4-power is only valid with --xpass-weight v4.")
-    if args.v4_zero is not None:
-        if not math.isfinite(args.v4_zero) or args.v4_zero <= 0:
-            parser.error("--v4-zero must be positive.")
-        if args.xpass_weight != "v4":
-            parser.error("--v4-zero is only valid with --xpass-weight v4.")
-    if args.v4_discount is not None and args.xpass_weight != "v4":
-        parser.error("--discount is only valid with --xpass-weight v4.")
-    if args.v4_discount is None:
-        args.v4_discount = True
-    if (args.v5_intent_threshold is not None or args.v5_discount is not None) and args.xpass_weight != "v5":
-        parser.error("v5 options are only valid with --xpass-weight v5.")
-    args.v5_intent_threshold = 0.01 if args.v5_intent_threshold is None else args.v5_intent_threshold
-    args.v5_discount = True if args.v5_discount is None else args.v5_discount
-    if not math.isfinite(args.v5_intent_threshold) or args.v5_intent_threshold <= 0:
-        parser.error("--v5-intent-threshold must be a positive finite float.")
+    validate_xpass_weight_options(parser, args)
     return validate_comparison_args(parser, args, inference=True)
 
 

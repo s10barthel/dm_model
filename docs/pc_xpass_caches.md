@@ -176,6 +176,53 @@ or generation occurs. Comparison metadata records `comparison_mode: pc_xpass`,
 fixed models/source, shared CLI settings, and each cache's resolved provenance.
 Evaluation commands are unchanged.
 
+The two inference visualizers, `run_and_visualize_hawkeye.py` and
+`visualize_action_components.py`, also compare versions or blend weights within
+one explicit `--pc-xpass-id`. Exactly one selector may vary: cache ID, version,
+or weight. Repeat the singular flags for two or more distinct values; their
+command-line order is the panel order. `--pc-xpass` is implied. Unvaried version
+and weight defaults remain `top10` and `v3`.
+
+```powershell
+# Compare three cached metrics without loading learned models.
+python scripts/run_and_visualize_hawkeye.py --compare --pc-xpass-id CACHE_ID `
+  --xpass-version max --top-pass 10 --xpass-version uncertainty `
+  --situation-id SITUATION --only-physical-xpass
+
+# Compare blended success with fixed cache, metric, and auxiliary checkpoints.
+python scripts/run_and_visualize_hawkeye.py --compare --pc-xpass-id CACHE_ID `
+  --xpass-version max --xpass-weight v5 --xpass-weight v4 `
+  --use-physical-xpass --pass-success-model-id pass_success/MODEL `
+  --xpass-pass-height-model-id pass_height/HEIGHT `
+  --xpass-pass-intent-model-id pass_intent/INTENT `
+  --situation-id SITUATION --only-pass-success --show-physical-xpass
+```
+
+`--top-pass N` / `--top_pass N` contributes `top-passN` to the same ordered
+version list as `--xpass-version`. Counts may repeat with different values.
+Select uncertainty with `--xpass-version uncertainty`; `--uncertainty true/false`
+remains a generation option. Every selected metric must already exist in the
+cache with compatible metadata. Normalized duplicate selections, repeated
+selectors without `--compare`, and combinations varying multiple settings are
+rejected. For example, two cache IDs plus two versions are invalid, as are
+`--top-pass 10 --xpass-version top-pass10` in comparison mode.
+
+Weight comparisons require explicit `--use-physical-xpass` and a selected final
+pass-success or pass-score output. Raw physical panels alone cannot compare
+weights: their values are identical across weight variants. v4/v5 require one
+explicit height auxiliary; v5 also requires an explicit intent auxiliary. Each
+auxiliary loads once and is used only by variants needing it. Selectors unused
+by every variant are rejected. v4 tuning flags apply only to v4 variants; v5
+flags apply only to v5 variants, and both sets may be supplied when comparing
+those weights. Other comparison restrictions above also apply.
+
+Inference comparison metadata retains `comparison_mode: pc_xpass` and records
+`comparison_dimension` as `cache_id`, `version`, or `weight`. New variant IDs are
+`version:<normalized-version>` and `weight:<weight>`; cache comparison IDs are
+unchanged. Each variant records its cache, version, metric, weight, and effective
+model/auxiliary settings. Errors identify those settings and the failing scene.
+Saved-component visualizers retain their existing cache-only comparison behavior.
+
 All five visualization commands support `--compare-pass-success`, which stacks
 the existing model pass-success, pc-xPass, and final pass-success images into one
 PNG. `--only-compare-pass-success` selects only that combined output. Both modes

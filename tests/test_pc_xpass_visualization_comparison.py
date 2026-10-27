@@ -1,4 +1,4 @@
-"""Cache comparisons keep checkpoints/settings fixed and isolate runtime cache inputs."""
+"""PC-xPass comparisons vary one setting and isolate each runtime pipeline."""
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +12,7 @@ import inference
 import physical_pass_model as physics
 import project_config
 import pc_xpass_match_cache as match_cache
+import pc_xpass_uncertainty as uncertainty
 from scripts import inference_visualization_comparison as direct_compare
 from scripts import saved_visualization_comparison as saved_compare
 from scripts import run_and_visualize_hawkeye as direct
@@ -420,3 +421,332 @@ def test_auxiliary_prediction_reuse_includes_the_active_cache(caches, monkeypatc
             assert all(table.at[10, "home_2"] == (.2 if variant.identifier == "a" else .8)
                        for table in predictions.values())
     assert calls == [(role, identifier) for identifier in ("a", "b") for role in ("pass_height", "pass_intent")]
+
+
+@pytest.mark.parametrize("module,required", COMMANDS[:2])
+def test_cli_versions_alias_order_and_defaults(module, required):
+    default = module.parse_args(required)
+    assert default.x_pass_version == "top10" and default.xpass_weight == "v3"
+    assert default.comparison_dimension is None
+    single = module.parse_args([*required, "--pc-xpass", "--xpass-version", "top_pass10", "--top_pass", "10"])
+    assert single.x_pass_version == "top-pass10"
+    args = module.parse_args([*required, "--compare", "--pc-xpass-id", "a", "--top_pass", "10",
+        "--x-pass-version", "MAX_XPASS", "--top-pass", "5", "--x_pass_version", "uncertainty"])
+    assert args.x_pass_version == ["top-pass10", "max", "top-pass5", "uncertainty"]
+    assert args.pc_xpass and args.comparison_dimension == "version"
+    weights = module.parse_args([*required, "--compare", "--pc-xpass-id", "a", "--use-physical-xpass",
+        "--xpass-weight", "v5", "--xpass_weight", "v4", "--xpass-weight", "v3",
+        "--v4-power", "3", "--v4-zero", "0.7", "--discount", "false", "--v5-discount", "false",
+        "--v5-intent-threshold", "0.2", "--only-pass-success"])
+    assert weights.xpass_weight == ["v5", "v4", "v3"]
+    assert weights.x_pass_version == "top10" and weights.comparison_dimension == "weight" and weights.pc_xpass
+    assert list(direct_compare.pc_xpass_specifications(weights)) == ["weight:v5", "weight:v4", "weight:v3"]
+
+
+VERSION_FLAGS = ["--compare", "--pc-xpass-id", "a", "--xpass-version", "max", "--top-pass", "10"]
+WEIGHT_FLAGS = ["--compare", "--pc-xpass-id", "a", "--xpass-weight", "v5", "--xpass-weight", "v4"]
+
+
+@pytest.mark.parametrize("module,required", COMMANDS[:2])
+@pytest.mark.parametrize("extra", [
+    ["--xpass-version", "max", "--xpass-version", "top10"],
+    ["--pc-xpass", "--top-pass", "10", "--top-pass", "5"],
+    ["--xpass-weight", "v3", "--xpass-weight", "v4"],
+    ["--pc-xpass", "--xpass-version", "max", "--top-pass", "10"],
+    ["--compare", "--xpass-version", "max", "--top-pass", "10"],
+    ["--compare", "--xpass-weight", "v3", "--xpass-weight", "v4", "--use-physical-xpass"],
+    [*VERSION_FLAGS, "--pc-xpass-id", "b"],
+    [*VERSION_FLAGS, "--xpass-weight", "v3", "--xpass-weight", "v4"],
+    [*CACHE_FLAGS, "--xpass-weight", "v3", "--xpass-weight", "v4"],
+    [*VERSION_FLAGS, "--xpass-version", "MAX_XPASS"],
+    [*VERSION_FLAGS, "--xpass-version", "top_pass10"],
+    [*VERSION_FLAGS, "--top-pass", "0"],
+    [*VERSION_FLAGS, "--xpass-version", "noise-kernel"],
+    [*VERSION_FLAGS, "--no-physical-cache"],
+    [*VERSION_FLAGS, "--physical-cache-dir", "cache"],
+    [*VERSION_FLAGS, "--lane-survival-cache-dir", "cache"],
+    [*VERSION_FLAGS, "--compare-pass-success"],
+    [*VERSION_FLAGS, "--only-compare-pass-success"],
+    [*VERSION_FLAGS, "--inference-mask-1", "accel"],
+    [*VERSION_FLAGS, "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b"],
+    [*VERSION_FLAGS, "--uncertainty"],
+    WEIGHT_FLAGS,
+    [*WEIGHT_FLAGS, "--use-physical-xpass", "--only-physical-xpass"],
+    [*WEIGHT_FLAGS, "--use-physical-xpass", "--only-pass-intent", "--show-model-pass-success"],
+    [*WEIGHT_FLAGS, "--use-physical-xpass", "--only-outcome-success"],
+    [*WEIGHT_FLAGS, "--use-physical-xpass", "--xpass-weight", "v5"],
+    [*VERSION_FLAGS, "--v4-power", "3"],
+    [*VERSION_FLAGS, "--v5-discount", "false"],
+])
+def test_cli_invalid_version_and_weight_comparisons(module, required, extra):
+    with pytest.raises((SystemExit, ValueError)):
+        module.parse_args([*required, *extra])
+
+
+@pytest.fixture
+def metric_caches(caches):
+    values = {"max_xpass": .8, "top10_xpass": .2, "top_pass10_xpass": .5, "uncertainty_xpass": .3}
+    for dataset in ("hawkeye", "sportec"):
+        folder = caches / "a" / dataset
+        metadata = json.loads((folder / "metadata.json").read_text())
+        metadata.update(available_metrics=list(values), uncertainty_config=uncertainty.configuration(True),
+                        uncertainty_metric_definition=uncertainty.DEFINITION)
+        (folder / "metadata.json").write_text(json.dumps(metadata))
+        path = folder / "matches/s.parquet"
+        rows = pd.read_parquet(path)
+        for player in ("home_1", "home_2", "away_3"):
+            for metric, value in values.items():
+                rows[f"{player}__{metric}"] = value
+        rows.to_parquet(path, index=False)
+    return values
+
+
+@pytest.mark.parametrize("dimension", ["version", "weight"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_inference_versions_weights_and_scores(tmp_path, monkeypatch, outcome_pipeline, metric_caches, dimension, reverse):
+    from models import utils
+    from models.pass_height import definition
+    module, required, models, _, build, _ = outcome_pipeline
+    weights = ["v5", "v4", "v3"]
+    versions = ["max", "top-pass10", "uncertainty"]
+    values = versions if dimension == "version" else weights
+    if reverse:
+        values.reverse()
+    flags = ["--compare", "--pc-xpass-id", "a", "--use-physical-xpass"]
+    for value in values:
+        flags.extend(["--top-pass", "10"] if value == "top-pass10" else
+                     ["--xpass-version" if dimension == "version" else "--xpass-weight", value])
+    auxiliary_calls = []
+    def load_auxiliary(identifier, device):
+        auxiliary_calls.append(identifier)
+        model = TinyModel(identifier)
+        if identifier.startswith("pass_height/"):
+            model.args["pass_height_definition"] = definition(1.5, "checkpoint")
+        return model.eval()
+    monkeypatch.setattr(utils, "load_model", load_auxiliary)
+    monkeypatch.setattr(utils, "get_model_provenance", lambda identifier: {"model_id": identifier})
+    if dimension == "weight":
+        flags.extend(["--xpass-pass-height-model-id", "pass_height/h", "--xpass-pass-intent-model-id", "pass_intent/i",
+                      "--v4-power", "3", "--v5-intent-threshold", "2"])
+    calls = []
+    def predict(scene, model, **kw):
+        task = model.args["task"]
+        if task == "pass_success":
+            settings = physics.physical_xpass_inference_lookup_config(model.args, cache_dir=model.args["physical_cache_dir"])
+            weight = model.args["xpass_weight"]
+            expected_roles = {"pass_height", "pass_intent"} if weight == "v5" else {"pass_height"} if weight == "v4" else set()
+            assert set(model._xpass_auxiliary_models) == set(model.args["xpass_auxiliary_models"]) == expected_roles
+            calls.append((model.args["x_pass_version"], weight))
+            result = physics.blend_physical_xpass_predictions(pass_success_model=.6,
+                xpass=metric_caches[settings["metric"]], pass_distance=20., weight_version=weight,
+                pass_height=.25, pass_intent=1., v4_power=model.args.get("v4_power", 2.),
+                v5_intent_threshold=model.args.get("v5_intent_threshold", .01))
+            return pd.DataFrame({"home_1": [0.], "home_2": [result]}, index=[10]), None
+        pair = (.1, .8) if task == "outcome_scoring" else (.02, .1)
+        return tuple(pd.DataFrame({"home_1": [0.], "home_2": [value]}, index=[10]) for value in pair)
+    monkeypatch.setattr(module, "inference_gnn", predict)
+    physical_loader = None
+    if module is direct:
+        physical_loader = Mock(wraps=module.load_runtime_physical_xpass_visualization_table)
+        monkeypatch.setattr(module, "load_runtime_physical_xpass_visualization_table", physical_loader)
+    if module is sportec:
+        from datatools import sportec_possessions
+        subject = build.return_value
+        monkeypatch.setattr(sportec_possessions, "build_sportec_possessions", lambda *a, **kw: [])
+        monkeypatch.setattr(module, "possession_state_for_action", lambda *a: (subject, 10))
+        monkeypatch.setattr(module.match_cache, "selection_for", lambda *a: {})
+        def physical(folder, *a, metric, x_pass_version, **kw):
+            assert metric == physics.physical_xpass_metric_for_version(x_pass_version, pc_xpass=True)
+            return pd.Series({"home_1": 0., "home_2": metric_caches[metric]})
+        monkeypatch.setattr(module, "load_runtime_physical_xpass_visualization_component", physical)
+    args = module.parse_args([*required, *flags, "--only-pass-success", "--only-pass-score", "--show-physical-xpass",
+        "--pass-success-model-id", "pass_success/fixed", "--outcome-scoring-model-id", "outcome_scoring/a",
+        "--outcome-conceding-model-id", "outcome_conceding/x", "--output-dir", str(tmp_path), "--run-id", "settings"])
+    direct_compare.run_comparison(args, module)
+    aligned = pd.read_csv(tmp_path / "settings/aligned_predictions.csv")
+    metadata = json.loads((tmp_path / "settings/metadata.json").read_text())
+    assert metadata["comparison_dimension"] == dimension and metadata["comparison_mode"] == "pc_xpass"
+    assert [v["id"] for v in metadata["variants"]] == [f"{dimension}:{value}" for value in values]
+    assert build.call_count == 1 and len(calls) == 3
+    if physical_loader is not None:
+        assert physical_loader.call_count == (3 if dimension == "version" else 1)
+    assert sorted(auxiliary_calls) == (["pass_height/h", "pass_intent/i"] if dimension == "weight" else [])
+    for value in values:
+        version, weight = (value, "v3") if dimension == "version" else ("top10", value)
+        raw = metric_caches[physics.physical_xpass_metric_for_version(version, pc_xpass=True)]
+        blended = physics.blend_physical_xpass_predictions(pass_success_model=.6, xpass=raw, pass_distance=20.,
+            weight_version=weight, pass_height=.25, pass_intent=1., v4_power=3., v5_intent_threshold=2.)
+        for name, expected in (("physical_xpass", raw), ("pass_success", blended),
+                               ("pass_score", blended * .7 + (1 - blended) * .08)):
+            row = aligned.loc[aligned.component.eq(name) & aligned.candidate_id.eq("home_2")].iloc[0]
+            assert row[f"prediction:{dimension}:{value}"] == pytest.approx(expected)
+    for model in models.values():
+        assert "physical_cache_dir" not in model.args and not hasattr(model, "_xpass_auxiliary_models")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_real_metric_comparison_matches_standalone(caches, metric_caches, reverse):
+    from test_physical_xpass import DummyBaselineInferenceModel, make_physical_inference_match
+    subject = make_physical_inference_match([10, 11], [1, 1])
+    subject.match_id = "s"
+    primary = DummyBaselineInferenceModel(caches / "a/hawkeye")
+    original = primary.args
+    versions = ["max", "top-pass10", "uncertainty"]
+    if reverse:
+        versions.reverse()
+    args = direct.parse_args(["--compare", "--pc-xpass-id", "a", "--use-physical-xpass",
+                             *[token for v in versions for token in ("--xpass-version", v)]])
+    variants = [Variant(identifier, label, models={"pass_success": primary}, pc_xpass_settings=settings)
+                for identifier, (label, settings) in direct_compare.pc_xpass_specifications(args).items()]
+    direct_compare.configure_physical(args, direct, variants, "hawkeye")
+    memo = {}
+    for variant in [*variants, variants[0]]:
+        with direct_compare.active_variant(variant, "situation s"):
+            compared, _ = cached_prediction(memo, inference.inference_gnn, subject, primary, device="cpu")
+            standalone, _ = inference.inference_gnn(subject, primary, device="cpu")
+            pd.testing.assert_frame_equal(compared, standalone)
+            expected = physics.blend_physical_xpass_predictions(pass_success_model=.9,
+                xpass=metric_caches[variant.provenance["physical_xpass_metric"]], pass_distance=20., weight_version="v3")
+            assert compared.at[10, "home_2"] == pytest.approx(expected)
+        assert primary.args is original and not hasattr(primary, "_xpass_auxiliary_models")
+
+
+@pytest.mark.parametrize("failure", ["metric", "uncertainty", "row", "player"])
+def test_version_failure_has_complete_context(caches, metric_caches, failure):
+    from test_physical_xpass import DummyBaselineInferenceModel, make_physical_inference_match
+    folder = caches / "a/hawkeye"
+    if failure in {"metric", "uncertainty"}:
+        metadata = json.loads((folder / "metadata.json").read_text())
+        if failure == "metric":
+            metadata["available_metrics"].remove("uncertainty_xpass")
+        else:
+            metadata["uncertainty_config"]["schema_version"] = 1
+        (folder / "metadata.json").write_text(json.dumps(metadata))
+    else:
+        path = folder / "matches/s.parquet"
+        rows = pd.read_parquet(path)
+        rows = rows.loc[rows.action_index.ne(11)] if failure == "row" else rows.drop(columns=["home_2__uncertainty_xpass"])
+        rows.to_parquet(path, index=False)
+    args = direct.parse_args([*VERSION_FLAGS, "--xpass-version", "uncertainty", "--use-physical-xpass"])
+    primary = DummyBaselineInferenceModel(folder)
+    variants = [Variant(identifier, label, models={"pass_success": primary}, pc_xpass_settings=settings)
+                for identifier, (label, settings) in direct_compare.pc_xpass_specifications(args).items()]
+    if failure in {"metric", "uncertainty"}:
+        with pytest.raises(ValueError, match="cache 'a'.*version '.*'.*weight 'v3'"):
+            direct_compare.configure_physical(args, direct, variants, "hawkeye")
+    else:
+        direct_compare.configure_physical(args, direct, variants, "hawkeye")
+        subject = make_physical_inference_match([10, 11], [1, 1])
+        subject.match_id = "s"
+        with pytest.raises((inference.PCXPassBlendingError, ValueError),
+                           match="cache 'a'.*situation s.*version 'uncertainty'.*weight 'v3'"):
+            with direct_compare.active_variant(variants[-1], "situation s"):
+                inference.inference_gnn(subject, primary, device="cpu")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_weight_auxiliaries_union_graph_schema_and_state_restoration(monkeypatch, inference_fixture, caches, reverse):
+    from models import utils
+    from models.pass_height import definition
+    from models.edge_schema import BASE_FEATURES, EDGE_GROUPS
+    weights = ["v4", "v5", "v3"]
+    if reverse:
+        weights.reverse()
+    loaded = {}
+    def load(identifier, device):
+        assert identifier not in loaded
+        model = loaded[identifier] = TinyModel(identifier).eval()
+        if identifier.startswith("pass_height/"):
+            model.args.update(edge_in_dim=2, pass_height_definition=definition(1.5, "checkpoint"))
+        else:
+            names = BASE_FEATURES + EDGE_GROUPS["relative_velocity"]
+            model.args.update(node_in_dim=30, edge_in_dim=len(names), edge_feature_names=list(names))
+        return model
+    monkeypatch.setattr(utils, "load_model", load)
+    monkeypatch.setattr(utils, "get_model_provenance", lambda identifier: {"model_id": identifier})
+    args = direct.parse_args(["--compare", "--pc-xpass-id", "a", "--use-physical-xpass", "--only-pass-success",
+        "--pass-success-model-id", "pass_success/fixed", "--xpass-pass-height-model-id", "pass_height/h",
+        "--xpass-pass-intent-model-id", "pass_intent/i", "--v4-power", "3", "--v5-intent-threshold", "2",
+        *[token for weight in weights for token in ("--xpass-weight", weight)]])
+    variants, _, _, _, schema = direct_compare.resolve_variants(args, direct, False)
+    assert schema["node_in_dim"] == 30 and "relative_vx" in schema["edge_feature_names"]
+    assert all(variant.provenance["graph_schema"] == schema for variant in variants)
+    primary = variants[0].models["pass_success"]
+    original_binding = {"original": object()}
+    primary._xpass_auxiliary_models = original_binding
+    originals = {id(model): model.args for variant in variants for model in variant.models.values()}
+    direct_compare.configure_physical(args, direct, variants, "hawkeye")
+    for variant in [*variants, variants[0]]:
+        weight = variant.pc_xpass_settings["xpass_weight"]
+        roles = {"pass_height", "pass_intent"} if weight == "v5" else {"pass_height"} if weight == "v4" else set()
+        with pytest.raises(ValueError, match="deliberate failure"):
+            with direct_compare.active_variant(variant, "situation s"):
+                assert set(primary._xpass_auxiliary_models) == set(primary.args["xpass_auxiliary_models"]) == roles
+                assert ("v4_power" in primary.args) == (weight == "v4")
+                assert ("v5_intent_threshold" in primary.args) == (weight == "v5")
+                raise ValueError("deliberate failure")
+        assert primary._xpass_auxiliary_models is original_binding
+        assert all(model.args is originals[id(model)] for model in variant.models.values())
+    assert sorted(loaded) == ["pass_height/h", "pass_intent/i"]
+
+
+@pytest.mark.parametrize("auxiliary_flags,weights", [
+    ([], ["v4", "v5"]),
+    (["--xpass-pass-height-model-id", "pass_height/h"], ["v4", "v5"]),
+    (["--xpass-pass-intent-model-id", "pass_intent/i"], ["v4", "v5"]),
+    (["--xpass-pass-height-model-id", "pass_height/h"], ["v2", "v3"]),
+])
+def test_weight_comparison_requires_exact_auxiliary_union(inference_fixture, auxiliary_flags, weights):
+    args = direct.parse_args(["--compare", "--pc-xpass-id", "a", "--use-physical-xpass", "--only-pass-success",
+        "--pass-success-model-id", "pass_success/fixed", *auxiliary_flags,
+        *[token for weight in weights for token in ("--xpass-weight", weight)]])
+    with pytest.raises((ValueError, inference.PCXPassBlendingError), match="required explicitly|unused"):
+        direct_compare.resolve_variants(args, direct, False)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_real_weight_comparison_matches_standalone_and_reuses_auxiliaries(caches, reverse):
+    import torch
+    from test_physical_xpass import DummyBaselineInferenceModel, make_physical_inference_match
+    from test_pc_xpass_auxiliary import auxiliary_model
+    from models.pass_height import definition
+    subject = make_physical_inference_match([10, 11], [1, 1])
+    subject.match_id = "s"
+    for graph in subject.graph_features_0:
+        graph.x = torch.cat([graph.x, graph.x.new_zeros((graph.num_nodes, 1))], dim=1)
+    primary = DummyBaselineInferenceModel(caches / "a/hawkeye")
+    primary.args["xpass_pass_height_definition"] = definition(1.5, "checkpoint")
+    height = auxiliary_model(probability=.25)
+    intent = auxiliary_model("pass_intent")
+    weights = ["v5", "v4", "v3"]
+    if reverse:
+        weights.reverse()
+    args = direct.parse_args(["--compare", "--pc-xpass-id", "a", "--use-physical-xpass",
+        "--v5-intent-threshold", "2", "--v4-power", "3",
+        *[token for weight in weights for token in ("--xpass-weight", weight)]])
+    variants = []
+    for identifier, (label, settings) in direct_compare.pc_xpass_specifications(args).items():
+        weight = settings["xpass_weight"]
+        models = {"pass_success": primary}
+        if weight in {"v4", "v5"}:
+            models["xpass_pass_height"] = height
+        if weight == "v5":
+            models["xpass_pass_intent"] = intent
+        variants.append(Variant(identifier, label, models=models, pc_xpass_settings=settings))
+    original_args = primary.args
+    direct_compare.configure_physical(args, direct, variants, "hawkeye")
+    memo, predictions = {}, {}
+    for variant in [*variants, variants[0]]:
+        weight = variant.pc_xpass_settings["xpass_weight"]
+        with direct_compare.active_variant(variant, "situation s"):
+            compared, _ = cached_prediction(memo, inference.inference_gnn, subject, primary, device="cpu")
+            standalone, _ = inference.inference_gnn(subject, primary, device="cpu")
+            pd.testing.assert_frame_equal(compared, standalone)
+            expected = physics.blend_physical_xpass_predictions(pass_success_model=.9, xpass=.2,
+                pass_distance=20., weight_version=weight, pass_height=.25, pass_intent=1.,
+                v4_power=3., v5_intent_threshold=2.)
+            assert compared.at[10, "home_2"] == pytest.approx(expected)
+            predictions[weight] = compared.at[10, "home_2"]
+        assert primary.args is original_args and not hasattr(primary, "_xpass_auxiliary_models")
+    assert len(set(predictions.values())) == 3
+    assert len(subject._xpass_auxiliary_predictions) == 2
