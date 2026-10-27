@@ -21,6 +21,7 @@ import pc_xpass_acceleration as acceleration
 import pandas as pd
 import pc_xpass_match_cache as match_cache
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
+import pc_xpass_high_pass as high_pass
 import torch
 from tqdm import tqdm
 from torch_geometric.data import Batch, Data
@@ -410,6 +411,7 @@ def pc_xpass_metadata(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -494,7 +496,8 @@ def pc_xpass_metadata(
         "top_n": top_n,
         "top_n_values": resolved_top_n_values,
         "top_pass_values": _pc_xpass_top_counts(None, top_pass_values),
-        "top_pass_definition": PC_XPASS_TOP_PASS_DEFINITION,
+        "top_pass_definition": high_pass.TOP_PASS_DEFINITION if high_pass_config else PC_XPASS_TOP_PASS_DEFINITION,
+        **({"high_pass_config": high_pass.validate(high_pass_config)} if high_pass_config else {}),
         "ranking_mode": ranking_mode,
         "top_xt": bool(top_xt),
         "xt_surface": None if xt_surface is None else {
@@ -597,6 +600,8 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
         payload["blocking_radius"] = metadata["blocking_radius"]
     if metadata.get("acceleration_config"):
         payload["acceleration_config"] = metadata["acceleration_config"]
+    if metadata.get("high_pass_config"):
+        payload["high_pass_config"] = high_pass.validate(metadata["high_pass_config"])
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -970,7 +975,7 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
     if version.startswith("top-pass"):
         expected_metric = physical_xpass_metric_for_version(version, pc_xpass=resolved_source == PC_XPASS_SOURCE)
         if (expected_metric not in available_metrics
-                or metadata.get("top_pass_definition") != PC_XPASS_TOP_PASS_DEFINITION):
+                or metadata.get("top_pass_definition") != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION)):
             raise ValueError(f"Cache at {cache_dir} lacks compatible {expected_metric}. Regenerate with scripts/generate_physical_xpass.py --pc-xpass --top-pass {version[8:]}.")
     elif version.startswith("top"):
         requested_top_n = int(version[3:])
@@ -1220,6 +1225,8 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         metadata_path = Path(cache_dir) / "metadata.json"
         if metadata_path.is_file():
             recorded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            if recorded.get("high_pass_config"):
+                lookup["high_pass_config"] = high_pass.validate(recorded["high_pass_config"])
             if recorded.get("blocking_radius", 0.):
                 lookup["blocking_radius"] = recorded["blocking_radius"]
             if recorded.get("acceleration_config"):
@@ -2787,7 +2794,7 @@ def validate_pc_xpass_lane_survival_mode_cache_metadata(metadata: Mapping[str, A
     if normalized.startswith("top_pass_"):
         n = int(normalized[9:])
         metric = pc_xpass_top_pass_metric(n)
-        if metric not in (metadata.get("available_metrics") or []) or metadata.get("top_pass_definition") != PC_XPASS_TOP_PASS_DEFINITION:
+        if metric not in (metadata.get("available_metrics") or []) or metadata.get("top_pass_definition") != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION):
             raise ValueError(f"Cache lacks compatible {metric}. Regenerate with scripts/generate_physical_xpass.py --pc-xpass --top-pass {n}.")
         return normalized
     top_n = int(PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN.fullmatch(normalized).group("n"))
@@ -2815,6 +2822,7 @@ def pc_xpass_output_columns(
     top_n: int | None = PHYSICAL_XPASS_DEFAULT_TOP_N,
     top_n_values: list[int] | tuple[int, ...] | set[int] | None = None,
     top_pass_values: list[int] | tuple[int, ...] | set[int] | None = None,
+    high_pass_config: dict | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[str]:
     resolved_top_n_values = _pc_xpass_top_counts(top_n, top_n_values)
@@ -2842,6 +2850,8 @@ def pc_xpass_output_columns(
                     ]
                 )
         columns.extend(f"{player}{suffix}" for suffix in PC_XPASS_DETAIL_SUFFIXES)
+        if high_pass_config:
+            columns.extend(f"{player}{suffix}" for suffix in high_pass.DETAIL_SUFFIXES)
     return columns
 
 
@@ -3184,7 +3194,14 @@ def validate_pc_xpass_ball_motion_metadata(metadata: Mapping[str, Any]) -> BallD
         raise ValueError("Incompatible pc-xPass physics_version; create a new version.")
     if metadata.get("ball_drag") != expected.get("ball_drag"):
         raise ValueError("Incompatible pc-xPass ball_drag definition; create a new version.")
+    high_pass.validate(metadata.get("high_pass_config"))
     recorded = metadata.get("generation_settings", {})
+    if "high_pass" in recorded:
+        effective_high = high_pass.configuration(
+            **{key: recorded.get(key, default) for key, default in high_pass.DEFAULTS.items()},
+            speed_step=recorded.get("speed_step", PC_XPASS_DEFAULT_SPEED_STEP))
+        if effective_high != metadata.get("high_pass_config"):
+            raise ValueError("Cache high-pass configuration differs from generation settings; create a new version")
     if "ball_dec" in recorded and parse_ball_dec(recorded["ball_dec"]) != value:
         raise ValueError("Cache ball deceleration differs from its generation settings; create a new version.")
     return value
@@ -3242,6 +3259,7 @@ def compute_graph_pc_xpass_metrics(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -3280,6 +3298,7 @@ def compute_graph_pc_xpass_metrics(
             top_n_values=resolved_top_n_values,
             top_pass_values=top_pass_values,
             enabled_metrics=enabled_metrics,
+            high_pass_config=high_pass_config,
         ),
         dtype=float,
     )
@@ -3316,6 +3335,11 @@ def compute_graph_pc_xpass_metrics(
     target_x = target_x_base
     target_y = target_y_base
     t_ball, reachable = pc_xpass_ball_arrival_times(distances, speeds, ball_dec)
+    elevations = np.zeros(len(speeds))
+    ball_heights = np.zeros_like(t_ball)
+    if high_pass_config:
+        speeds, elevations, t_ball, ball_heights, reachable = high_pass.candidates(
+            distances, speeds, t_ball, reachable, high_pass_config)
     valid_targets = on_pitch[np.newaxis, :, :] & reachable
     effective_off_speed = float(max_player_speed if max_player_speed_off is None else max_player_speed_off)
     effective_def_speed = float(max_player_speed if max_player_speed_def is None else max_player_speed_def)
@@ -3376,6 +3400,11 @@ def compute_graph_pc_xpass_metrics(
             power=control_power,
             inflection_point=control_inflection_point,
         )
+    if high_pass_config:
+        eligible = ball_heights[np.newaxis, ...] <= high_pass_config["cutoff"]
+        shared = control_raw_all is lane_raw_all
+        lane_raw_all = np.where(eligible, lane_raw_all, 0.)
+        control_raw_all = lane_raw_all if shared else np.where(eligible, control_raw_all, 0.)
     shared_control = control_raw_all is lane_raw_all
     lane_raw_all = np.where(valid_targets[np.newaxis, ...], lane_raw_all, np.nan)
     control_raw_all = lane_raw_all if shared_control else np.where(valid_targets[np.newaxis, ...], control_raw_all, np.nan)
@@ -3392,7 +3421,7 @@ def compute_graph_pc_xpass_metrics(
         diagnostic_details.update(target_x=target_x, target_y=target_y, ball_times=t_ball,
             player_ids=player_ids, player_positions=player_pos, speeds=speeds,
             raw_lane=lane_raw_all, raw_control=control_raw_all, lane_survival=lane_survival,
-            receiver_control={})
+            receiver_control={}, elevations=elevations, ball_heights=ball_heights)
 
     share_receiver_control: dict[int, np.ndarray] = {}
     if endpoint_normalization == PC_XPASS_ENDPOINT_NORMALIZATION_SHARE:
@@ -3491,6 +3520,9 @@ def compute_graph_pc_xpass_metrics(
                     "distance": float(distances[distance_i]),
                     "target_x": float(target_x[angle_i, distance_i]),
                     "target_y": float(target_y[angle_i, distance_i]),
+                    **({"elevation": float(elevations[speed_i]),
+                        "target_z": float(ball_heights[speed_i, 0, distance_i]),
+                        "flight_time": float(t_ball[speed_i, 0, distance_i])} if high_pass_config else {}),
                 })
         top_option_indices = {
             int(value): _pc_xpass_top_option_indices(score, ranking if bool(top_xt) else score, int(value))
@@ -3535,6 +3567,10 @@ def compute_graph_pc_xpass_metrics(
         result.loc[f"{node_id}__distance"] = float(distances[distance_i])
         result.loc[f"{node_id}__target_x"] = float(target_x[angle_i, distance_i])
         result.loc[f"{node_id}__target_y"] = float(target_y[angle_i, distance_i])
+        if high_pass_config:
+            result.loc[f"{node_id}__elevation"] = float(elevations[speed_i])
+            result.loc[f"{node_id}__target_z"] = float(ball_heights[speed_i, 0, distance_i])
+            result.loc[f"{node_id}__flight_time"] = float(t_ball[speed_i, 0, distance_i])
     return result
 
 
@@ -3568,6 +3604,7 @@ def compute_graphs_pc_xpass_metrics(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -3611,6 +3648,7 @@ def compute_graphs_pc_xpass_metrics(
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            high_pass_config=high_pass_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
             blocking_radius=blocking_radius,
@@ -4342,6 +4380,11 @@ def load_physical_xpass_component(
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
     series.index = output_index
     series.name = selected_metric
+    if frame.attrs.get("physical_xpass_cache_metadata", {}).get("high_pass_config"):
+        series.attrs["pc_xpass_elevations"] = {
+            player: float(row.get(f"{player}__elevation", np.nan)) for player in output_index
+            if pd.notna(row.get(f"{player}__elevation", np.nan))
+        }
     return series
 
 
@@ -4429,6 +4472,10 @@ def load_runtime_physical_xpass_visualization_table(
     table = pd.DataFrame(rows)
     table.index = [int(action_index) for action_index in action_indices]
     table.index.name = "action_index"
+    elevations = {int(row.name): row.attrs["pc_xpass_elevations"] for row in rows
+                  if "pc_xpass_elevations" in row.attrs}
+    if elevations:
+        table.attrs["pc_xpass_elevations_by_action"] = elevations
     return table.sort_index()
 
 
@@ -4489,6 +4536,7 @@ def _runtime_cache_metadata(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -4531,6 +4579,7 @@ def _runtime_cache_metadata(
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            high_pass_config=high_pass_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
             blocking_radius=blocking_radius,
@@ -4627,6 +4676,7 @@ def _ensure_runtime_physical_xpass_cache(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -4677,6 +4727,7 @@ def _ensure_runtime_physical_xpass_cache(
         margin=margin,
         reachability_config=reachability_config,
         acceleration_config=acceleration_config,
+        high_pass_config=high_pass_config,
         distance_power=distance_power,
         distance_allowance=distance_allowance,
         blocking_radius=blocking_radius,
@@ -4709,6 +4760,8 @@ def _ensure_runtime_physical_xpass_cache(
                 raise ValueError("Cache ball deceleration differs; select matching settings or create a new pc-xPass version.")
             if float(metadata.get("blocking_radius", 0.)) != blocking_radius:
                 raise ValueError("Incompatible blocking radius; create a new pc-xPass version")
+            if metadata.get("high_pass_config") != high_pass_config:
+                raise ValueError("Incompatible high-pass settings; create a new pc-xPass version")
             if metadata.get("acceleration_config", {}) != (acceleration_config or {}):
                 raise ValueError("Incompatible acceleration settings/table; create a new pc-xPass version")
             mismatches = []
@@ -4814,7 +4867,7 @@ def _ensure_runtime_physical_xpass_cache(
                 )
             if expected_metadata.get("top_pass_values") and (
                 metadata.get("top_pass_values") != expected_metadata["top_pass_values"]
-                or metadata.get("top_pass_definition") != PC_XPASS_TOP_PASS_DEFINITION
+                or metadata.get("top_pass_definition") != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION)
             ):
                 mismatches.append("top_pass_values or top_pass_definition differ")
             if normalize_physical_xpass_metrics(metadata.get("available_metrics")) != normalize_physical_xpass_metrics(
@@ -4915,6 +4968,16 @@ LANE_CONTROL_COLUMNS = LANE_CONTROL_ID_COLUMNS + [
 LANE_CONTROL_DEFINITION = "per_opponent_max_before_endpoint_v1"
 
 
+def lane_control_columns(cache_dir):
+    metadata = match_cache.read_json(Path(cache_dir) / "metadata.json")
+    return LANE_CONTROL_COLUMNS + (high_pass.LANE_DETAILS if metadata.get("high_pass_config") else [])
+
+
+def lane_control_schema(cache_dir):
+    aerial = "elevation" in lane_control_columns(cache_dir)
+    return (2, "per_opponent_height_masked_max_before_endpoint_v2") if aerial else (1, LANE_CONTROL_DEFINITION)
+
+
 def _lane_control_identity(row: Mapping[str, Any]) -> dict[str, Any]:
     def nullable(value):
         return None if value is None or pd.isna(value) else value
@@ -4944,7 +5007,8 @@ def _lane_control_completed_states(cache_dir: str | Path, match_id: str) -> set[
     if not manifest.exists() or not data.exists():
         return set()
     metadata = json.loads(manifest.read_text(encoding="utf-8"))
-    if metadata.get("definition") != LANE_CONTROL_DEFINITION or metadata.get("schema_version") != 1:
+    schema, definition = lane_control_schema(cache_dir)
+    if metadata.get("definition") != definition or metadata.get("schema_version") != schema:
         raise ValueError("Incompatible lane-control sidecar schema; create a fresh run.")
     counts: dict[tuple, int] = {}
     for row in pd.read_parquet(data, columns=LANE_CONTROL_ID_COLUMNS).to_dict("records"):
@@ -4966,7 +5030,8 @@ def _write_lane_control_sidecar(cache_dir: str | Path, match_id: str,
     manifest = root / "coverage" / f"{match_id}.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     state_keys = {_lane_control_state_key(row) for row in states}
-    frame = pd.DataFrame(records, columns=LANE_CONTROL_COLUMNS)
+    columns = lane_control_columns(cache_dir)
+    frame = pd.DataFrame(records, columns=columns)
     if output.exists():
         old = pd.read_parquet(output)
         keep = [_lane_control_state_key(row) not in state_keys for row in old.to_dict("records")]
@@ -4976,7 +5041,7 @@ def _write_lane_control_sidecar(cache_dir: str | Path, match_id: str,
         frame[column] = frame[column].astype("string")
     for column in ["action_index", "state_frame_id"]:
         frame[column] = frame[column].astype("Int64")
-    for column in ["lane_control", "speed", "angle", "distance", "target_x", "target_y"]:
+    for column in ["lane_control", "speed", "angle", "distance", "target_x", "target_y", *[c for c in high_pass.LANE_DETAILS if c in columns]]:
         frame[column] = frame[column].astype("float64")
     frame = frame.sort_values(LANE_CONTROL_ID_COLUMNS + ["receiver_id", "opponent_id"]).reset_index(drop=True)
     previous = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
@@ -4988,7 +5053,8 @@ def _write_lane_control_sidecar(cache_dir: str | Path, match_id: str,
     for row in states:
         key = _lane_control_state_key(row)
         completed[key] = {**_lane_control_identity(row), "row_count": len(counts.get(key, set()))}
-    metadata = {"schema_version": 1, "definition": LANE_CONTROL_DEFINITION,
+    schema, definition = lane_control_schema(cache_dir)
+    metadata = {"schema_version": schema, "definition": definition,
                 "selection": "same_as_main_cache_best_option", "states": list(completed.values())}
     temporary = output.with_name(f".{output.stem}.{uuid.uuid4().hex}.tmp.parquet")
     temporary_manifest = manifest.with_name(f".{manifest.stem}.{uuid.uuid4().hex}.tmp.json")
@@ -5388,11 +5454,18 @@ def _physical_xpass_row_has_finite_metric(row: dict[str, Any], enabled_metrics: 
     return False
 
 
-def _physical_xpass_row_has_cached_metrics(row: pd.Series, graph: Data, metrics: list[str]) -> bool:
+def _physical_xpass_row_has_cached_metrics(row: pd.Series, graph: Data, metrics: list[str], high_pass_config=None) -> bool:
     """Require requested top-pass scores and diagnostics before reusing a row."""
     if not _physical_xpass_row_has_finite_metric(row.to_dict(), metrics):
         return False
     node_ids = _node_ids(graph)
+    if high_pass_config:
+        for index in _candidate_target_indices(graph):
+            player = node_ids[index]
+            if any(f"{player}{suffix}" not in row for suffix in high_pass.DETAIL_SUFFIXES):
+                return False
+            if pd.notna(row.get(player)) and not all(np.isfinite(row[f"{player}{suffix}"]) for suffix in high_pass.DETAIL_SUFFIXES):
+                return False
     for metric in metrics:
         if not metric.startswith("top_pass"):
             continue
@@ -5552,6 +5625,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     margin = task.get("margin", "tta")
     reachability_config = task.get("reachability_config")
     acceleration_config = task.get("acceleration_config")
+    high_pass_config = task.get("high_pass_config")
     distance_power = float(task.get("distance_power", 3.))
     distance_allowance = float(task.get("distance_allowance", 1.))
     blocking_radius = float(task.get("blocking_radius", 0.))
@@ -5618,6 +5692,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             margin=margin,
             reachability_config=reachability_config,
             acceleration_config=acceleration_config,
+            high_pass_config=high_pass_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
             blocking_radius=blocking_radius,
@@ -5990,6 +6065,7 @@ def prewarm_physical_xpass_runtime_cache(
     margin: str = "tta",
     reachability_config: dict | None = None,
     acceleration_config: dict | None = None,
+    high_pass_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
     blocking_radius: float = 0.,
@@ -6050,7 +6126,7 @@ def prewarm_physical_xpass_runtime_cache(
             raise ValueError("Reusable runtime compute sessions are PC-xPass only")
         if compute_session.num_workers != resolved_workers or compute_session.worker_thread_limit != int(worker_thread_limit):
             raise ValueError("Runtime compute session worker configuration differs from prewarming")
-    if (acceleration_config or margin == "distance" or blocking_radius) and source != PC_XPASS_SOURCE:
+    if (acceleration_config or high_pass_config or margin == "distance" or blocking_radius) and source != PC_XPASS_SOURCE:
         raise ValueError("Acceleration is supported only for pc-xPass")
     cache_metadata = _ensure_runtime_physical_xpass_cache(
         cache_dir,
@@ -6086,6 +6162,7 @@ def prewarm_physical_xpass_runtime_cache(
         margin=margin,
         reachability_config=reachability_config,
         acceleration_config=acceleration_config,
+        high_pass_config=high_pass_config,
         distance_power=distance_power,
         distance_allowance=distance_allowance,
         blocking_radius=blocking_radius,
@@ -6112,6 +6189,8 @@ def prewarm_physical_xpass_runtime_cache(
                 raise ValueError("pc-xPass acceleration reuse cache has incompatible movement/scoring settings")
             if float(reuse_metadata.get("blocking_radius", 0.)) != blocking_radius:
                 raise ValueError("pc-xPass reuse cache has incompatible blocking radius")
+            if reuse_metadata.get("high_pass_config") != high_pass_config:
+                raise ValueError("Reuse cache has incompatible high-pass settings")
             if reuse_metadata.get("acceleration_config", {}) != (acceleration_config or {}):
                 raise ValueError("pc-xPass reuse cache has incompatible acceleration settings/table")
             if (reuse_metadata.get("margin", "tta") != cache_metadata.get("margin", "tta")
@@ -6124,7 +6203,7 @@ def prewarm_physical_xpass_runtime_cache(
                 )
         elif ball_dec == "drag":
             raise ValueError("A drag reuse cache requires compatible ball-motion metadata.")
-        elif acceleration_config or blocking_radius:
+        elif acceleration_config or blocking_radius or high_pass_config:
             raise ValueError("An acceleration/radius reuse cache requires matching metadata")
         elif margin == "reachability":
             raise ValueError("A reachability reuse cache requires metadata with matching artifact/settings.")
@@ -6274,7 +6353,7 @@ def prewarm_physical_xpass_runtime_cache(
                     and _has_finite_pass_distance(cached_row)
                     and _has_finite_ball_z(cached_row)
                     and _has_finite_nearest_opponent_distances(cached_row, graph)
-                    and _physical_xpass_row_has_cached_metrics(cached_row, graph, available_metrics)
+                    and _physical_xpass_row_has_cached_metrics(cached_row, graph, available_metrics, high_pass_config)
                 ):
                     has_current_pass_height = (
                         not pass_height_enabled
@@ -6290,7 +6369,7 @@ def prewarm_physical_xpass_runtime_cache(
                 if not hash_matches:
                     stats["hash_mismatch_recomputed"] = int(stats["hash_mismatch_recomputed"]) + 1
                     match_stats["hash_mismatch_recomputed"] += 1
-                if hash_matches and _physical_xpass_row_has_cached_metrics(cached_row, graph, available_metrics):
+                if hash_matches and _physical_xpass_row_has_cached_metrics(cached_row, graph, available_metrics, high_pass_config):
                     had_pass_height = _has_finite_pass_height_predictions(cached_row, graph) if pass_height_enabled else True
                     copied_row = cached_row.to_dict()
                     copied_row["match_id"] = match_id
@@ -6334,7 +6413,7 @@ def prewarm_physical_xpass_runtime_cache(
             if not refresh and reuse_rows is not None and action_index in reuse_rows.index:
                 reuse_row = reuse_rows.loc[action_index]
                 hash_matches, _missing_hash = _physical_row_hash_matches_or_missing(reuse_row, state_hash)
-                if hash_matches and _physical_xpass_row_has_cached_metrics(reuse_row, graph, available_metrics):
+                if hash_matches and _physical_xpass_row_has_cached_metrics(reuse_row, graph, available_metrics, high_pass_config):
                     had_pass_height = _has_finite_pass_height_predictions(reuse_row, graph) if pass_height_enabled else True
                     copied_row = reuse_row.to_dict()
                     copied_row["match_id"] = match_id
@@ -6471,6 +6550,7 @@ def prewarm_physical_xpass_runtime_cache(
             "margin": margin,
             "reachability_config": reach.configuration(margin, reachability_config),
             "acceleration_config": acceleration_config,
+            "high_pass_config": high_pass_config,
             "distance_power": distance_power,
             "distance_allowance": distance_allowance,
             "blocking_radius": blocking_radius,

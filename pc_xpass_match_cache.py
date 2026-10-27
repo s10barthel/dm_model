@@ -445,8 +445,8 @@ class MatchAccumulator:
         self.dirty = True
 
     def write_lane(self, key, records, states):
-        from physical_pass_model import LANE_CONTROL_COLUMNS, _lane_control_identity
-        frame = pd.DataFrame(records, columns=LANE_CONTROL_COLUMNS)
+        from physical_pass_model import lane_control_columns, _lane_control_identity
+        frame = pd.DataFrame(records, columns=lane_control_columns(self.root))
         if frame.duplicated(["action_index", "receiver_id", "opponent_id"]).any():
             raise ValueError("Duplicate lane-control identities")
         replaced = {int(row["action_index"]) for row in states}
@@ -512,8 +512,8 @@ class MatchAccumulator:
                 collections["lane_control"] = self.lanes
             for name, parts in collections.items():
                 frames = [self._external(frame, key) for key, frame in parts.items()]
-                from physical_pass_model import LANE_CONTROL_COLUMNS
-                columns = list(dict.fromkeys(REQUIRED + (LANE_CONTROL_COLUMNS if name == "lane_control" else [])))
+                from physical_pass_model import lane_control_columns
+                columns = list(dict.fromkeys(REQUIRED + (lane_control_columns(self.root) if name == "lane_control" else [])))
                 if self.root.name == "sportec":
                     columns += ["state_id", "state_partition_id", "period_id"]
                 frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)

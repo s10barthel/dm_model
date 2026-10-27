@@ -1,5 +1,12 @@
 # pc-xPass deceleration and cache versions
 
+[Aerial candidate generation](pc_xpass_high_pass.md) is optional and defaults
+off. Enabled runs retain `--ball-dec` for ground candidates and fingerprint a
+separate Kang aerial-physics block, grid, 2 m default contact cutoff and ranking
+definition. Use a fresh cache ID for changed aerial settings. Older caches imply
+off. Saved-cache inference and visualization read these results without loading
+the flight simulator; normal/location resume precedence follows existing rules.
+
 Optional player acceleration and separate movement-table preparation are described
 in [pc_xpass_acceleration.md](pc_xpass_acceleration.md). Acceleration-based
 [distance raw control](pc_xpass_distance.md) is available with `--margin distance`.

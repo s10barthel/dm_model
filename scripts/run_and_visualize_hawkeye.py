@@ -488,6 +488,8 @@ def render_situation(
     output_paths: list[str] = []
 
     if needs_physical_xpass(args):
+        if getattr(args, "show_physical_xpass", False) and "physical_xpass" not in component_names:
+            component_names.append("physical_xpass")
         xpass = getattr(args, "_pass_success_comparison_xpass", None)
         if compare_pass_success_requested(args) and xpass is None:
             xpass = resolve_saved_xpass(args, {}, "hawkeye")

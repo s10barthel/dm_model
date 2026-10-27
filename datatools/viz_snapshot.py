@@ -631,6 +631,14 @@ class SnapshotVisualizer:
                 else:
                     text = f"{value:.3f}"
 
+                if annot_type == "physical_xpass":
+                    elevations = self.annots.attrs.get("pc_xpass_elevations")
+                    if elevations is None:
+                        elevations = self.annots.attrs.get("pc_xpass_elevations_by_action", {}).get(self.annots.name, {})
+                    elevation = elevations.get(p) if elevations else None
+                    if elevation is not None and np.isfinite(elevation) and pd.notna(value):
+                        text += f"\nbest {elevation:g}°"
+
                 text_xy = snapshot[[f"{p}_x", f"{p}_y"]].values[-1]
                 annot_kwargs = dict(annot_args)
                 if not p.endswith("_goal"):

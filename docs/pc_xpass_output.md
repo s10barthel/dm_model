@@ -1,5 +1,12 @@
 # Sportec pc-xPass output
 
+For newer [aerial-enabled runs](pc_xpass_high_pass.md), receiver details also
+include `__elevation` (degrees), `__target_z` (metres) and `__flight_time`
+(seconds). These describe the best ranked option; `__angle` remains azimuth and
+`__speed` means total 3D release speed. Ground selections have zero elevation
+and height. Top-pass treats speed/azimuth/elevation triples as distinct launches.
+The specific historical run documented below is ground-only.
+
 Directory: `data/pc_xpass/pc_xpass_20261013T223051_439659_c2a48dc1_2f6b95d5/sportec/`
 
 This run stores physical pass-completion estimates for match `DFL-MAT-J040A0`,

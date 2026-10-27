@@ -2773,6 +2773,7 @@ class PhysicalXPassTests(unittest.TestCase):
                         physical_xpass_metric_name=PHYSICAL_XPASS_METRIC_TOPMEAN,
                         physical_xpass_version_name="top10",
                         rendered_components=["unused_component"],
+                        pass_endpoint=False,  # Cache-selection fixture has no tracking for endpoint overlays.
                     )
 
         load_xpass.assert_called_once_with(

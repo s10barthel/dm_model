@@ -44,6 +44,7 @@ from models.utils import (
 from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
+import pc_xpass_high_pass as high_pass
 import pc_xpass_acceleration as acceleration
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
@@ -323,6 +324,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     import reachability as reach
     reach.add_arguments(parser)
     acceleration.add_arguments(parser)
+    high_pass.add_arguments(parser)
     pc_versions.add_selection_argument(parser)
     add_auxiliary_arguments(parser)
     add_inference_mask_arguments(parser)
@@ -332,6 +334,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _validate_args(parser, args)
     reach.configure_args(parser, args)
     acceleration.configure_args(parser, args)
+    high_pass.configure_args(parser, args)
     return args
 
 

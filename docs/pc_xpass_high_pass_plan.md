@@ -1,6 +1,6 @@
 # Implementation plan: optional aerial candidates for PC xPass
 
-Status: plan only. Date: 27 October 2026. User decisions are recorded below; recommendations for unresolved choices are identified explicitly.
+Status: all recommendations approved by the user and implemented on 27 October 2026. See [usage and validation](pc_xpass_high_pass.md). The following records the agreed implementation plan.
 
 ## Agreed behavior
 
@@ -43,17 +43,17 @@ python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_trial 
 
 This yields aerial speeds 20, 22, 24, 26, 28 and 30 m/s: 24 speed/elevation combinations for every horizontal angle.
 
-## Decisions to settle before implementation
+## Approved decisions
 
 | Decision | Options | Recommendation |
 |---|---|---|
-| Aerial physics | Preserve the authors' fixed damping; substitute quadratic drag. | Preserve the authors' fixed damping at 25 Hz for the initial implementation, including update ordering. Evaluate quadratic drag separately later. This follows the previous recommendation but has not been explicitly selected by the user. |
+| Aerial physics | Preserve the authors' fixed damping; substitute quadratic drag. | Preserve the authors' fixed damping at 25 Hz for the initial implementation, including update ordering. Evaluate quadratic drag separately later. |
 | Ground trajectory behavior when enabled | Keep the existing ground solver and `--ball-dec`; run ground passes through the imported simulator too. | Keep the existing ground solver. The feature adds aerial choices while retaining the current meaning of the ground configuration. `--ball-dec` applies to ground candidates only. |
 | Aerial launch height | Start at `z0=0`; use current tracked ball height. | Start at `z0=0` for hypothetical footed passes, with XY origin at the current PC possessor position. This matches the existing hypothetical-pass setup and allows reusable flight tables. Tracked-height launches are more general but require a new height-sensitive input/cache contract and missing-height policy. |
 | Aerial trajectory after landing | Continue the authors' bounce/rolling model; ground immediately and switch to our ground law; stop at first landing. | Continue the authors' bounce/rolling model through later receiving opportunities. This preserves the complete source trajectory. Ground candidates still use their separately selected ground law. |
 | Ranked output | Rank all ground and aerial candidates together; export separate probabilities per family. | Rank together using the existing max/top-N/top-pass and xT rules. Add selected elevation and height/time diagnostics. Separate family scores can be an additional later feature. |
 
-These recommendations are proposals, not answers inferred from elapsed time. If the user is asked to choose, wait for their explicit answer before dependent implementation.
+The user explicitly accepted all recommendations before implementation.
 
 ## Implementation sequence
 

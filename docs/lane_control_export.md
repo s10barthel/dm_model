@@ -1,5 +1,10 @@
 # Best-pass opponent lane-control export
 
+[Aerial-enabled runs](pc_xpass_high_pass.md) use schema 2 and also export
+`elevation`, `target_z`, and `flight_time` for the selected pass. The contact
+cutoff (default 2 m, inclusive) is applied before each opponent's lane maximum.
+Schema 1 and its original columns remain in use for ground-only runs.
+
 Use a fresh pc-xPass run:
 
 ```powershell

@@ -1111,7 +1111,10 @@ def build_hawkeye_visualization_probs(row: pd.Series | None) -> pd.Series:
         return pd.Series(dtype=float)
 
     probs = pd.to_numeric(row, errors="coerce").dropna()
-    return probs.astype(float).sort_values(ascending=False)
+    result = probs.astype(float).sort_values(ascending=False)
+    result.attrs.update({key: row.attrs[key] for key in ("pc_xpass_elevations", "pc_xpass_elevations_by_action")
+                         if key in row.attrs})
+    return result
 
 
 def load_hawkeye_models(

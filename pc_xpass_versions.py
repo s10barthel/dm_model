@@ -13,6 +13,7 @@ from pathlib import Path
 
 import project_config as config
 import reachability as reach
+import pc_xpass_high_pass as high_pass
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle_step radial_gridsize
@@ -26,6 +27,7 @@ SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k
 SETTING_KEYS.update({"distance_power", "distance_allowance"})
 SETTING_KEYS.add("blocking_radius")
 SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
+SETTING_KEYS.update(high_pass.KEYS)
 RESERVED = {"acceleration", "reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
 
@@ -99,6 +101,8 @@ def settings(args: Namespace) -> dict[str, Any]:
         result = {k: v for k, v in result.items() if k not in {"accel", "accel_table_id", "accel_table_fingerprint"}}
     if not result.get("blocking_radius", 0.):
         result.pop("blocking_radius", None)
+    if result.get("high_pass", "off") == "off":
+        result = {key: value for key, value in result.items() if key not in high_pass.KEYS}
     return result
 
 
@@ -108,6 +112,8 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
     tokens = list(sys.argv[1:] if argv is None else argv)
     explicit = {action.dest for token in tokens for action in [parser._option_string_actions.get(token.split("=", 1)[0])] if action}
     args._pc_explicit = explicit
+    if "high_pass_angle" in explicit:
+        args.high_pass_angle = sorted(set(args.high_pass_angle))
     args._pc_location = location
     args.pc_xpass_overrides = []
     run_id = getattr(args, "pc_xpass_id", None)
@@ -144,7 +150,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
                     warnings.warn("Selected cache uses acceleration off; ignoring acceleration table override.", stacklevel=2)
                 args.accel_table_id = None
                 args.accel_table_fingerprint = None
-            for key, value in metadata["generation_settings"].items():
+            for key, value in {**high_pass.DEFAULTS, **metadata["generation_settings"]}.items():
                 if key not in SETTING_KEYS or (location and key == "pass_height_model_id"):
                     continue
                 requested = getattr(args, key, None)
@@ -184,6 +190,10 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
             if "ball_dec" in explicit and parse_ball_dec(args.ball_dec) != cached_dec:
                 raise ValueError("Explicit cache directory uses different ball deceleration; create a new version.")
             args.ball_dec = cached_dec
+            for key, value in high_pass.cli_settings(legacy.get("high_pass_config")).items():
+                if key in explicit and getattr(args, key, None) != value:
+                    raise ValueError(f"--{key.replace('_', '-')} differs from the explicit cache directory; create a new version")
+                setattr(args, key, value)
     try:
         args.ball_dec = parse_ball_dec(args.ball_dec)
         validate_ball_dec(args.ball_dec)
@@ -222,6 +232,8 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
                     physical_input_contract=PHYSICAL_INPUT_CONTRACT,
                     generation_settings=effective, created_at=old.get("created_at", now),
                     updated_at=now, status="running")
+    if getattr(args, "high_pass_config", None):
+        metadata["high_pass_config"] = high_pass.validate(args.high_pass_config)
     history = list(old.get("invocations", []))
     history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items()
                     if not k.startswith("_") and not k.startswith("pass_height")

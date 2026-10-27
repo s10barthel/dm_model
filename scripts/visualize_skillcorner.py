@@ -219,7 +219,11 @@ def _probs_for_component_frame(
 
     if component_name == "physical_xpass":
         row = _row_for_frame(component_tables[component_name], frame_id)
-        return pd.Series(dtype=float) if row is None else pd.to_numeric(row, errors="coerce").dropna().astype(float).sort_values(ascending=False)
+        if row is None:
+            return pd.Series(dtype=float)
+        probs = pd.to_numeric(row, errors="coerce").dropna().astype(float).sort_values(ascending=False)
+        probs.attrs.update(row.attrs)
+        return probs
 
     return build_visualization_probs(_row_for_frame(component_tables[component_name], frame_id))
 
