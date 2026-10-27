@@ -12,6 +12,10 @@ if str(ROOT) not in sys.path:
 
 import pandas as pd
 import torch
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from tqdm import tqdm
 
 from inference import configure_lane_survival_runtime_cache
@@ -266,6 +270,7 @@ def update_benchmark_runs_ledger(
     return path
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -297,6 +302,7 @@ def main() -> None:
     component_run_id = args.run_id or generate_run_id("benchmark_component")
     output_parent = Path(args.output_dir) if args.output_dir else BENCHMARK_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
+    start_inference_attempt(output_dir, args)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_modifications, skipped_modifications = discover_benchmark_modifications(
@@ -316,9 +322,10 @@ def main() -> None:
     )
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
-    )
+    with cli_blending_guard(args):
+        physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
+            pc_versions.cache_dir("benchmark", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("benchmark")
+        )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("benchmark", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
@@ -353,6 +360,7 @@ def main() -> None:
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("benchmark", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
+    validate_pc_xpass_startup(model_specs.get("pass_success"))
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     export_tables: list[pd.DataFrame] = []
@@ -371,6 +379,8 @@ def main() -> None:
 
         try:
             modification_data = load_benchmark_modification_data(modification_id, args.input_dir)
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             error_summary = summarize_exception(exc)
             skipped_modification_errors.append({"modification": int(modification_id), "error": error_summary})
@@ -388,7 +398,10 @@ def main() -> None:
                     add_relative_speed_edge_features=bool(graph_schema.get("add_relative_speed_edge_features", False)),
                     **generation_kwargs(graph_schema),
                 )
+                preflight_pc_xpass(state, model_specs.get("pass_success"))
                 built_states.append((int(modification_id), int(game_state_id), state, state_rows, stats))
+            except PCXPassBlendingError:
+                raise
             except Exception as exc:
                 error_summary = summarize_exception(exc)
                 skipped_state_errors.append(
@@ -431,6 +444,8 @@ def main() -> None:
                     state_record["physical_xpass_skipped_actions"] = physical_skip_stats
                 processed_states.append(state_record)
                 processed_state_counts[int(modification_id)] = processed_state_counts.get(int(modification_id), 0) + 1
+            except PCXPassBlendingError:
+                raise
             except Exception as exc:
                 error_summary = summarize_exception(exc)
                 skipped_state_errors.append(

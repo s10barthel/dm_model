@@ -110,7 +110,7 @@ def test_roles_load_independently_and_cutoff_is_checkpoint_owned(monkeypatch):
     assert models["xpass_pass_height"] is height
     assert primary._xpass_auxiliary_models == selected
     args.pass_height_threshold = 2
-    with pytest.raises(ValueError, match="cutoff"):
+    with pytest.raises(inference.PCXPassBlendingError, match="cutoff"):
         configure_auxiliary_models(args, models, "cpu")
 
 
@@ -180,6 +180,7 @@ def test_blending_ignores_wrong_cached_height_and_component_intent(monkeypatch, 
     model._xpass_auxiliary_models = {"pass_height": auxiliary_model(probability=.25)}
     if version == "v5":
         model._xpass_auxiliary_models["pass_intent"] = auxiliary_model("pass_intent")
+    monkeypatch.setattr(inference, "validate_pc_xpass_startup", lambda *a, **k: None)
     monkeypatch.setattr(inference, "filter_missing_physical_xpass_rows_for_inference", lambda match, graphs, labels, model, **kw: (graphs, labels))
     def attach(match, graphs, labels, model, **kwargs):
         for graph in graphs:

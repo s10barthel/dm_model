@@ -349,7 +349,7 @@ def test_real_inference_matches_standalone_and_rejects_incomplete_cache(caches, 
     memo = {}
     for variant in [variants[0], variants[1], variants[0]]:
         if missing and variant.identifier == "b":
-            with pytest.raises(ValueError, match="cache 'b'.*situation s"):
+            with pytest.raises(inference.PCXPassBlendingError, match="cache 'b'.*situation s"):
                 with direct_compare.active_variant(variant, "situation s"):
                     cached_prediction(memo, inference.inference_gnn, subject, model,
                                       device="cpu", return_model_pass_success=True)

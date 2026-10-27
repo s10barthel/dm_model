@@ -18,6 +18,10 @@ import matplotlib
 # Render exports without a GUI or Tcl/Tk installation.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
@@ -789,13 +793,22 @@ def collect_action_components(
 
     cache_memo = getattr(match, "_pc_match_cache", None)
     panel_cache_dir = comparison_xpass.cache_dir if comparison_xpass else physical_cache_dir
-    cache_metadata = match_cache.read_json(Path(panel_cache_dir) / "metadata.json", memo=cache_memo) if panel_cache_dir else {}
+    with blending_guard(loaded_models.get("pass_success"), "state_validation", match):
+        cache_metadata = match_cache.read_json(Path(panel_cache_dir) / "metadata.json", memo=cache_memo) if panel_cache_dir else {}
     possession_cache = match_cache.is_match_format(cache_metadata.get("cache_format")) or cache_metadata.get("source") == "pc_xpass"
     pc_state, pc_frame = None, None
     if possession_cache or any(getattr(model, "args", {}).get("pc_xpass") for model in loaded_models.values()):
         if panel_cache_dir:
-            match_cache.require_format(panel_cache_dir, memo=cache_memo)
+            with blending_guard(loaded_models.get("pass_success"), "state_validation", match):
+                match_cache.require_format(panel_cache_dir, memo=cache_memo)
         pc_state, pc_frame = possession_state_for_action(match, action_index, feature_root, possession_states)
+
+    pass_model = loaded_models.get("pass_success")
+    if pass_model is not None:
+        use_state = pc_state is not None and getattr(pass_model, "args", {}).get("pc_xpass")
+        preflight_pc_xpass(pc_state if use_state else match, pass_model,
+            event_indices=[pc_frame if use_state else action_index],
+            **({"graph_override": pc_state.graph_features_0, "label_override": pc_state.labels} if use_state else {}))
 
     precomputed_auxiliaries = {}
     # Prepare reusable component probabilities before pass-success, regardless of selection order.
@@ -1032,6 +1045,7 @@ def merge_success_intent_context(shared_context: dict[str, object], model_id: st
     return shared
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     if getattr(args, "visualization_comparison", None):
@@ -1044,6 +1058,7 @@ def main() -> None:
     visualization_run_id = args.run_id or generate_run_id("visualization")
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
+    start_inference_attempt(output_root, args)
     output_root.mkdir(parents=True, exist_ok=True)
     initial_component_selection = resolve_component_selection(
         args,
@@ -1122,9 +1137,10 @@ def main() -> None:
         configure_auxiliary_models(args, loaded_models, device)
     inference_mask_config = configure_inference_masks(loaded_models, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(loaded_models)
-    physical_cache_dir = args.physical_cache_dir or str(
-        pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
-    )
+    with cli_blending_guard(args):
+        physical_cache_dir = args.physical_cache_dir or str(
+            pc_versions.cache_dir("sportec", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("sportec")
+        )
     feature_run_id = args.feature_run_id
     if not feature_run_id and not component_selection.required_component_groups:
         cache_metadata = match_cache.read_json(Path(physical_cache_dir) / "metadata.json")
@@ -1185,6 +1201,7 @@ def main() -> None:
         if not no_physical_cache:
             pass_success_model.args["physical_cache_dir"] = physical_cache_dir
 
+    validate_pc_xpass_startup(pass_success_model)
     match = load_match(
         args.match_id,
         intended_receiver_mode=intended_receiver_mode,
@@ -1225,6 +1242,8 @@ def main() -> None:
                 compare_intended_receiver=getattr(args, "compare_intended_receiver", False),
                 comparison_xpass=comparison_xpass,
             )
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             skipped_actions.append(
                 {

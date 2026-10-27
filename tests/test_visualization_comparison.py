@@ -249,6 +249,8 @@ def _subject():
 
 @pytest.fixture
 def inference_fixture(monkeypatch):
+    monkeypatch.setattr(dv, "preflight_pc_xpass", lambda *a, **k: None)
+    monkeypatch.setattr(av, "preflight_pc_xpass", lambda *a, **k: None)
     subject = _subject()
     models = {}
     calls = []

@@ -15,7 +15,7 @@ from torch_geometric.data import Data
 from datatools import config, utils
 import datatools.preprocess as proc
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
-from inference import PhysicalXPassNoUsableRowsError, inference_gnn
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn, preflight_pc_xpass
 
 REQUIRED_EVENT_COLUMNS = [
     "match_id",
@@ -690,6 +690,8 @@ def infer_skillcorner_components(
     components: dict[str, pd.DataFrame] = {}
     if possession.labels.numel() == 0 or not possession.graph_features_0:
         return components
+
+    preflight_pc_xpass(possession, model_specs["pass_success"], graph_override=possession.graph_features_0, label_override=possession.labels)
 
     state_inputs = {"graph_override": possession.graph_features_0, "label_override": possession.labels}
     precomputed_auxiliaries = {}

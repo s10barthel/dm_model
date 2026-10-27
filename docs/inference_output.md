@@ -131,3 +131,28 @@ All matches are staged and round-trip checked before publishing. Existing
 and a checksum report under `repairs/<repair_id>/`, updates current cache-use
 statistics, and records the repair in `metadata.json`. Other component exports,
 their state IDs, and the physical cache are preserved.
+
+## Required pc-xPass blending
+
+Enabling `--pc-xpass --use-physical-xpass` makes the configured blend required.
+Startup validates the cache, metric, weighting configuration, and auxiliary
+checkpoints. Each prepared inference unit is checked before its component models
+run. A rejected cache, missing required state/player value, or nonfinite required
+input aborts the entire run. Capturing `model_pass_success` or enabling comparison
+skip modes does not permit fallback to incomplete predictions.
+
+Self/carry options, offside options, opponents, and absent players retain their
+normal handling. Valid weights that select the model prediction are allowed.
+Checks preserve normal clipping and numerical blending behavior.
+
+Required-blend attempts record `status: running`, then `completed` or `failed`.
+Failure metadata includes the stage, error, and available cache/match/state/player
+context. Failed runs exit nonzero and do not update the latest-successful pointer;
+earlier completed outputs remain available in the failed run directory. EPV
+attempts stage under `data/epv/inference_runs/` and publish canonical exports only
+after inference succeeds. Existing explicit Hawkeye location cache preparation
+and audit stages remain; ordinary inference does not generate replacement caches.
+
+This policy applies to pc-xPass inference blending. Blending-disabled inference,
+checkpoint-internal physical inputs without blending, other physical-xPass
+sources, and reading saved component outputs retain their existing behavior.

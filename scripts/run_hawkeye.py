@@ -13,6 +13,10 @@ if str(ROOT) not in sys.path:
 import pandas as pd
 import torch
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from inference import configure_lane_survival_runtime_cache
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from datatools.config import LABEL_INDEX
@@ -291,6 +295,7 @@ def filter_hawkeye_situation_by_time_norm(
     return filtered_attacking_rows, frame_selections, range_metadata
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -323,6 +328,7 @@ def main() -> None:
     component_run_id = args.run_id or generate_run_id("hawkeye_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
+    start_inference_attempt(output_dir, args)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
@@ -340,9 +346,10 @@ def main() -> None:
     )
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
-    )
+    with cli_blending_guard(args):
+        physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
+            pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
+        )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("hawkeye", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
@@ -377,6 +384,7 @@ def main() -> None:
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("hawkeye", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
+    validate_pc_xpass_startup(model_specs.get("pass_success"))
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     export_tables: list[pd.DataFrame] = []
@@ -421,6 +429,8 @@ def main() -> None:
             if physical_skip_stats:
                 physical_xpass_skipped_actions[str(situation_id)] = physical_skip_stats
             processed_situation_ids.append(str(situation_id))
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             error_summary = summarize_exception(exc)
             skipped_situations.append({"situation_id": str(situation_id), "error": error_summary})

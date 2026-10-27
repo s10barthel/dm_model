@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (pc_xpass_setup)
+
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments
 from datatools.sportec_possessions import STATE_CONTRACT, state_contract_for_run
 from datatools.sportec_possessions import build_sportec_possessions, sportec_component_table
@@ -158,6 +162,7 @@ def summarize_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+@pc_xpass_setup
 def resolve_component_physical_cache_dir(args: argparse.Namespace) -> str:
     override = getattr(args, "physical_cache_dir", None)
     if override:
@@ -176,6 +181,7 @@ def resolve_component_physical_cache_dir(args: argparse.Namespace) -> str:
         ) from exc
 
 
+@pc_xpass_setup
 def resolve_component_feature_run_context(
     args: argparse.Namespace,
     shared_context: dict,
@@ -286,6 +292,8 @@ def load_match(
     if graph_path.exists():
         try:
             match.graph_features_0 = torch.load(graph_path, weights_only=False)
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             print(f"  Rebuilding cached action graphs after read failure: {summarize_exception(exc)}")
             match.graph_features_0 = construct_graph_features(
@@ -330,6 +338,8 @@ def load_match(
     if post_graph_path.exists():
         try:
             match.graph_features_1 = torch.load(post_graph_path, weights_only=False)
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             print(f"  Rebuilding cached post-action graphs after read failure: {summarize_exception(exc)}")
             match.graph_features_1 = construct_graph_features(
@@ -680,6 +690,7 @@ def resolve_match_ids(
     return match_ids
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -710,6 +721,7 @@ def main() -> None:
     component_run_id = args.run_id or generate_run_id("component")
     output_parent = Path(args.output_dir) if args.output_dir else SPORTEC_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
+    start_inference_attempt(output_dir, args)
 
     model_specs = {
         "action_intent": load_model(resolved_model_ids["action_intent"], device),
@@ -789,6 +801,7 @@ def main() -> None:
         pass_success_args["physical_runtime_cache_read_only"] = True
         if not no_physical_cache:
             pass_success_args["physical_cache_dir"] = physical_cache_dir
+    validate_pc_xpass_startup(model_specs.get("pass_success"))
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
     success_intent_model_id = resolve_optional_success_intent_model_id(args, bundle)
     (
@@ -896,7 +909,7 @@ def main() -> None:
         "physical_worker_thread_limit": physical_worker_thread_limit,
         "physical_batch_size": physical_batch_size,
         "physical_xpass_runtime_stats": {},
-        "status": "completed",
+        "status": "running",
     }
     if success_intent_model_id and success_intent_model_record is not None:
         metadata["models"]["success_intent"] = success_intent_model_id
@@ -938,6 +951,8 @@ def main() -> None:
                     for name, prediction in components.items():
                         if prediction is not None and (not prediction.empty or name == "model_pass_success"):
                             tables.setdefault(name, []).append(sportec_component_table(prediction, state))
+                except PCXPassBlendingError:
+                    raise
                 except Exception as exc:
                     error = summarize_exception(exc)
                     metadata.setdefault("skipped_possessions", {}).setdefault(str(match_id), {})[str(state.event_index)] = error
@@ -965,17 +980,22 @@ def main() -> None:
                         feature_root=feature_root,
                     )
                     save_component_table(success_intent, match.actions, match_output_dir / "success_intent.parquet")
+                except PCXPassBlendingError:
+                    raise
                 except Exception as exc:
                     error_summary = summarize_exception(exc)
                     metadata["success_intent_skipped_matches"].append({"match_id": match_id, "error": error_summary})
                     print(f"  WARN {match_id}: success_intent export skipped: {error_summary}")
             metadata["processed_match_ids"].append(match_id)
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             error_summary = summarize_exception(exc)
             metadata["skipped_matches"].append({"match_id": match_id, "error": error_summary})
             print(f"  SKIP {match_id}: {error_summary}")
 
     metadata.update(model_pass_success_metadata())
+    metadata["status"] = "completed"
     write_run_metadata(output_dir, metadata)
     if not metadata["processed_match_ids"]:
         raise RuntimeError("No usable matches were available for component inference.")

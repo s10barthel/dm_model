@@ -1,6 +1,8 @@
 """Checkpoint, pc-xPass cache, and runtime-mask comparisons for inference visualizers."""
 from __future__ import annotations
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, start_inference_attempt, validate_pc_xpass_startup, inference_attempt, cli_blending_guard)
+
 import json
 from contextlib import contextmanager
 from copy import copy, deepcopy
@@ -228,6 +230,10 @@ def active_variant(variant, scene):
                     masks.append((component, getattr(component, "inference_masks", missing)))
         _configure_variant(variant)
         yield
+    except PCXPassBlendingError as exc:
+        raise PCXPassBlendingError(f"pc-xPass cache {variant.identifier!r}, {scene}: {exc}",
+                                  stage=exc.stage, context={**exc.context, "cache_id": variant.identifier,
+                                                            "scene": scene}) from exc
     except (ValueError, KeyError, FileNotFoundError) as exc:
         raise type(exc)(f"pc-xPass cache {variant.identifier!r}, {scene}: {exc}") from exc
     finally:
@@ -378,18 +384,23 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
             yield from group.load()
 
 
+@inference_attempt
 def run_comparison(args, mod):
+    root = Path(args.output_dir) / (args.run_id or mod.generate_run_id("visualization_comparison"))
+    start_inference_attempt(root, args)
     sportec = Path(mod.__file__).stem == "visualize_action_components"
     dataset = "sportec" if sportec else "hawkeye"
     device = args.device if torch.cuda.is_available() else "cpu"
     variants, selection, shared, bundle, schema = resolve_variants(args, mod, sportec)
-    configure_physical(args, mod, variants, dataset)
+    with cli_blending_guard(args):
+        configure_physical(args, mod, variants, dataset)
+    for variant in variants:
+        validate_pc_xpass_startup(variant.models.get("pass_success"))
     # Validate all scopes/schemas before any expensive inference or artifact output.
     for variant in variants:
         with active_variant(variant, "preflight"):
             pass
     names = list(selection.rendered_components)
-    root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(dataset + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,

@@ -13,7 +13,7 @@ from torch_geometric.data import Data
 
 from datatools import config, utils
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
-from inference import PhysicalXPassNoUsableRowsError, inference_gnn
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn, preflight_pc_xpass
 
 COMPONENT_COLUMNS = [
     "action_intent",
@@ -602,6 +602,8 @@ def infer_benchmark_components(
     components: dict[str, pd.DataFrame] = {}
     if state.labels.numel() == 0 or not state.graph_features_0:
         return components
+
+    preflight_pc_xpass(state, model_specs["pass_success"], graph_override=state.graph_features_0, label_override=state.labels)
 
     action_intent, _ = inference_gnn(state, model_specs["action_intent"], device=device, post_action=False)
     precomputed_auxiliaries = {}

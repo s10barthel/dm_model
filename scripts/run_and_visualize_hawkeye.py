@@ -18,6 +18,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
+from pc_xpass_inference_policy import (inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from PIL import Image
 
 from datatools.hawkeye import (
@@ -314,6 +318,7 @@ def collect_situation_components(situation, model_specs, device, inference_frame
                                  rendered_components, prediction_cache=None):
     rendered_components = input_components(rendered_components)
     components: dict[str, pd.DataFrame] = {}
+    preflight_pc_xpass(situation, model_specs.get("pass_success"), event_indices=inference_frame_ids)
     precomputed_auxiliaries = {}
     if situation.labels.numel() != 0 and situation.graph_features_0:
         if "action_intent" in model_specs:
@@ -557,6 +562,7 @@ def render_situation(
     return output_dir, getattr(situation, "physical_xpass_runtime_stats", {}), render_info
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     if getattr(args, "visualization_comparison", None):
@@ -571,6 +577,7 @@ def main() -> None:
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
     output_root = output_parent / visualization_run_id
+    start_inference_attempt(output_root, args)
     output_root.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
@@ -665,9 +672,10 @@ def main() -> None:
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
-    )
+    with cli_blending_guard(args):
+        physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
+            pc_versions.cache_dir("hawkeye", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("hawkeye")
+        )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("hawkeye", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     args.physical_cache_dir = physical_cache_dir
@@ -705,6 +713,7 @@ def main() -> None:
     physical_xpass_skipped_actions: dict[str, dict[str, object]] = {}
     resolved_time_norm_ranges: dict[str, dict[str, object]] = {}
     selected_output_mode = output_mode(args)
+    validate_pc_xpass_startup(pass_success_model)
     for situation_id in situation_ids:
         render_kwargs = dict(
             situation_id=situation_id,

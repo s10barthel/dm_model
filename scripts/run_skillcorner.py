@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments
 
 import pandas as pd
@@ -240,6 +244,7 @@ def format_match_completion(match_id: str, match_stats: dict[str, int]) -> str:
     )
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     device = args.device if torch.cuda.is_available() else "cpu"
@@ -272,6 +277,7 @@ def main() -> None:
     component_run_id = args.run_id or generate_run_id("skillcorner_component")
     output_parent = Path(args.output_dir) if args.output_dir else SKILLCORNER_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
+    start_inference_attempt(output_dir, args)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_match_ids, skipped_matches = discover_skillcorner_matches(
@@ -293,9 +299,10 @@ def main() -> None:
     )
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
     refresh_physical_cache = bool(getattr(args, "refresh_physical_cache", False))
-    physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
-        pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
-    )
+    with cli_blending_guard(args):
+        physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
+            pc_versions.cache_dir("skillcorner", args) if bool(getattr(args, "pc_xpass", False)) else get_runtime_physical_xpass_dir("skillcorner")
+        )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("skillcorner", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
     physical_num_workers = getattr(args, "physical_num_workers", "auto")
@@ -330,6 +337,7 @@ def main() -> None:
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("skillcorner", args, model_specs))
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     graph_schema = validate_model_graph_schemas(model_specs)
+    validate_pc_xpass_startup(model_specs.get("pass_success"))
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_model_ids.items()}
 
     stats_by_match: dict[str, dict[str, int]] = {}
@@ -413,7 +421,11 @@ def main() -> None:
                         )
                         continue
 
+                    preflight_pc_xpass(possession, model_specs.get("pass_success"),
+                                       graph_override=possession.graph_features_0, label_override=possession.labels)
                     built_possessions.append((possession_number, int(event_index), possession))
+                except PCXPassBlendingError:
+                    raise
                 except Exception as exc:
                     error_summary = summarize_exception(exc)
                     skipped_possessions.setdefault(str(match_id), []).append(
@@ -466,6 +478,8 @@ def main() -> None:
                             )
                             tables_by_component[component_name].append(table)
                         match_stats["processed_possessions"] += 1
+                    except PCXPassBlendingError:
+                        raise
                     except Exception as exc:
                         error_summary = summarize_exception(exc)
                         skipped_possessions.setdefault(str(match_id), []).append(
@@ -496,6 +510,8 @@ def main() -> None:
             stats_by_match[str(match_id)] = match_stats
             processed_matches.append(str(match_id))
             print(format_match_completion(str(match_id), match_stats))
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             skipped_matches["processing_error"].append(str(match_id))
             skipped_match_errors.append({"match_id": str(match_id), "error": summarize_exception(exc)})

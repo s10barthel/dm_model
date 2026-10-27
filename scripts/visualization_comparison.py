@@ -18,6 +18,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 from models.inference_masks import flatten_mask_values, resolve_inference_mask_configurations
 from models.membership import MembershipReport, attach_comparison_membership
+from pc_xpass_inference_policy import (PCXPassBlendingError)
+from inference import preflight_pc_xpass
+
 from project_config import write_run_metadata
 from datatools.pass_success import model_pass_success_metadata
 from scripts.comparison_warnings import ComparisonWarnings, ComparisonCancelled, add_warning_argument, metadata_differences
@@ -180,6 +183,8 @@ def render_comparison_groups(report, variant_groups, names, *, shared=False, ben
                           for index in range(len(report.variants))]
             render_independent_groups(report, loaded, names, benchmark=benchmark)
         except ComparisonCancelled:
+            raise
+        except PCXPassBlendingError:
             raise
         except Exception as exc:
             if not skip_failed_groups:

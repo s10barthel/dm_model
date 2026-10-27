@@ -11,6 +11,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (pc_xpass_setup)
+from pc_xpass_inference_policy import (pc_blending_required)
+from project_config import generate_run_id, write_run_metadata
+import shutil
+from uuid import uuid4
+
 from models.edge_schema import generation_kwargs
 
 import pandas as pd
@@ -160,6 +168,7 @@ def load_epv_models(resolved_model_ids: dict[str, str], device: str) -> dict[str
     return model_specs
 
 
+@pc_xpass_setup
 def configure_epv_physical_xpass(args: argparse.Namespace, model_specs: dict[str, object]) -> str:
     configure_lane_survival_runtime_cache(model_specs, pc_versions.lane_cache_dir("sportec", args, model_specs))
     physical_cache_dir = getattr(args, "physical_cache_dir", None) or str(
@@ -243,6 +252,7 @@ def epv_physical_xpass_metadata(
 
 
 def infer_match_epv(match, model_specs: dict[str, object], device: str) -> pd.DataFrame:
+    preflight_pc_xpass(match, model_specs.get("pass_success"))
     precomputed_auxiliaries = {}
     pass_intent, _ = inference_gnn(match, model_specs["pass_intent"], device=device, post_action=False,
                                    precomputed_auxiliaries=precomputed_auxiliaries)
@@ -333,6 +343,8 @@ def save_export_outputs(
             physical_skip_stats = getattr(match, "physical_xpass_skipped_actions", None)
             if physical_skip_stats:
                 physical_xpass_skipped_actions[resolved_match_id] = physical_skip_stats
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             skipped_matches.append({"match_id": match_id, "error": summarize_exception(exc)})
             print(f"  SKIP {match_id}: {summarize_exception(exc)}")
@@ -351,6 +363,7 @@ def save_export_outputs(
     return processed_match_ids, skipped_matches, exported_actions, physical_xpass_runtime_stats, physical_xpass_skipped_actions
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
     ensure_project_dirs()
@@ -363,12 +376,18 @@ def main() -> None:
         print(f"EPV outputs already exist in {EPV_DIR}. Use --overwrite to rebuild them.")
         return
 
+    attempt_root = EPV_DIR / "inference_runs" / generate_run_id("epv_inference")
+    start_inference_attempt(attempt_root, args)
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
     model_specs = load_epv_models(resolved_model_ids, device)
     configure_auxiliary_models(args, model_specs, device)
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
     physical_cache_dir = configure_epv_physical_xpass(args, model_specs)
+    validate_pc_xpass_startup(model_specs.get("pass_success"))
+    required_blend = pc_blending_required(model_specs.get("pass_success"))
+    export_dir = attempt_root if required_blend else EPV_DIR
+    export_match_dir = attempt_root / "matches" if required_blend else EPV_MATCH_DIR
     graph_schema = validate_model_graph_schemas(model_specs)
     runtime_feature_context = resolve_runtime_feature_run_context(
         args.feature_run_id,
@@ -403,8 +422,8 @@ def main() -> None:
         shared_context,
         graph_schema,
         device,
-        EPV_DIR,
-        EPV_MATCH_DIR,
+        export_dir,
+        export_match_dir,
     )
     physical_xpass_metadata = epv_physical_xpass_metadata(
         args,
@@ -449,7 +468,22 @@ def main() -> None:
         "skipped_export_matches": skipped_export_matches,
     }
     metadata.update(physical_xpass_metadata)
-    (EPV_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if required_blend:
+        metadata.update(status="completed", run_id=attempt_root.name, pc_xpass_blending_policy="required",
+                        inference_attempt_dir=str(attempt_root.resolve()))
+        write_run_metadata(attempt_root, metadata)
+        # No canonical output is touched until all requested inference has succeeded.
+        publications = [(p, EPV_MATCH_DIR / p.name) for p in export_match_dir.glob("*.csv")]
+        publications.append((export_dir / "epv.csv", EPV_DIR / "epv.csv"))
+        for source, destination in publications:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + "." + uuid4().hex + ".tmp")
+            try:
+                shutil.copy2(source, temporary)
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+    write_run_metadata(EPV_DIR, metadata)
 
     if skipped_export_matches:
         print(f"Skipped {len(skipped_export_matches)} export matches while generating EPV outputs.")

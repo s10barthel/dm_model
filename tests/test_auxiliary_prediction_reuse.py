@@ -36,6 +36,7 @@ def pipeline(monkeypatch):
         def count(module, inputs, output, role=role):
             calls[role] += 1
         model.register_forward_hook(count)
+    monkeypatch.setattr(inference, "validate_pc_xpass_startup", lambda *a, **k: None)
     monkeypatch.setattr(inference, "filter_missing_physical_xpass_rows_for_inference",
                         lambda match, graphs, labels, model, **kw: (graphs, labels))
 

@@ -13,7 +13,7 @@ from torch_geometric.data import Data
 from datatools import config, utils
 import datatools.preprocess as proc
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
-from inference import PhysicalXPassNoUsableRowsError, inference_gnn
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn, preflight_pc_xpass
 
 FRAME_KEY_COLUMNS = ["game_id", "half", "abs_time"]
 SITUATION_FRAME_KEY_COLUMNS = ["id", *FRAME_KEY_COLUMNS]
@@ -824,6 +824,8 @@ def infer_hawkeye_components(
     components: dict[str, pd.DataFrame] = {}
     if situation.labels.numel() == 0 or not situation.graph_features_0:
         return components
+
+    preflight_pc_xpass(situation, model_specs["pass_success"], graph_override=situation.graph_features_0, label_override=situation.labels)
 
     action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
     precomputed_auxiliaries = {}

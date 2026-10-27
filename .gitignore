@@ -64,6 +64,7 @@ tests/AS_viz/
 !tests/test_pc_xpass_auxiliary.py
 !tests/test_auxiliary_prediction_reuse.py
 !tests/test_pc_xpass_match_cache.py
+!tests/test_pc_xpass_inference_policy.py
 !tests/test_repair_component_pass_success.py
 !tests/test_reachability.py
 !tests/test_pc_top_pass.py

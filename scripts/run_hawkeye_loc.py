@@ -19,6 +19,10 @@ import numpy as np
 import pandas as pd
 import torch
 
+from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
+from inference import preflight_pc_xpass
+from pc_xpass_inference_policy import (cli_blending_guard)
+
 from datatools.config import LABEL_INDEX
 from datatools.hawkeye import (
     COMPONENT_COLUMNS,
@@ -622,9 +626,6 @@ def _configure_models(args: argparse.Namespace):
         outcome_conceding_model_id=resolved_ids["outcome_conceding"],
         device=device,
     )
-    configure_auxiliary_models(args, specs, device, active=True)
-    configure_inference_masks(specs, getattr(args, "inference_mask", None))
-    schema = validate_model_graph_schemas(specs)
     pass_model = specs["pass_success"]
     pass_model.args.update(
         {
@@ -651,6 +652,9 @@ def _configure_models(args: argparse.Namespace):
         pass_model.args["v4_zero"] = float(args.v4_zero)
     if getattr(args, "pass_height_threshold", None) is not None:
         pass_model.args["pass_height_threshold"] = args.pass_height_threshold
+    configure_auxiliary_models(args, specs, device, active=True)
+    configure_inference_masks(specs, getattr(args, "inference_mask", None))
+    schema = validate_model_graph_schemas(specs)
     configure_lane_survival_runtime_cache(specs, args.lane_survival_cache_dir or args.pc_xpass_cache_dir)
     args._runtime_graph_schema = schema
     args._pass_height_model = None
@@ -777,13 +781,24 @@ def _cache_stats_have_unusable_rows(stats: dict[str, object] | None) -> bool:
     return bool(stats) and int(stats.get("skipped_all_nan", 0) or 0) > 0
 
 
+@inference_attempt
 def main() -> None:
     args = parse_args()
-    pc_versions.start_generation(args, location=True)
+    args.run_id = args.run_id or generate_run_id("hawkeye_loc_component")
+    output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_LOC_COMPONENT_RUNS_DIR
+    output_dir = output_parent / args.run_id
+    if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
+        raise FileExistsError(f"Component run directory already exists; use --overwrite: {output_dir}")
+    start_inference_attempt(output_dir, args, required=True)
+    with cli_blending_guard(args, required=True):
+        pc_versions.start_generation(args, location=True)
     try:
         _run_location(args)
-    except Exception:
-        pc_versions.finish_generation(args, success=False)
+    except Exception as exc:
+        try:
+            pc_versions.finish_generation(args, success=False)
+        except Exception as cleanup_error:
+            exc.add_note(f"Cache-generation cleanup failed: {cleanup_error}")
         raise
 
 
@@ -811,8 +826,6 @@ def _run_location(args: argparse.Namespace) -> None:
     run_id = args.run_id or generate_run_id("hawkeye_loc_component")
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_LOC_COMPONENT_RUNS_DIR
     output_dir = output_parent / run_id
-    if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite:
-        raise FileExistsError(f"Component run directory already exists; use --overwrite: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
@@ -850,6 +863,8 @@ def _run_location(args: argparse.Namespace) -> None:
                 ),
             )
             merge_stats(pc_stats, stats)
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             batch_errors.append(
@@ -879,6 +894,8 @@ def _run_location(args: argparse.Namespace) -> None:
             missing_records.append(_missing_record(row, status, str(exc)))
         except ArithmeticError as exc:
             missing_records.append(_missing_record(row, "adjusted_position_out_of_bounds", str(exc)))
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             missing_records.append(_missing_record(row, "geometry_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: {type(exc).__name__}: {exc}")
@@ -895,32 +912,35 @@ def _run_location(args: argparse.Namespace) -> None:
         was_missing = False
         try:
             unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
-            stats = prewarm_runtime_items(
-                unit["cache_items"],
-                cache_dir=cache_dir,
-                args=audit_args,
-                progress_desc=f"hawkeye_loc cache audit row {row_id}",
-            )
-            if _cache_stats_have_unusable_rows(stats):
-                raise RuntimeError("pc-xPass cache generation skipped an all-NaN target row")
-            if _cache_stats_have_misses(stats):
-                was_missing = True
-                cache_audit["initially_missing"] += 1
-                merge_stats(pc_stats, stats)
-                verification = prewarm_runtime_items(
+            with blending_guard(model_specs["pass_success"], "state_validation", unit["situation"], selection_row_id=row_id):
+                stats = prewarm_runtime_items(
                     unit["cache_items"],
                     cache_dir=cache_dir,
                     args=audit_args,
-                    progress_desc=f"hawkeye_loc cache verify row {row_id}",
+                    progress_desc=f"hawkeye_loc cache audit row {row_id}",
                 )
-                if _cache_stats_have_misses(verification) or _cache_stats_have_unusable_rows(verification):
-                    raise RuntimeError("pc-xPass cache remained missing or invalid after individual retry")
-                cache_audit["recovered"] += 1
+                if _cache_stats_have_unusable_rows(stats):
+                    raise RuntimeError("pc-xPass cache generation skipped an all-NaN target row")
+                if _cache_stats_have_misses(stats):
+                    was_missing = True
+                    cache_audit["initially_missing"] += 1
+                    merge_stats(pc_stats, stats)
+                    verification = prewarm_runtime_items(
+                        unit["cache_items"],
+                        cache_dir=cache_dir,
+                        args=audit_args,
+                        progress_desc=f"hawkeye_loc cache verify row {row_id}",
+                    )
+                    if _cache_stats_have_misses(verification) or _cache_stats_have_unusable_rows(verification):
+                        raise RuntimeError("pc-xPass cache remained missing or invalid after individual retry")
+                    cache_audit["recovered"] += 1
             cache_ready_rows.append(row)
         except (LookupError, ArithmeticError, ValueError) as exc:
             cache_audit["failed"] += 1
             missing_records.append(_missing_record(row, "geometry_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: cache audit graph rebuild failed: {type(exc).__name__}: {exc}")
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             if not was_missing:
                 cache_audit["initially_missing"] += 1
@@ -928,6 +948,7 @@ def _run_location(args: argparse.Namespace) -> None:
             missing_records.append(_missing_record(row, "pc_xpass_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: pc-xPass audit/retry failed: {type(exc).__name__}: {exc}")
 
+    validate_pc_xpass_startup(model_specs["pass_success"])
     # Phase 3: rebuild each graph and infer sequentially from read-only caches.
     for row in cache_ready_rows:
         row_id = int(row["selection_row_id"])
@@ -972,6 +993,8 @@ def _run_location(args: argparse.Namespace) -> None:
             processed_rows.append(row_id)
             if bool(target_geometry["loc_target_position_clamped"]):
                 geometry_warning_records.append(_geometry_warning_record(row, frame, target_geometry))
+        except PCXPassBlendingError:
+            raise
         except Exception as exc:
             missing_records.append(_missing_record(row, "inference_failed", f"{type(exc).__name__}: {exc}"))
             print(f"SKIP selection_row_id={row_id}: {type(exc).__name__}: {exc}")

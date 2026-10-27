@@ -101,6 +101,17 @@ def validate_auxiliary_selectors(args, *, active=None, version=None, weighted=No
 
 
 def configure_auxiliary_models(args, models, device, *, active=None):
+    from types import SimpleNamespace
+    from pc_xpass_inference_policy import blending_guard, pc_blending_required
+    primary = models.get("pass_success")
+    guard_model = primary if pc_blending_required(primary) else SimpleNamespace(args={
+        **vars(args), "task": "pass_success",
+        "inference_use_physical_xpass": bool(getattr(args, "use_physical_xpass", False))})
+    with blending_guard(guard_model, "startup"):
+        return _configure_auxiliary_models(args, models, device, active=active)
+
+
+def _configure_auxiliary_models(args, models, device, *, active=None):
     """Add separately loaded roles to the schema/mask dependency set."""
     from models.utils import load_model, get_model_provenance
     from models.pass_height import check_height_probability, model_definition
