@@ -85,6 +85,52 @@ def test_selection_copies_runtime_descriptor(equivalent_cache):
     assert selected.memo is state._pc_match_cache
 
 
+def test_equivalent_run_defaults_missing_cached_reception_policy(equivalent_cache):
+    root, selection = equivalent_cache
+    selection.descriptor["reception_policy"] = "legacy_elastic_v1"
+    before = {p: cache.checksum(p) for p in root.rglob("*") if p.is_file()}
+
+    result = physics.load_physical_xpass_match(root, "match", cache_selection=selection)
+
+    assert result.home_1.tolist() == [0.5, 0.5]
+    assert result.attrs["pc_xpass_cache_resolution"]["mode"] == "equivalent"
+    assert result.possession_provenance_id.tolist() == ["cached", "cached"]
+    assert "reception_policy" not in cache.read_json(root / "completion/match.json")["descriptors"]["cached"]
+    assert before == {p: cache.checksum(p) for p in root.rglob("*") if p.is_file()}
+
+
+def test_equivalent_run_defaults_missing_runtime_reception_policy(equivalent_cache):
+    from copy import deepcopy
+
+    root, selection = equivalent_cache
+    _, _, record = cache.load_match(root, "match")
+    descriptors = deepcopy(record["descriptors"])
+    descriptors["cached"]["reception_policy"] = "legacy_elastic_v1"
+    before = deepcopy(descriptors)
+
+    key, descriptor, mode = cache._resolve_possession(root, "match", selection, descriptors)
+
+    assert (key, mode) == ("cached", "equivalent")
+    assert descriptor is descriptors["cached"]
+    assert descriptors == before
+    assert "reception_policy" not in selection.descriptor
+
+
+@pytest.mark.parametrize("side", ["runtime", "cached"])
+@pytest.mark.parametrize("policy", ["provider_receptions_only_v1", "unknown", None])
+def test_equivalent_run_rejects_changed_reception_policy(equivalent_cache, side, policy):
+    from copy import deepcopy
+
+    root, selection = equivalent_cache
+    _, _, record = cache.load_match(root, "match")
+    descriptors = deepcopy(record["descriptors"])
+    target = selection.descriptor if side == "runtime" else descriptors["cached"]
+    target["reception_policy"] = policy
+
+    with pytest.raises(ValueError, match="reception[_ ]policy"):
+        cache._resolve_possession(root, "match", selection, descriptors)
+
+
 def test_equivalent_run_resolves_lane_coverage_and_visualization_frames(equivalent_cache):
     root, selection = equivalent_cache
     lane = cache.load_possession(root, "match", selection, lane=True, requested_frames=[20])

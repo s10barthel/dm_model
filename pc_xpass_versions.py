@@ -14,6 +14,7 @@ from pathlib import Path
 import project_config as config
 import reachability as reach
 import pc_xpass_high_pass as high_pass
+import pc_xpass_uncertainty as uncertainty
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle_step radial_gridsize
@@ -28,6 +29,7 @@ SETTING_KEYS.update({"distance_power", "distance_allowance"})
 SETTING_KEYS.add("blocking_radius")
 SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
 SETTING_KEYS.update(high_pass.KEYS)
+SETTING_KEYS.update(uncertainty.KEYS)
 RESERVED = {"acceleration", "reachability", "hawkeye_loc", "sportec", "skillcorner", "benchmark", "hawkeye", "latest", "latest.json"}
 
 
@@ -104,6 +106,8 @@ def settings(args: Namespace) -> dict[str, Any]:
     if result.get("high_pass", "off") == "off":
         result = {key: value for key, value in result.items() if key not in high_pass.KEYS}
     result.pop("high_pass_cutoff", None)
+    if not result.get("uncertainty", False):
+        result = {key: value for key, value in result.items() if key not in uncertainty.KEYS}
     return result
 
 
@@ -154,7 +158,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
                     warnings.warn("Selected cache uses acceleration off; ignoring acceleration table override.", stacklevel=2)
                 args.accel_table_id = None
                 args.accel_table_fingerprint = None
-            for key, value in {**high_pass.DEFAULTS, **metadata["generation_settings"]}.items():
+            for key, value in {**high_pass.DEFAULTS, **uncertainty.DEFAULTS, **metadata["generation_settings"]}.items():
                 if key not in SETTING_KEYS or (location and key == "pass_height_model_id"):
                     continue
                 requested = getattr(args, key, None)
@@ -196,6 +200,10 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
                 raise ValueError("Explicit cache directory uses different ball deceleration; create a new version.")
             args.ball_dec = cached_dec
             for key, value in high_pass.cli_settings(legacy.get("high_pass_config")).items():
+                if key in explicit and getattr(args, key, None) != value:
+                    raise ValueError(f"--{key.replace('_', '-')} differs from the explicit cache directory; create a new version")
+                setattr(args, key, value)
+            for key, value in uncertainty.cli_settings(legacy.get("uncertainty_config")).items():
                 if key in explicit and getattr(args, key, None) != value:
                     raise ValueError(f"--{key.replace('_', '-')} differs from the explicit cache directory; create a new version")
                 setattr(args, key, value)
@@ -241,6 +249,9 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
     if getattr(args, "high_pass_config", None):
         metadata["high_pass_config"] = high_pass.validate(args.high_pass_config)
         metadata["top_pass_definition"] = high_pass.TOP_PASS_DEFINITION
+    if getattr(args, "uncertainty_config", None):
+        metadata["uncertainty_config"] = uncertainty.validate(args.uncertainty_config)
+        metadata["top_pass_definition"] = uncertainty.TOP_PASS_DEFINITION
     history = list(old.get("invocations", []))
     history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items()
                     if not k.startswith("_") and not k.startswith("pass_height")

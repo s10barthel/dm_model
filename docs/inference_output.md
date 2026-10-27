@@ -109,3 +109,25 @@ operands. For pass-only rankings, exclude the `possessor_id` option in each row.
 Higher scores indicate better expected net outcomes; negative scores are possible.
 `pass_intent` is not part of the per-option score; weighting scores by pass intent
 and summing across receivers produces the corresponding state EPV.
+
+## Repairing missing v5 pass-success exports
+
+For a Sportec v3 run that saved `model_pass_success`, `pass_height`, and
+`pass_intent` but rejected its physical cache before blending, use:
+
+```powershell
+.venv/Scripts/python.exe scripts/repair_component_pass_success.py --component-run-dir data/component_runs/sportec/<component_run_id> --workers 4
+```
+
+The repair requires unmasked exports from the selected height and intent
+auxiliary checkpoints, v5 weighting, and no carries or ball-z limit. It verifies
+cache checksums and provenance, aligns physical keys across feature runs, checks
+offside zeros against tracking, and reproduces inference's float32 xPass clipping
+before applying the recorded v5 blend. A missing legacy `reception_policy` is
+compared using its documented default; a different policy still rejects reuse.
+
+All matches are staged and round-trip checked before publishing. Existing
+`pass_success.parquet` files are refused. The utility retains original metadata
+and a checksum report under `repairs/<repair_id>/`, updates current cache-use
+statistics, and records the repair in `metadata.json`. Other component exports,
+their state IDs, and the physical cache are preserved.

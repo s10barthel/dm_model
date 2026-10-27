@@ -232,11 +232,18 @@ def _resolve_possession(root, match_id, selection, descriptors):
             or runtime["state_partition_id"] != selection.possession_id):
         raise ValueError(message + ": runtime match_id, possession_id or state_partition_id differs from selection")
 
+    from datatools.reception_policy import KEY as reception_key, policy_version
+
+    # Older descriptors predate the explicit policy field. Compare its effective
+    # value without changing the stored descriptors or their provenance IDs.
+    runtime_comparison = dict(runtime, **{reception_key: policy_version(runtime)})
     matches, differences = [], []
     for key, candidate in descriptors.items():
-        fields = (set(runtime) | set(candidate)) - {"feature_run_id"}
+        candidate_comparison = dict(candidate, **{reception_key: policy_version(candidate)})
+        fields = (set(runtime_comparison) | set(candidate_comparison)) - {"feature_run_id"}
         differing = {field for field in fields
-                     if field not in runtime or field not in candidate or runtime[field] != candidate[field]}
+                     if field not in runtime_comparison or field not in candidate_comparison
+                     or runtime_comparison[field] != candidate_comparison[field]}
         incomplete = {field for field in required if candidate.get(field) is None or candidate.get(field) == ""}
         if not differing and not incomplete:
             matches.append((key, candidate))

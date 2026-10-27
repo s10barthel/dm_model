@@ -1529,6 +1529,12 @@ Metric selection applies only to inference-time physical xPass blending:
 - `--xpass-version max`: use `<player_id>__max_xpass`.
 - `--xpass-version noise-kernel`: use unsuffixed original physical xPass columns. This is invalid for pc-xPass.
 
+PC-xPass generation supports `--uncertainty true` (default `false`) with fixed
+`--speed-uncertainty 2`, `--angle-uncertainty 3`, `--elevation-uncertainty 6`.
+It averages existing trajectory outcomes before `max` or `top-pass<N>` selection;
+ordinary `top<N>` is unavailable for these caches. See
+[uncertainty behaviour, outputs and validation](docs/pc_xpass_uncertainty.md).
+
 Inference reads physical xPass caches only. It does not compute or prewarm missing rows. If cache rows, selected metric columns, required `pass_distance` values, or v2 nearest-opponent distances are missing/unusable, the affected pass rows are skipped or failed according to the selected weighting mode.
 
 ### Visualization

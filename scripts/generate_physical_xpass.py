@@ -47,6 +47,7 @@ from datatools.skillcorner import (
 from models.utils import get_model_provenance, load_model, parse_model_id, validate_model_graph_schemas
 import pc_xpass_versions as pc_versions
 import pc_xpass_high_pass as high_pass
+import pc_xpass_uncertainty as uncertainty
 import pc_xpass_resume as pc_resume
 import pc_xpass_match_cache as match_cache
 
@@ -412,6 +413,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     acceleration.add_arguments(parser)
     high_pass.add_arguments(parser)
+    uncertainty.add_arguments(parser)
     pc_versions.add_selection_argument(parser)
     reach.add_arguments(parser)
     args = parser.parse_args(argv)
@@ -422,6 +424,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--sportec-feature-run-id requires runtime --pc-xpass mode.")
     if not args.pc_xpass and any(token.startswith("--high-pass") for token in (sys.argv[1:] if argv is None else argv)):
         parser.error("High-pass options require --pc-xpass")
+    if not args.pc_xpass and any(token.split("=", 1)[0] in {
+            "--uncertainty", "--speed-uncertainty", "--angle-uncertainty", "--elevation-uncertainty"}
+            for token in (sys.argv[1:] if argv is None else argv)):
+        parser.error("Uncertainty options require --pc-xpass")
     if not args.pc_xpass and any(token.split('=', 1)[0] == '--margin' or token.startswith('--reachability-') or token.startswith('--distance-')
                                 for token in (sys.argv[1:] if argv is None else argv)):
         parser.error('--margin, --reachability-* and --distance-* require --pc-xpass')
@@ -662,6 +668,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(str(exc))
     acceleration.configure_args(parser, args)
     high_pass.configure_args(parser, args)
+    uncertainty.configure_args(parser, args)
+    if args.pc_xpass and not enabled_physical_xpass_metrics_from_args(args):
+        parser.error("At least one pc-xPass metric must be exported; uncertainty supports max and top-pass<N>")
     return args
 
 
@@ -1341,6 +1350,7 @@ def prewarm_runtime_items(
             reachability_config=getattr(args, "reachability_config", None),
             acceleration_config=getattr(args, "acceleration_config", None),
             high_pass_config=getattr(args, "high_pass_config", None),
+            uncertainty_config=getattr(args, "uncertainty_config", None),
             distance_power=getattr(args, "distance_power", 3.),
             distance_allowance=getattr(args, "distance_allowance", 1.),
             blocking_radius=getattr(args, "blocking_radius", 0.),
@@ -1568,6 +1578,7 @@ def write_runtime_dataset_metadata(
             reachability_config=getattr(args, "reachability_config", None),
             acceleration_config=getattr(args, "acceleration_config", None),
             high_pass_config=getattr(args, "high_pass_config", None),
+            uncertainty_config=getattr(args, "uncertainty_config", None),
             distance_power=getattr(args, "distance_power", 3.),
             distance_allowance=getattr(args, "distance_allowance", 1.),
             blocking_radius=getattr(args, "blocking_radius", 0.),
@@ -1650,12 +1661,13 @@ def write_runtime_dataset_metadata(
     if bool(getattr(args, "export_lane_control", False)):
         metadata["lane_control_export"] = {
             "enabled": True,
-            "schema_version": 2 if args.high_pass_config else 1,
-            "definition": "per_opponent_height_masked_max_before_endpoint_v2" if args.high_pass_config else LANE_CONTROL_DEFINITION,
+            "schema_version": 3 if args.uncertainty_config else 2 if args.high_pass_config else 1,
+            "definition": ("per_opponent_nominal_intended_launch_before_endpoint_v1" if args.uncertainty_config else
+                           "per_opponent_height_masked_max_before_endpoint_v2" if args.high_pass_config else LANE_CONTROL_DEFINITION),
             "columns": LANE_CONTROL_COLUMNS + (high_pass.LANE_DETAILS if args.high_pass_config else []),
             "path": "lane_control/<match_id>.parquet",
             "coverage": "lane_control/coverage/<match_id>.json",
-            "selection": "same_as_main_cache_best_option",
+            "selection": "nominal_selected_intention" if args.uncertainty_config else "same_as_main_cache_best_option",
         }
     if getattr(args, "pass_height_model_id", None) and not args.pc_xpass:
         metadata.update(

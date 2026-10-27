@@ -35,6 +35,11 @@ by period/possessor; semantic possession spells and event links live in the mani
 
 Receiver columns use tracking IDs such as `away_17` or `home_27`:
 
+For caches generated with `--uncertainty true`, see the
+[uncertainty output contract](pc_xpass_uncertainty.md#outputs-and-cache-compatibility):
+scores are expected probabilities, with separately identified nominal geometry
+and expected component marginals. The following table describes uncertainty off.
+
 | Column pattern (`<player>` is the receiver ID) | Meaning |
 | --- | --- |
 | `<player>` | Default estimate; equals `<player>__max_xpass` in this run. |

@@ -231,6 +231,9 @@ def candidates(distances, ground_speeds, ground_times, ground_reachable, config)
 
 
 def top_pass_definition(metadata, legacy):
+    if metadata.get("uncertainty_config"):
+        from pc_xpass_uncertainty import TOP_PASS_DEFINITION as expected_definition
+        return expected_definition
     config = metadata.get("high_pass_config")
     if not config:
         return legacy

@@ -125,6 +125,8 @@ def prepare_contracts(args, selected):
     dependencies["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
     if effective.get("high_pass_config"):
         dependencies["high_pass_config"] = effective["high_pass_config"]
+    if effective.get("uncertainty_config"):
+        dependencies["uncertainty_config"] = effective["uncertainty_config"]
     if effective["ball_dec"] == "drag":
         dependencies["ball_drag"] = effective["ball_drag"]
     if dependencies["xt_surface"]:

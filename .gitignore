@@ -64,6 +64,7 @@ tests/AS_viz/
 !tests/test_pc_xpass_auxiliary.py
 !tests/test_auxiliary_prediction_reuse.py
 !tests/test_pc_xpass_match_cache.py
+!tests/test_repair_component_pass_success.py
 !tests/test_reachability.py
 !tests/test_pc_top_pass.py
 !tests/test_skillcorner_postprocessing.py
@@ -150,3 +151,4 @@ _vendor/defcon/saved
 
 !tests/test_pc_xpass_compiled_tta.py
 !tests/test_pc_xpass_high_pass.py
+!tests/test_pc_xpass_uncertainty.py

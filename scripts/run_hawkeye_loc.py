@@ -45,6 +45,7 @@ from models.membership import attach_membership_report
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
 import pc_xpass_high_pass as high_pass
+import pc_xpass_uncertainty as uncertainty
 import pc_xpass_acceleration as acceleration
 from pc_xpass_auxiliary import add_auxiliary_arguments, configure_auxiliary_models, auxiliary_metadata, validate_auxiliary_selectors
 
@@ -325,12 +326,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     reach.add_arguments(parser)
     acceleration.add_arguments(parser)
     high_pass.add_arguments(parser)
+    uncertainty.add_arguments(parser)
     pc_versions.add_selection_argument(parser)
     add_auxiliary_arguments(parser)
     add_inference_mask_arguments(parser)
     args = parser.parse_args(argv)
     pc_versions.prepare_generation_args(parser, args, argv, location=True)
     resolve_top_pass_selector(parser, args, pc_only=True)
+    uncertainty.configure_args(parser, args)
     _validate_args(parser, args)
     reach.configure_args(parser, args)
     acceleration.configure_args(parser, args)
@@ -364,6 +367,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         if not math.isfinite(float(getattr(args, name))) or float(getattr(args, name)) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be a positive finite number")
     for name in ["top_n", "coarse_n_angles", "refine_top_k_angles", "physical_batch_size", "worker_thread_limit", "max_auto_workers"]:
+        if name == "top_n" and args.uncertainty_config:
+            continue
         if int(getattr(args, name)) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.top_n_values is not None and any(int(value) < 1 for value in args.top_n_values):
