@@ -25,6 +25,7 @@ from scripts.feature_extension_diagnostics import ExtensionAttempt, extend_graph
 from datatools.graph_validation import add_graph_validation_argument, graph_validation_flags, graph_validation_enabled
 from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
+from datatools.input_diagnostics import read_json, read_parquet
 from datatools.xt_refresh import refresh_xt
 from datatools.trajectory import TRAJECTORY_SPEED
 from datatools.trajectory_refresh import run_trajectory_refresh
@@ -1515,7 +1516,7 @@ def audit_receiver_extension(plan):
             if (carries and not has_carries) or (variant == "intent_train_augmented" and split == "test"):
                 continue
             report_path = root / "generation_reports" / f"{split}_{variant}.json"
-            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report = read_json(report_path, encoding="utf-8")
             if (report.get("receiver_extension_attempt") != plan.receiver_extension_attempt
                     or sorted(map(str, report["expected_matches"])) != sorted(match_ids)
                     or report["successful_matches"] != len(match_ids) or report["skipped_matches"]):
@@ -1533,11 +1534,15 @@ def audit_receiver_extension(plan):
                         raise ValueError(f"Receiver extension label alignment failed: {path}")
                 if not intent:
                     path = get_resolved_action_path(match_id, intended_receiver_mode="model", root=root, use_carries=carries)
-                    actions = pd.read_parquet(path)
+                    actions = read_parquet(path)
+                    source_actions = read_parquet(get_resolved_action_path(
+                        match_id, intended_receiver_mode=source_mode, root=root, use_carries=carries))
                     provenance = actions.attrs.get(PROVENANCE) or {}
                     if (provenance.get("attempt_id") != plan.receiver_extension_attempt
                             or provenance.get("model_id") != plan.intended_receiver_model_id
-                            or not torch.equal(torch.tensor(actions.index.to_numpy(), dtype=reference.dtype), reference[:, 0])):
+                            or not actions.index.is_unique or not source_actions.index.is_unique
+                            or not actions.index.equals(source_actions.index)
+                            or not pd.Index(reference[:, 0].tolist()).isin(actions.index).all()):
                         raise ValueError(f"Receiver extension resolved-action provenance/alignment failed: {path}")
 
 

@@ -9,6 +9,7 @@ import argparse
 import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
+from datatools.input_diagnostics import read_parquet
 
 PASS_DURATION_KEY = "pass_duration_definition"
 PASS_DURATION = "canonical_official_pass_end_v3"
@@ -71,10 +72,10 @@ def load_official_events(match_id):
     from pyarrow import ArrowInvalid
     tracking_path = DATA_ROOT / "tracking" / f"{match_id}.parquet"
     try:
-        mapping = pd.read_parquet(tracking_path, columns=["period_id", "raw_frame_id", "frame_id"])
+        mapping = read_parquet(tracking_path, columns=["period_id", "raw_frame_id", "frame_id"])
     except ArrowInvalid:
         # Preprocessing leaves IDs unchanged when periods do not overlap.
-        mapping = pd.read_parquet(tracking_path, columns=["period_id", "frame_id"])
+        mapping = read_parquet(tracking_path, columns=["period_id", "frame_id"])
         if mapping.frame_id.duplicated().any():
             raise ValueError(f"Ambiguous tracking frame mapping for {match_id}")
         mapping["raw_frame_id"] = mapping.frame_id
@@ -316,7 +317,7 @@ def apply_pinned_endpoints(actions, root, match_id):
     path = Path(root) / "pass_endpoints" / f"{match_id}.parquet"
     if not path.exists():
         return actions.copy()
-    pinned = pd.read_parquet(path)
+    pinned = read_parquet(path)
     pinned = pinned.loc[pinned.pass_endpoint_definition.eq(PASS_DURATION)].copy()
     pinned["_key"] = pinned.original_event_id.map(event_key)
     pinned = pinned.drop_duplicates("_key").set_index("_key")

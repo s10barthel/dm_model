@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 import torch
 from datatools.artifact_storage import atomic_torch_save, atomic_parquet_save, atomic_graph_save
+from datatools.input_diagnostics import read_json, read_parquet, WorkerFailure, failure_report, failure_summary
 from datatools.graph_validation import (add_graph_validation_argument, graph_validation_enabled,
     validate_graphs, validation_stats, merge_validation_stats, GraphValidationError)
 from scipy.spatial.distance import cdist
@@ -691,6 +692,8 @@ def build_match_for_feature_generation(
 
 
 def summarize_exception(exc: Exception) -> str:
+    if isinstance(exc, WorkerFailure):
+        return failure_summary(exc.details)
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -773,7 +776,7 @@ def build_labels_by_mode_and_return(
                 use_carries=use_carries,
             )
             if resolved_action_path.exists():
-                resolved_actions = pd.read_parquet(resolved_action_path)
+                resolved_actions = read_parquet(resolved_action_path)
 
         loaded_existing = resolved_actions is not None
         if loaded_existing:
@@ -791,7 +794,7 @@ def build_labels_by_mode_and_return(
                 source = get_resolved_action_path(match_id, intended_receiver_mode=mode, root=feature_root)
                 provenance = prediction_provenance(feature_root, match_id, intended_receiver_model_id,
                                                    receiver_extension_attempt)
-                predictions = pd.read_parquet(source) if source.exists() else None
+                predictions = read_parquet(source) if source.exists() else None
                 prediction_kwargs["precomputed_receiver_predictions"] = reusable_predictions(match.actions, predictions, provenance)
             labels = match.construct_labels(
                 intended_receiver_mode=mode,
@@ -1707,24 +1710,22 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
     from project_config import atomic_write_json
     args.reception_policy = run_version(feature_root) if (feature_root / "metadata.json").exists() else RETIRED
     if (feature_root / "metadata.json").exists():
-        import json
-        run_metadata = json.loads((feature_root / "metadata.json").read_text(encoding="utf-8-sig"))
+        run_metadata = read_json(feature_root / "metadata.json")
         args.max_pass_duration = run_metadata.get("max_pass_duration", getattr(args, "max_pass_duration", None))
     records = None
     if args.reception_policy == RETIRED:
-        import json
         record_path = feature_root / "reception_retirement" / f"{task.match_id}.json"
-        manifest = json.loads(record_path.read_text(encoding="utf-8")) if record_path.exists() else {}
+        manifest = read_json(record_path, encoding="utf-8") if record_path.exists() else {}
         records = list({r["event_id"]: r for r in [*manifest.get("receptions", []),
                                                  *retirement_records(events)]}.values())
         manifest["receptions"] = records
         atomic_write_json(record_path, manifest)
     events = apply_policy(events, args.reception_policy, records=records)
-    tracking = pd.read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
+    tracking = read_parquet(f"data/tracking_processed/{task.match_id}.parquet")
     from datatools.pass_trajectory import prepare_pass_events
     endpoint_path = feature_root / "pass_endpoints" / f"{task.match_id}.parquet"
     if endpoint_path.exists():
-        events = pd.read_parquet(endpoint_path)
+        events = read_parquet(endpoint_path)
     else:
         events = prepare_pass_events(events, tracking, task.match_id, getattr(args, "max_pass_duration", None))
         atomic_parquet_save(events, endpoint_path)
@@ -1737,7 +1738,7 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
     for mode in ("original", "angle_only"):
         baseline = get_resolved_action_path(task.match_id, intended_receiver_mode=mode, root=feature_root)
         if baseline.exists():
-            pinned_actions = pd.read_parquet(baseline)
+            pinned_actions = read_parquet(baseline)
             definitions = pinned_actions.get("pass_endpoint_definition")
             if definitions is not None and definitions.fillna("").isin(["", PASS_DURATION]).all():
                 match.actions = pinned_actions.copy()
@@ -1756,13 +1757,13 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
         local = feature_root / "carry_sidecars"
         carry_path = local / "segments" / f"{task.match_id}.parquet"
         if not carry_path.exists():
-            controls = pd.read_parquet(CONTROL_EVENTS_SYNCED_DIR / f"{task.match_id}.parquet")
+            controls = read_parquet(CONTROL_EVENTS_SYNCED_DIR / f"{task.match_id}.parquet")
             _, policy = run_policy(feature_root)
             carries, audit = derive_carry_segments(controls, events, match.tracking, fps=match.fps, policy=policy)
             atomic_parquet_save(controls, local / "control_events" / f"{task.match_id}.parquet")
             atomic_parquet_save(audit, local / "audits" / f"{task.match_id}.parquet")
             atomic_parquet_save(carries, carry_path)
-        carries = pd.read_parquet(carry_path)
+        carries = read_parquet(carry_path)
         validate_carry_artifact_version(carries)
         augment_match_actions_with_carries(match, carries)
     if task.show_progress:
@@ -1989,6 +1990,16 @@ def process_match_generation_task(task: MatchGenerationTask) -> MatchGenerationR
     result = _process_match_generation_task(replace(task, args_dict=args_dict))
     return replace(result, graph_validation=stats)
 
+
+def _process_match_with_diagnostics(task: MatchGenerationTask) -> MatchGenerationResult:
+    try:
+        return process_match_generation_task(task)
+    except GraphValidationError:
+        raise
+    except Exception as error:
+        raise WorkerFailure(failure_report(error, task.match_id)) from error
+
+
 def aggregate_mode_stats(intended_receiver_modes: list[str]) -> dict[str, dict[str, int]]:
     return {
         mode: {
@@ -2067,15 +2078,15 @@ def run_match_generation(
     num_workers: int,
     intended_receiver_modes: list[str],
     graph_validation_report=None,
-) -> tuple[int, list[dict[str, str]], dict[str, dict[str, int]]]:
+) -> tuple[int, list[dict[str, object]], dict[str, dict[str, int]]]:
     successful_matches = 0
-    skipped_matches: list[dict[str, str]] = []
+    skipped_matches: list[dict[str, object]] = []
     aggregate_stats = aggregate_mode_stats(intended_receiver_modes)
 
     if num_workers == 1:
         for task in tasks:
             try:
-                result = process_match_generation_task(task)
+                result = _process_match_with_diagnostics(task)
                 successful_matches += 1
                 accumulate_mode_stats(aggregate_stats, result.stats_by_mode)
                 if graph_validation_report is not None:
@@ -2085,9 +2096,9 @@ def run_match_generation(
             except GraphValidationError:
                 raise
             except Exception as exc:
-                error_summary = summarize_exception(exc)
-                skipped_matches.append({"match_id": task.match_id, "error": error_summary})
-                print(f"  SKIP {task.match_id}: {error_summary}")
+                failure = failure_report(exc, task.match_id)
+                skipped_matches.append(failure)
+                print(f"  SKIP {task.match_id}: {failure_summary(failure)}")
         return successful_matches, skipped_matches, aggregate_stats
 
     progress = tqdm(total=len(tasks), desc="compute matches")
@@ -2097,7 +2108,7 @@ def run_match_generation(
             initializer=configure_worker_thread_limit,
             initargs=(int(tasks[0].worker_thread_limit) if tasks else 1,),
         ) as executor:
-            future_to_task = {executor.submit(process_match_generation_task, task): task for task in tasks}
+            future_to_task = {executor.submit(_process_match_with_diagnostics, task): task for task in tasks}
             for future in as_completed(future_to_task):
                 task = future_to_task[future]
                 try:
@@ -2112,9 +2123,9 @@ def run_match_generation(
                 except GraphValidationError:
                     raise
                 except Exception as exc:
-                    error_summary = summarize_exception(exc)
-                    skipped_matches.append({"match_id": task.match_id, "error": error_summary})
-                    progress.write(f"  SKIP {task.match_id}: {error_summary}")
+                    failure = failure_report(exc, task.match_id)
+                    skipped_matches.append(failure)
+                    progress.write(f"  SKIP {task.match_id}: {failure_summary(failure)}")
                 finally:
                     progress.update(1)
     finally:
@@ -2137,7 +2148,7 @@ def main() -> None:
 
     paths = ensure_output_dirs(args, feature_root)
 
-    lineups = pd.read_parquet("data/lineup/line_up.parquet")
+    lineups = read_parquet("data/lineup/line_up.parquet")
     lineups["game_id"] = lineups["stats_perform_match_id"]
     lineups["game_date"] = pd.to_datetime(lineups["game_date"])
 

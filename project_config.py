@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import numpy as np
+from datatools.input_diagnostics import read_json
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -559,7 +560,7 @@ def assert_feature_run_usable(run_root: Path) -> None:
     if not metadata_path.exists():
         return  # Legacy artifact directories need not have run metadata.
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+        metadata = read_json(metadata_path)
     except (OSError, ValueError) as exc:
         raise ValueError(f"Cannot verify feature run metadata {metadata_path}; inspect it before use.") from exc
     if not isinstance(metadata, dict):
@@ -587,7 +588,7 @@ def assert_feature_paths_usable(*paths) -> None:
         for parent in (path, *path.parents):
             metadata_path = parent / "metadata.json"
             if metadata_path.is_file() and parent.parent.name == "runs":
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                metadata = read_json(metadata_path)
                 if metadata.get("model_mode_regeneration_required") and any(
                         part.endswith(("_model", "_model_carries")) for part in path.relative_to(parent).parts):
                     raise ValueError("Model receiver mode requires regeneration: retrain success_intent, then extend "
@@ -608,7 +609,7 @@ def load_run_metadata(run_root: Path, required: bool = True) -> dict[str, Any] |
         if required:
             raise FileNotFoundError(f"Run metadata not found at {metadata_path}.")
         return None
-    return json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+    return read_json(metadata_path)
 
 
 def load_feature_run_metadata(feature_run_id: str, required: bool = True) -> dict[str, Any] | None:

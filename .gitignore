@@ -118,6 +118,7 @@ _vendor/defcon/saved
 
 !tests/test_extension_failures.py
 !tests/test_carry_receiver_extension.py
+!tests/test_feature_failure_diagnostics.py
 
 !tests/test_comparison_overrides.py
 !tests/test_model_membership.py

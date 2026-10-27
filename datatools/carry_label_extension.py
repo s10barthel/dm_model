@@ -9,13 +9,14 @@ import pandas as pd
 import torch
 
 from datatools.graph_validation import GraphValidationError, validate_graphs
+from datatools.input_diagnostics import read_json, read_parquet
 from models.edge_schema import edge_names
 from project_config import get_action_graph_dir, get_post_action_graph_dir, get_action_label_dir, get_resolved_action_path
 
 
 def load_carry_reference(root, match_id):
     root = Path(root)
-    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8-sig"))
+    metadata = read_json(root / "metadata.json")
     if not (metadata.get("carry_variant") or {}).get("available"):
         raise ValueError("Carry labels-only generation requires an existing completed carry variant")
     return_types = metadata.get("return_types") or [metadata.get("return_type")]
@@ -27,7 +28,7 @@ def load_carry_reference(root, match_id):
         if not label_path.exists():
             raise FileNotFoundError(f"Missing reference carry labels: {label_path}")
         labels = torch.load(label_path, weights_only=False, map_location="cpu")
-        actions = pd.read_parquet(path)
+        actions = read_parquet(path)
         if not actions.index.is_unique or labels.ndim != 2 or labels.shape[1] < 1:
             raise ValueError(f"Malformed pinned carry actions/labels: {match_id}")
         indices = labels[:, 0].numpy()

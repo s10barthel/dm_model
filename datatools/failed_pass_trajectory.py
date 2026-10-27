@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from datatools.pass_trajectory import event_key
+from datatools.input_diagnostics import read_json, read_parquet
 
 KEY = "failed_pass_trajectory_policy"
 VERSION = "proximity_xy_peak_v1"
@@ -130,7 +131,7 @@ def observation(match, action, original_cutoff):
     metadata_path = root / "metadata.json"
     stamp = (str(metadata_path), metadata_path.stat().st_mtime_ns if metadata_path.exists() else None)
     if getattr(match, "_failed_pass_metadata_stamp", None) != stamp:
-        match._failed_pass_metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig")) if metadata_path.exists() else {}
+        match._failed_pass_metadata = read_json(metadata_path) if metadata_path.exists() else {}
         match._failed_pass_metadata_stamp = stamp
     metadata = match._failed_pass_metadata
     policy = metadata.get(KEY) or getattr(match, "failed_pass_trajectory_policy", None)
@@ -143,7 +144,7 @@ def observation(match, action, original_cutoff):
     if getattr(match, "_failed_pass_cache_key", None) != cache_key:
         if not path.exists():
             raise ValueError(f"Missing failed-pass refresh coverage: {path}. Run --refresh-failed-pass-trajectories.")
-        table = pd.read_parquet(path)
+        table = read_parquet(path)
         if table.event_key.duplicated().any():
             raise ValueError(f"Duplicate failed-pass trajectory identities: {path}")
         match._failed_pass_records = table.set_index("event_key").to_dict("index")
@@ -198,7 +199,7 @@ def validate_graph_coverage(match, graphs, labels, action_indices=None, selected
         return
     root = Path(match.runtime_feature_root)
     metadata_path = root / "metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig")) if metadata_path.exists() else {}
+    metadata = read_json(metadata_path) if metadata_path.exists() else {}
     if not metadata.get(KEY):
         return
     if action_indices is not None:

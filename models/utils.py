@@ -27,6 +27,7 @@ from xgboost import XGBClassifier
 
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
+from datatools.input_diagnostics import read_json
 from models.architecture import GNN_ARCHITECTURES, normalize_architecture, architecture_identity, resolve_architecture
 from models.self_loops import capture_self_attributes
 from models.gnn import GNN
@@ -231,7 +232,7 @@ def get_model_path(model_id: str) -> Path:
 def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return read_json(path, encoding="utf-8")
 
 
 def enrich_model_args_from_metadata(args: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -551,8 +552,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
 
     else:
         model_path = get_model_path(model_id)
-        with open(model_path / "args.json", "r", encoding="utf-8") as f:
-            args = json.load(f)
+        args = read_json(model_path / "args.json", encoding="utf-8")
         from models.feature_masks import normalize_feature_settings
         normalize_feature_settings(args)
         metadata = _read_json_if_exists(model_path / "metadata.json") or {}
@@ -589,8 +589,7 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
             model.load_state_dict(state_dict)
 
         elif args["model"] in ["xgboost", "catboost"]:  # Gradient boosting models
-            with open(model_path / "best_params.json", "r", encoding="utf-8") as f:
-                params = json.load(f)
+            params = read_json(model_path / "best_params.json", encoding="utf-8")
             model = XGBClassifier(**params) if args["model"] == "xgboost" else CatBoostClassifier(**params)
             model.load_model(str(model_path / "best_model.json"))
 

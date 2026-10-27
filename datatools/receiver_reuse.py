@@ -9,6 +9,7 @@ from numbers import Real
 import pandas as pd
 
 from datatools.pass_trajectory import event_key
+from datatools.input_diagnostics import read_json
 from project_config import SAVED_DIR
 
 PROVENANCE = "receiver_prediction_provenance"
@@ -23,7 +24,7 @@ def prediction_provenance(root, match_id, model_id, attempt_id):
     if not attempt_id:
         return None
     root = Path(root)
-    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8-sig"))
+    metadata = read_json(root / "metadata.json")
     inputs = {key: metadata.get(key) for key in POLICY_KEYS}
     for name, path in (("checkpoint_args", SAVED_DIR / model_id / "args.json"),
                        ("endpoints", root / "pass_endpoints" / f"{match_id}.parquet"),

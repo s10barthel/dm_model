@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+from datatools.input_diagnostics import read_json
 
 LEGACY = "legacy_elastic_v1"
 RETIRED = "provider_receptions_only_v1"
@@ -23,7 +24,7 @@ def policy_version(metadata):
 
 def run_version(root):
     path = Path(root) / "metadata.json" if root is not None else None
-    return policy_version(json.loads(path.read_text(encoding="utf-8-sig"))) if path and path.exists() else LEGACY
+    return policy_version(read_json(path)) if path and path.exists() else LEGACY
 
 
 def retired_mask(actions):
@@ -75,7 +76,7 @@ def apply_run_policy(actions, root, match_id=None, *, mode=None):
         path = Path(root) / "reception_retirement" / f"{match_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"Missing pinned reception policy records: {path}")
-        records = json.loads(path.read_text(encoding="utf-8"))["receptions"]
+        records = read_json(path, encoding="utf-8")["receptions"]
     from datatools.pass_trajectory import apply_pinned_endpoints
     actions = apply_pinned_endpoints(actions, root, match_id)
     return apply_policy(actions, version, mode=mode, records=records)
