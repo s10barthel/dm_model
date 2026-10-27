@@ -37,8 +37,9 @@ Receiver columns use tracking IDs such as `away_17` or `home_27`:
 
 For caches generated with `--uncertainty true`, see the
 [uncertainty output contract](pc_xpass_uncertainty.md#outputs-and-cache-compatibility):
-scores are expected probabilities, with separately identified nominal geometry
-and expected component marginals. The following table describes uncertainty off.
+the additional uncertainty metric has its own nominal geometry and expected
+component marginals. Raw metrics in the following table keep the same meaning
+with uncertainty either on or off.
 
 | Column pattern (`<player>` is the receiver ID) | Meaning |
 | --- | --- |

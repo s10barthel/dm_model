@@ -28,7 +28,7 @@ def add_saved_xpass_arguments(parser: ArgumentParser) -> None:
                         help="Compatibility flag; saved-component visualization supports only pc-xPass.")
     parser.add_argument("--xpass-version", "--x-pass-version", "--x_pass_version",
                         dest="x_pass_version", default=None,
-                        help="Override the inherited pc-xPass metric: max, top<N>, or top-pass<N>.")
+                        help="Override the inherited pc-xPass metric: max, top<N>, top-pass<N>, or uncertainty.")
     add_top_pass_selector(parser)
     versions.add_selection_argument(parser, repeatable=True)
     parser._option_string_actions["--pc-xpass-id"].help = (
@@ -184,7 +184,7 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
     # A pc metric column can identify its selector; generic topmean cannot.
     saved_metric = saved.get("physical_xpass_metric")
     metric_version = None
-    if isinstance(saved_metric, str) and re.fullmatch(r"(?:max|top[1-9][0-9]*|top_pass[1-9][0-9]*)_xpass", saved_metric):
+    if isinstance(saved_metric, str) and re.fullmatch(r"(?:max|uncertainty|top[1-9][0-9]*|top_pass[1-9][0-9]*)_xpass", saved_metric):
         metric_version = saved_metric.removesuffix("_xpass").replace("top_pass", "top-pass")
     version, metric_origin = _first(
         (explicit_version, "explicit.--xpass-version"),

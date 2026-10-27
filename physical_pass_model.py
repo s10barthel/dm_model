@@ -123,6 +123,7 @@ PC_XPASS_AVAILABLE_METRICS = [
     PC_XPASS_METRIC_TOP25,
 ]
 PHYSICAL_XPASS_SUPPORTED_METRICS = [
+    uncertainty.METRIC,
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL,
     PHYSICAL_XPASS_METRIC_MAX,
     PHYSICAL_XPASS_METRIC_TOPMEAN,
@@ -179,6 +180,7 @@ PC_XPASS_LANE_SURVIVAL_MODE_MAX = "max"
 PC_XPASS_LANE_SURVIVAL_MODE_TOP_PATTERN = re.compile(r"^top_(?P<n>[1-9][0-9]*)$")
 PC_XPASS_TOP_PASS_DEFINITION = "best_endpoint_per_speed_angle_v1"
 PHYSICAL_XPASS_METRIC_SUFFIXES = {
+    uncertainty.METRIC: "__uncertainty_xpass",
     PHYSICAL_XPASS_METRIC_NOISE_KERNEL: "",
     PHYSICAL_XPASS_METRIC_MAX: "__max_xpass",
     PHYSICAL_XPASS_METRIC_TOPMEAN: "__topmean_xpass",
@@ -453,7 +455,7 @@ def pc_xpass_metadata(
     )
     lane_survival_policy = _pc_xpass_lane_survival_policy(ignore_lane)
     control_policy = _pc_xpass_control_policy(ignore_control)
-    resolved_top_n_values = [] if uncertainty_config else _pc_xpass_top_counts(top_n, top_n_values)
+    resolved_top_n_values = _pc_xpass_top_counts(top_n, top_n_values)
     top_metrics = [pc_xpass_top_metric(value) for value in resolved_top_n_values]
     top_metrics.extend(pc_xpass_top_pass_metric(value) for value in _pc_xpass_top_counts(None, top_pass_values))
     metrics = uncertainty.metrics(uncertainty_config, normalize_physical_xpass_metrics(
@@ -466,6 +468,8 @@ def pc_xpass_metadata(
         if pc_xpass_top_metric(value) in metrics:
             available_versions.append(f"top{int(value)}")
     available_versions.extend(_pc_xpass_metric_version(metric) for metric in metrics if metric.startswith("top_pass"))
+    if uncertainty.METRIC in metrics:
+        available_versions.append(uncertainty.VERSION)
     max_speed_value = float(PC_XPASS_DEFAULT_MAX_SPEED if max_speed is None else max_speed)
     speed_step_value = float(PC_XPASS_DEFAULT_SPEED_STEP if speed_step is None else speed_step)
     validate_ball_dec(ball_dec)
@@ -499,10 +503,10 @@ def pc_xpass_metadata(
         "top_n": top_n,
         "top_n_values": resolved_top_n_values,
         "top_pass_values": _pc_xpass_top_counts(None, top_pass_values),
-        "top_pass_definition": (uncertainty.TOP_PASS_DEFINITION if uncertainty_config else
-                                high_pass.TOP_PASS_DEFINITION if high_pass_config else PC_XPASS_TOP_PASS_DEFINITION),
+        "top_pass_definition": high_pass.TOP_PASS_DEFINITION if high_pass_config else PC_XPASS_TOP_PASS_DEFINITION,
         **({"high_pass_config": high_pass.validate(high_pass_config)} if high_pass_config else {}),
-        **({"uncertainty_config": uncertainty.validate(uncertainty_config)} if uncertainty_config else {}),
+        **({"uncertainty_config": uncertainty.validate(uncertainty_config),
+            "uncertainty_metric_definition": uncertainty.DEFINITION} if uncertainty_config else {}),
         "ranking_mode": ranking_mode,
         "top_xt": bool(top_xt),
         "xt_surface": None if xt_surface is None else {
@@ -638,6 +642,8 @@ def normalize_x_pass_version(value: str | None) -> str:
         return X_PASS_VERSION_NOISE_KERNEL
     if version in {"max", "max-xpass", "max_xpass"}:
         return X_PASS_VERSION_MAX
+    if version in {uncertainty.VERSION, "uncertainty-xpass"}:
+        return uncertainty.VERSION
     match = re.fullmatch(r"top-pass([1-9][0-9]*)", version)
     if match:
         return f"top-pass{int(match.group(1))}"
@@ -645,7 +651,7 @@ def normalize_x_pass_version(value: str | None) -> str:
         version = "top" + version[4:]
     if version.startswith("top") and version[3:].isdigit() and int(version[3:]) >= 1:
         return f"top{int(version[3:])}"
-    raise ValueError("--xpass-version must be max, noise-kernel, top<N>, or pc-only top-pass<N>.")
+    raise ValueError("--xpass-version must be max, noise-kernel, top<N>, or pc-only top-pass<N>/uncertainty.")
 
 
 def x_pass_version_top_n(version: str | None) -> int | None:
@@ -691,6 +697,10 @@ def physical_xpass_metric_for_version(version: str | None, *, pc_xpass: bool = F
     resolved = normalize_x_pass_version(version)
     if resolved == X_PASS_VERSION_MAX:
         return PHYSICAL_XPASS_METRIC_MAX
+    if resolved == uncertainty.VERSION:
+        if not pc_xpass:
+            raise ValueError("--xpass-version uncertainty requires --pc-xpass")
+        return uncertainty.METRIC
     if resolved == X_PASS_VERSION_NOISE_KERNEL:
         if pc_xpass:
             raise ValueError("--xpass-version noise-kernel is not available for pc-xPass caches.")
@@ -707,6 +717,8 @@ def physical_xpass_metric_for_version(version: str | None, *, pc_xpass: bool = F
 
 def normalize_physical_xpass_metric(value: str | None) -> str:
     metric = PHYSICAL_XPASS_DEFAULT_METRIC if value is None else str(value).replace("-", "_")
+    if metric == uncertainty.VERSION:
+        return uncertainty.METRIC
     if metric in {"top10mean", "top10mean_xpass", "topmean"}:
         metric = PHYSICAL_XPASS_METRIC_TOPMEAN
     if metric in {"top10", "pc_top10", "pc_top10_xpass"}:
@@ -743,7 +755,8 @@ def normalize_physical_xpass_metrics(values: list[str] | tuple[str, ...] | set[s
         pc_top,
         key=lambda metric: (metric.startswith("top_pass"), int(re.search(r"([0-9]+)_xpass$", metric).group(1))),
     )
-    metrics = [metric for metric in base_metrics if metric in normalized] + pc_top
+    metrics = ([metric for metric in base_metrics if metric in normalized] + pc_top
+               + ([uncertainty.METRIC] if uncertainty.METRIC in normalized else []))
     if not metrics:
         raise ValueError("At least one physical xPass metric must be enabled.")
     return metrics
@@ -982,6 +995,13 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
     available_metrics = normalize_physical_xpass_metrics(raw_available_metrics)
     if resolved_source == PC_XPASS_SOURCE and version == X_PASS_VERSION_NOISE_KERNEL:
         raise ValueError("--xpass-version noise-kernel is not available for pc-xPass caches.")
+    if version == uncertainty.VERSION:
+        if resolved_source != PC_XPASS_SOURCE:
+            raise ValueError("--xpass-version uncertainty requires --pc-xpass")
+        if selected_metric != uncertainty.METRIC:
+            raise ValueError("--xpass-version uncertainty must select uncertainty_xpass")
+        if uncertainty.METRIC not in available_metrics:
+            raise ValueError("Cache lacks uncertainty_xpass; generate a new PC-xPass cache with --uncertainty true")
     if version.startswith("top-pass"):
         expected_metric = physical_xpass_metric_for_version(version, pc_xpass=resolved_source == PC_XPASS_SOURCE)
         if (expected_metric not in available_metrics
@@ -2838,7 +2858,7 @@ def pc_xpass_output_columns(
     uncertainty_config: dict | None = None,
     enabled_metrics: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[str]:
-    resolved_top_n_values = [] if uncertainty_config else _pc_xpass_top_counts(top_n, top_n_values)
+    resolved_top_n_values = _pc_xpass_top_counts(top_n, top_n_values)
     metrics = uncertainty.metrics(uncertainty_config, normalize_physical_xpass_metrics(
         enabled_metrics or [PHYSICAL_XPASS_METRIC_MAX, *(pc_xpass_top_metric(value) for value in resolved_top_n_values), *(pc_xpass_top_pass_metric(value) for value in (top_pass_values or []))]
     ))
@@ -2854,8 +2874,6 @@ def pc_xpass_output_columns(
             if metric.startswith("top_pass"):
                 prefix = f"{player}__{metric.removesuffix('_xpass')}"
                 columns.extend([f"{prefix}_lane_survival", f"{prefix}_control_prob"])
-                if uncertainty_config:
-                    columns.extend(f"{prefix}_{suffix}" for suffix in uncertainty.TOP_DETAILS)
         for value in resolved_top_n_values:
             if pc_xpass_top_metric(value) in metrics:
                 columns.extend(
@@ -3228,7 +3246,12 @@ def validate_pc_xpass_ball_motion_metadata(metadata: Mapping[str, Any]) -> BallD
     high_config = high_pass.validate(metadata.get("high_pass_config"), allow_legacy=True)
     uncertainty_config = uncertainty.validate(metadata.get("uncertainty_config"))
     if uncertainty_config:
-        uncertainty.metrics(uncertainty_config, metadata.get("available_metrics", []))
+        if metadata.get("uncertainty_metric_definition") != uncertainty.DEFINITION:
+            raise ValueError("Incompatible uncertainty metric definition; regenerate under a new cache ID")
+        if "available_metrics" in metadata and uncertainty.METRIC not in metadata["available_metrics"]:
+            raise ValueError("Cache uncertainty settings require an advertised uncertainty_xpass metric")
+    elif uncertainty.METRIC in metadata.get("available_metrics", []):
+        raise ValueError("Cache advertises uncertainty_xpass without uncertainty configuration")
     if (high_config or uncertainty_config) and "top_pass_definition" in metadata:
         if metadata["top_pass_definition"] != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION):
             raise ValueError("Incompatible high-pass top_pass_definition; create a new version")
@@ -3326,7 +3349,7 @@ def compute_graph_pc_xpass_metrics(
     )
     node_ids = _node_ids(graph)
     candidate_indices = _candidate_target_indices(graph)
-    resolved_top_n_values = [] if uncertainty_config else _pc_xpass_top_counts(top_n, top_n_values)
+    resolved_top_n_values = _pc_xpass_top_counts(top_n, top_n_values)
     top_metrics = [pc_xpass_top_metric(value) for value in resolved_top_n_values]
     top_metrics.extend(pc_xpass_top_pass_metric(value) for value in _pc_xpass_top_counts(None, top_pass_values))
     enabled_metrics = uncertainty.metrics(uncertainty_config, normalize_physical_xpass_metrics(
@@ -3549,21 +3572,6 @@ def compute_graph_pc_xpass_metrics(
         finite_ranking = np.isfinite(score) & np.isfinite(ranking)
         if not finite_ranking.any():
             continue
-        uncertain = None
-        if uncertainty_config:
-            uncertain = uncertainty.outcomes(score, ranking, lane_survival, receiver_control,
-                                               position_discount, uncertainty_weights)
-            if diagnostic_details is not None:
-                diagnostic_details["uncertainty_outcomes"][node_id] = uncertain
-            # One cell represents each intended launch; its distance is nominal.
-            # Expected values are calculated before any launch/elevation ranking.
-            p, a = np.indices(uncertain["endpoint"].shape)
-            selected = (p, a, uncertain["endpoint"])
-            score = np.full_like(score, np.nan)
-            ranking = np.full_like(ranking, np.nan)
-            score[selected] = uncertain["expected_xpass"]
-            ranking[selected] = uncertain["expected_ranking"]
-            finite_ranking = np.isfinite(score) & np.isfinite(ranking)
         flat = int(np.nanargmax(np.where(finite_ranking, ranking, np.nan)))
         speed_i, angle_i, distance_i = np.unravel_index(flat, score.shape)
         max_score = float(score[speed_i, angle_i, distance_i])
@@ -3617,15 +3625,8 @@ def compute_graph_pc_xpass_metrics(
                     value = float(np.mean(score.ravel()[indices]))
                     result.loc[physical_xpass_metric_column(node_id, metric)] = float(np.clip(value, eps, 1.0 - eps))
                     prefix = f"{node_id}__{metric.removesuffix('_xpass')}"
-                    if uncertain is None:
-                        result.loc[f"{prefix}_lane_survival"] = float(np.mean(lane_survival.ravel()[indices]))
-                        result.loc[f"{prefix}_control_prob"] = float(np.mean(receiver_control.ravel()[indices]))
-                    else:
-                        launches = indices // score.shape[-1]
-                        for field in ("lane_survival", "control_prob"):
-                            result.loc[f"{prefix}_{field}"] = float(np.mean(uncertain[f"expected_{field}"].ravel()[launches]))
-                        for field in ("xpass", "lane_survival", "control_prob"):
-                            result.loc[f"{prefix}_nominal_{field}"] = float(np.mean(uncertain[f"nominal_{field}"].ravel()[launches]))
+                    result.loc[f"{prefix}_lane_survival"] = float(np.mean(lane_survival.ravel()[indices]))
+                    result.loc[f"{prefix}_control_prob"] = float(np.mean(receiver_control.ravel()[indices]))
         result.loc[node_id] = result.loc[physical_xpass_metric_column(node_id, top_metric)]
         result.loc[f"{node_id}__lane_survival"] = float(lane_survival[speed_i, angle_i, distance_i])
         result.loc[f"{node_id}__control_prob"] = float(receiver_control[speed_i, angle_i, distance_i])
@@ -3638,16 +3639,27 @@ def compute_graph_pc_xpass_metrics(
             result.loc[f"{node_id}__elevation"] = float(elevations[speed_i])
             result.loc[f"{node_id}__target_z"] = float(ball_heights[speed_i, 0, distance_i])
             result.loc[f"{node_id}__flight_time"] = float(t_ball[speed_i, 0, distance_i])
-        if uncertain is not None:
-            for suffix in uncertainty.DETAIL_SUFFIXES:
-                result.loc[f"{node_id}{suffix}"] = float(uncertain[suffix[2:]][speed_i, angle_i])
-            if not uncertain["valid"][speed_i, angle_i]:
-                # A nearby successful execution may make a nominally invalid
-                # intention win; no nominal reception location then exists.
-                for suffix in ("__distance", "__target_x", "__target_y", "__target_z", "__flight_time",
-                               "__lane_survival", "__control_prob"):
-                    if f"{node_id}{suffix}" in result:
-                        result.loc[f"{node_id}{suffix}"] = np.nan
+        if uncertainty_config:
+            uncertain = uncertainty.outcomes(score, ranking, lane_survival, receiver_control,
+                                              position_discount, uncertainty_weights)
+            if diagnostic_details is not None:
+                diagnostic_details["uncertainty_outcomes"][node_id] = uncertain
+            up, ua = np.unravel_index(np.argmax(uncertain["expected_ranking"]), uncertain["expected_ranking"].shape)
+            ud = int(uncertain["endpoint"][up, ua])
+            prefix = f"{node_id}__uncertainty"
+            result.loc[f"{prefix}_xpass"] = float(np.clip(uncertain["expected_xpass"][up, ua], eps, 1.-eps))
+            geometry = dict(speed=float(speeds[up]), angle=math.degrees(float(angles[ua])) % 360.,
+                elevation=float(elevations[up]), distance=float(distances[ud]),
+                target_x=float(target_x[ua, ud]), target_y=float(target_y[ua, ud]),
+                target_z=float(ball_heights[up, 0, ud]), flight_time=float(t_ball[up, 0, ud]))
+            for field, value in geometry.items():
+                result.loc[f"{prefix}_{field}"] = value if uncertain["valid"][up, ua] or field in ("speed", "angle", "elevation") else np.nan
+            for kind in ("nominal", "expected"):
+                for field in uncertainty.COMPONENTS:
+                    result.loc[f"{prefix}_{kind}_{field}"] = float(uncertain[f"{kind}_{field}"][up, ua])
+            # Only an uncertainty-only export uses this metric as its default alias.
+            if top_metric == uncertainty.METRIC:
+                result.loc[node_id] = result.loc[f"{prefix}_xpass"]
     return result
 
 
@@ -4432,7 +4444,8 @@ def load_physical_xpass_component(
         if not has_primary:
             suffixes.append(legacy_suffix)
     default_metric = frame.attrs.get("physical_xpass_default_metric")
-    allow_unsuffixed_default = default_metric is not None and normalize_physical_xpass_metric(default_metric) == selected_metric
+    allow_unsuffixed_default = (selected_metric != uncertainty.METRIC and default_metric is not None
+                                and normalize_physical_xpass_metric(default_metric) == selected_metric)
     player_columns = []
     output_index = []
     for column in row.index:
@@ -4459,11 +4472,17 @@ def load_physical_xpass_component(
     series = pd.to_numeric(row[player_columns], errors="coerce").astype(float)
     series.index = output_index
     series.name = selected_metric
-    if frame.attrs.get("physical_xpass_cache_metadata", {}).get("high_pass_config"):
+    if (frame.attrs.get("physical_xpass_cache_metadata", {}).get("high_pass_config")
+            or selected_metric == uncertainty.METRIC):
+        prefix = "__uncertainty_" if selected_metric == uncertainty.METRIC else "__"
         series.attrs["pc_xpass_elevations"] = {
-            player: float(row.get(f"{player}__elevation", np.nan)) for player in output_index
-            if pd.notna(row.get(f"{player}__elevation", np.nan))
+            player: float(row.get(f"{player}{prefix}elevation", np.nan)) for player in output_index
+            if pd.notna(row.get(f"{player}{prefix}elevation", np.nan))
         }
+        if selected_metric == uncertainty.METRIC:
+            series.attrs["pc_xpass_geometry"] = {
+                player: {field: float(row.get(f"{player}{prefix}{field}", np.nan))
+                         for field in uncertainty.GEOMETRY} for player in output_index}
     return series
 
 
@@ -4555,6 +4574,9 @@ def load_runtime_physical_xpass_visualization_table(
                   if "pc_xpass_elevations" in row.attrs}
     if elevations:
         table.attrs["pc_xpass_elevations_by_action"] = elevations
+    geometry = {int(row.name): row.attrs["pc_xpass_geometry"] for row in rows if "pc_xpass_geometry" in row.attrs}
+    if geometry:
+        table.attrs["pc_xpass_geometry_by_action"] = geometry
     return table.sort_index()
 
 
@@ -5060,9 +5082,6 @@ def lane_control_columns(cache_dir):
 
 
 def lane_control_schema(cache_dir):
-    metadata = match_cache.read_json(Path(cache_dir) / "metadata.json")
-    if metadata.get("uncertainty_config"):
-        return 3, "per_opponent_nominal_intended_launch_before_endpoint_v1"
     aerial = "elevation" in lane_control_columns(cache_dir)
     return (2, "per_opponent_height_masked_max_before_endpoint_v2") if aerial else (1, LANE_CONTROL_DEFINITION)
 
@@ -5549,17 +5568,19 @@ def _physical_xpass_row_has_cached_metrics(row: pd.Series, graph: Data, metrics:
         return False
     node_ids = _node_ids(graph)
     if uncertainty_config:
+        if not _physical_xpass_row_has_finite_metric(row.to_dict(), [uncertainty.METRIC]):
+            return False
         for index in _candidate_target_indices(graph):
             player = node_ids[index]
+            if pd.notna(row.get(player)) and not np.isfinite(row.get(f"{player}__uncertainty_xpass", np.nan)):
+                return False
             if any(f"{player}{suffix}" not in row for suffix in uncertainty.DETAIL_SUFFIXES):
                 return False
-            if pd.notna(row.get(player)) and not all(np.isfinite(row[f"{player}{suffix}"]) for suffix in uncertainty.DETAIL_SUFFIXES):
+            finite_fields = ["speed", "angle", "elevation", *(f"{kind}_{field}"
+                for kind in ("nominal", "expected") for field in uncertainty.COMPONENTS)]
+            if pd.notna(row.get(f"{player}__uncertainty_xpass")) and not all(
+                    np.isfinite(row[f"{player}__uncertainty_{field}"]) for field in finite_fields):
                 return False
-            for metric in metrics:
-                if metric.startswith("top_pass"):
-                    prefix = f"{player}__{metric.removesuffix('_xpass')}"
-                    if any(f"{prefix}_{suffix}" not in row for suffix in uncertainty.TOP_DETAILS):
-                        return False
     if high_pass_config:
         for index in _candidate_target_indices(graph):
             player = node_ids[index]
@@ -6210,7 +6231,7 @@ def prewarm_physical_xpass_runtime_cache(
             if available_metrics is not None:
                 available_metrics = [*available_metrics, pc_xpass_top_metric(requested_top_n)]
     if available_metrics is None and source == PC_XPASS_SOURCE:
-        resolved_top_n_values = [] if uncertainty_config else _pc_xpass_top_counts(top_n, top_n_values)
+        resolved_top_n_values = _pc_xpass_top_counts(top_n, top_n_values)
         available_metrics = [PHYSICAL_XPASS_METRIC_MAX, *(pc_xpass_top_metric(value) for value in resolved_top_n_values), *(pc_xpass_top_pass_metric(value) for value in (top_pass_values or []))]
     available_metrics = uncertainty.metrics(uncertainty_config, normalize_physical_xpass_metrics(available_metrics))
     speed_aggregation = normalize_physical_xpass_speed_aggregation(speed_aggregation)

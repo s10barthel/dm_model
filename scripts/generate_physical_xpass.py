@@ -658,7 +658,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         explicitly_ignored_teammates_lane_survival or bool(args.ignore_teammates_control)
     ):
         parser.error("--ignore-teammates-lane-survival and --ignore-teammates-control require --pc-xpass.")
-    if args.pc_xpass and not (args.export_max or (args.export_topmean and pc_top_n_values_from_args(args)) or args.top_pass_values):
+    if args.pc_xpass and not (args.export_max or (args.export_topmean and pc_top_n_values_from_args(args)) or args.top_pass_values or args.uncertainty):
         parser.error("At least one pc-xPass metric must be exported.")
     if not bool(args.pc_xpass) and not any([bool(args.export_noise_kernel), bool(args.export_max), bool(args.export_topmean)]):
         parser.error("At least one physical xPass metric must be exported.")
@@ -683,6 +683,8 @@ def enabled_physical_xpass_metrics_from_args(args: argparse.Namespace) -> list[s
             for top_n in pc_top_n_values_from_args(args):
                 metrics.append(f"top{int(top_n)}_xpass")
         metrics.extend(f"top_pass{n}_xpass" for n in (getattr(args, "top_pass_values", None) or []))
+        if getattr(args, "uncertainty", False):
+            metrics.append(uncertainty.METRIC)
         return normalize_physical_xpass_metrics(metrics)
     metrics: list[str] = []
     if bool(getattr(args, "export_noise_kernel", True)):
@@ -1661,13 +1663,12 @@ def write_runtime_dataset_metadata(
     if bool(getattr(args, "export_lane_control", False)):
         metadata["lane_control_export"] = {
             "enabled": True,
-            "schema_version": 3 if args.uncertainty_config else 2 if args.high_pass_config else 1,
-            "definition": ("per_opponent_nominal_intended_launch_before_endpoint_v1" if args.uncertainty_config else
-                           "per_opponent_height_masked_max_before_endpoint_v2" if args.high_pass_config else LANE_CONTROL_DEFINITION),
+            "schema_version": 2 if args.high_pass_config else 1,
+            "definition": "per_opponent_height_masked_max_before_endpoint_v2" if args.high_pass_config else LANE_CONTROL_DEFINITION,
             "columns": LANE_CONTROL_COLUMNS + (high_pass.LANE_DETAILS if args.high_pass_config else []),
             "path": "lane_control/<match_id>.parquet",
             "coverage": "lane_control/coverage/<match_id>.json",
-            "selection": "nominal_selected_intention" if args.uncertainty_config else "same_as_main_cache_best_option",
+            "selection": "same_as_main_cache_best_option",
         }
     if getattr(args, "pass_height_model_id", None) and not args.pc_xpass:
         metadata.update(

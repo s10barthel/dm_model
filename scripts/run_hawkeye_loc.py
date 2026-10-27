@@ -371,8 +371,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         if not math.isfinite(float(getattr(args, name))) or float(getattr(args, name)) <= 0:
             parser.error(f"--{name.replace('_', '-')} must be a positive finite number")
     for name in ["top_n", "coarse_n_angles", "refine_top_k_angles", "physical_batch_size", "worker_thread_limit", "max_auto_workers"]:
-        if name == "top_n" and args.uncertainty_config:
-            continue
         if int(getattr(args, name)) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.top_n_values is not None and any(int(value) < 1 for value in args.top_n_values):
@@ -422,9 +420,9 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         except ValueError:
             parser.error("--xpass-version must be max or top<N>")
         args.top_n_values = sorted({*(args.top_n_values or []), requested_top_n})
-    elif args.x_pass_version != "max":
-        parser.error("--xpass-version must be max or top<N>")
-    if not args.export_max and not args.export_topmean and not args.top_pass_values:
+    elif args.x_pass_version not in ("max", uncertainty.VERSION):
+        parser.error("--xpass-version must be max, top<N>, top-pass<N> or uncertainty")
+    if not args.export_max and not args.export_topmean and not args.top_pass_values and not args.uncertainty:
         parser.error("At least one pc-xPass metric must be enabled")
     if args.x_pass_version == "max" and not args.export_max:
         parser.error("--xpass-version max cannot be combined with --no-max")

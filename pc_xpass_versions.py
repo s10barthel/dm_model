@@ -215,7 +215,7 @@ def prepare_generation_args(parser: ArgumentParser, args: Namespace, argv: list[
 
 
 def start_generation(args: Namespace, *, location: bool = False) -> None:
-    from physical_pass_model import pc_xpass_ball_motion_metadata
+    from physical_pass_model import pc_xpass_ball_motion_metadata, PC_XPASS_TOP_PASS_DEFINITION
     if not getattr(args, "pc_xpass", False):
         return
     directory = getattr(args, "pc_xpass_cache_dir", None) if location else None
@@ -251,7 +251,9 @@ def start_generation(args: Namespace, *, location: bool = False) -> None:
         metadata["top_pass_definition"] = high_pass.TOP_PASS_DEFINITION
     if getattr(args, "uncertainty_config", None):
         metadata["uncertainty_config"] = uncertainty.validate(args.uncertainty_config)
-        metadata["top_pass_definition"] = uncertainty.TOP_PASS_DEFINITION
+        metadata["uncertainty_metric_definition"] = uncertainty.DEFINITION
+        metadata["top_pass_definition"] = (high_pass.TOP_PASS_DEFINITION if getattr(args, "high_pass_config", None)
+                                           else PC_XPASS_TOP_PASS_DEFINITION)
     history = list(old.get("invocations", []))
     history.append({"started_at": now, "arguments": {k: v for k, v in vars(args).items()
                     if not k.startswith("_") and not k.startswith("pass_height")

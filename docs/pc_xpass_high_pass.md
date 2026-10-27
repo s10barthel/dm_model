@@ -2,8 +2,8 @@
 
 Enable aerial alternatives during generation with `--high-pass on`. The default
 is `off`. Ground and aerial options are ranked together for each receiver.
-Optional [launch uncertainty](pc_xpass_uncertainty.md) averages only existing
-trajectory outcomes before max/top-pass selection.
+Optional [launch uncertainty](pc_xpass_uncertainty.md) adds a separate expected
+success metric using existing trajectories; raw max/top-pass exports stay independent.
 
 ```powershell
 python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_v3 `

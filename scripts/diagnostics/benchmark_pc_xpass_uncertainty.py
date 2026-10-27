@@ -8,6 +8,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import numpy as np
+import pandas as pd
 import torch
 from datatools.benchmark import build_benchmark_state, load_benchmark_modification_data
 import pc_xpass_high_pass as hp
@@ -24,7 +25,7 @@ def main():
     parser.add_argument("--margin", choices=["tta", "distance"], default="tta")
     parser.add_argument("--accel-table-id", default="accel7_v8_radius1_refined")
     parser.add_argument("--high-pass", choices=["on", "off"], default="on")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "out/pc_xpass_uncertainty")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "out/pc_xpass_uncertainty_independent")
     args = parser.parse_args()
     if not 1 <= args.states <= len(STATE_PAIRS) or args.repeats < 1:
         parser.error("Select available states and a positive repeat count")
@@ -53,16 +54,18 @@ def main():
     timings = {key: [] for key in configs}
     warmup = {}
     warmup_profiles = {}
+    warmup_rows = {}
     peak_rss = {key: 0 for key in configs}
     def compute(config):
-        for graph in graphs:
-            physics.compute_graph_pc_xpass_metrics(graph, uncertainty_config=config, **opts)
+        return [physics.compute_graph_pc_xpass_metrics(graph, uncertainty_config=config, **opts) for graph in graphs]
     for name, config in configs.items():
         start = time.perf_counter()
-        compute(config)
+        warmup_rows[name] = compute(config)
         warmup[name] = time.perf_counter()-start
         warmup_profiles[name] = hp.profile.cache_info()._asdict()
     assert warmup_profiles["off"]["misses"] == warmup_profiles["on"]["misses"]
+    for raw, added in zip(warmup_rows["off"], warmup_rows["on"]):
+        pd.testing.assert_series_equal(raw, added.reindex(raw.index), check_exact=True)
     # Verify the mode adds no flight profiles, then alternate order across repeats.
     before = hp.profile.cache_info()._asdict()
     for repeat in range(args.repeats):
@@ -80,6 +83,9 @@ def main():
                   flight_profiles_before=before, flight_profiles_after=after,
                   warmup_flight_profiles=warmup_profiles, peak_working_set_bytes=peak_rss,
                   memory_measurement="Absolute shared-process RSS sampled every 10 ms; not incremental memory",
+                  raw_exports_exact=True,
+                  available_metrics_by_mode={name: [*opts["enabled_metrics"], *([uncertainty.METRIC] if config else [])]
+                                             for name, config in configs.items()},
                   prediction_caches_changed=False, threads=1)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     (args.output_dir / "benchmark.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

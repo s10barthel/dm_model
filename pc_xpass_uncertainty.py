@@ -14,11 +14,13 @@ from scipy.sparse import csr_matrix
 DEFAULTS = dict(uncertainty=False, speed_uncertainty=2., angle_uncertainty=3.,
                 elevation_uncertainty=6.)
 KEYS = set(DEFAULTS)
-TOP_PASS_DEFINITION = "expected_launch_then_best_elevation_per_speed_azimuth_v1"
-DETAIL_SUFFIXES = ["__nominal_xpass", "__expected_xpass", "__expected_lane_survival",
-                   "__expected_control_prob", "__expected_position_discount",
-                   "__expected_ranking"]
-TOP_DETAILS = ["nominal_xpass", "nominal_lane_survival", "nominal_control_prob"]
+METRIC = "uncertainty_xpass"
+VERSION = "uncertainty"
+DEFINITION = "expected_best_existing_launch_independent_v1"
+GEOMETRY = ("speed", "angle", "elevation", "distance", "target_x", "target_y", "target_z", "flight_time")
+COMPONENTS = ("xpass", "lane_survival", "control_prob", "position_discount", "ranking")
+DETAIL_FIELDS = [*GEOMETRY, *(f"{kind}_{field}" for kind in ("nominal", "expected") for field in COMPONENTS)]
+DETAIL_SUFFIXES = [f"__uncertainty_{field}" for field in DETAIL_FIELDS]
 
 
 def boolean(value):
@@ -31,7 +33,7 @@ def boolean(value):
 
 def add_arguments(parser):
     parser.add_argument("--uncertainty", type=boolean, default=False,
-                        help="Average existing launch outcomes before selection (PC xPass only).")
+                        help="Add a separate uncertainty_xpass export using existing launches (PC xPass only).")
     for name in ("speed_uncertainty", "angle_uncertainty", "elevation_uncertainty"):
         units = "m/s" if name == "speed_uncertainty" else "degrees"
         parser.add_argument("--" + name.replace("_", "-"), type=float, default=DEFAULTS[name],
@@ -46,18 +48,21 @@ def configuration(uncertainty=False, speed_uncertainty=2., angle_uncertainty=3.,
         raise ValueError("Uncertainty scales must be finite and non-negative")
     if not enabled:
         return None
-    return dict(schema_version=1, algorithm="existing_launch_gaussian_v1",
+    return dict(schema_version=2, algorithm="existing_launch_gaussian_v1", metric=METRIC, definition=DEFINITION,
                 speed_uncertainty=scales[0], angle_uncertainty=scales[1], elevation_uncertainty=scales[2],
                 cutoff="inclusive_one_scale_per_dimension", weights="normalized_gaussian_point_weights",
                 horizontal_difference="shortest_circular_degrees", distance="best_endpoint_per_executed_launch",
                 missing_profiles="excluded", unsuccessful_outcomes="zero_with_weight_retained",
-                selection="expectation_before_max_or_top_pass", xt="expected_xpass_times_outcome_endpoint_xt",
-                endpoint_details="nominal_selected_intention", lane_sidecar="nominal_selected_intention")
+                selection="expectation_before_independent_max", xt="expected_xpass_times_outcome_endpoint_xt",
+                endpoint_details="uncertainty_prefixed_nominal_selected_intention", lane_sidecar="raw_max")
 
 
 def validate(config):
     if config is None:
         return None
+    if isinstance(config, dict) and config.get("schema_version") == 1:
+        raise ValueError("Legacy schema-1 uncertainty caches store adjusted scores as max_xpass; "
+                         "regenerate under a new cache ID")
     try:
         expected = configuration(True, *(config[k] for k in
             ("speed_uncertainty", "angle_uncertainty", "elevation_uncertainty")))
@@ -82,27 +87,23 @@ def configure_args(parser, args):
         if explicit & KEYS and not getattr(args, "pc_xpass", False):
             raise ValueError("Uncertainty options require --pc-xpass")
         args.uncertainty_config = configuration(**selected)
+        if getattr(args, "x_pass_version", None) == VERSION and not args.uncertainty_config:
+            raise ValueError("Generating --xpass-version uncertainty requires --uncertainty true")
         if not args.uncertainty_config:
             if explicit & (KEYS - {"uncertainty"}):
                 raise ValueError("Explicit uncertainty scales require --uncertainty true")
             return
-        if explicit & {"top_n", "top_n_values"}:
-            raise ValueError("Uncertainty supports max and top-pass<N>; --top-n/--top-n-values are endpoint metrics")
-        version = getattr(args, "x_pass_version", None)
-        if version and version != "max" and not version.startswith("top-pass"):
-            raise ValueError("Uncertainty supports --xpass-version max or top-pass<N>")
-        # Ordinary endpoint metrics are not generated implicitly in this mode.
-        args.top_n = None
-        args.top_n_values = None
-        args.export_topmean = False
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
 
 
 def metrics(config, values):
     validate(config)
-    if config and any(v != "max_xpass" and not v.startswith("top_pass") for v in values):
-        raise ValueError("Uncertainty supports only max and top-pass<N> metrics")
+    values = list(values)
+    if not config and METRIC in values:
+        raise ValueError("The uncertainty metric requires --uncertainty true during generation")
+    if config and METRIC not in values:
+        values.append(METRIC)
     return values
 
 

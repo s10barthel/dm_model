@@ -1114,7 +1114,7 @@ def build_hawkeye_visualization_probs(row: pd.Series | None) -> pd.Series:
 
     probs = pd.to_numeric(row, errors="coerce").dropna()
     result = probs.astype(float).sort_values(ascending=False)
-    result.attrs.update({key: row.attrs[key] for key in ("pc_xpass_elevations", "pc_xpass_elevations_by_action")
+    result.attrs.update({key: row.attrs[key] for key in ("pc_xpass_elevations", "pc_xpass_elevations_by_action", "pc_xpass_geometry", "pc_xpass_geometry_by_action")
                          if key in row.attrs})
     return result
 

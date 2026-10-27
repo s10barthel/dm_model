@@ -35,8 +35,8 @@ def resolve_top_pass_selector(parser, args, *, pc_only=False):
             normalized = normalize_x_pass_version(version)
         except ValueError as exc:
             parser.error(str(exc))
-        if normalized.startswith("top-pass") and not (pc_only or getattr(args, "pc_xpass", False)):
-            parser.error("--top-pass and top-pass versions require --pc-xpass.")
+        if (normalized.startswith("top-pass") or normalized == "uncertainty") and not (pc_only or getattr(args, "pc_xpass", False)):
+            parser.error("--top-pass, top-pass and uncertainty versions require --pc-xpass.")
         version = normalized
     setattr(args, dest, version if version is not None else args._xpass_version_default)
     del args._xpass_version_default

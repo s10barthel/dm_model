@@ -1,8 +1,10 @@
-# Existing-grid uncertainty for PC xPass
+# Separate uncertainty export for PC xPass
 
-Enable uncertainty during generation with `--uncertainty true`. The default is
-`false`. The same flags are accepted by `scripts/run_hawkeye_loc.py`; location
-runs must select `--xpass-version max` or `--top-pass N`.
+Enable an additional uncertainty export during generation with `--uncertainty true`
+(default `false`). It leaves raw max, top-N, top-pass and their geometry unchanged.
+The same flags are accepted by `scripts/run_hawkeye_loc.py`. Select the separate
+estimate with `--xpass-version uncertainty` during inference or visualization;
+location generation additionally requires `--uncertainty true` for that selector.
 
 ```powershell
 python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_uncertainty `
@@ -10,16 +12,17 @@ python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_uncert
   --angle-uncertainty 3 --elevation-uncertainty 6 --top-pass 5 10
 ```
 
-Add the usual dataset/frame selection. Uncertainty also works with ground-only
-candidates. It supports `max` and `top-pass<N>`; ordinary endpoint `top<N>` and the
-original physical-xPass `noise-kernel` are unavailable in this mode. Implicit
-endpoint metrics are omitted, and explicit `--top-n`/`--top-n-values` requests
-are rejected. Saved-cache readers select the appropriate existing metric and
-inherit its uncertainty configuration; they perform no new simulation.
+Add the usual dataset/frame selection. Ground-only and combined ground/aerial
+candidates are supported. One run can export raw max, raw endpoint `top<N>`, raw
+`top-pass<N>` and `uncertainty` independently. `--no-max` controls only raw max;
+`--uncertainty true --no-max --no-topmean` permits uncertainty-only generation.
+The original physical-xPass `noise-kernel` remains a separate non-PC model.
+Cache-only readers require the requested exported metric and never simulate
+missing outcomes or fall back from uncertainty to raw max.
 
 | Flag | Default | Definition |
 |---|---:|---|
-| `--uncertainty true/false` | `false` | Average execution outcomes before launch selection. |
+| `--uncertainty true/false` | `false` | Add an independent expected-success maximum. |
 | `--speed-uncertainty FLOAT` | `2` | Gaussian scale and inclusive radius in total initial speed, m/s. |
 | `--angle-uncertainty FLOAT` | `3` | Gaussian scale and inclusive radius in horizontal direction, degrees. |
 | `--elevation-uncertainty FLOAT` | `6` | Gaussian scale and inclusive radius in elevation, degrees. |
@@ -44,9 +47,10 @@ For each receiver:
    normalize over the included vectors. A frozen dimension contributes zero to
    the exponent and allows only matching values. Computed unsuccessful outcomes
    contribute zero while retaining their weight; absent profiles are excluded.
-5. Average complete outcome scores, then select the best intended launch.
-   For `top-pass<N>`, retain the best intended elevation for each speed and
-   horizontal angle, rank those representatives and average the best N.
+5. Average complete outcome scores, then select the best intended launch for
+   `uncertainty_xpass`. Raw max, endpoint top-N and top-pass selection continue
+   to use the original unsmoothed scores. There is no uncertainty-adjusted
+   top-pass mode.
 
 With xT ranking, average **score times each outcome's endpoint xT**, while
 exporting the corresponding expected xPass probability. Reception distance
@@ -64,48 +68,47 @@ There is no grid expansion or additional trajectory/reachability evaluation.
 
 ## Outputs and cache compatibility
 
-Existing xPass metric columns contain expected probabilities when enabled.
-The selected `__speed`, `__angle`, `__elevation` describe the **intended launch**.
-`__distance`, `__target_x`, `__target_y`, aerial `__target_z`/`__flight_time`,
-and `__lane_survival`/`__control_prob` describe that intention's **nominal**
-reception. They do not describe a single averaged physical endpoint. If the
-selected intention has no nominal reception location, its location/components
-are NaN, although neighbouring successful executions can yield a positive mean.
+`<player>__uncertainty_xpass` contains the selected uncertainty winner's expected
+probability with the usual numerical clipping. Existing max and top metrics,
+their default receiver-column alias and ordinary geometry remain identical
+when the flag is enabled. If uncertainty is the only export, its score becomes
+the default receiver-column alias.
 
-New receiver columns describe the highest-ranked intention, even when the
-unsuffixed receiver estimate selects a top-pass mean. Top-pass metrics have
-their own component means.
+All uncertainty diagnostics use `<player>__uncertainty_<detail>`:
 
-| Suffix | Meaning for the selected intended launch |
+| Detail | Meaning for the selected uncertainty intention |
 |---|---|
-| `__nominal_xpass` | Its unperturbed reception score, before numerical clipping. |
-| `__expected_xpass` | Weighted outcome xPass before numerical clipping. |
-| `__expected_lane_survival` | Weighted lane-survival marginal. |
-| `__expected_control_prob` | Weighted control marginal. |
-| `__expected_position_discount` | Weighted position-discount marginal. |
-| `__expected_ranking` | Expected ranking score; includes outcome xT when enabled. |
+| `speed`, `angle`, `elevation` | Intended total launch speed (m/s) and angles (degrees). |
+| `distance`, `target_x`, `target_y`, `target_z`, `flight_time` | Its nominal reception geometry and time, rather than an averaged physical endpoint. |
+| `nominal_xpass`, `nominal_lane_survival`, `nominal_control_prob`, `nominal_position_discount`, `nominal_ranking` | Unperturbed values for that intention's best endpoint. |
+| `expected_xpass` | Unclipped expected probability; the selectable metric is `uncertainty_xpass`. |
+| `expected_lane_survival`, `expected_control_prob`, `expected_position_discount`, `expected_ranking` | Averaged marginals and ranking, including outcome xT when enabled. |
 
-Top-pass `*_lane_survival` and `*_control_prob` are means of expected marginals
-for the selected representatives. Additional `*_nominal_xpass`,
-`*_nominal_lane_survival`, `*_nominal_control_prob` record their nominal means.
-**Products of expected marginals do not generally equal expected xPass.**
+Elevation, height and flight time are also present for ground-only uncertainty;
+elevation and height are zero. If the winning intention has no nominal
+reception, nominal reception geometry is NaN. Products of expected component
+marginals do not generally equal expected xPass. Previous unprefixed uncertainty
+and uncertainty-specific top-pass diagnostics are not exported.
 
-Opponent lane sidecars describe the nominal trajectory of the selected
-intention, with schema 3 and definition
-`per_opponent_nominal_intended_launch_before_endpoint_v1`. Their opponent
-product reconstructs nominal lane survival, rather than its expected marginal.
+Readers and visualization use the uncertainty winner's prefixed elevation and
+geometry when that metric is selected. Raw max and lane-control sidecars continue
+to describe the raw maximum, using the usual ground/aerial sidecar schemas.
 
-Enabled caches record the full algorithm/scales in `uncertainty_config`, the
-settings, computation dependencies and lane fingerprints. Changes require a new
-cache ID. Historical caches default to uncertainty off. Disabled mode preserves
-existing numerical results, column schemas and compatibility fingerprints.
+New enabled caches record uncertainty configuration schema 2, the independent
+metric definition, scales, available metric and output semantics. Previous
+schema-1 uncertainty-enabled caches stored adjusted values in `max_xpass` and
+are rejected for both generation and consumption: regenerate under a new cache
+ID. Caches without uncertainty remain compatible. Changes to scales/settings
+require a new cache ID; missing metric or diagnostic columns are repaired during
+generation and rejected during cache-only consumption as appropriate.
 
 ## Validation
 
 `tests/test_pc_xpass_uncertainty.py` covers Gaussian weights, support boundaries,
-wraparound, zero scales, independent reference expectations, xT and top-pass
-selection, movement modes, version inheritance, cache repair, transactional
-match storage, the production CLI and Windows worker equality.
+wraparound, zero scales, independent reference expectations, xT and independent
+raw top-pass selection, raw-export equivalence, legacy rejection, movement modes,
+version inheritance, cache repair, transactional match storage, the production CLI
+and Windows worker equality.
 
 Run a timing comparison on saved states without writing prediction caches:
 

@@ -1,51 +1,64 @@
-# PC xPass uncertainty validation
+# Independent uncertainty export validation
 
-Implementation validated on 27 October 2026.
+Validated on 27 October 2026 for uncertainty configuration schema 2.
 
-## Numerical and integration checks
+## Behaviour and integration
 
-Across the physical xPass, PC top-pass/version, aerial, uncertainty, cache/resume,
-movement and visualization suites, **1,031 unique tests and 49 subtests passed**.
-This combines the 930-test broad regression run, the top-pass/version checks,
-and the final 34-test uncertainty module after adding six integration cases.
+**1,234 unique tests and 49 subtests passed** across physical/PC xPass, top-pass,
+versions, aerial/uncertainty, cache/resume, all movement margins, visualization,
+inference startup policy and auxiliary-input reuse. This comprises the 1,233-test
+regression suite plus the focused missing-uncertainty-export test. Version resume
+checks were also repeated after making the root raw top-pass definition explicit.
 
-The uncertainty tests independently enumerate the retained Gaussian outcomes
-and compare expected probabilities, xT ranking and top-pass grouping against
-the production scorer. They also cover the requested elevation neighbours,
-cutoff boundaries, circular angles, zero scales, failures retaining their weight,
-and a case where expectation changes the winning intention. Integration checks
-include all three movement margins, position discount, serial versus spawned
-Windows workers, transactional Sportec/SkillCorner caches, missing-field repair,
-and production CLI generation plus cache-only resume.
+Coverage includes:
 
-Disabled mode was compared against `physical_pass_model.py` at commit
-`a88d0ed38d02dcbfb9283b09bba8497b584d3681` on benchmark modification 1, states 1
-and 2. Ground/aerial and xT on/off give eight comparisons. Every output value
-is bit-exact (504 columns ground-only, 576 aerial), and metadata plus lane
-fingerprints match exactly. Details: `out/pc_xpass_uncertainty/disabled_equivalence.json`.
+- Independent Gaussian reference calculations, one-scale support, circular
+  angles, zero scales, retained failure weights and trajectory-specific endpoints.
+- Bit-exact raw max, raw endpoint top-N, raw top-pass, default aliases and lane
+  table equality when uncertainty is enabled; separate uncertainty winner details.
+- xT expectation and ranking; ground-only uncertainty height/time diagnostics;
+  prefixed elevation and geometry through all saved visualization adapters.
+- Coexisting exports, uncertainty-only generation, PC-only selectors, schema-1
+  rejection, missing-field repair, no alias fallback for a missing uncertainty
+  export, and required-inference startup failure reporting.
+- Production CLI generation/resume, transactional Sportec/SkillCorner caches,
+  all movement margins and serial versus spawned Windows workers.
 
-## Runtime
+## Comparison with the previous implementation
 
-The diagnostic uses two saved benchmark states, one worker thread, initial
-ground speeds 3–25 m/s at 2 m/s spacing, 3-degree horizontal spacing, 1 m radial
-spacing, default aerial candidates (15 profiles), acceleration 7 m/s², maximum
-player speed 8 m/s, zero reaction time and ground quadratic drag. Position discount
-is off, xT ranking is on, and max plus top-pass 1/5/10 are exported. It alternates
-off/on order between warmed repetitions. Prediction caches are not written.
+Loaded `physical_pass_model.py` from commit
+`5882108be7411978cec398a70f54988e10fbf5b7` and compared benchmark modification 1, states 1
+and 2, with ground/aerial and xT on/off: eight cases. All previous raw outputs
+are bit-exact both with uncertainty disabled and with the new separate export
+enabled. There are 504 ground-only or 576 aerial columns per comparison.
+Disabled metadata and lane fingerprints also match exactly.
 
-| Movement mode | Repeats | Uncertainty off, seconds per two states | On | Added runtime |
+Details: `out/pc_xpass_uncertainty_independent/raw_equivalence.json`.
+
+## Runtime and memory
+
+Both variants export raw max and raw top-pass 1/5/10. The enabled variant adds
+only the separate uncertainty metric and its diagnostics. Settings: two saved
+states, one thread, ground speeds 3-25 m/s at 2 m/s spacing, default aerial grid,
+3-degree azimuths, 1 m radial spacing, acceleration 7 m/s squared, maximum player
+speed 8 m/s, zero reaction time, ground quadratic drag, no position discount and
+xT ranking. Initialization is separate; off/on order alternates between repeats.
+
+| Movement mode | Repeats | Off: seconds per two states | On | Added runtime |
 |---|---:|---:|---:|---:|
-| TTA, `accel7_v8_radius1_refined` | 5 | 1.909 | 1.953 | 2.3% |
-| Distance, `distance_accel7_v8_v1` | 3 | 7.856 | 8.099 | 3.1% |
+| TTA, `accel7_v8_radius1_refined` | 5 | 2.010 | 2.167 | 7.8% |
+| Distance, `distance_accel7_v8_v1` | 3 | 8.022 | 8.049 | 0.3% |
 
-In the TTA run, sampled absolute process RSS was about 1.125 GB in both modes.
-This is a shared-process measurement, not an incremental-memory estimate.
-The flight-profile cache contained exactly 15 profiles before and after all
-uncertainty computations: averaging generated no additional flight profiles.
-Raw measurements: `out/pc_xpass_uncertainty/benchmark.json`.
-The distance run used about 1.124 GB absolute RSS in both modes and likewise
-retained exactly 15 flight profiles. Its measurements are in
-`out/pc_xpass_uncertainty_distance/benchmark.json`.
+Sampled absolute process RSS was approximately 1.126 GB for TTA and 1.124 GB
+for distance in both modes. These are shared-process measurements rather than
+incremental-memory estimates. Both modes retain 12 ground plus 15 aerial profiles
+per azimuth; uncertainty generates no additional flight profiles. The diagnostic
+also verifies raw-score equality and leaves prediction caches untouched.
 
-These small samples verify implementation overhead; they do not establish
-whole-season throughput or predictive calibration of the uncertainty scales.
+Measurements:
+`out/pc_xpass_uncertainty_independent/benchmark.json` and
+`out/pc_xpass_uncertainty_independent_distance/benchmark.json`.
+
+These are small-sample timings with variation between repetitions, not season-wide
+throughput or probability-calibration guarantees. Earlier timings for the former
+coupled uncertainty mode remain historical and do not describe this export design.

@@ -39,11 +39,11 @@ def test_default_scales_and_disabled_settings():
     args = generate.parse_args(["--pc-xpass", "--uncertainty", "true"])
     assert args.uncertainty_config == uncertainty.configuration(True)
     assert (args.speed_uncertainty, args.angle_uncertainty, args.elevation_uncertainty) == (2, 3, 6)
-    assert generate.enabled_physical_xpass_metrics_from_args(args) == ["max_xpass"]
-    assert args.top_n_values is None and args.top_n is None and not args.export_topmean
+    assert generate.enabled_physical_xpass_metrics_from_args(args) == ["max_xpass", "uncertainty_xpass"]
+    assert args.top_n_values is None and args.top_n is None and args.export_topmean
     args = generate.parse_args(["--pc-xpass", "--uncertainty", "true", "--top-pass", "5", "10", "--no-max",
                                 "--speed-uncertainty", "0", "--angle-uncertainty", "2", "--elevation-uncertainty", "7"])
-    assert generate.enabled_physical_xpass_metrics_from_args(args) == ["top_pass5_xpass", "top_pass10_xpass"]
+    assert generate.enabled_physical_xpass_metrics_from_args(args) == ["top_pass5_xpass", "top_pass10_xpass", "uncertainty_xpass"]
     assert args.uncertainty_config == uncertainty.configuration(True, 0, 2, 7)
 
 
@@ -54,26 +54,71 @@ def test_default_scales_and_disabled_settings():
     ["--pc-xpass", "--uncertainty", "true", "--speed-uncertainty", "-1"],
     ["--pc-xpass", "--uncertainty", "true", "--elevation-uncertainty", "nan"],
     ["--pc-xpass", "--uncertainty", "true", "--angle-uncertainty", "inf"],
-    ["--pc-xpass", "--uncertainty", "true", "--top-n", "5"],
-    ["--pc-xpass", "--uncertainty", "true", "--top-n-values", "5", "10"],
-    ["--pc-xpass", "--uncertainty", "true", "--no-max"],
 ])
 def test_invalid_generation_cli(flags):
     with pytest.raises((SystemExit, ValueError)):
         generate.parse_args(flags)
 
 
-@pytest.mark.parametrize("selector", ["max", "top-pass5"])
+@pytest.mark.parametrize("selector", ["max", "top-pass5", "top10", "uncertainty"])
 def test_location_flags_and_metric_selection(selector):
     args = location.parse_args(["--uncertainty", "true", "--xpass-version", selector])
     assert args.uncertainty_config == uncertainty.configuration(True)
-    assert args.top_n is None and args.top_n_values is None
+    assert args.top_n == 10
+    assert args.top_n_values == ([10] if selector == "top10" else None)
     assert args.top_pass_values == ([5] if selector == "top-pass5" else [])
 
 
-def test_location_rejects_endpoint_metric():
+def test_location_rejects_uncertainty_selection_without_export():
     with pytest.raises(SystemExit):
-        location.parse_args(["--uncertainty", "true", "--xpass-version", "top10"])
+        location.parse_args(["--xpass-version", "uncertainty"])
+
+
+def test_independent_exports_and_uncertainty_only():
+    flags = ["--pc-xpass", "--uncertainty", "true", "--top-n-values", "5", "10", "--top-pass", "5"]
+    args = generate.parse_args(flags)
+    assert generate.enabled_physical_xpass_metrics_from_args(args) == [
+        "max_xpass", "top5_xpass", "top10_xpass", "top_pass5_xpass", "uncertainty_xpass"]
+    only = generate.parse_args(["--pc-xpass", "--uncertainty", "true", "--no-max", "--no-topmean"])
+    assert generate.enabled_physical_xpass_metrics_from_args(only) == ["uncertainty_xpass"]
+    opts = options()
+    both = ppm.compute_graph_pc_xpass_metrics(graph(), uncertainty_config=uncertainty.configuration(True), **opts)
+    row = ppm.compute_graph_pc_xpass_metrics(graph(), uncertainty_config=uncertainty.configuration(True),
+        enabled_metrics=["uncertainty_xpass"], **opts)
+    assert row["home_2"] == row["home_2__uncertainty_xpass"] == both["home_2__uncertainty_xpass"]
+    assert "home_2__max_xpass" not in row
+    assert not any(suffix in row for suffix in ("home_2__expected_xpass", "home_2__nominal_xpass",
+                                               "home_2__top_pass5_nominal_xpass"))
+
+
+def test_missing_uncertainty_export_does_not_fall_back_to_default_alias(tmp_path):
+    items = [dict(match_id="example", graphs=[graph()], labels=torch.stack([make_label()]))]
+    opts = dict(source=ppm.PC_XPASS_SOURCE, num_workers=1, uncertainty_config=uncertainty.configuration(True),
+                available_metrics=["uncertainty_xpass"], **options(angle_step=30))
+    ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, **opts)
+    path = tmp_path / "matches/example.parquet"
+    frame = pd.read_parquet(path)
+    frame.drop(columns=[column for column in frame if column.endswith("__uncertainty_xpass")]).to_parquet(path)
+    with pytest.raises(ValueError, match="does not contain columns"):
+        ppm.load_runtime_physical_xpass_visualization_component(tmp_path, "example", 7,
+            metric="uncertainty_xpass", x_pass_version="uncertainty")
+    assert ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, **opts)["cache_written"] == 1
+
+
+def test_selector_is_pc_only():
+    from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pc-xpass", action="store_true")
+    parser.add_argument("--xpass-version", dest="x_pass_version", default="top10")
+    add_top_pass_selector(parser)
+    with pytest.raises(SystemExit):
+        resolve_top_pass_selector(parser, parser.parse_args(["--xpass-version", "uncertainty"]))
+    with pytest.raises(ValueError, match="requires --pc-xpass"):
+        ppm.physical_xpass_metric_for_version("uncertainty", pc_xpass=False)
+    args = resolve_top_pass_selector(parser, parser.parse_args(["--pc-xpass", "--xpass-version", "uncertainty"]))
+    assert args.x_pass_version == "uncertainty"
+    assert ppm.physical_xpass_metric_for_version("uncertainty", pc_xpass=True) == "uncertainty_xpass"
 
 
 def test_elevation_examples_and_gaussian_weights():
@@ -124,7 +169,7 @@ def test_failed_outcome_retains_weight_and_averaging_can_change_winner():
 @pytest.mark.parametrize("xt", [False, True])
 @pytest.mark.parametrize("aerial", [False, True])
 def test_integrated_scores_match_independent_discrete_expectation(xt, aerial):
-    opts = options(top_xt=xt, high_pass_config=hp.configuration("on") if aerial else None)
+    opts = options(top_xt=xt, top_n_values=[3, 10], high_pass_config=hp.configuration("on") if aerial else None)
     raw, details = {}, {}
     baseline = ppm.compute_graph_pc_xpass_metrics(graph(), diagnostic_details=raw, **opts)
     result = ppm.compute_graph_pc_xpass_metrics(graph(), diagnostic_details=details,
@@ -157,19 +202,12 @@ def test_integrated_scores_match_independent_discrete_expectation(xt, aerial):
             expected_rank[p, a] /= total
     np.testing.assert_allclose(details["uncertainty_outcomes"]["home_2"]["expected_xpass"], expected, atol=1e-14)
     winner = np.unravel_index(np.argmax(expected_rank), expected_rank.shape)
-    assert result["home_2__max_xpass"] == pytest.approx(np.clip(expected[winner], 1e-4, 1-1e-4))
-    assert result["home_2__expected_xpass"] == pytest.approx(expected[winner])
-    assert result["home_2__nominal_xpass"] == pytest.approx(nominal[winner])
-    assert result["home_2__distance"] == endpoint[winner]*3
-    # Stable ranking followed by one representative per speed/horizontal angle.
-    representatives, seen = [], set()
-    for flat in np.argsort(-expected_rank.ravel(), kind="stable"):
-        p, a = np.unravel_index(flat, expected_rank.shape)
-        key = (raw["speeds"][p], a)
-        if key not in seen:
-            representatives.append(flat)
-            seen.add(key)
-    assert result["home_2__top_pass5_xpass"] == pytest.approx(np.clip(expected.ravel()[representatives[:5]].mean(), 1e-4, 1-1e-4))
+    assert result["home_2__uncertainty_xpass"] == pytest.approx(np.clip(expected[winner], 1e-4, 1-1e-4))
+    assert result["home_2__uncertainty_expected_xpass"] == pytest.approx(expected[winner])
+    assert result["home_2__uncertainty_nominal_xpass"] == pytest.approx(nominal[winner])
+    assert result["home_2__uncertainty_distance"] == endpoint[winner]*3
+    # Every raw metric, detail and default alias is unchanged by adding uncertainty.
+    pd.testing.assert_series_equal(baseline, result.reindex(baseline.index), check_exact=True)
     assert result["home_2__top_pass1_xpass"] == result["home_2__max_xpass"]
     pd.testing.assert_series_equal(result, ppm.compute_graphs_pc_xpass_metrics([graph()],
         uncertainty_config=uncertainty.configuration(True), **opts)[0])
@@ -187,7 +225,8 @@ def test_disabled_scores_metadata_and_fingerprints_equal():
     assert a == b
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) == ppm.pc_xpass_lane_survival_metadata_fingerprint(b)
     c = ppm.pc_xpass_metadata(policy, uncertainty_config=uncertainty.configuration(True), **opts)
-    assert c["top_pass_definition"] == uncertainty.TOP_PASS_DEFINITION
+    assert c["top_pass_definition"] == hp.TOP_PASS_DEFINITION
+    assert c["uncertainty_metric_definition"] == uncertainty.DEFINITION
     assert ppm.pc_xpass_lane_survival_metadata_fingerprint(a) != ppm.pc_xpass_lane_survival_metadata_fingerprint(c)
     broken = copy.deepcopy(c)
     broken["uncertainty_config"]["speed_uncertainty"] = -1
@@ -207,6 +246,9 @@ def test_version_resume_and_old_caches_default_off(tmp_path, monkeypatch, locati
     args = parse([*prefix, "--uncertainty", "true", "--speed-uncertainty", "3"])
     args.pc_xpass_id = "uncertain"
     versions.start_generation(args, location=location_mode)
+    saved = versions.read_metadata(versions.version_root("uncertain", location_mode))
+    assert saved["top_pass_definition"] == ppm.PC_XPASS_TOP_PASS_DEFINITION
+    assert saved["uncertainty_config"]["schema_version"] == 2
     resumed = parse([*([] if location_mode else ["--pc-xpass"]), "--pc-xpass-id", "uncertain"])
     assert resumed.uncertainty_config == args.uncertainty_config
     assert versions.settings(resumed) == versions.settings(args)
@@ -232,12 +274,13 @@ def test_runtime_cache_resume_repair_sidecars_and_selection(tmp_path, monkeypatc
     saved = pd.read_parquet(tmp_path / "matches/example.parquet")
     assert ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, **opts)["cache_hits"] == 1
     manifest = json.loads((tmp_path / "lane_control/coverage/example.json").read_text())
-    assert manifest["schema_version"] == 3
+    assert manifest["schema_version"] == 2
     ppm.validate_x_pass_version_available(tmp_path, x_pass_version="top-pass5", metric="top_pass5_xpass")
     ppm.validate_pc_xpass_lane_survival_mode_cache_metadata(json.loads((tmp_path / "metadata.json").read_text()), "top_pass_5")
+    ppm.validate_x_pass_version_available(tmp_path, x_pass_version="uncertainty", metric="uncertainty_xpass")
     with pytest.raises(ValueError):
         ppm.validate_x_pass_version_available(tmp_path, x_pass_version="top5", metric="top5_xpass")
-    saved.drop(columns=["home_2__expected_xpass"]).to_parquet(tmp_path / "matches/example.parquet", index=True)
+    saved.drop(columns=["home_2__uncertainty_expected_xpass"]).to_parquet(tmp_path / "matches/example.parquet", index=True)
     assert ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, **opts)["cache_written"] == 1
     with pytest.raises(ValueError, match="uncertainty"):
         ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, **{**opts, "uncertainty_config": None})
@@ -278,6 +321,108 @@ def test_zero_uncertainty_matches_all_movement_modes(accel_table, distance_table
     averaged = ppm.compute_graph_pc_xpass_metrics(graph(),
         uncertainty_config=uncertainty.configuration(True, 0, 0, 0), **opts)
     pd.testing.assert_series_equal(raw, averaged.reindex(raw.index), atol=1e-14)
+    assert averaged["home_2__uncertainty_xpass"] == raw["home_2__max_xpass"]
+
+
+@pytest.mark.parametrize("aerial", [False, True])
+def test_raw_lane_exports_and_default_alias_do_not_change(tmp_path, aerial):
+    items = [dict(match_id="example", graphs=[graph()], labels=torch.stack([make_label()]))]
+    opts = dict(source=ppm.PC_XPASS_SOURCE, num_workers=1, export_lane_control=True,
+                high_pass_config=hp.configuration("on") if aerial else None,
+                **options(angle_step=30, top_n=3, top_n_values=[3, 10]))
+    raw, enabled = tmp_path / "raw", tmp_path / "enabled"
+    ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=raw, **opts)
+    ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=enabled,
+        uncertainty_config=uncertainty.configuration(True), **opts)
+    before = pd.read_parquet(raw / "matches/example.parquet")
+    after = pd.read_parquet(enabled / "matches/example.parquet")
+    pd.testing.assert_frame_equal(before, after[before.columns], check_exact=True)
+    pd.testing.assert_frame_equal(pd.read_parquet(raw / "lane_control/example.parquet"),
+                                  pd.read_parquet(enabled / "lane_control/example.parquet"), check_exact=True)
+    for directory in (raw, enabled):
+        metadata = json.loads((directory / "metadata.json").read_text())
+        assert metadata["default_metric"] == "top3_xpass"
+        assert metadata["top_pass_definition"] == (hp.TOP_PASS_DEFINITION if aerial else ppm.PC_XPASS_TOP_PASS_DEFINITION)
+        assert ppm.lane_control_schema(directory) == ((2, "per_opponent_height_masked_max_before_endpoint_v2")
+                                                     if aerial else (1, ppm.LANE_CONTROL_DEFINITION))
+
+
+@pytest.mark.parametrize("operation", ["read", "select", "resume"])
+def test_schema_one_uncertainty_caches_require_regeneration(tmp_path, operation):
+    metadata = ppm.pc_xpass_metadata(ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+        uncertainty_config=uncertainty.configuration(True), **options())
+    metadata["uncertainty_config"]["schema_version"] = 1
+    versions.atomic_json(tmp_path / "metadata.json", metadata)
+    original = (tmp_path / "metadata.json").read_bytes()
+    with pytest.raises(ValueError, match="schema-1.*regenerate under a new cache ID"):
+        if operation == "read":
+            versions.read_metadata(tmp_path)
+        elif operation == "select":
+            ppm.validate_x_pass_version_available(tmp_path, x_pass_version="max", metric="max_xpass")
+        else:
+            ppm.prewarm_physical_xpass_runtime_cache([], cache_dir=tmp_path,
+                source=ppm.PC_XPASS_SOURCE, num_workers=1,
+                uncertainty_config=uncertainty.configuration(True), **options())
+    assert (tmp_path / "metadata.json").read_bytes() == original
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_required_inference_startup_selects_uncertainty_or_reports_failure(tmp_path, enabled):
+    from types import SimpleNamespace
+    from pc_xpass_inference_policy import validate_pc_xpass_startup, PCXPassBlendingError
+    metadata = ppm.pc_xpass_metadata(ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+        uncertainty_config=uncertainty.configuration(enabled), **options())
+    versions.atomic_json(tmp_path / "metadata.json", metadata)
+    model = SimpleNamespace(args=dict(task="pass_success", pc_xpass=True, inference_use_physical_xpass=True,
+        physical_cache_dir=str(tmp_path), x_pass_version="uncertainty", xpass_weight="v3"))
+    if enabled:
+        validate_pc_xpass_startup(model)
+        assert ppm.physical_xpass_inference_lookup_config(model.args, cache_dir=tmp_path)["metric"] == "uncertainty_xpass"
+    else:
+        with pytest.raises(PCXPassBlendingError, match="--uncertainty true") as exc:
+            validate_pc_xpass_startup(model)
+        assert exc.value.stage == "startup"
+
+
+@pytest.mark.parametrize("aerial", [False, True])
+def test_visualization_uses_uncertainty_winner_geometry_and_elevation(tmp_path, monkeypatch, aerial):
+    import matplotlib.pyplot as plt
+    from datatools.viz_snapshot import SnapshotVisualizer
+    from scripts import visualize_benchmark, visualize_hawkeye, visualize_skillcorner
+    items = [dict(match_id="example", graphs=[graph()], labels=torch.stack([make_label()]))]
+    ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path, source=ppm.PC_XPASS_SOURCE,
+        num_workers=1, high_pass_config=hp.configuration("on") if aerial else None,
+        uncertainty_config=uncertainty.configuration(True), **options(angle_step=30))
+    saved_path = tmp_path / "matches/example.parquet"
+    saved = pd.read_parquet(saved_path)
+    # Make the two winners visibly distinct to catch use of raw details.
+    saved.loc[:, "home_2__uncertainty_xpass"] = .8
+    saved.loc[:, "home_2__uncertainty_elevation"] = 25. if aerial else 0.
+    saved.loc[:, "home_2__uncertainty_target_x"] = 12.5
+    saved.loc[:, "home_2__elevation"] = 0.
+    saved.to_parquet(saved_path)
+    monkeypatch.setattr(ppm, "compute_graph_pc_xpass_metrics", lambda *a, **k: pytest.fail("Reader recomputed physics"))
+    table = ppm.load_runtime_physical_xpass_visualization_table(tmp_path, "example", [7],
+        metric="uncertainty_xpass", x_pass_version="uncertainty")
+    for module in (visualize_benchmark, visualize_hawkeye, visualize_skillcorner):
+        row = module._probs_for_component_frame("physical_xpass", {"physical_xpass": table}, 7)
+        assert row.attrs["pc_xpass_geometry_by_action"][7]["home_2"]["target_x"] == 12.5
+        snapshot = pd.DataFrame(dict(home_2_x=[10.], home_2_y=[20.], home_2_vx=[0.], home_2_vy=[0.],
+                                     ball_x=[0.], ball_y=[0.]))
+        fig, ax = SnapshotVisualizer(snapshot, player_annots=row, show_velocities=False).plot(annot_type="physical_xpass", show=False)
+        assert any(f"best {25 if aerial else 0}°" in text.get_text() for text in ax.texts)
+        plt.close(fig)
+
+
+def test_saved_component_can_inherit_uncertainty_from_metric_name(tmp_path):
+    from scripts import saved_visualization_xpass as panel
+    from test_saved_visualization_xpass import args, component
+    metadata = ppm.pc_xpass_metadata(ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER,
+        uncertainty_config=uncertainty.configuration(True), **options())
+    versions.atomic_json(tmp_path / "metadata.json", metadata)
+    selected = panel.resolve_saved_xpass(args(), component(physical_cache_dir=str(tmp_path),
+        physical_xpass_metric="uncertainty_xpass", x_pass_version=None), "benchmark")
+    assert selected.x_pass_version == "uncertainty" and selected.metric == "uncertainty_xpass"
 
 
 @pytest.mark.parametrize("dataset", ["sportec", "skillcorner"])
@@ -296,7 +441,7 @@ def test_transactional_match_cache(tmp_path, dataset):
         transaction.expect([item])
         assert ppm.prewarm_physical_xpass_runtime_cache([item], cache_dir=root, **opts)["cache_written"] == 1
         transaction.commit(export_lane=True)
-    assert "home_2__expected_xpass" in pd.read_parquet(root / "matches/match.parquet")
+    assert "home_2__uncertainty_expected_xpass" in pd.read_parquet(root / "matches/match.parquet")
     with cache.MatchAccumulator(root, "match") as transaction:
         transaction.expect([item])
         assert ppm.prewarm_physical_xpass_runtime_cache([item], cache_dir=root, **opts)["cache_hits"] == 1
@@ -329,12 +474,13 @@ def test_production_cli_generation_and_resume(tmp_path, monkeypatch):
     dataset = json.loads((root / "benchmark/metadata.json").read_text())
     assert metadata["status"] == "completed"
     assert metadata["uncertainty_config"] == dataset["uncertainty_config"] == uncertainty.configuration(True)
-    assert dataset["top_pass_definition"] == metadata["top_pass_definition"] == uncertainty.TOP_PASS_DEFINITION
-    assert dataset["available_metrics"] == ["max_xpass", "top_pass5_xpass"]
-    assert dataset["lane_control_export"]["schema_version"] == 3
+    assert dataset["top_pass_definition"] == metadata["top_pass_definition"] == hp.TOP_PASS_DEFINITION
+    assert dataset["uncertainty_metric_definition"] == uncertainty.DEFINITION
+    assert dataset["available_metrics"] == ["max_xpass", "top_pass5_xpass", "uncertainty_xpass"]
+    assert dataset["lane_control_export"]["schema_version"] == 2
     saved = root / "benchmark/matches/modification_1_game_state_1.parquet"
     before = pd.read_parquet(saved)
-    assert "home_2__expected_xpass" in before
+    assert "home_2__uncertainty_expected_xpass" in before
     monkeypatch.setattr(sys, "argv", common)
     monkeypatch.setattr(hp, "profile", lambda *args: pytest.fail("Resume recalculated physics"))
     generate.main()

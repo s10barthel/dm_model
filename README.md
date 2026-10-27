@@ -671,7 +671,7 @@ Useful options:
 - `--success-intent-model-id success_intent/<model_run_id>` to additionally export `success_intent.parquet` for each processed match
 - `--pass-height-model-id pass_height/<model_run_id>` to additionally export `pass_height.parquet` for each processed match
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/sportec` first
-- `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -746,7 +746,7 @@ Useful options:
 - `--show-physical-xpass` to render the cached physical xPass metric itself
 - `--only-physical-xpass` to render cached physical xPass alone, without model IDs, checkpoint loading, or inference. Combine it with other `--only-*` selections to add outputs and their dependencies; `--show-*` additions still work.
 - `--show-model-pass-success` to render **Model Pass Success** separately: the selected checkpoint's probability after normal offside handling and before inference-time physical xPass blending. Physical inputs used inside a checkpoint remain part of its prediction. This flag works independently of `--show-physical-xpass`, with or without blending, and adds its plot even when `--only-*` or `--no-pass-success` hides ordinary pass success.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -830,7 +830,7 @@ Useful options:
 - `--run-id <component_run_id>` to pin the created HawkEye export run id instead of auto-generating one
 - `--no-freeze-ballreceipt` to disable the default BallReceipt freeze for the possessor and the ball
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/hawkeye` first
-- `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -900,7 +900,7 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` selected modifications
 - `--run-id <component_run_id>` to pin the created benchmark export run id instead of auto-generating one
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/benchmark` first
-- `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -945,7 +945,7 @@ Useful options:
 - `--limit N` to smoke-test on the first `N` selected matches
 - `--run-id <component_run_id>` to pin the created SkillCorner export run id instead of auto-generating one
 - `--use-physical-xpass` to blend `pass_success` with cached runtime physical xPass; generate `data/runtime_physical_xpass/skillcorner` first
-- `--xpass-version <max|noise-kernel|topN|top-passN>` to select the cached xPass metric for the blend; default: `top10`
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for the blend; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -1527,12 +1527,14 @@ Metric selection applies only to inference-time physical xPass blending:
 - `--top-pass N` / `--top_pass N`: directly select the mean over the best N distinct passes, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed; `--xpass-version top-pass5` is an equivalent alternative.
 - `--xpass-version top<N>`: dynamic top-N selection, for example `top25` or `top50`. The requested version must be present in the cache.
 - `--xpass-version max`: use `<player_id>__max_xpass`.
+- `--xpass-version uncertainty`: use the separately exported `<player_id>__uncertainty_xpass` (pc-xPass only).
 - `--xpass-version noise-kernel`: use unsuffixed original physical xPass columns. This is invalid for pc-xPass.
 
 PC-xPass generation supports `--uncertainty true` (default `false`) with fixed
 `--speed-uncertainty 2`, `--angle-uncertainty 3`, `--elevation-uncertainty 6`.
-It averages existing trajectory outcomes before `max` or `top-pass<N>` selection;
-ordinary `top<N>` is unavailable for these caches. See
+It adds `<player>__uncertainty_xpass`, selected with `--xpass-version uncertainty`,
+by averaging existing trajectory outcomes before selecting the best intention.
+Raw max, `top<N>` and `top-pass<N>` exports remain independent and can coexist. See
 [uncertainty behaviour, outputs and validation](docs/pc_xpass_uncertainty.md).
 
 Inference reads physical xPass caches only. It does not compute or prewarm missing rows. If cache rows, selected metric columns, required `pass_distance` values, or v2 nearest-opponent distances are missing/unusable, the affected pass rows are skipped or failed according to the selected weighting mode.
@@ -1582,7 +1584,7 @@ Only the `pass_success` low-level training command receives physical xPass flags
 
 - `--use-physical-xpass`: enable inference-time pass-success blending from the runtime cache.
 - `--pc-xpass` / `--pc_xpass`: read `data/pc_xpass/<dataset>` instead of `data/runtime_physical_xpass/<dataset>`.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select blend weighting. Default: `v3`; `v2` requires cached `<player_id>__distance_to_nearest_opponent` values. PC-xPass v4/v5 require explicit runtime auxiliaries below.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -1756,7 +1758,7 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--overwrite`: overwrite existing EPV outputs. Default: off.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend only the `pass_success` inference used inside EPV calculation with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches from `data/pc_xpass/sportec` instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric for the pass-success blend. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2471,7 +2473,7 @@ for the coverage audit and commands to create the required fresh cache.
 - `--output-dir <path>`: parent directory for the created component run folder. Default: `data/component_runs/sportec`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2517,7 +2519,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--output-dir <path>`: parent directory for the created Hawkeye run folder. Default: `data/component_runs/hawkeye`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2550,7 +2552,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--output-dir <path>`: parent directory for the created benchmark run folder. Default: `data/component_runs/benchmark`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2585,7 +2587,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--output-dir <path>`: parent directory for the created SkillCorner run folder. Default: `data/component_runs/skillcorner`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2618,7 +2620,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2665,7 +2667,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
 
@@ -2683,7 +2685,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
@@ -2717,7 +2719,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
 - `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v1,v2,v3,v4,v5}` / `--xpass_weight {v1,v2,v3,v4,v5}`: select xPass/model blend weighting; rendering still shows the selected raw cached xPass metric. Default: `v3`.
 - `--xpass-pass-height-model-id pass_height/<id>`: required for active PC-xPass v4/v5 blending or height-weighted evaluation; independent of component models/bundles.
@@ -2748,7 +2750,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
-- `--xpass-version <max|noise-kernel|topN|top-passN>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
+- `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`.
 
