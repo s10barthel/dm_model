@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pc_xpass_inference_policy import pc_xpass_coverage_unit
+
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -816,6 +818,7 @@ def build_hawkeye_situation(
     return situation, attacking_rows, stats
 
 
+@pc_xpass_coverage_unit
 def infer_hawkeye_components(
     situation: HawkeyeSituation,
     model_specs: dict[str, Any],

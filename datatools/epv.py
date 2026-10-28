@@ -61,6 +61,10 @@ def compute_epv_values(
     if len(weighted_pass_score.columns) == 0:
         return pd.Series(np.nan, index=weighted_pass_score.index, name="epv", dtype=float)
     epv = weighted_pass_score.sum(axis=1, min_count=1)
+    # A partial sum omits a possible pass and is not a complete action value.
+    unavailable = ((aligned_pass_intent > 0) & np.isfinite(aligned_pass_intent)
+                   & ~np.isfinite(aligned_pass_success)).any(axis=1)
+    epv = epv.mask(unavailable)
     epv.name = "epv"
     return epv.astype(float)
 

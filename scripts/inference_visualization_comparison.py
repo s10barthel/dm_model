@@ -1,7 +1,7 @@
 """Checkpoint, pc-xPass cache, and runtime-mask comparisons for inference visualizers."""
 from __future__ import annotations
 
-from pc_xpass_inference_policy import (PCXPassBlendingError, start_inference_attempt, validate_pc_xpass_startup, inference_attempt, cli_blending_guard)
+from pc_xpass_inference_policy import (pc_xpass_variant, finalize_pc_xpass_attempt, PCXPassBlendingError, start_inference_attempt, validate_pc_xpass_startup, inference_attempt, cli_blending_guard)
 
 import json
 from contextlib import contextmanager
@@ -245,8 +245,6 @@ def configure_cache_variants(args, mod, variants, dataset):
                 for key, model in variant.models.items():
                     if model.args.get("lane_survival"):
                         validate_pc_xpass_lane_survival_mode_cache_metadata(metadata, model.args.get("lane_survival_mode"))
-                    if key == "pass_success":
-                        model.args["physical_xpass_require_complete"] = True
                     if key == "pass_success" and (mod.model_uses_physical_xpass(model.args)
                                                   or mod.inference_uses_physical_xpass(model.args)):
                         model.args["pc_xpass"] = True
@@ -267,6 +265,13 @@ def configure_cache_variants(args, mod, variants, dataset):
 
 @contextmanager
 def active_variant(variant, scene):
+    with pc_xpass_variant(variant.identifier):
+        with _active_variant(variant, scene):
+            yield
+
+
+@contextmanager
+def _active_variant(variant, scene):
     """Scope cache configuration, masks and auxiliary bindings to one prediction pipeline."""
     if "pc_xpass_id" not in variant.provenance:
         _configure_variant(variant)
@@ -500,6 +505,7 @@ def run_comparison(args, mod):
                                  skip_failed_groups=sportec and args.visualization_comparison != "pc_xpass")
         if sportec and not report.outputs:
             raise RuntimeError("All selected actions were skipped or failed during rendering.")
+        report.metadata.update(finalize_pc_xpass_attempt())
         report.finish()
     except (Exception, KeyboardInterrupt) as exc:
         report.failed(exc)

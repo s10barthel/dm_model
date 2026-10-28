@@ -140,7 +140,7 @@ def test_v0_supports_standard_physical_cache_without_pc_xpass(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["row", "column", "nan", "inf"])
-def test_v0_missing_physical_values_abort_before_forward(physical_run, failure):
+def test_v0_missing_physical_values_remain_unavailable(physical_run, failure):
     subject, model, rows, folder = physical_run
     if failure == "row":
         rows = rows.iloc[1:]
@@ -149,9 +149,10 @@ def test_v0_missing_physical_values_abort_before_forward(physical_run, failure):
     else:
         rows.loc[0, "home_2__top10_xpass"] = np.nan if failure == "nan" else np.inf
     rows.to_parquet(folder / "matches/match_1.parquet", index=False)
-    model.register_forward_pre_hook(lambda *_: pytest.fail("Invalid pc-xPass inputs must fail before inference"))
-    with pytest.raises(PCXPassBlendingError):
-        inference.inference_gnn(subject, model, device="cpu")
+    final, learned = inference.inference_gnn(subject, model, device="cpu", return_model_pass_success=True)
+    assert np.isnan(final.at[10, "home_2"])
+    assert np.isfinite(learned.at[10, "home_2"])
+    assert final.attrs["pc_xpass_blending_coverage"]["missing_count"] == (4 if failure == "column" else 1)
 
 
 def test_v0_pass_score_and_epv_use_physical_success(physical_run):

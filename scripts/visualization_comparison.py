@@ -679,9 +679,13 @@ def cached_prediction(cache, predict, scene, model, **kwargs):
            height_signature, auxiliary_signature, repr(sorted(model.args.items())),
            bool(kwargs.get("post_action")), source_signature,
            bool(kwargs.get("return_model_pass_success")))
-    if key not in cache:
+    cached = key in cache
+    if not cached:
         cache[key] = predict(scene, model, **kwargs)
-    elif kwargs.get("precomputed_auxiliaries") is not None:
+    if cached and cache[key][0].attrs.get("pc_xpass_blending_coverage") is not None:
+        from pc_xpass_inference_policy import record_pc_xpass_coverage
+        record_pc_xpass_coverage(model, cache[key][0].attrs["pc_xpass_blending_coverage"])
+    if cached and kwargs.get("precomputed_auxiliaries") is not None:
         from pc_xpass_auxiliary import record_component_prediction
         record_component_prediction(
             kwargs["precomputed_auxiliaries"], scene, model, cache[key][0], kwargs.get("device", "cuda"),

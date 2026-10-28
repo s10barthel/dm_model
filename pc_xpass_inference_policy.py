@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import json
+import hashlib
 from pathlib import Path
 import sys
 
@@ -87,10 +88,7 @@ def pc_xpass_setup(function):
 def validate_pc_xpass_startup(model, *, memo=None):
     if not pc_blending_required(model):
         return
-    state = _attempt.get()
-    if state is not None and state["root"] is not None and not state["active"]:
-        state["active"] = True
-        _write_attempt(state, status="running")
+    register_pc_xpass_variant(model)
     from physical_pass_model import (physical_xpass_inference_lookup_config,
                                      validate_x_pass_version_available, XPASS_WEIGHT_VERSIONS)
     import math
@@ -127,6 +125,101 @@ def validate_pc_xpass_startup(model, *, memo=None):
 
 
 _attempt = ContextVar("pc_xpass_inference_attempt", default=None)
+_variant = ContextVar("pc_xpass_inference_variant", default=None)
+_pending = ContextVar("pc_xpass_pending_coverage", default=None)
+
+
+def empty_pc_xpass_coverage():
+    return dict(eligible_count=0, usable_count=0, missing_count=0, missing_by_reason={}, examples=[])
+
+
+def _merge_coverage(target, report):
+    for field in ("eligible_count", "usable_count", "missing_count"):
+        target[field] += report[field]
+    for reason, count in report["missing_by_reason"].items():
+        target["missing_by_reason"][reason] = target["missing_by_reason"].get(reason, 0) + count
+    target["examples"].extend(report["examples"][:max(0, 10 - len(target["examples"]))])
+
+
+def register_pc_xpass_variant(model):
+    state = _attempt.get()
+    if state is None or not pc_blending_required(model):
+        return None
+    from models.inference_masks import inference_mask_metadata
+    args = model.args
+    settings = dict(cache_id=args.get("pc_xpass_id"), cache_dir=args.get("physical_cache_dir"),
+                    metric=args.get("x_pass_version"), weight=args.get("xpass_weight"),
+                    require_complete=bool(args.get("physical_xpass_require_complete", False)))
+    identity = json.dumps([args, inference_mask_metadata(model)], sort_keys=True, default=str)
+    key = _variant.get() or hashlib.sha256(identity.encode()).hexdigest()[:16]
+    state["coverage"].setdefault(key, dict(**settings, **empty_pc_xpass_coverage()))
+    starting = not state["active"]
+    state["active"] = True
+    if starting and state["root"] is not None:
+        _write_attempt(state, status="running")
+    return key
+
+
+def record_pc_xpass_coverage(model, report):
+    key = register_pc_xpass_variant(model)
+    if key is None:
+        return
+    pending = _pending.get()
+    if pending is not None:
+        pending.append((key, report))
+    else:
+        _merge_coverage(_attempt.get()["coverage"][key], report)
+    _attempt.get()["finalized"] = False
+
+
+@contextmanager
+def pc_xpass_variant(identifier):
+    token = _variant.set(str(identifier))
+    try:
+        yield
+    finally:
+        _variant.reset(token)
+
+
+def pc_xpass_coverage_unit(function):
+    """Only count predictions from collectors that successfully return their outputs."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        parent = _pending.get()
+        pending = []
+        token = _pending.set(pending)
+        try:
+            result = function(*args, **kwargs)
+        except BaseException:
+            raise
+        else:
+            if parent is not None:
+                parent.extend(pending)
+            elif _attempt.get() is not None:
+                for key, report in pending:
+                    _merge_coverage(_attempt.get()["coverage"][key], report)
+            return result
+        finally:
+            _pending.reset(token)
+    return wrapped
+
+
+def finalize_pc_xpass_attempt():
+    """Call before completed metadata, successful pointers, or canonical exports."""
+    state = _attempt.get()
+    if state is None or not state["active"]:
+        return {}
+    for key, report in state["coverage"].items():
+        if report["eligible_count"] and not report["usable_count"]:
+            raise PCXPassBlendingError("No usable blended outputs across the inference attempt",
+                stage="coverage_finalization", context={"variant": key,
+                    **{field: report[field] for field in ("cache_id", "cache_dir", "metric", "weight")}})
+    if not state["finalized"]:
+        missing = sum(report["missing_count"] for report in state["coverage"].values())
+        if missing:
+            print(f"WARN pc-xPass: {missing} eligible predictions unavailable; see pc_xpass_blending_coverage.")
+        state["finalized"] = True
+    return dict(pc_xpass_blending_policy="cache_required", pc_xpass_blending_coverage=state["coverage"])
 
 
 def start_inference_attempt(root, args, *, required=False):
@@ -148,7 +241,8 @@ def _write_attempt(state, **updates):
         "run_id": root.name, "command": " ".join(sys.argv)}
     if updates.get("status") == "running":
         payload.pop("failure", None)
-    payload.update(pc_xpass_blending_policy="required", **updates)
+    payload.update(pc_xpass_blending_policy="cache_required",
+                   pc_xpass_blending_coverage=state["coverage"], **updates)
     write_run_metadata(root, payload)
 
 
@@ -156,10 +250,11 @@ def inference_attempt(function):
     """Keep failures visible even when normal runner metadata is built at the end."""
     @wraps(function)
     def wrapped(*args, **kwargs):
-        token = _attempt.set({"root": None, "active": False})
+        token = _attempt.set({"root": None, "active": False, "coverage": {}, "finalized": False})
         try:
             result = function(*args, **kwargs)
             state = _attempt.get()
+            finalize_pc_xpass_attempt()
             if state["root"] is not None and state["active"]:
                 path = state["root"] / "metadata.json"
                 status = json.loads(path.read_text(encoding="utf-8-sig")).get("status", "running")

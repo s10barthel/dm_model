@@ -17,7 +17,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
-from pc_xpass_inference_policy import (inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from pc_xpass_inference_policy import (finalize_pc_xpass_attempt, pc_xpass_coverage_unit, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
 from inference import preflight_pc_xpass
 from pc_xpass_inference_policy import (cli_blending_guard)
 
@@ -296,6 +296,7 @@ def render_frame_image(
     return image
 
 
+@pc_xpass_coverage_unit
 def collect_situation_components(situation, model_specs, device, inference_frame_ids,
                                  rendered_components, prediction_cache=None):
     rendered_components = input_components(rendered_components)
@@ -846,6 +847,7 @@ def main() -> None:
     if comparison_xpass:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))
+    metadata.update(finalize_pc_xpass_attempt())
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

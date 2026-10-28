@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pc_xpass_inference_policy import pc_xpass_coverage_unit
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -682,6 +684,7 @@ def build_skillcorner_possession(
     return possession, stats
 
 
+@pc_xpass_coverage_unit
 def infer_skillcorner_components(
     possession: SkillcornerPossession,
     model_specs: dict[str, Any],

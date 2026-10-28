@@ -1,4 +1,4 @@
-"""Required blending rejects incomplete inputs before models or later units run."""
+"""Cache rejection is fatal; numerical gaps obey the selected coverage policy."""
 from argparse import Namespace
 import json
 from types import SimpleNamespace
@@ -61,6 +61,7 @@ def test_startup_rejection_is_fatal(fixture, failure):
 @pytest.mark.parametrize("failure", ["row", "player", "nan", "inf", "corrupt_file", "nearest"])
 def test_one_required_input_aborts_before_forward(fixture, failure):
     subject, model, rows, folder, calls = fixture
+    model.args["physical_xpass_require_complete"] = True
     if failure == "row":
         rows = rows.iloc[:1]
     elif failure == "player":
@@ -92,6 +93,7 @@ def test_collector_preflight_runs_before_all_components(fixture, monkeypatch, mo
 @pytest.mark.parametrize("role", ["pass_height", "pass_intent"])
 def test_auxiliary_nonfinite_fails_before_primary_forward(fixture, role):
     subject, model, rows, folder, calls = fixture
+    model.args["physical_xpass_require_complete"] = True
     model.args.update(xpass_weight="v5", xpass_pass_height_definition=definition(2., "checkpoint"))
     height = pd.DataFrame({"home_1": [np.nan, np.nan], "home_2": [.5, .5]}, index=[10, 11])
     intent = pd.DataFrame({"home_1": [np.nan, np.nan], "home_2": [.5, .5]}, index=[10, 11])
@@ -165,6 +167,7 @@ def test_capturing_model_predictions_cannot_swallow_rejected_rows(fixture, monke
 def test_invalid_attachment_fails_before_primary_forward(fixture, monkeypatch):
     import physical_pass_model as physics
     subject, model, rows, folder, calls = fixture
+    model.args["physical_xpass_require_complete"] = True
     attach = inference.attach_physical_xpass_for_inference
     def corrupt(*args, **kwargs):
         graphs = attach(*args, **kwargs)
@@ -221,7 +224,7 @@ def test_failure_reporting_does_not_replace_original(tmp_path, monkeypatch):
     assert "disk error" in caught.value.__notes__[0]
 
 
-@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("fail", [False, True, "coverage"])
 def test_epv_attempt_preserves_canonical_outputs_on_blend_failure(tmp_path, fixture, monkeypatch, fail):
     from scripts import generate_epv as epv
     subject, model, rows, folder, calls = fixture
@@ -256,7 +259,11 @@ def test_epv_attempt_preserves_canonical_outputs_on_blend_failure(tmp_path, fixt
     visited = []
     def predict(*a):
         visited.append(len(visited))
-        if fail and len(visited) == 2:
+        if fail == "coverage":
+            rows["home_2__top10_xpass"] = np.nan
+            rows.to_parquet(folder / "matches/match_1.parquet", index=False)
+            inference.inference_gnn(subject, model, device="cpu")
+        if fail is True and len(visited) == 2:
             raise PCXPassBlendingError("missing candidate", stage="state_validation", context={"match_id": "two"})
         return pd.DataFrame()
     monkeypatch.setattr(epv, "infer_match_epv", predict)
@@ -264,7 +271,7 @@ def test_epv_attempt_preserves_canonical_outputs_on_blend_failure(tmp_path, fixt
     if fail:
         with pytest.raises(PCXPassBlendingError):
             epv.main()
-        assert len(visited) == 2
+        assert len(visited) == (3 if fail == "coverage" else 2)
         assert (output / "epv.csv").read_text() == "previous aggregate"
         assert json.loads((output / "metadata.json").read_text())["run_id"] == "previous"
         assert (match_dir / "one.csv").read_text() == "previous match"

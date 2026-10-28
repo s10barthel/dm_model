@@ -328,7 +328,7 @@ def test_inference_physical_only_needs_no_models(tmp_path, monkeypatch, inferenc
 
 
 @pytest.mark.parametrize("missing", [None, "row", "all_rows", "player", "nearest"])
-def test_real_inference_matches_standalone_and_rejects_incomplete_cache(caches, monkeypatch, missing):
+def test_real_inference_matches_standalone_with_partial_cache(caches, monkeypatch, missing):
     from test_physical_xpass import DummyBaselineInferenceModel, make_physical_inference_match
     subject = make_physical_inference_match([10, 11], [1, 1])
     subject.match_id = "s"
@@ -349,12 +349,6 @@ def test_real_inference_matches_standalone_and_rejects_incomplete_cache(caches, 
     original_graphs = [graph.clone() for graph in subject.graph_features_0]
     memo = {}
     for variant in [variants[0], variants[1], variants[0]]:
-        if missing and variant.identifier == "b":
-            with pytest.raises(inference.PCXPassBlendingError, match="cache 'b'.*situation s"):
-                with direct_compare.active_variant(variant, "situation s"):
-                    cached_prediction(memo, inference.inference_gnn, subject, model,
-                                      device="cpu", return_model_pass_success=True)
-            continue
         with direct_compare.active_variant(variant, "situation s"):
             compared, _ = cached_prediction(memo, inference.inference_gnn, subject, model,
                                            device="cpu", return_model_pass_success=True)
@@ -364,7 +358,11 @@ def test_real_inference_matches_standalone_and_rejects_incomplete_cache(caches, 
         expected = physics.blend_physical_xpass_predictions(pass_success_model=.9,
             xpass=.2 if variant.identifier == "a" else .8, pass_distance=20.,
             weight_version=model.args["xpass_weight"], distance_to_nearest_opponent=5.)
-        assert compared.at[10, "home_2"] == pytest.approx(expected)
+        if missing and variant.identifier == "b":
+            assert pd.isna(compared.at[11, "home_2"])
+            assert pd.isna(compared.at[10, "home_2"]) if missing != "row" else compared.at[10, "home_2"] == pytest.approx(expected)
+        else:
+            assert compared.at[10, "home_2"] == pytest.approx(expected)
     for original, graph in zip(original_graphs, subject.graph_features_0):
         assert original.to_dict().keys() == graph.to_dict().keys()
         assert original.x.equal(graph.x)
@@ -629,6 +627,7 @@ def test_version_failure_has_complete_context(caches, metric_caches, failure):
         rows.to_parquet(path, index=False)
     args = direct.parse_args([*VERSION_FLAGS, "--xpass-version", "uncertainty", "--use-physical-xpass"])
     primary = DummyBaselineInferenceModel(folder)
+    primary.args["physical_xpass_require_complete"] = True
     variants = [Variant(identifier, label, models={"pass_success": primary}, pc_xpass_settings=settings)
                 for identifier, (label, settings) in direct_compare.pc_xpass_specifications(args).items()]
     if failure in {"metric", "uncertainty"}:

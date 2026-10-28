@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 import pandas as pd
 import torch
 
-from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from pc_xpass_inference_policy import (finalize_pc_xpass_attempt, PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
 from inference import preflight_pc_xpass
 from pc_xpass_inference_policy import (cli_blending_guard)
 
@@ -526,6 +526,7 @@ def main() -> None:
     hawkeye_table.to_csv(csv_path, index=False)
     metadata.update(model_pass_success_metadata())
     attach_membership_report(metadata, "hawkeye")
+    metadata.update(finalize_pc_xpass_attempt())
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == HAWKEYE_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("hawkeye_component", component_run_id)

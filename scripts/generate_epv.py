@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
-from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
+from pc_xpass_inference_policy import (finalize_pc_xpass_attempt, pc_xpass_coverage_unit, PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup)
 from inference import preflight_pc_xpass
 from pc_xpass_inference_policy import (pc_xpass_setup)
 from pc_xpass_inference_policy import (pc_blending_required)
@@ -251,6 +251,7 @@ def epv_physical_xpass_metadata(
     }
 
 
+@pc_xpass_coverage_unit
 def infer_match_epv(match, model_specs: dict[str, object], device: str) -> pd.DataFrame:
     preflight_pc_xpass(match, model_specs.get("pass_success"))
     precomputed_auxiliaries = {}
@@ -468,8 +469,9 @@ def main() -> None:
         "skipped_export_matches": skipped_export_matches,
     }
     metadata.update(physical_xpass_metadata)
+    metadata.update(finalize_pc_xpass_attempt())
     if required_blend:
-        metadata.update(status="completed", run_id=attempt_root.name, pc_xpass_blending_policy="required",
+        metadata.update(status="completed", run_id=attempt_root.name, pc_xpass_blending_policy="cache_required",
                         inference_attempt_dir=str(attempt_root.resolve()))
         write_run_metadata(attempt_root, metadata)
         # No canonical output is touched until all requested inference has succeeded.

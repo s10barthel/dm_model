@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
+from pc_xpass_inference_policy import (finalize_pc_xpass_attempt, PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
 from inference import preflight_pc_xpass
 from pc_xpass_inference_policy import (cli_blending_guard)
 
@@ -902,7 +902,7 @@ def _run_location(args: argparse.Namespace) -> None:
     # Phase 2: a single-worker prewarm is both a cache validity audit and a retry for misses.
     audit_args = argparse.Namespace(**vars(args))
     audit_args.num_workers = 1
-    cache_audit = {"checked": 0, "initially_missing": 0, "recovered": 0, "failed": 0}
+    cache_audit = {"checked": 0, "initially_missing": 0, "recovered": 0, "failed": 0, "coverage_gaps": 0}
     cache_ready_rows: list[pd.Series] = []
     for row in prepared_rows:
         row_id = int(row["selection_row_id"])
@@ -917,8 +917,6 @@ def _run_location(args: argparse.Namespace) -> None:
                     args=audit_args,
                     progress_desc=f"hawkeye_loc cache audit row {row_id}",
                 )
-                if _cache_stats_have_unusable_rows(stats):
-                    raise RuntimeError("pc-xPass cache generation skipped an all-NaN target row")
                 if _cache_stats_have_misses(stats):
                     was_missing = True
                     cache_audit["initially_missing"] += 1
@@ -929,9 +927,11 @@ def _run_location(args: argparse.Namespace) -> None:
                         args=audit_args,
                         progress_desc=f"hawkeye_loc cache verify row {row_id}",
                     )
-                    if _cache_stats_have_misses(verification) or _cache_stats_have_unusable_rows(verification):
-                        raise RuntimeError("pc-xPass cache remained missing or invalid after individual retry")
-                    cache_audit["recovered"] += 1
+                    if not (_cache_stats_have_misses(verification) or _cache_stats_have_unusable_rows(verification)):
+                        cache_audit["recovered"] += 1
+                    stats = verification
+                if _cache_stats_have_misses(stats) or _cache_stats_have_unusable_rows(stats):
+                    cache_audit["coverage_gaps"] += 1
             cache_ready_rows.append(row)
         except (LookupError, ArithmeticError, ValueError) as exc:
             cache_audit["failed"] += 1
@@ -954,6 +954,8 @@ def _run_location(args: argparse.Namespace) -> None:
             unit = build_location_target(row, tracking, ball, graph_schema, float(args.time_tolerance), args.mode)
             situation = unit["situation"]
             attacking_rows = unit["attacking_rows"]
+            situation.pc_xpass_coverage_players = set(attacking_rows.loc[
+                pd.to_numeric(attacking_rows.uefa_player_id, errors="coerce").eq(int(unit["selected_player"])), "object_id"].astype(str))
             components = infer_hawkeye_components(situation, model_specs, device=device)
             export = build_hawkeye_export(attacking_rows, situation, components)
             selected_export = export.loc[
@@ -965,8 +967,9 @@ def _run_location(args: argparse.Namespace) -> None:
                     f"found {len(selected_export)}"
                 )
             missing_components = [column for column in REQUIRED_SCORE_COMPONENTS if pd.isna(selected_export.iloc[0][column])]
-            if missing_components:
-                raise RuntimeError("selected-player component values are missing: " + ", ".join(missing_components))
+            unrelated_missing = [name for name in missing_components if name not in {"pass_success", "pass_score", "epv"}]
+            if unrelated_missing:
+                raise RuntimeError("selected-player component values are missing: " + ", ".join(unrelated_missing))
             frame = unit["frame"]
             adjusted_info = unit["adjusted_info"]
             export["selection_row_id"] = row_id
@@ -1062,6 +1065,7 @@ def _run_location(args: argparse.Namespace) -> None:
     metadata.update(model_pass_success_metadata())
     attach_membership_report(metadata, "hawkeye",
                              identities=[(str(value), None) for value in hawkeye_table["loc_situation_id"].unique()])
+    metadata.update(finalize_pc_xpass_attempt())
     write_run_metadata(output_dir, metadata)
     if output_parent.resolve() == HAWKEYE_LOC_COMPONENT_RUNS_DIR.resolve():
         write_latest_run("hawkeye_loc_component", run_id)

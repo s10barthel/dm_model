@@ -72,7 +72,8 @@ from physical_pass_model import (
 import pc_xpass_versions as pc_versions
 import pc_xpass_match_cache as match_cache
 from pc_xpass_inference_policy import (PCXPassBlendingError, pc_blending_required,
-    blending_guard, blending_stage, blending_context, validate_pc_xpass_startup)
+    blending_guard, blending_stage, blending_context, validate_pc_xpass_startup,
+    empty_pc_xpass_coverage, record_pc_xpass_coverage)
 from project_config import get_pc_xpass_dir, get_physical_xpass_dir, get_runtime_physical_xpass_dir, get_success_intent_label_dir
 
 PASS_ONLY_INTENT_TASKS = {"pass_intent", "pass_intent_oppo_agn", "success_intent"}
@@ -141,8 +142,10 @@ def _aligned_pass_intent_values(
     return _aligned_auxiliary_values(pass_intent_probs, event_index, player_indices, "pass_intent")
 
 
-def _aligned_auxiliary_values(table, event_index, player_indices, role):
+def _aligned_auxiliary_values(table, event_index, player_indices, role, *, allow_missing=False):
     if table is None or event_index not in table.index:
+        if allow_missing:
+            return np.full(len(player_indices), np.nan)
         raise ValueError(f"PC-xPass auxiliary {role} has no prediction for state/action {event_index}.")
     row = table.loc[event_index]
     if isinstance(row, pd.DataFrame) or not row.index.is_unique:
@@ -162,6 +165,7 @@ def _physical_xpass_blend_finite_mask(
     pass_intent: np.ndarray | None = None,
     ball_z: np.ndarray | None = None,
     ball_z_limit: float | None = None,
+    allow_missing: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     xpass_values = np.asarray(xpass, dtype=float)
     distance_values = np.asarray(pass_distance, dtype=float)
@@ -182,19 +186,19 @@ def _physical_xpass_blend_finite_mask(
     elif weight_version == "v2":
         nearest_values = np.asarray(distance_to_nearest_opponent, dtype=float)
         missing_nearest_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(nearest_values)
-        if bool(missing_nearest_mask.any()):
+        if not allow_missing and bool(missing_nearest_mask.any()):
             raise ValueError("Physical xPass weight v2 requires finite distance_to_nearest_opponent for every blended player.")
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(nearest_values)
     elif weight_version in {"v4", "v5"}:
         pass_height_values = np.asarray(pass_height, dtype=float)
         missing_pass_height_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & ~np.isfinite(pass_height_values)
-        if bool(missing_pass_height_mask.any()):
+        if not allow_missing and bool(missing_pass_height_mask.any()):
             raise ValueError(f"Physical xPass weight {weight_version} requires finite auxiliary pass_height for every blended player.")
         finite_mask = blend_eligible & np.isfinite(xpass_values) & np.isfinite(distance_values) & np.isfinite(pass_height_values)
         if weight_version == "v5":
             pass_intent_values = np.asarray(pass_intent, dtype=float)
             missing_pass_intent_mask = finite_mask & ~np.isfinite(pass_intent_values)
-            if bool(missing_pass_intent_mask.any()):
+            if not allow_missing and bool(missing_pass_intent_mask.any()):
                 raise ValueError("Physical xPass weight v5 requires finite pass_intent for every blended player.")
             finite_mask = finite_mask & np.isfinite(pass_intent_values)
     else:
@@ -203,7 +207,7 @@ def _physical_xpass_blend_finite_mask(
     if ball_z_limit is not None:
         ball_z_values = np.asarray(ball_z, dtype=float)
         missing_ball_z_mask = finite_mask & ~np.isfinite(ball_z_values)
-        if bool(missing_ball_z_mask.any()):
+        if not allow_missing and bool(missing_ball_z_mask.any()):
             raise ValueError("Physical xPass ball_z_limit requires finite cached ball_z for every blended player.")
         finite_mask = finite_mask & np.isfinite(ball_z_values)
 
@@ -535,6 +539,9 @@ def attach_physical_xpass_for_inference(
         require_ball_z=use_inference_blend and physical_xpass_ball_z_limit(model.args) is not None,
         frame_scope=_physical_xpass_frame_scope_for_inference(post_action) if use_inference_blend else None,
         cache_selection=match_cache.selection_for(match),
+        physical_rows=_accepted_pc_rows(match, model, post_action) if pc_blending_required(model) else None,
+        allow_missing_rows=pc_blending_required(model) and not model_uses_physical_xpass(model.args),
+        allow_missing_values=_partial_pc_blending(model),
     )
 
 
@@ -580,6 +587,60 @@ def _inference_xpass_lookup(match, model, cache_dir):
 
 def _physical_xpass_frame_scope_for_inference(post_action: bool) -> str:
     return PHYSICAL_XPASS_FRAME_SCOPE_RECEIVE if bool(post_action) else PHYSICAL_XPASS_FRAME_SCOPE_ACTION
+
+
+def _partial_pc_blending(model):
+    return pc_blending_required(model) and not model.args.get("physical_xpass_require_complete", False)
+
+
+def _record_pc_blend_row(report, eligible, usable, fields, players, context):
+    report["eligible_count"] += int(eligible.sum())
+    report["usable_count"] += int(usable.sum())
+    missing = eligible & ~usable
+    report["missing_count"] += int(missing.sum())
+    if not missing.any():
+        return
+    reasons = {}
+    for name, values in fields.items():
+        invalid = missing & ~np.isfinite(values)
+        count = int(invalid.sum())
+        if count:
+            report["missing_by_reason"][name] = report["missing_by_reason"].get(name, 0) + count
+            reasons[name] = invalid
+    for index in np.flatnonzero(missing)[:max(0, 10 - len(report["examples"]))]:
+        report["examples"].append({**context, "player": players[index],
+            "reasons": [name for name, invalid in reasons.items() if invalid[index]]})
+
+
+@blending_stage("cache_validation")
+def _accepted_pc_rows(match, model, post_action=False):
+    """Accept each cache/selection once, without scanning candidate graphs or values."""
+    import json
+    match.physical_xpass_hash_policy = PHYSICAL_XPASS_INFERENCE_HASH_POLICY
+    match.physical_xpass_lookup_policy = "dataset_event_frame_player_only"
+    directory = Path(_physical_xpass_cache_dir_for_inference(match, model))
+    memo = getattr(match, "_pc_match_cache", None)
+    if memo is None:
+        memo = match._pc_match_cache = {}
+    selection = match_cache.selection_for(match)
+    match_id = resolve_physical_state_match_id(match, model)
+    paths = [directory / "metadata.json", directory.parent / "metadata.json",
+             directory / "completion" / f"{match_id}.json", directory / "matches" / f"{match_id}.parquet"]
+    signature = tuple((str(path), path.stat().st_mtime_ns, path.stat().st_size)
+                      for path in paths if path.exists())
+    key = ("accepted_pc_rows", str(directory.resolve()), match_id, bool(post_action),
+           json.dumps([selection.possession_id, selection.provenance_id, selection.descriptor],
+                      sort_keys=True, default=str) if selection else None)
+    if key not in memo or memo[key][0] != signature:
+        rows = load_physical_xpass_match(directory, match_id,
+            frame_scope=_physical_xpass_frame_scope_for_inference(post_action), cache_selection=selection)
+        # Attachment needs only these metadata fields. Retaining season provenance in
+        # DataFrame.attrs makes pandas deep-copy it on every row selection.
+        metadata = rows.attrs.get("physical_xpass_cache_metadata", {})
+        rows.attrs["physical_xpass_cache_metadata"] = {
+            field: metadata[field] for field in ("source", "pass_height_refresh_pending") if field in metadata}
+        memo[key] = (signature, rows)
+    return memo[key][1]
 
 
 def _record_physical_xpass_skipped_actions(
@@ -701,6 +762,9 @@ def preflight_pc_xpass(match, model, *, post_action=False, event_indices=None,
     if not pc_blending_required(model):
         return
     validate_pc_xpass_startup(model, memo=getattr(match, "_pc_match_cache", None))
+    _accepted_pc_rows(match, model, post_action)
+    if not model.args.get("physical_xpass_require_complete", False):
+        return
     if graph_override is None:
         graphs, indices = resolve_match_graphs(match, model, post_action)
         labels = match.labels
@@ -713,7 +777,7 @@ def preflight_pc_xpass(match, model, *, post_action=False, event_indices=None,
 
 
 def _validate_pc_auxiliary_values(match, model, graphs, labels, height, intent):
-    if not pc_blending_required(model):
+    if not pc_blending_required(model) or _partial_pc_blending(model):
         return
     version = physical_xpass_weight_version(model.args)
     if version not in {"v4", "v5"}:
@@ -738,7 +802,7 @@ def _validate_pc_auxiliary_values(match, model, graphs, labels, height, intent):
 
 
 def _validate_pc_attachments(match, model, graphs, labels):
-    if not pc_blending_required(model):
+    if not pc_blending_required(model) or _partial_pc_blending(model):
         return
     with blending_guard(model, "attachment", match):
         attributes = ([PHYSICAL_XPASS_RAW_PROB_ATTR] if physical_xpass_weight_version(model.args) == "v0"
@@ -775,6 +839,9 @@ def filter_missing_physical_xpass_rows_for_inference(
 ) -> tuple[list[Data], torch.Tensor]:
     if not requires_physical_xpass_for_inference(model.args):
         return graphs, labels
+    if _partial_pc_blending(model) and not model_uses_physical_xpass(model.args):
+        _accepted_pc_rows(match, model, post_action)
+        return graphs, labels
     if len(labels) and bool((labels[:, config.LABEL_INDEX["is_dribble"]] == 1).all().item()):
         return graphs, labels
 
@@ -804,8 +871,9 @@ def filter_missing_physical_xpass_rows_for_inference(
                 metric=str(lookup_config["metric"]),
                 memo=getattr(match, "_pc_match_cache", None),
             )
-        physical_rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope,
-                                                   cache_selection=match_cache.selection_for(match))
+        physical_rows = (_accepted_pc_rows(match, model, post_action) if pc_blending_required(model) else
+                         load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope,
+                                                   cache_selection=match_cache.selection_for(match)))
         if match_cache.selection_for(match) is not None:
             missing_frames = set(all_action_indexes) - set(physical_rows.index)
             if missing_frames:
@@ -847,7 +915,8 @@ def filter_missing_physical_xpass_rows_for_inference(
             reason_key = "missing_row" if frame_scope is None else f"missing_row_{frame_scope}"
             skip_reasons[reason_key] = skip_reasons.get(reason_key, 0) + 1
             continue
-        if pc_blending_required(model):
+        if pc_blending_required(model) and (model.args.get("physical_xpass_require_complete", False)
+                                           or model_uses_physical_xpass(model.args)):
             _validate_required_pc_row(physical_rows.loc[action_index], graph, model,
                                       metric=metric, default_metric=default_metric)
             kept_graphs.append(graph)
@@ -869,7 +938,8 @@ def filter_missing_physical_xpass_rows_for_inference(
         kept_graphs.append(graph)
         kept_labels.append(label)
 
-    if skipped_action_indexes and pc_blending_required(model):
+    if skipped_action_indexes and pc_blending_required(model) and (
+            model.args.get("physical_xpass_require_complete", False) or model_uses_physical_xpass(model.args)):
         raise PCXPassBlendingError(f"Missing required states: {skipped_action_indexes}; {skip_reasons}",
             stage="state_validation", context={"cache_dir": cache_dir, "metric": metric, "match_id": match_id})
     if skipped_action_indexes and model.args.get("physical_xpass_require_complete", False):
@@ -1075,6 +1145,8 @@ def inference_gnn(
         raise ValueError("No usable graphs remain for the selected inference actions.")
     validate_pc_xpass_startup(model, memo=getattr(match, "_pc_match_cache", None))
     capture_model = return_model_pass_success and model.args["task"] == "pass_success"
+    pc_coverage = empty_pc_xpass_coverage() if pc_blending_required(model) else None
+    partial_pc = _partial_pc_blending(model)
     # Checkpoints without mandatory physical inputs can predict states excluded by blending.
     retain_unblended_states = (capture_model and inference_uses_physical_xpass(model.args)
                               and not model_uses_physical_xpass(model.args)
@@ -1355,10 +1427,10 @@ def inference_gnn(
                     )
                     pass_height_i = None
                     if weight_version in {"v4", "v5"}:
-                        pass_height_i = _aligned_auxiliary_values(pass_height_probs, event_index, player_indices_i, "pass_height")
+                        pass_height_i = _aligned_auxiliary_values(pass_height_probs, event_index, player_indices_i, "pass_height", allow_missing=partial_pc)
                     pass_intent_i = None
                     if weight_version == "v5":
-                        pass_intent_i = _aligned_pass_intent_values(pass_intent_probs, event_index, player_indices_i)
+                        pass_intent_i = _aligned_auxiliary_values(pass_intent_probs, event_index, player_indices_i, "pass_intent", allow_missing=partial_pc)
                     if xpass_i.shape[0] != probs_i.shape[0] or distance_i.shape[0] != probs_i.shape[0]:
                         raise ValueError(
                             "Physical xPass blend tensors do not match pass-success probabilities: "
@@ -1389,7 +1461,7 @@ def inference_gnn(
                             )
                     required_candidates = pass_candidate_mask & ~offside_i & np.isfinite(xpass_i) & np.isfinite(distance_i)
                     for role, values in (("pass_height", pass_height_i), ("pass_intent", pass_intent_i)):
-                        if values is not None and bool((required_candidates & ~np.isfinite(values)).any()):
+                        if not partial_pc and values is not None and bool((required_candidates & ~np.isfinite(values)).any()):
                             missing = [player for player, invalid in zip(player_indices_i, required_candidates & ~np.isfinite(values)) if invalid]
                             raise ValueError(
                                 f"PC-xPass auxiliary {role} has missing or nonfinite predictions in match "
@@ -1406,8 +1478,9 @@ def inference_gnn(
                         pass_intent=pass_intent_i,
                         ball_z=ball_z_i,
                         ball_z_limit=ball_z_limit,
+                        allow_missing=partial_pc,
                     )
-                    if (pc_blending_required(model) or model.args.get("physical_xpass_require_complete", False)) and missing_physical_mask.any():
+                    if model.args.get("physical_xpass_require_complete", False) and missing_physical_mask.any():
                         missing = [player for player, invalid in zip(player_indices_i, missing_physical_mask) if invalid]
                         raise ValueError(
                             f"Physical xPass comparison is missing required blend inputs in match {match.match_id}, "
@@ -1442,6 +1515,21 @@ def inference_gnn(
                         )
                         probs_i[finite_mask] = blended_i
                     probs_i[missing_physical_mask] = np.nan
+                    if pc_coverage is not None:
+                        eligible = pass_candidate_mask & ~offside_i
+                        selected_players = getattr(match, "pc_xpass_coverage_players", None)
+                        if selected_players is not None:
+                            eligible &= np.array([player in selected_players for player in player_indices_i])
+                        fields = {"xpass": xpass_i, "prediction": probs_i}
+                        if weight_version != "v0":
+                            fields["pass_distance"] = distance_i
+                        for name, values in (("nearest_opponent_distance", nearest_i if weight_version == "v2" else None), ("pass_height", pass_height_i),
+                                             ("pass_intent", pass_intent_i), ("ball_z", ball_z_i if ball_z_limit is not None else None)):
+                            if values is not None:
+                                fields[name] = values
+                        _record_pc_blend_row(pc_coverage, eligible, eligible & finite_mask & np.isfinite(probs_i),
+                            fields, player_indices_i, {"match_id": str(match.match_id), "state": int(event_index),
+                                                     "frame": int(frame), "possessor": str(possessor_object_id)})
                 if probs_i.shape[0] == offside_i.shape[0]:
                     probs_i[offside_i] = 0.0
 
@@ -1465,6 +1553,9 @@ def inference_gnn(
         final_columns = [player for player in players if player in final_players]
         probabilities = (pd.DataFrame(probs).set_index("index").reindex(columns=final_columns)
                          if probs else pd.DataFrame(columns=final_columns).rename_axis("index"))
+        if pc_coverage is not None:
+            probabilities.attrs["pc_xpass_blending_coverage"] = pc_coverage
+            record_pc_xpass_coverage(model, pc_coverage)
         if precomputed_auxiliaries is not None and not auxiliary_prediction:
             from pc_xpass_auxiliary import record_component_prediction
             record_component_prediction(

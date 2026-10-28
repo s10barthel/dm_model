@@ -17,7 +17,7 @@ import matplotlib
 # Render exports without a GUI or Tcl/Tk installation.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from pc_xpass_inference_policy import (PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
+from pc_xpass_inference_policy import (finalize_pc_xpass_attempt, pc_xpass_coverage_unit, PCXPassBlendingError, inference_attempt, start_inference_attempt, validate_pc_xpass_startup, blending_guard)
 from inference import preflight_pc_xpass
 from pc_xpass_inference_policy import (cli_blending_guard)
 
@@ -738,6 +738,7 @@ def possession_state_for_action(match, action_index, feature_root, states=None):
     return state, frame
 
 
+@pc_xpass_coverage_unit
 def collect_action_components(
     match: Match,
     loaded_models: dict[str, object],
@@ -1361,6 +1362,7 @@ def main() -> None:
     if comparison_xpass:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "sportec", records=shared_context.get("model_records", {}))
+    metadata.update(finalize_pc_xpass_attempt())
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

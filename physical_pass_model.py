@@ -7009,18 +7009,21 @@ def attach_physical_xpass_to_graph(
     missing_player_value: float | None = PHYSICAL_XPASS_NEUTRAL_PROB,
     require_ball_z: bool = False,
     frame_scope: str | None = None,
+    row: pd.Series | None = None,
+    allow_missing_values: bool = False,
 ) -> Data:
     if physical_rows is None:
         raise ValueError("physical_rows must be provided when attaching physical xPass.")
     action_index = int(labels[LABEL_INDEX["action_index"]].item())
-    if action_index not in physical_rows.index:
+    if row is None and action_index not in physical_rows.index:
         scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
         raise FileNotFoundError(
             f"Physical xPass sidecar for match {match_id} has no row for action_index={action_index}{scope_text}. "
             "Run scripts/generate_physical_xpass.py for the full feature run."
         )
 
-    row = physical_rows.loc[action_index]
+    if row is None:
+        row = physical_rows.loc[action_index]
     node_ids = _node_ids(graph)
     selected_metric = normalize_physical_xpass_metric(metric)
     if missing_player_value is None:
@@ -7054,6 +7057,8 @@ def attach_physical_xpass_to_graph(
             continue
         value = row[value_column]
         if pd.isna(value):
+            continue
+        if allow_missing_values and (not math.isfinite(float(value)) or abs(float(value)) > np.finfo(np.float32).max):
             continue
         probs[node_index] = float(value)
         raw_probs[node_index] = float(value)
@@ -7356,18 +7361,22 @@ def attach_physical_xpass_read_only_to_graphs(
     require_ball_z: bool = False,
     frame_scope: str | None = None,
     cache_selection: match_cache.Selection | None = None,
+    physical_rows: pd.DataFrame | None = None,
+    allow_missing_rows: bool = False,
+    allow_missing_values: bool = False,
 ) -> list[Data]:
-    rows = load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope, cache_selection=cache_selection)
+    rows = (physical_rows if physical_rows is not None else
+            load_physical_xpass_match(cache_dir, match_id, frame_scope=frame_scope, cache_selection=cache_selection))
     attached: list[Data] = []
     for graph, label in zip(graphs, labels):
         action_index = int(label[LABEL_INDEX["action_index"]].item())
-        if action_index not in rows.index:
+        if action_index not in rows.index and not allow_missing_rows:
             scope_text = "" if frame_scope is None else f", frame_scope={frame_scope}"
             raise FileNotFoundError(
                 f"Physical xPass runtime cache for match {match_id} has no row for action_index={action_index}{scope_text}. "
                 "Runtime prewarm should have written this row before inference."
             )
-        row = rows.loc[action_index]
+        row = rows.loc[action_index] if action_index in rows.index else pd.Series(dtype=float)
         attached.append(
             attach_physical_xpass_to_graph(
                 graph,
@@ -7379,8 +7388,10 @@ def attach_physical_xpass_read_only_to_graphs(
                 require_observed_target=require_observed_target,
                 metric=metric,
                 missing_player_value=missing_player_value,
-                require_ball_z=require_ball_z,
+                require_ball_z=require_ball_z and not allow_missing_values,
                 frame_scope=frame_scope,
+                row=row,
+                allow_missing_values=allow_missing_values,
             )
         )
     return attached
