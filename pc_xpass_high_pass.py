@@ -8,7 +8,7 @@ import numpy as np
 
 DEFAULTS = dict(high_pass="off", high_pass_angle=[20., 25., 30.],
                 high_pass_speed=[21., 23., 25., 27., 29.], high_pass_cutoff=None,
-                high_pass_lane_cutoff=2., high_pass_control_cutoff=.5)
+                high_pass_lane_cutoff=2., high_pass_control_cutoff=.5, high_pass_bounce="on")
 KEYS = set(DEFAULTS)
 LEGACY_TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_elevation_v2"
 TOP_PASS_DEFINITION = "best_endpoint_per_speed_azimuth_over_elevation_v3"
@@ -19,6 +19,9 @@ REVISION = "cc6af7b00769fc780d890eca49f530c2dce97e4b"
 
 def add_arguments(parser):
     parser.add_argument("--high-pass", choices=["on", "off"], default="off")
+    parser.add_argument("--high-pass-bounce", choices=["on", "off"], default="on",
+                        help="Continue aerial trajectories through bouncing and rolling (default on); "
+                             "off stops at first ground contact, inclusive.")
     parser.add_argument("--high-pass-angle", nargs="+", type=float, default=DEFAULTS["high_pass_angle"].copy())
     parser.add_argument("--high-pass-speed", nargs="+", type=float, default=DEFAULTS["high_pass_speed"].copy(),
                         help="Total 3D release speeds in m/s; independent of --speed-step.")
@@ -31,10 +34,12 @@ def add_arguments(parser):
 
 
 def configuration(high_pass="off", high_pass_angle=None, *, high_pass_speed=None, high_pass_cutoff=None,
-                  high_pass_lane_cutoff=None, high_pass_control_cutoff=None):
+                  high_pass_lane_cutoff=None, high_pass_control_cutoff=None, high_pass_bounce="on"):
     lane_cutoff, control_cutoff = _cutoffs(high_pass_cutoff, high_pass_lane_cutoff, high_pass_control_cutoff)
     if high_pass not in ("on", "off"):
         raise ValueError("--high-pass must be on or off")
+    if high_pass_bounce not in ("on", "off"):
+        raise ValueError("--high-pass-bounce must be on or off")
     if high_pass == "off":
         return None
     angles = sorted(set(float(x) for x in (DEFAULTS["high_pass_angle"] if high_pass_angle is None else high_pass_angle)))
@@ -43,9 +48,13 @@ def configuration(high_pass="off", high_pass_angle=None, *, high_pass_speed=None
     speeds = sorted(set(float(x) for x in (DEFAULTS["high_pass_speed"] if high_pass_speed is None else high_pass_speed)))
     if not speeds or any(not math.isfinite(v) or v <= 0 for v in (*speeds, lane_cutoff, control_cutoff)):
         raise ValueError("High-pass speeds and cutoffs must be positive and finite; speed list must not be empty")
-    return dict(schema_version=3, angles=angles,
-                lane_cutoff=lane_cutoff, control_cutoff=control_cutoff,
-                speeds=speeds, physics=physics_metadata())
+    result = dict(schema_version=3, angles=angles,
+                  lane_cutoff=lane_cutoff, control_cutoff=control_cutoff,
+                  speeds=speeds, physics=physics_metadata(high_pass_bounce))
+    # Omit the default to preserve existing bounce-on cache identities.
+    if high_pass_bounce == "off":
+        result["bounce"] = "off"
+    return result
 
 
 def _cutoffs(alias, lane, control):
@@ -76,14 +85,15 @@ def normalize_cutoff_args(parser, args, explicit):
     return explicit
 
 
-def physics_metadata():
+def physics_metadata(bounce="on"):
     # Keep cache-only readers independent of the simulator import and profile cache.
     return dict(model="kang_zero_spin_v1", source_revision=REVISION, source_sha256=_source_digest(), timestep=.04,
                 gravity=9.81, air_resistance=.00648, restitution=.109,
                 ground_friction=0., rolling_friction=.02731, rolling_z_thresh=.054,
                 rolling_vertical_speed_threshold=1., launch_height=0., spin=0.,
                 interpolation="linear_horizontal_range_v1", max_range=150.,
-                termination="air_only_remaining_range_bound_v1", remaining_range_tolerance=.001,
+                termination=("first_ground_contact_inclusive_v1" if bounce == "off"
+                             else "air_only_remaining_range_bound_v1"), remaining_range_tolerance=.001,
                 max_steps=100000)
 
 
@@ -149,7 +159,8 @@ def validate(config, *, allow_legacy=False):
                 config["cutoff"] if legacy else config["control_cutoff"], legacy=legacy)
         elif version == 3:
             expected = configuration("on", config["angles"], high_pass_speed=config["speeds"],
-                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"])
+                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"],
+                high_pass_bounce=config.get("bounce", "on"))
         else:
             raise ValueError("Unsupported high-pass configuration schema")
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
@@ -171,7 +182,8 @@ def cli_settings(config):
     validate(config)
     return dict(high_pass="on", high_pass_angle=config["angles"],
                 high_pass_speed=config["speeds"], high_pass_cutoff=None,
-                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"])
+                high_pass_lane_cutoff=config["lane_cutoff"], high_pass_control_cutoff=config["control_cutoff"],
+                high_pass_bounce=config.get("bounce", "on"))
 
 
 def configure_args(parser, args):
@@ -191,16 +203,20 @@ def configure_args(parser, args):
 
 
 @lru_cache(maxsize=512)
-def profile(speed, elevation):
-    """Immutable range, time, height; remaining unrepresented travel <=1 mm."""
+def profile(speed, elevation, bounce="on"):
+    """Immutable range, time, height; optionally end at first ground contact."""
     from _vendor.montecarlo_pass_search import ball_motion as motion
     if not math.isfinite(speed) or speed <= 0 or not math.isfinite(elevation) or not 0 < elevation < 90:
         raise ValueError("Flight profiles require positive finite speed and elevation strictly between 0 and 90")
+    if bounce not in ("on", "off"):
+        raise ValueError("--high-pass-bounce must be on or off")
     beta = math.radians(elevation)
     initial = np.array([speed*math.cos(beta), 0., speed*math.sin(beta)])
     rows = []
     for index, (pos, vel) in enumerate(motion.states(np.zeros(3), initial)):
         rows.append((float(pos[0]), index/motion.FPS, float(pos[2])))
+        if bounce == "off" and index > 0 and pos[2] == 0.:
+            break
         bound = math.hypot(*vel[:2])*(1-motion.AIR_RESISTANCE)/(motion.FPS*motion.AIR_RESISTANCE)
         if pos[0] >= 150. or bound <= .001:
             break
@@ -219,7 +235,7 @@ def candidates(distances, ground_speeds, ground_times, ground_reachable, config)
     speeds, elevations = list(ground_speeds), [0.]*len(ground_speeds)
     for elevation in config["angles"]:
         for speed in config["speeds"]:
-            path = profile(speed, elevation)
+            path = profile(speed, elevation, config.get("bounce", "on"))
             valid = distances <= path[-1, 0]
             times.append(np.where(valid, np.interp(distances, path[:, 0], path[:, 1]), 0.)[None, None, :])
             heights.append(np.interp(distances, path[:, 0], path[:, 2])[None, None, :])

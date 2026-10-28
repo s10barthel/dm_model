@@ -19,6 +19,7 @@ selected cache's configuration and require no aerial-generation flags.
 | Option | Default | Definition |
 |---|---|---|
 | `--high-pass {on,off}` | `off` | Add aerial alternatives. |
+| `--high-pass-bounce {on,off}` | `on` | Continue after first ground contact; `off` ends the trajectory at that contact, inclusive. |
 | `--high-pass-angle FLOAT [FLOAT ...]` | `20 25 30` | Elevations above the pitch, degrees. |
 | `--high-pass-speed FLOAT [FLOAT ...]` | `21 23 25 27 29` | Total 3D release speeds, m/s. |
 | `--high-pass-lane-cutoff FLOAT` | `2` | Maximum lane interception height, metres, inclusive. |
@@ -36,6 +37,7 @@ The former `--high-pass-min-speed`, `--high-pass-max-speed` and
 `--high-pass-speed-step` options have been removed and are rejected. The Python
 configuration API accepts `high_pass_speed` and no longer accepts range or step
 parameters; arguments after the enable/angle parameters are keyword-only.
+It also accepts `high_pass_bounce="on"` or `"off"`, defaulting to `"on"`.
 
 The deprecated alias emits a warning and cannot be combined with either new
 cutoff option. For example, `--high-pass-cutoff 2` explicitly sets both thresholds
@@ -53,9 +55,25 @@ The source, permission provenance, exact revision and adaptations are recorded
 in [`_vendor/montecarlo_pass_search`](../_vendor/montecarlo_pass_search/README.md).
 
 Ground passes retain their existing `--ball-dec` law. This option applies only
-to ground candidates; aerial passes continue the Kang law through bouncing and
-rolling. Aerial profiles stop at 150 m horizontal range or when a conservative
+to ground candidates; by default aerial passes continue the Kang law through
+bouncing and rolling. With `--high-pass-bounce off`, each aerial profile ends at
+the first post-launch sample whose height is zero, including that sample. The
+initial ground-level launch sample does not count as contact. Contact uses the
+existing 25 Hz simulator, without estimating a sub-step impact time. The radial
+grid is unchanged: first contact is eligible when it coincides with an evaluated
+grid distance; all greater distances are unreachable for that aerial profile.
+This boundary applies to receptions, lane interceptions, ranking and uncertainty.
+
+For example, add `--high-pass-bounce off` to a new aerial generation run:
+
+```powershell
+python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id aerial_first_contact `
+  --high-pass on --high-pass-bounce off --top-pass 5 10
+```
+
+In both modes, aerial profiles stop at 150 m horizontal range or when a conservative
 bound on remaining travel is at most 1 mm. Unreached grid distances are masked.
+The existing maximum-step protection also applies.
 
 Ball time and height are interpolated at horizontal radial distances. The
 existing player movement model uses that time. Every player's raw lane
@@ -91,7 +109,12 @@ Enabled configurations (schema 3, with explicit `angles`/`speeds` lists and
 separate `lane_cutoff`/`control_cutoff`), physics coefficients/source checksum, interpolation,
 termination and ranking definitions enter cache identities. The aerial top-pass
 definition is `best_endpoint_per_speed_azimuth_over_elevation_v3`.
-Use a fresh cache ID for this revision or any speed, angle or cutoff change. Normal
+Schema 3 also supports an optional `bounce` field. Missing means `on`; canonical
+bounce-on configurations and generation settings omit the default, preserving
+existing bounce-on cache identities and resumes. Bounce-off configurations store
+`bounce: "off"` and physics termination `first_ground_contact_inclusive_v1`;
+generation settings store `high_pass_bounce: "off"`.
+Use a fresh cache ID when changing bounce mode, speed, angle or cutoff. Normal
 resumes reject incompatible overrides; location
 resumes retain their cached-setting precedence. Missing aerial metadata means
 off, preserving old ground-only cache identities and output schemas.

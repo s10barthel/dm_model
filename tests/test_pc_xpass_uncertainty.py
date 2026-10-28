@@ -167,9 +167,10 @@ def test_failed_outcome_retains_weight_and_averaging_can_change_winner():
 
 
 @pytest.mark.parametrize("xt", [False, True])
-@pytest.mark.parametrize("aerial", [False, True])
+@pytest.mark.parametrize("aerial", [None, "on", "off"])
 def test_integrated_scores_match_independent_discrete_expectation(xt, aerial):
-    opts = options(top_xt=xt, top_n_values=[3, 10], high_pass_config=hp.configuration("on") if aerial else None)
+    opts = options(top_xt=xt, top_n_values=[3, 10],
+                   high_pass_config=hp.configuration("on", high_pass_bounce=aerial) if aerial else None)
     raw, details = {}, {}
     baseline = ppm.compute_graph_pc_xpass_metrics(graph(), diagnostic_details=raw, **opts)
     result = ppm.compute_graph_pc_xpass_metrics(graph(), diagnostic_details=details,

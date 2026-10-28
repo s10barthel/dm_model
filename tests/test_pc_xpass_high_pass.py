@@ -11,6 +11,7 @@ import pytest
 import torch
 
 import pc_xpass_high_pass as hp
+import pc_xpass_uncertainty as uncertainty
 import pc_xpass_versions as versions
 import physical_pass_model as ppm
 from scripts import generate_physical_xpass as generate
@@ -46,6 +47,9 @@ def test_cli_defaults_and_independent_speed_step():
             assert args.high_pass_cutoff is None
             assert args.high_pass_lane_cutoff == 2
             assert args.high_pass_control_cutoff == .5
+            assert args.high_pass_bounce == "on"
+            assert "bounce" not in args.high_pass_config
+            assert "high_pass_bounce" not in versions.settings(args)
             assert args.high_pass_config["schema_version"] == 3
             assert not {"min_speed", "max_speed", "speed_step"} & args.high_pass_config.keys()
             assert not any(hasattr(args, key) for key in ("high_pass_min_speed", "high_pass_max_speed", "high_pass_speed_step"))
@@ -56,6 +60,40 @@ def test_cli_defaults_and_independent_speed_step():
         assert versions.settings(explicit)["high_pass_speed"] == [21, 24.5, 29]
         single = parse([*prefix, "--high-pass", "on", "--high-pass-speed", "17.5"])
         assert single.high_pass_config["speeds"] == [17.5]
+
+
+@pytest.mark.parametrize("parse", [generate.parse_args, location.parse_args])
+def test_bounce_cli_configuration(parse):
+    prefix = ["--pc-xpass"] if parse == generate.parse_args else []
+    default = parse([*prefix, "--high-pass", "on"])
+    on = parse([*prefix, "--high-pass", "on", "--high-pass-bounce", "on"])
+    assert default.high_pass_config == on.high_pass_config
+    assert versions.settings(default) == versions.settings(on)
+    off = parse([*prefix, "--high-pass", "on", "--high-pass-bounce", "off"])
+    assert off.high_pass_config["bounce"] == off.high_pass_bounce == "off"
+    assert off.high_pass_config["schema_version"] == 3
+    assert off.high_pass_config["physics"]["termination"] == "first_ground_contact_inclusive_v1"
+    assert versions.settings(off)["high_pass_bounce"] == "off"
+    assert hp.configuration_from_settings(versions.settings(off)) == off.high_pass_config
+    assert hp.configuration(**hp.cli_settings(off.high_pass_config)) == off.high_pass_config
+
+
+@pytest.mark.parametrize("parse", [generate.parse_args, location.parse_args])
+@pytest.mark.parametrize("bounce", ["on", "off"])
+def test_bounce_cli_requires_high_pass(parse, bounce):
+    prefix = ["--pc-xpass"] if parse == generate.parse_args else []
+    for disabled in ([], ["--high-pass", "off"]):
+        with pytest.raises(SystemExit):
+            parse([*prefix, *disabled, "--high-pass-bounce", bounce])
+
+
+@pytest.mark.parametrize("value", ["true", "invalid", None, True])
+def test_invalid_bounce_api(value):
+    for enabled in ("on", "off"):
+        with pytest.raises(ValueError, match="high-pass-bounce"):
+            hp.configuration(enabled, high_pass_bounce=value)
+    with pytest.raises(ValueError, match="high-pass-bounce"):
+        hp.profile(21., 20., value)
 
 
 def test_default_candidate_grid_and_ground_speed_overlap():
@@ -73,6 +111,7 @@ def test_default_candidate_grid_and_ground_speed_overlap():
 
 @pytest.mark.parametrize("flags", [
     ["--high-pass", "on"], ["--high-pass", "off"], ["--high-pass-angle", "20"], ["--high-pass-speed", "21"],
+    ["--high-pass-bounce", "on"], ["--high-pass-bounce", "off"],
 ])
 def test_non_pc_rejected(flags):
     with pytest.raises(SystemExit):
@@ -85,6 +124,7 @@ def test_non_pc_rejected(flags):
     ["--high-pass-speed", "0"], ["--high-pass-speed", "-1"],
     ["--high-pass-speed", "nan"], ["--high-pass-speed", "inf"], ["--high-pass-speed"],
     ["--high-pass-cutoff", "0"], ["--high-pass-cutoff", "inf"],
+    ["--high-pass-bounce", "true"], ["--high-pass-bounce"],
 ])
 def test_invalid_grid(flags):
     for parse in (generate.parse_args, location.parse_args):
@@ -172,7 +212,80 @@ def test_all_default_profiles_match_pinned_upstream_and_stop_bound():
         # At least one visible bounce after the first descending ground contact.
         ground = np.flatnonzero((path[:, 2] == 0) & (path[:, 1] > .1))
         assert len(ground) and np.any(path[ground[0]+1:, 2] > 0)
+        np.testing.assert_array_equal(hp.profile(speed, angle, "on"), path)
+        first_contact = np.flatnonzero(path[1:, 2] == 0)[0] + 1
+        stopped = hp.profile(speed, angle, "off")
+        np.testing.assert_array_equal(stopped, path[:first_contact+1])
+        assert not stopped.flags.writeable
+        assert hp.profile(speed, angle, "off") is stopped
     assert hp.profile(20., 15.) is hp.profile(20., 15.)
+
+
+def test_shallow_launch_stops_on_first_step():
+    path = hp.profile(1., 1., "off")
+    assert path.shape == (2, 3)
+    assert path[0, 1] == 0.
+    assert path[1, 1] == .04
+    assert path[1, 0] > 0.
+    assert path[1, 2] == 0.
+    np.testing.assert_array_equal(path, hp.profile(1., 1., "on")[:2])
+
+
+def test_bounce_candidates_include_contact_and_exclude_greater_distances():
+    path = hp.profile(21., 20., "off")
+    landing = path[-1, 0]
+    distances = np.array([0., np.nextafter(landing, -np.inf), landing,
+                          np.nextafter(landing, np.inf), landing+1.])
+    ground_speeds = np.array([20.])
+    ground_times, ground_valid = ppm.pc_xpass_ball_arrival_times(distances, ground_speeds)
+    outputs = {}
+    for bounce in ("on", "off"):
+        config = hp.configuration("on", [20.], high_pass_speed=[21.], high_pass_bounce=bounce)
+        outputs[bounce] = hp.candidates(distances, ground_speeds, ground_times, ground_valid, config)
+    _, _, times, heights, valid = outputs["off"]
+    np.testing.assert_array_equal(valid[1, 0], [True, True, True, False, False])
+    assert outputs["on"][4][1, 0].all()
+    assert times[1, 0, 2] == path[-1, 1]
+    assert heights[1, 0, 2] == 0.
+    for i in (2, 3, 4):
+        np.testing.assert_array_equal(outputs["off"][i][0], outputs["on"][i][0])
+        np.testing.assert_array_equal(outputs["off"][i][1, :, :3], outputs["on"][i][1, :, :3])
+
+
+@pytest.mark.parametrize("mode", ["share", "normal", "normal-one", "subtract", "subtract-one"])
+def test_bounce_boundary_applies_to_controls_selection_and_uncertainty(mode):
+    landing = hp.profile(21., 20., "off")[-1, 0]
+    landing_index = 4
+    # Include contact exactly and post-contact points still reachable with bouncing.
+    opts = {**settings(endpoint_normalization=mode), "angle_step": 90, "radial_gridsize": landing/landing_index,
+            "uncertainty_config": uncertainty.configuration(True)}
+    diagnostics = {}
+    for bounce in ("on", "off"):
+        details, lanes = {}, []
+        config = hp.configuration("on", [20.], high_pass_speed=[21.], high_pass_bounce=bounce)
+        row = ppm.compute_graph_pc_xpass_metrics(obstructed_graph(), high_pass_config=config,
+            diagnostic_details=details, lane_control_records=lanes, **opts)
+        diagnostics[bounce] = details
+        if bounce == "off":
+            assert np.isfinite(details["raw_control"][:, 1, 0, landing_index]).all()
+            assert (details["raw_control"][:, 1, 0, landing_index] > 0.).all()
+            for name in ("raw_lane", "raw_control"):
+                assert np.isnan(details[name][:, 1, :, landing_index+1:]).all()
+            assert np.isnan(details["lane_survival"][1, :, landing_index+1:]).all()
+            assert np.isnan(details["receiver_control"]["home_2"][1, :, landing_index+1:]).all()
+            assert (details["uncertainty_outcomes"]["home_2"]["endpoint"][1] <= landing_index).all()
+            for elevation_column, distance_column in (
+                ("home_2__elevation", "home_2__distance"),
+                ("home_2__uncertainty_elevation", "home_2__uncertainty_distance"),
+            ):
+                if row[elevation_column] > 0:
+                    assert row[distance_column] <= landing
+            assert all(record["elevation"] == 0 or record["distance"] <= landing for record in lanes)
+    assert np.isfinite(diagnostics["on"]["raw_control"][:, 1, 0, landing_index+1:]).any()
+    for name in ("raw_lane", "raw_control"):
+        np.testing.assert_array_equal(diagnostics["off"][name][:, 0], diagnostics["on"][name][:, 0])
+        np.testing.assert_array_equal(diagnostics["off"][name][:, 1, :, :landing_index+1],
+                                      diagnostics["on"][name][:, 1, :, :landing_index+1])
 
 
 def test_airborne_release_speed_and_gravity():
@@ -334,6 +447,68 @@ def test_metadata_fingerprints_and_corruption():
     missing["generation_settings"] = {"high_pass": "on"}
     with pytest.raises(ValueError, match="high-pass"):
         ppm.validate_pc_xpass_ball_motion_metadata(missing)
+
+
+def test_bounce_metadata_preserves_old_identity_and_validates_mode():
+    policy = ppm.PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER
+    on = hp.configuration("on", high_pass_bounce="on")
+    metadata = ppm.pc_xpass_metadata(policy, high_pass_config=on)
+    # Captured before the bounce flag was introduced.
+    assert ppm.pc_xpass_lane_survival_metadata_fingerprint(metadata) == "e8f04a65b718a09cee95dc043cd8dbac01cee935c5af8009de9f9b2765aa0da0"
+    off = hp.configuration("on", high_pass_bounce="off")
+    stopped = ppm.pc_xpass_metadata(policy, high_pass_config=off)
+    assert ppm.pc_xpass_lane_survival_metadata_fingerprint(stopped) != ppm.pc_xpass_lane_survival_metadata_fingerprint(metadata)
+    assert hp.validate(off) == off
+    for field in ("bounce", "termination"):
+        broken = copy.deepcopy(off)
+        if field == "bounce":
+            broken.pop("bounce")
+        else:
+            broken["physics"]["termination"] = on["physics"]["termination"]
+        with pytest.raises(ValueError, match="high-pass"):
+            hp.validate(broken)
+    stopped["generation_settings"] = {"high_pass": "on"}
+    with pytest.raises(ValueError, match="differs from generation settings"):
+        ppm.validate_pc_xpass_ball_motion_metadata(stopped)
+    stopped["generation_settings"]["high_pass_bounce"] = "off"
+    ppm.validate_pc_xpass_ball_motion_metadata(stopped)
+
+
+@pytest.mark.parametrize("location_mode", [False, True])
+@pytest.mark.parametrize("bounce", ["on", "off"])
+def test_bounce_version_resume_and_conflicts(tmp_path, monkeypatch, location_mode, bounce):
+    monkeypatch.setattr(versions.config, "PC_XPASS_DIR", tmp_path)
+    parse = location.parse_args if location_mode else generate.parse_args
+    prefix = [] if location_mode else ["--pc-xpass"]
+    args = parse([*prefix, "--high-pass", "on", "--high-pass-bounce", bounce])
+    args.pc_xpass_id = "bounce"
+    versions.start_generation(args, location=location_mode)
+    root = versions.version_root("bounce", location_mode)
+    metadata = versions.read_metadata(root)
+    if bounce == "on":
+        assert "high_pass_bounce" not in metadata["generation_settings"]
+        assert "bounce" not in metadata["high_pass_config"]
+    else:
+        assert metadata["generation_settings"]["high_pass_bounce"] == "off"
+    selection = [*prefix, "--pc-xpass-id", "bounce"]
+    inherited = parse(selection)
+    assert inherited.high_pass_bounce == bounce
+    assert inherited.high_pass_config == args.high_pass_config
+    versions.start_generation(inherited, location=location_mode)
+    explicit = parse([*selection, "--high-pass-bounce", bounce])
+    assert explicit.high_pass_config == args.high_pass_config
+    other = "off" if bounce == "on" else "on"
+    if location_mode:
+        with pytest.warns(UserWarning, match="high-pass-bounce.*cached value"):
+            conflict = parse([*selection, "--high-pass-bounce", other])
+        assert conflict.high_pass_config == args.high_pass_config
+        directory = parse(["--pc-xpass-cache-dir", str(root)])
+        assert directory.high_pass_bounce == bounce
+        with pytest.raises(ValueError, match="high-pass-bounce"):
+            parse(["--pc-xpass-cache-dir", str(root), "--high-pass-bounce", other])
+    else:
+        with pytest.raises(ValueError, match="high-pass-bounce"):
+            parse([*selection, "--high-pass-bounce", other])
 
 
 def test_normal_and_location_resume(tmp_path, monkeypatch):
@@ -519,6 +694,25 @@ def test_alias_resume_uses_resolved_cutoffs(tmp_path, monkeypatch):
     assert explicit.high_pass_config == args.high_pass_config
 
 
+@pytest.mark.parametrize("bounce", ["on", "off"])
+def test_runtime_cache_rejects_mixed_bounce_modes(tmp_path, bounce):
+    config = hp.configuration("on", [20.], high_pass_speed=[21.], high_pass_bounce=bounce)
+    opts = dict(source=ppm.PC_XPASS_SOURCE, num_workers=1, high_pass_config=config, **settings())
+    items = [dict(match_id="example", graphs=[obstructed_graph()], labels=torch.stack([make_label()]))]
+    source = tmp_path / "source"
+    assert ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=source, **opts)["cache_written"] == 1
+    assert ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=source, **opts)["cache_hits"] == 1
+    other = "off" if bounce == "on" else "on"
+    requested = {**opts, "high_pass_config": hp.configuration("on", [20.], high_pass_speed=[21.], high_pass_bounce=other)}
+    before = (source / "matches/example.parquet").read_bytes()
+    with pytest.raises(ValueError, match="high-pass"):
+        ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=source, **requested)
+    with pytest.raises(ValueError, match="[Hh]igh-pass"):
+        ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=tmp_path / "target",
+                                               reuse_cache_dir=source, **requested)
+    assert (source / "matches/example.parquet").read_bytes() == before
+
+
 def test_runtime_cache_lane_export_repair_and_cache_only(tmp_path, monkeypatch):
     graph = obstructed_graph()
     items = [{"match_id": "example", "graphs": [graph], "labels": torch.stack([make_label()])}]
@@ -558,7 +752,8 @@ def test_generation_forwards_aerial_settings(tmp_path):
     assert prewarm.call_args.kwargs["high_pass_config"] == args.high_pass_config
 
 
-def test_production_cli_writes_metadata_and_resumes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bounce", ["on", "off"])
+def test_production_cli_writes_metadata_and_resumes(tmp_path, monkeypatch, bounce):
     import sys
     inputs = tmp_path / "input/modification_1"
     inputs.mkdir(parents=True)
@@ -577,7 +772,7 @@ def test_production_cli_writes_metadata_and_resumes(tmp_path, monkeypatch):
         "--no-sportec", "--no-skillcorner", "--no-hawkeye", "--benchmark-input-dir", str(inputs.parent),
         "--benchmark-modification", "1", "--num-workers", "1", "--angle-step", "90",
         "--radial-gridsize", "10", "--top-pass", "5", "--export-lane-control"]
-    monkeypatch.setattr(sys, "argv", common + ["--high-pass", "on"])
+    monkeypatch.setattr(sys, "argv", common + ["--high-pass", "on", "--high-pass-bounce", bounce])
     generate.main()
     root = tmp_path / "cache/cli_smoke"
     metadata = json.loads((root / "metadata.json").read_text())
@@ -585,6 +780,8 @@ def test_production_cli_writes_metadata_and_resumes(tmp_path, monkeypatch):
     dataset = json.loads((root / "benchmark/metadata.json").read_text())
     assert dataset["high_pass_config"] == metadata["high_pass_config"]
     assert metadata["high_pass_config"]["schema_version"] == 3
+    assert metadata["high_pass_config"].get("bounce", "on") == bounce
+    assert metadata["generation_settings"].get("high_pass_bounce", "on") == bounce
     assert metadata["high_pass_config"]["angles"] == [20, 25, 30]
     assert metadata["generation_settings"]["high_pass_speed"] == [21, 23, 25, 27, 29]
     assert not {"high_pass_min_speed", "high_pass_max_speed", "high_pass_speed_step"} & metadata["generation_settings"].keys()
@@ -649,10 +846,12 @@ def test_transactional_match_caches_retain_elevation(tmp_path, dataset):
         transaction.commit(export_lane=True)
 
 
-def test_windows_workers_equal_serial(tmp_path):
+@pytest.mark.parametrize("bounce", ["on", "off"])
+def test_windows_workers_equal_serial(tmp_path, bounce):
     items = [dict(match_id=f"example_{i}", graphs=[obstructed_graph()], labels=torch.stack([make_label()])) for i in range(2)]
     opts = dict(source=ppm.PC_XPASS_SOURCE,
-                high_pass_config=hp.configuration("on", high_pass_lane_cutoff=1.8, high_pass_control_cutoff=.35),
+                high_pass_config=hp.configuration("on", high_pass_lane_cutoff=1.8, high_pass_control_cutoff=.35,
+                                                  high_pass_bounce=bounce),
                 export_lane_control=True, physical_batch_size=1, **settings())
     serial, parallel = tmp_path / "serial", tmp_path / "parallel"
     ppm.prewarm_physical_xpass_runtime_cache(items, cache_dir=serial, num_workers=1, **opts)

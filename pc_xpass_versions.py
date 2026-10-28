@@ -108,6 +108,8 @@ def settings(args: Namespace) -> dict[str, Any]:
     if result.get("high_pass", "off") == "off":
         result = {key: value for key, value in result.items() if key not in high_pass.KEYS}
     result.pop("high_pass_cutoff", None)
+    if result.get("high_pass_bounce", "on") == "on":
+        result.pop("high_pass_bounce", None)
     if not result.get("uncertainty", False):
         result = {key: value for key, value in result.items() if key not in uncertainty.KEYS}
     return result
