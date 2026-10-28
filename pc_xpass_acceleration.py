@@ -516,15 +516,21 @@ def add_arguments(parser):
     parser.add_argument("--blocking-radius", type=float, default=0., help="TTA raw control: earliest arrival within this radius in metres, for all players (default 0); positive radius defaults omitted temporal offsets to zero")
     parser.add_argument("--distance-power", type=float, default=3., help="Distance raw-control sigmoid slope in inverse metres (default 3)")
     parser.add_argument("--distance-allowance", type=float, default=1., help="Distance raw-control 50%% shortfall in metres (default 1)")
+    for component in ("lane", "control"):
+        parser.add_argument(f"--distance-{component}-power", type=float, default=None,
+                            help=f"Distance {component} sigmoid slope in inverse metres (default: --distance-power)")
+        parser.add_argument(f"--distance-{component}-allowance", type=float, default=None,
+                            help=f"Distance {component} raw-control 50%% shortfall in metres (default: --distance-allowance)")
     parser.add_argument("--accel", default="off", help="pc-xPass only: 'off' or maximum vector acceleration in m/s^2")
     parser.add_argument("--accel-table-id", help="Prepared acceleration lookup table; required when --accel is enabled")
 
 
 def configure_args(parser, args):
+    import pc_xpass_distance_control as distance_control
     explicit = getattr(args, "_pc_explicit", set())
     # The ordinary physical path does not run pc_xpass_versions preparation.
     if not getattr(args, "pc_xpass", False):
-        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None) or explicit & {"distance_power", "distance_allowance", "blocking_radius"} or getattr(args, "blocking_radius", 0.):
+        if getattr(args, "accel", "off") != "off" or getattr(args, "accel_table_id", None) or explicit & {*distance_control.PARAMETER_KEYS, "blocking_radius"} or getattr(args, "blocking_radius", 0.):
             parser.error("--accel and --accel-table-id require --pc-xpass")
         args.accel, args.acceleration_config = None, {}
         return
@@ -538,15 +544,16 @@ def configure_args(parser, args):
             for key in ("lane_inflection_point", "control_inflection_point"):
                 if key not in explicit and key not in recorded:
                     setattr(args, key, 0.)
-        distance_flags = explicit & {"distance_power", "distance_allowance"}
+        distance_flags = explicit & set(distance_control.PARAMETER_KEYS)
         if margin != "distance" and distance_flags:
-            raise ValueError("--distance-power and --distance-allowance require --margin distance")
+            raise ValueError("--distance-* sigmoid flags require --margin distance")
         if margin == "distance":
             if explicit & {"lane_power", "lane_inflection_point", "control_power", "control_inflection_point"}:
-                raise ValueError("Temporal sigmoid flags conflict with --margin distance; use --distance-power/--distance-allowance")
-            _positive(args.distance_power, "distance-power")
-            if not math.isfinite(args.distance_allowance) or args.distance_allowance < 0:
-                raise ValueError("--distance-allowance must be nonnegative and finite")
+                raise ValueError("Temporal sigmoid flags conflict with --margin distance; use --distance-* sigmoid flags")
+            resolved = distance_control.configuration(**{
+                key: getattr(args, key, None) for key in distance_control.PARAMETER_KEYS})
+            for key, value in resolved.items():
+                setattr(args, key, value)
         a = parse_accel(getattr(args, "accel", None))
         if margin == "distance" and a is None:
             raise ValueError("--margin distance requires --accel <number>")

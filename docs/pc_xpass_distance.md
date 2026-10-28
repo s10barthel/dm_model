@@ -9,8 +9,23 @@ For signed distance d in metres (positive outside, negative inside), raw control
 `sigmoid(distance_power * (distance_allowance - d))`. Defaults are power 3 per
 metre and allowance 1 metre: 50% control at a 1 m shortfall, approximately 95.3%
 at the reachable boundary, and approximately 4.7% at a 2 m shortfall. This is raw
-control, before aggregation and competition. The same mapping applies to every
-player and to lane and endpoint raw controls.
+control, before aggregation and competition. By default the same mapping applies
+to lane and endpoint raw controls. Four optional flags override it independently:
+
+| Flag | Default when omitted |
+|---|---|
+| `--distance-lane-power` | `--distance-power` |
+| `--distance-control-power` | `--distance-power` |
+| `--distance-lane-allowance` | `--distance-allowance` |
+| `--distance-control-allowance` | `--distance-allowance` |
+
+Lane raw control is `sigmoid(distance_lane_power * (distance_lane_allowance - d))`.
+Endpoint raw control is `sigmoid(distance_control_power * (distance_control_allowance - d))`
+for every eligible player, including receivers and defenders. Allowances are in
+metres and powers are in inverse metres. For example, `--distance-power 4
+--distance-allowance 1 --distance-lane-power 2 --distance-control-allowance 0`
+uses lane power 2/allowance 1 and endpoint power 4/allowance 0. Changing either
+curve can change the selected pass and both reported component summaries.
 
 ## Prepare a distance movement table
 
@@ -72,8 +87,8 @@ Distance generation uses Numba (`numba>=0.68,<0.69`, included in
 maximum. Install project requirements in the environment used for generation.
 No additional CLI flag is needed. Fully validated tables use the compiled path;
 tables with unresolved cells retain the general NumPy lookup and its reference
-fallback rules. The same movement table and prediction-cache settings remain
-compatible because the model and interpolation definition are unchanged.
+fallback rules. Both implementations use the same movement tables and scoring
+contract; switching between them does not change the model or interpolation definition.
 
 Each worker loads Numba on its first nonanalytic distance batch. Native kernels
 compile or load their on-disk cache once per signature, then stay available for
@@ -83,15 +98,26 @@ module's `__pycache__` directory (or `NUMBA_CACHE_DIR` when configured). Kernels
 use one thread and strict floating-point arithmetic. TTA, original physical
 xPass, table preparation and cache-only reads do not initialize these kernels.
 
-Distance power must be positive and finite; allowance must be nonnegative and
-finite, including zero. Explicit temporal sigmoid flags (`--lane-power`,
+All shared and component-specific distance powers must be positive and finite;
+allowances must be nonnegative and finite, including zero. Explicit temporal sigmoid flags (`--lane-power`,
 `--lane-inflection-point`, `--control-power`, `--control-inflection-point`) conflict
 with distance mode. Explicit distance sigmoid flags conflict with other modes.
 Nonzero/distance reaction delay and explicit `--dist-pass-*` conflict with
 acceleration, as before. There is no blocking-radius option.
 
 Prediction metadata and fingerprints record the margin definition, distance
-parameters, and movement artifact checksum. Resumes inherit settings and reject
+parameters, and movement artifact checksum. The distance-only scoring contract is
+`distance_control_version = "split_lane_control_v1"`. Generation settings and
+prediction metadata record both shared settings and all four resolved overrides.
+Older distance prediction caches, or caches missing this marker or any resolved
+parameter, are rejected during generation, resume, reuse, inference and visualization.
+Regenerate predictions under a **new `--pc-xpass-id`**, reusing the existing
+distance movement table. No metadata migration, deletion or relabeling is performed.
+Previously trained distance lane-survival models are not fingerprint-compatible
+with the new contract, even with numerically identical curves. TTA and empirical
+reachability caches and model fingerprints remain unchanged.
+
+Resumes inherit settings and reject
 incompatible normal-cache overrides. Location caches retain their existing
 cached-setting precedence. Cache-only inference/visualization consumes stored
 predictions without loading movement artifacts or a numerical solver.
@@ -149,6 +175,13 @@ zero reaction delay, 3-degree/1 m pass grid, release speeds 3..25 m/s, and top-p
 separate fresh-cache writes in temporary directories, and warm cache reuse.
 Normal prediction caches and latest pointers are not changed by this diagnostic.
 Its output directory defaults to out/pc_xpass_distance.
+The diagnostic also measures `distance_split`, using lane power 2/allowance .5 m
+and endpoint power 4/allowance 1 m. Its four `--distance-lane-*`/`--distance-control-*`
+flags customize this variant. Reports record the resolved curves, the numerical
+and fresh-cache runtime ratios against shared distance settings, and separate
+warm-cache timings. Both variants perform the same signed-distance queries.
+Numerical and fresh-cache comparisons rotate variant order between repetitions
+after numerical warmup to reduce sensitivity to changes in system load.
 Use `--include-numpy` to compare the compiled implementation with the original
 distance lookup as well as TTA. The diagnostic checks final prediction
 equivalence, records first-state warmup separately, and times fresh cache writes.
@@ -230,3 +263,39 @@ python scripts/diagnostics/benchmark_pc_xpass_distance.py `
 ~~~
 
 Results: out/distance_compiled_integration/benchmark.json and validation.json.
+
+## Separate lane/control curve measurements
+
+The split-control diagnostic used two benchmark states, one worker, six numerical
+repetitions after warmup and three fresh-cache repetitions. Variant order rotated
+between repetitions. Shared curves used power 3/allowance 1 m for both components;
+split curves used lane power 2/allowance .5 m and endpoint power 4/allowance 1 m.
+
+| Measurement (both states) | Shared curves | Split curves | Additional time |
+|---|---:|---:|---:|
+| Numerical computation, median | 3.56 s | 3.74 s | 5.0% |
+| Fresh cache generation, median | 3.68 s | 4.00 s | 8.6% |
+| Warm cache reads, median | 0.31 s | 0.31 s | Within timing variation |
+
+Both variants made the same signed-distance queries with zero reference
+fallbacks. Equal curves reuse one probability array; unequal curves add a sigmoid
+and validity mask while sharing signed distances. These two-state measurements
+support a coarse 5–15% overhead estimate for unequal curves, not a whole-dataset
+throughput guarantee.
+
+A separate comparison with the pre-change implementation matched all 576 output
+values across these two states exactly when overrides were omitted. TTA and
+empirical-reachability fingerprints remained unchanged; the distance fingerprint
+changed intentionally.
+
+```powershell
+python scripts/diagnostics/benchmark_pc_xpass_distance.py `
+  --table-id distance_accel7_v8_v1 --states 2 --repeats 6 `
+  --cache-repeats 3 --validation-points 4 `
+  --output-dir out/distance_split_control
+```
+
+Reports: out/distance_split_control/benchmark.json, validation.json and
+baseline_equivalence.json. Normal prediction caches and latest pointers were
+not modified. The baseline equivalence report is a separate validation artifact;
+the diagnostic generates benchmark.json and validation.json.

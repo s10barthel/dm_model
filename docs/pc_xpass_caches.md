@@ -12,6 +12,11 @@ the flight simulator; normal/location resume precedence follows existing rules.
 Optional player acceleration and separate movement-table preparation are described
 in [pc_xpass_acceleration.md](pc_xpass_acceleration.md). Acceleration-based
 [distance raw control](pc_xpass_distance.md) is available with `--margin distance`.
+Distance prediction caches require `distance_control_version = "split_lane_control_v1"`
+and all four resolved lane/control distance parameters. Older distance caches
+must be regenerated under new IDs; their prepared movement tables remain reusable.
+This changes distance fingerprints, including for trained lane-survival models,
+and leaves other margin modes unchanged.
 TTA raw control also supports an optional
 [blocking radius](pc_xpass_acceleration.md#tta-with-a-blocking-radius), default 0.
 

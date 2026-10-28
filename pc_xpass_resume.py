@@ -123,6 +123,9 @@ def prepare_contracts(args, selected):
         "physics_version", "ranking_mode", "lane_function", "control_function", "lane_survival_aggregation",
         "top_pass_definition", "position_discount_function", "xt_surface", "reachability_config")}
     dependencies["physical_input_contract"] = PHYSICAL_INPUT_CONTRACT
+    if effective.get("margin") == "distance":
+        from pc_xpass_distance_control import SETTING_KEYS
+        dependencies.update({key: effective[key] for key in SETTING_KEYS})
     if effective.get("high_pass_config"):
         dependencies["high_pass_config"] = effective["high_pass_config"]
     if effective.get("uncertainty_config"):

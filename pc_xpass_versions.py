@@ -15,6 +15,7 @@ import project_config as config
 import reachability as reach
 import pc_xpass_high_pass as high_pass
 import pc_xpass_uncertainty as uncertainty
+import pc_xpass_distance_control as distance_control
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
 
 SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle_step radial_gridsize
@@ -25,7 +26,7 @@ SETTING_KEYS = set("""ball_dec physical_eps min_speed max_speed speed_step angle
     ignore_teammates_control export_max export_topmean export_noise_kernel x_pass_version
     export_lane_control""".split())
 SETTING_KEYS.update({"margin", "reachability_fingerprint", *("reachability_" + k for k in reach.DEFAULTS)})
-SETTING_KEYS.update({"distance_power", "distance_allowance"})
+SETTING_KEYS.update(distance_control.SETTING_KEYS)
 SETTING_KEYS.add("blocking_radius")
 SETTING_KEYS.update({"accel", "accel_table_id", "accel_table_fingerprint"})
 SETTING_KEYS.update(high_pass.KEYS)
@@ -52,6 +53,7 @@ def read_metadata(path: str | Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"pc-xPass metadata not found: {path}")
     metadata = json.loads(path.read_text(encoding="utf-8-sig"))
+    distance_control.validate_metadata(metadata)
     from physical_pass_model import validate_pc_xpass_ball_motion_metadata
     validate_pc_xpass_ball_motion_metadata(metadata)
     return metadata
@@ -94,7 +96,7 @@ def settings(args: Namespace) -> dict[str, Any]:
     if getattr(args, "margin", "tta") == "tta":
         result = {k: v for k, v in result.items() if k != "margin" and not k.startswith("reachability_")}
     if getattr(args, "margin", "tta") != "distance":
-        result = {k: v for k, v in result.items() if k not in {"distance_power", "distance_allowance"}}
+        result = {k: v for k, v in result.items() if k not in distance_control.SETTING_KEYS}
     # Store the CLI representation so existing validation can be reused on load.
     if result.get("reaction_time_mode") == "dist_pass":
         result["reaction_time"] = "dist_pass"

@@ -18,6 +18,7 @@ from typing import Any, Literal
 import numpy as np
 import reachability as reach
 import pc_xpass_acceleration as acceleration
+import pc_xpass_distance_control as distance_control
 import pandas as pd
 import pc_xpass_match_cache as match_cache
 from pc_xpass_contract import PHYSICAL_INPUT_CONTRACT
@@ -420,6 +421,10 @@ def pc_xpass_metadata(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -437,14 +442,18 @@ def pc_xpass_metadata(
             f"Unsupported teammate_policy={teammate_policy!r}. "
             f"Expected {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE!r} or {PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER!r}."
     )
+    distance_settings = distance_control.configuration(
+        margin, distance_power=distance_power, distance_allowance=distance_allowance,
+        distance_lane_power=distance_lane_power,
+        distance_control_power=distance_control_power,
+        distance_lane_allowance=distance_lane_allowance,
+        distance_control_allowance=distance_control_allowance,
+    )
     blocking_radius = acceleration.validate_blocking_radius(blocking_radius, margin)
     if acceleration_config and float(acceleration_config.get("blocking_radius", 0.)) != blocking_radius:
         raise ValueError("Blocking radius differs from acceleration configuration")
     if margin == "distance" and (not acceleration_config or acceleration_config.get("spatial_version") != "exact_time_support_v1"):
         raise ValueError("Distance margin requires a compatible acceleration table")
-    if margin == "distance" and (not math.isfinite(distance_power) or distance_power <= 0 or
-                                 not math.isfinite(distance_allowance) or distance_allowance < 0):
-        raise ValueError("Invalid distance sigmoid parameters")
     legacy_ignore = teammate_policy == PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE
     ignore_lane = bool(legacy_ignore or bool(ignore_teammates_lane_survival))
     ignore_control = bool(legacy_ignore or bool(ignore_teammates_control))
@@ -518,7 +527,7 @@ def pc_xpass_metadata(
             "coordinate_system": "pc_xpass_centered_to_spadl_0_105_x_0_68",
         },
         **({"margin": margin, "reachability_config": reach.configuration(margin, reachability_config)} if margin != "tta" else {}),
-        **({"distance_power": float(distance_power), "distance_allowance": float(distance_allowance),
+        **({**distance_settings,
             "distance_definition": "signed_euclidean_exact_time_reachable_region", "distance_units": "m"} if margin == "distance" else {}),
         **({"blocking_radius": blocking_radius} if blocking_radius else {}),
         **({"acceleration_config": acceleration_config} if acceleration_config else {}),
@@ -605,8 +614,9 @@ def pc_xpass_lane_survival_metadata_fingerprint(metadata: Mapping[str, Any]) -> 
     if metadata.get("margin", "tta") != "tta":
         payload.update(margin=metadata["margin"], reachability_config=metadata.get("reachability_config"))
     if metadata.get("margin") == "distance":
-        payload.update(distance_power=metadata.get("distance_power"), distance_allowance=metadata.get("distance_allowance"),
-                       distance_definition=metadata.get("distance_definition"))
+        distance_control.validate_metadata(metadata)
+        payload.update({key: metadata[key] for key in distance_control.SETTING_KEYS})
+        payload["distance_definition"] = metadata.get("distance_definition")
     if metadata.get("blocking_radius", 0.):
         payload["blocking_radius"] = metadata["blocking_radius"]
     if metadata.get("acceleration_config"):
@@ -899,6 +909,7 @@ def validate_physical_xpass_cache_metadata(
             f"expected {expected_source!r}. {rerun_message}"
         )
     if source == PC_XPASS_SOURCE:
+        distance_control.validate_metadata(metadata)
         validate_pc_xpass_ball_motion_metadata(metadata)
     if expected_speed_aggregation is not None and source == PHYSICAL_XPASS_SOURCE:
         actual_speed_aggregation = normalize_physical_xpass_speed_aggregation(metadata.get("speed_aggregation"))
@@ -1259,6 +1270,9 @@ def physical_xpass_inference_lookup_config(args: Any, *, cache_dir: str | Path |
         metadata_path = Path(cache_dir) / "metadata.json"
         if metadata_path.is_file():
             recorded = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+            distance_control.validate_metadata(recorded)
+            if recorded.get("margin") == "distance":
+                lookup.update({key: recorded[key] for key in distance_control.SETTING_KEYS})
             if recorded.get("high_pass_config"):
                 lookup["high_pass_config"] = high_pass.validate(recorded["high_pass_config"], allow_legacy=True)
             if recorded.get("uncertainty_config"):
@@ -3342,6 +3356,10 @@ def compute_graph_pc_xpass_metrics(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -3355,6 +3373,13 @@ def compute_graph_pc_xpass_metrics(
     top_xt: bool = False,
 ) -> pd.Series:
     validate_ball_dec(ball_dec)
+    distance_settings = distance_control.configuration(
+        margin, distance_power=distance_power, distance_allowance=distance_allowance,
+        distance_lane_power=distance_lane_power,
+        distance_control_power=distance_control_power,
+        distance_lane_allowance=distance_lane_allowance,
+        distance_control_allowance=distance_control_allowance,
+    )
     blocking_radius = acceleration.validate_blocking_radius(blocking_radius, margin)
     if acceleration_config and float(acceleration_config.get("blocking_radius", 0.)) != blocking_radius:
         raise ValueError("Blocking radius differs from acceleration configuration")
@@ -3443,13 +3468,13 @@ def compute_graph_pc_xpass_metrics(
     if margin == "distance":
         if not acceleration_config or reaction_time_mode != "fixed" or reaction_times != 0.:
             raise ValueError("Distance margin requires acceleration and zero reaction time")
-        if not math.isfinite(distance_power) or distance_power <= 0 or not math.isfinite(distance_allowance) or distance_allowance < 0:
-            raise ValueError("Invalid distance sigmoid parameters")
         import pc_xpass_distance as spatial
         margins = -spatial.signed_distances(player_pos, target_x, target_y, t_ball,
                     max_player_speed_by_player, acceleration_config, valid=valid_targets)
-        lane_power = control_power = distance_power
-        lane_inflection_point = control_inflection_point = distance_allowance
+        lane_power = distance_settings["distance_lane_power"]
+        control_power = distance_settings["distance_control_power"]
+        lane_inflection_point = distance_settings["distance_lane_allowance"]
+        control_inflection_point = distance_settings["distance_control_allowance"]
     elif acceleration_config:
         if margin != "tta" or reaction_time_mode != "fixed" or reaction_times != 0.:
             raise ValueError("Acceleration requires time-arrival margins and zero reaction time")
@@ -3713,6 +3738,10 @@ def compute_graphs_pc_xpass_metrics(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -3758,6 +3787,10 @@ def compute_graphs_pc_xpass_metrics(
             uncertainty_config=uncertainty_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
+            distance_lane_power=distance_lane_power,
+            distance_control_power=distance_control_power,
+            distance_lane_allowance=distance_lane_allowance,
+            distance_control_allowance=distance_control_allowance,
             blocking_radius=blocking_radius,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
@@ -4510,6 +4543,7 @@ def validate_runtime_physical_xpass_visualization_cache(cache_dir: str | Path) -
         metadata = json.load(fh)
     if not isinstance(metadata, dict):
         return {}
+    distance_control.validate_metadata(metadata)
     return metadata
 
 
@@ -4657,6 +4691,10 @@ def _runtime_cache_metadata(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -4671,6 +4709,10 @@ def _runtime_cache_metadata(
 ) -> dict[str, Any]:
     if (blocking_radius or uncertainty_config) and source != PC_XPASS_SOURCE:
         raise ValueError("Blocking radius and uncertainty are supported only for pc-xPass")
+    if source != PC_XPASS_SOURCE and any(value is not None for value in (
+        distance_lane_power, distance_control_power, distance_lane_allowance, distance_control_allowance,
+    )):
+        raise ValueError("Distance control overrides require pc-xPass and --margin distance")
     if source == PC_XPASS_SOURCE:
         return pc_xpass_metadata(
             teammate_policy,
@@ -4701,6 +4743,10 @@ def _runtime_cache_metadata(
             uncertainty_config=uncertainty_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
+            distance_lane_power=distance_lane_power,
+            distance_control_power=distance_control_power,
+            distance_lane_allowance=distance_lane_allowance,
+            distance_control_allowance=distance_control_allowance,
             blocking_radius=blocking_radius,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
@@ -4799,6 +4845,10 @@ def _ensure_runtime_physical_xpass_cache(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -4851,6 +4901,10 @@ def _ensure_runtime_physical_xpass_cache(
         uncertainty_config=uncertainty_config,
         distance_power=distance_power,
         distance_allowance=distance_allowance,
+        distance_lane_power=distance_lane_power,
+        distance_control_power=distance_control_power,
+        distance_lane_allowance=distance_lane_allowance,
+        distance_control_allowance=distance_control_allowance,
         blocking_radius=blocking_radius,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
@@ -4867,6 +4921,13 @@ def _ensure_runtime_physical_xpass_cache(
         if source == PC_XPASS_SOURCE:
             with metadata_path.open("r", encoding="utf-8") as fh:
                 metadata = json.load(fh)
+            distance_control.validate_metadata(metadata)
+            saved_settings = metadata.get("generation_settings", {})
+            if saved_settings.get("margin") == "distance" and (
+                margin != "distance" or any(saved_settings[key] != expected_metadata.get(key)
+                                            for key in distance_control.SETTING_KEYS)
+            ):
+                raise ValueError("Incompatible distance control settings; create a new pc-xPass version")
             high_pass.validate(metadata.get("high_pass_config"))
             if ("ball_dec" in metadata or "ball_drag" in metadata
                     or metadata.get("physics_version") == PC_XPASS_DRAG_PHYSICS_VERSION):
@@ -4908,7 +4969,7 @@ def _ensure_runtime_physical_xpass_cache(
             if metadata.get("reachability_config", {}) != expected_metadata.get("reachability_config", {}):
                 raise ValueError("Incompatible reachability artifact/settings; create a new pc-xPass version")
             if margin == "distance" and any(metadata.get(k) != expected_metadata.get(k) for k in
-                                             ("distance_power", "distance_allowance", "distance_definition")):
+                                             (*distance_control.SETTING_KEYS, "distance_definition")):
                 raise ValueError("Incompatible distance control settings; create a new pc-xPass version")
             actual_ranking_mode = metadata.get("ranking_mode", PC_XPASS_DEFAULT_RANKING_MODE)
             if actual_ranking_mode != expected_metadata.get("ranking_mode"):
@@ -5767,6 +5828,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     uncertainty_config = task.get("uncertainty_config")
     distance_power = float(task.get("distance_power", 3.))
     distance_allowance = float(task.get("distance_allowance", 1.))
+    distance_lane_power = task.get("distance_lane_power")
+    distance_control_power = task.get("distance_control_power")
+    distance_lane_allowance = task.get("distance_lane_allowance")
+    distance_control_allowance = task.get("distance_control_allowance")
     blocking_radius = float(task.get("blocking_radius", 0.))
     dist_pass_div = float(task.get("dist_pass_div", PC_XPASS_DEFAULT_DIST_PASS_DIV))
     dist_pass_min = float(task.get("dist_pass_min", PC_XPASS_DEFAULT_DIST_PASS_MIN))
@@ -5835,6 +5900,10 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             uncertainty_config=uncertainty_config,
             distance_power=distance_power,
             distance_allowance=distance_allowance,
+            distance_lane_power=distance_lane_power,
+            distance_control_power=distance_control_power,
+            distance_lane_allowance=distance_lane_allowance,
+            distance_control_allowance=distance_control_allowance,
             blocking_radius=blocking_radius,
             dist_pass_div=dist_pass_div,
             dist_pass_min=dist_pass_min,
@@ -6209,6 +6278,10 @@ def prewarm_physical_xpass_runtime_cache(
     uncertainty_config: dict | None = None,
     distance_power: float = 3.,
     distance_allowance: float = 1.,
+    distance_lane_power: float | None = None,
+    distance_control_power: float | None = None,
+    distance_lane_allowance: float | None = None,
+    distance_control_allowance: float | None = None,
     blocking_radius: float = 0.,
     dist_pass_div: float = PC_XPASS_DEFAULT_DIST_PASS_DIV,
     dist_pass_min: float = PC_XPASS_DEFAULT_DIST_PASS_MIN,
@@ -6307,6 +6380,10 @@ def prewarm_physical_xpass_runtime_cache(
         uncertainty_config=uncertainty_config,
         distance_power=distance_power,
         distance_allowance=distance_allowance,
+        distance_lane_power=distance_lane_power,
+        distance_control_power=distance_control_power,
+        distance_lane_allowance=distance_lane_allowance,
+        distance_control_allowance=distance_control_allowance,
         blocking_radius=blocking_radius,
         dist_pass_div=dist_pass_div,
         dist_pass_min=dist_pass_min,
@@ -6325,6 +6402,7 @@ def prewarm_physical_xpass_runtime_cache(
         reuse_metadata_path = Path(reuse_cache_dir) / "metadata.json"
         if reuse_metadata_path.is_file():
             reuse_metadata = json.loads(reuse_metadata_path.read_text(encoding="utf-8"))
+            distance_control.validate_metadata(reuse_metadata)
             high_pass.validate(reuse_metadata.get("high_pass_config"))
             if validate_pc_xpass_ball_motion_metadata(reuse_metadata) != parse_ball_dec(ball_dec):
                 raise ValueError("pc-xPass reuse cache has incompatible ball deceleration; create a new version.")
@@ -6699,6 +6777,10 @@ def prewarm_physical_xpass_runtime_cache(
             "uncertainty_config": uncertainty_config,
             "distance_power": distance_power,
             "distance_allowance": distance_allowance,
+            "distance_lane_power": distance_lane_power,
+            "distance_control_power": distance_control_power,
+            "distance_lane_allowance": distance_lane_allowance,
+            "distance_control_allowance": distance_control_allowance,
             "blocking_radius": blocking_radius,
             "dist_pass_div": float(dist_pass_div),
             "dist_pass_min": float(dist_pass_min),

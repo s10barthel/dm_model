@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pc_xpass_distance_control as distance_control
 from datatools.possession_frames import STATE_CONTRACT
 
 FORMAT = "match_possession_frames_v1"
@@ -49,6 +50,8 @@ def read_json(path, *, memo=None):
     if memo is not None and key in memo and memo[key][0] == signature:
         return memo[key][1]
     value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if path.name == "metadata.json":
+        distance_control.validate_metadata(value)
     if memo is not None:
         memo[key] = (signature, value)
     return value
