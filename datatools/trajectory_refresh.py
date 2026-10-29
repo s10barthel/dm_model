@@ -44,8 +44,9 @@ def load_refresh_match(match_id, metadata):
     events = apply_policy(events, metadata.get("reception_policy", "legacy_elastic_v1"))
     events = prepare_pass_events(events, tracking, match_id, metadata.get(MAX_DURATION_KEY))
     if metadata.get("_endpoint_root"):
-        from datatools.graph_feature import atomic_parquet_save
-        atomic_parquet_save(events, Path(metadata["_endpoint_root"]) / "pass_endpoints" / f"{match_id}.parquet")
+        path = Path(metadata["_endpoint_root"]) / "pass_endpoints" / f"{match_id}.parquet.trajectory.tmp"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        events.to_parquet(path)
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
         reception_policy=metadata.get("reception_policy", "legacy_elastic_v1"),
@@ -100,7 +101,9 @@ def refresh_match_graphs(graphs, labels, match, *, context, schema=None, graph_v
         setattr(graph, TRAJECTORY_SPEED_KEY, TRAJECTORY_SPEED)
         endpoint = ensure_pass_endpoints(match, annotate=False).resolve(match.actions.loc[action_index])
         graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
-        graph.trajectory_end_frame_id = endpoint.trajectory
+        from datatools.failed_pass_trajectory import observation, KEY, VERSION
+        graph.trajectory_end_frame_id = observation(match, match.actions.loc[action_index], endpoint.trajectory)
+        setattr(graph, KEY, VERSION)
         graph.pass_endpoint_definition = PASS_DURATION
     validate_graphs(graphs, context=context, labels=labels, graph_validation=graph_validation, stats=stats)
     assert_preserved(before, graphs, context=context, labels=labels, allow_availability=True,
@@ -205,6 +208,15 @@ def stage_refresh_match(task):
         match.actions = pd.read_parquet(resolved_paths[0])
     resolver = ensure_pass_endpoints(match, annotate=False)
     match.actions = resolver.annotate(match.actions)
+    from datatools.failed_pass_trajectory import prepare_new_match, VERSION
+    match.runtime_feature_root = root
+    match.match_id = file.stem
+    match.failed_pass_trajectory_policy = VERSION
+    prepare_new_match(match, staged_path=root / "failed_pass_trajectories" / f"{file.stem}.parquet.trajectory.tmp")
+    endpoint_stage = root / "pass_endpoints" / f"{file.stem}.parquet.trajectory.tmp"
+    if not endpoint_stage.exists():
+        endpoint_stage.parent.mkdir(parents=True, exist_ok=True)
+        match.actions.to_parquet(endpoint_stage)
     canonical = match.actions.copy()
     staging = ExtensionAttempt(root, "trajectory_staging", "in_place", {})
     if file.is_file():
@@ -328,8 +340,9 @@ def refresh_directory_match(root, metadata, match_id, thread_limit=1, *, graph_v
     root = Path(root)
     file = get_success_intent_graph_dir(root) / (match_id + ".pt")
     paths = refresh_artifact_paths(root, match_id)
+    paths += [root / folder / f"{match_id}.parquet" for folder in ("pass_endpoints", "failed_pass_trajectories")]
     pairs = [(p, p.with_name(p.name + ".trajectory.tmp")) for p in paths]
-    artifacts = [(p, t) for p, t in pairs if p != file]
+    artifacts = [(p, t) for p, t in pairs if p != file and p.parent.name not in {"pass_endpoints", "failed_pass_trajectories"}]
     try:
         report = stage_refresh_match((file, file.with_name(file.name + ".trajectory.tmp"),
             get_success_intent_label_dir(root) / file.name, metadata, thread_limit, artifacts))
@@ -391,7 +404,8 @@ def run_trajectory_refresh(args):
             raise FileNotFoundError(label_path)
     related = [p for p in refresh_artifact_paths(base_root) if p not in files
                and not (metadata.get("model_mode_regeneration_required") and p.parent.name.endswith(("_model", "_model_carries")))]
-    manifest = sorted(str(path.relative_to(base_root)) for path in [*files, *related])
+    manifest = sorted({str(path.relative_to(base_root)) for path in [*files, *related]} |
+        {f"{folder}/{file.stem}.parquet" for file in files for folder in ("pass_endpoints", "failed_pass_trajectories")})
     expected_manifest = (previous.get("target_settings") or {}).get("artifacts") if recovery else None
     if expected_manifest is not None and manifest != expected_manifest:
         raise ValueError("Trajectory refresh artifact set changed during recovery")
@@ -409,6 +423,8 @@ def run_trajectory_refresh(args):
                      trajectory_speed_definition=TRAJECTORY_SPEED, pass_duration_definition=PASS_DURATION)
         result["extension_history"] = [*history, entry]
         if final:
+            from datatools.pass_eligibility import policy_metadata
+            result.update(policy_metadata())
             result[TRAJECTORY_SPEED_KEY] = TRAJECTORY_SPEED
             result[PASS_DURATION_KEY] = PASS_DURATION
             result[ANGLE_ONLY_KEY] = ANGLE_ONLY
@@ -448,7 +464,7 @@ def run_trajectory_refresh(args):
         temporary = pairs
         by_match = {}
         for path, staged in pairs:
-            if path.parent != get_success_intent_graph_dir(output_root):
+            if path.parent != get_success_intent_graph_dir(output_root) and path.parent.name not in {"pass_endpoints", "failed_pass_trajectories"}:
                 by_match.setdefault(path.stem, []).append((path, staged))
         match_ids = sorted(set(by_match) | {file.stem for file in files})
         tasks = []
@@ -470,8 +486,6 @@ def run_trajectory_refresh(args):
         from project_config import atomic_write_json
         for report in reports:
             atomic_write_json(output_root / "trajectory_refresh" / (report["match_id"] + ".json"), report)
-        if sum(r.get("pass_count", 0) for r in reports) and not sum(r.get("usable_pass_count", 0) for r in reports):
-            raise ValueError("All selected passes lack usable endpoints; see trajectory_refresh diagnostics.")
         attempt.finish()
     except BaseException as error:
         primary = error

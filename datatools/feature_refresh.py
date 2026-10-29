@@ -82,6 +82,8 @@ def run_combined_refresh(args):
     if output == source:
         raise ValueError('Combined refresh requires a new derived run')
     metadata = copy.deepcopy(original)
+    from datatools.pass_eligibility import policy_metadata
+    metadata.update(policy_metadata())
     metadata["graph_validation"] = graph_validation_enabled(getattr(args, "graph_validation", True))
     metadata.update(run_id=output.name, base_feature_run_id=source.name, status='in_progress',
         created_at=datetime.now().isoformat(timespec='seconds'), command=subprocess.list2cmdline(sys.argv),
@@ -131,9 +133,6 @@ def run_combined_refresh(args):
         metadata['skipped_action_count'] = sum(len(r['skipped_actions']) for r in reports)
         metadata['graph_validation_summary'] = merge_validation_stats(
             [r.get('graph_validation') for r in reports], metadata['graph_validation'])
-        if sum(r.get("pass_count", 0) for r in reports) and not sum(r.get("usable_pass_count", 0) for r in reports):
-            write_run_metadata(output, metadata)
-            raise ValueError("All selected passes lack usable endpoints; see skipped_actions in metadata.")
         if replace:
             metadata['carry_variant'].update(available=True, generated_at=datetime.now().isoformat(timespec='seconds'))
         metadata['status'] = 'completed'

@@ -1,9 +1,10 @@
 """Project shared intervals onto inference observations, preserving canonical states."""
-from datatools.carry_policy import reconstruct_spells
+from datatools.carry_policy import reconstruct_spells, STATE_CONTRACT
 
 
 def populate(plan, match, controls, canonical, policy):
-    audit = reconstruct_spells(controls, canonical, match.tracking, match.fps, policy)
+    audit = reconstruct_spells(controls, canonical, match.tracking, match.fps, policy,
+                              independent_receipts=plan.provenance["state_contract"] == STATE_CONTRACT)
     for record in audit.to_dict("records"):
         valid = record["valid"]
         owner, period = record["carrier_id"], record["period_id"]

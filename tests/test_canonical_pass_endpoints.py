@@ -33,7 +33,8 @@ def test_period_mapping_regression_and_possession_end_provenance(tmp_path):
     endpoint = PassEndpointResolver(tracking, events=events).resolve(
         dict(frame_id=118496, period_id=2, original_event_id="launch"))
     assert endpoint.duration == .72
-    assert endpoint.observed == endpoint.trajectory == 118514
+    assert endpoint.observed == 118514
+    assert endpoint.trajectory == 118513  # Failed receipt/contact frame is contaminated.
 
 
 def case():

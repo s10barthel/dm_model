@@ -33,7 +33,8 @@ def test_peak_is_impact_not_proximity_entry():
 
 def test_guard_and_no_contact():
     action, tracking = sample(1)
-    assert detect(action, tracking, 25)["status"] == "unchanged"
+    assert detect(action, tracking, 25)["status"] == "unavailable"
+    assert detect(action, tracking, 25)["reason"] == "insufficient_clean_intervals"
     action, tracking = sample()
     tracking.away_1_x = 100
     assert detect(action, tracking, 25)["status"] == "unchanged"

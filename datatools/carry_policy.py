@@ -13,11 +13,13 @@ import re
 import numpy as np
 import pandas as pd
 
-DEFINITION = "sportec_fernandez_1s_v4"
+DEFINITION = "sportec_fernandez_1s_v5"
+ENDPOINT_COUPLED_DEFINITION = "sportec_fernandez_1s_v4"
 PREVIOUS_DEFINITION = "sportec_fernandez_1s_v3"
 LEGACY_DEFINITION = "sportec_fernandez_1s_v2"
 PREVIOUS_STATE_CONTRACT = "sportec_possession_states_v4"
-STATE_CONTRACT = "sportec_possession_states_v5"
+ENDPOINT_COUPLED_STATE_CONTRACT = "sportec_possession_states_v5"
+STATE_CONTRACT = "sportec_possession_states_v6"
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,7 @@ def run_policy(root):
     metadata = json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
     carry = metadata.get("carry_variant") or {}
     definition = carry.get("definition", LEGACY_DEFINITION)
-    if definition not in {DEFINITION, PREVIOUS_DEFINITION, LEGACY_DEFINITION}:
+    if definition not in {DEFINITION, ENDPOINT_COUPLED_DEFINITION, PREVIOUS_DEFINITION, LEGACY_DEFINITION}:
         raise ValueError(f"Unsupported carry definition: {definition}")
     return definition, CarryPolicy(**carry.get("validation_parameters", {}))
 
@@ -122,7 +124,7 @@ def validate_spell(tracking, start, end, period, actor, fps, policy):
     return None, diagnostics
 
 
-def reconstruct_spells(controls, canonical, tracking, fps=25, policy=None):
+def reconstruct_spells(controls, canonical, tracking, fps=25, policy=None, *, independent_receipts=True):
     """Return audited spells. Only explicit control evidence can start an interval."""
     policy = policy or CarryPolicy()
     tracking = tracking_table(tracking)
@@ -143,23 +145,39 @@ def reconstruct_spells(controls, canonical, tracking, fps=25, policy=None):
             continue
         # An endpoint terminates a pass; only a confirmed reception establishes control.
         endpoint_kind = getattr(action, "pass_endpoint_source", None)
-        if endpoint_kind is not None and endpoint_kind != "official_reception":
+        success = independent_receipts and truth(getattr(action, "success", getattr(action, "source_event_success", False)))
+        independent_receipt = getattr(action, "official_receipt_frame_id", None)
+        if not success and endpoint_kind is not None and endpoint_kind != "official_reception":
             continue
         receiver = getattr(action, "receiver_id", None)
         if not player(receiver) or receiver[:4] != str(action.object_id)[:4]:
             continue
-        if not truth(getattr(action, "training_sample_eligible", True)):
+        if not success and not truth(getattr(action, "training_sample_eligible", True)):
             continue
-        frame, launch = number(getattr(action, "receive_frame_id", None)), number(action.frame_id)
+        if success and hasattr(action, "official_receipt_frame_id"):
+            frame = number(independent_receipt)
+        elif success and endpoint_kind not in {None, "official_reception"}:
+            original_source = getattr(action, "original_endpoint_source", None)
+            if original_source not in {"kpi_csv", "reception", "official_reception"}:
+                continue
+            frame = number(getattr(action, "original_receive_frame_id", None))
+        else:
+            frame = number(getattr(action, "receive_frame_id", None))
         if frame is None:
             continue
-        invalid = "invalid_receipt_interval" if (launch is None or frame < launch or launch not in tracking.index
-            or frame not in tracking.index or tracking.loc[launch].get("period_id", action.period_id) != action.period_id
+        launch = number(action.frame_id)
+        invalid = "invalid_receipt_interval" if (frame not in tracking.index
+            or (launch is not None and frame < launch)
+            or (not success and (launch is None or launch not in tracking.index
+                or tracking.loc[launch].get("period_id", action.period_id) != action.period_id))
             or tracking.loc[frame].get("period_id", action.period_id) != action.period_id) else None
         rows.append(dict(event_id=f"receipt:{event}", parent_event_id=event,
                          event_kind="invalid_receipt" if invalid else "receipt", frame_id=frame,
                          period_id=action.period_id, object_id=receiver, invalid_reason=invalid,
                          frame_source=getattr(action, "endpoint_source", "unknown")))
+    if independent_receipts:
+        known_receipts = {r["parent_event_id"] for r in rows if r["event_kind"] == "receipt"}
+        rows = [r for r in rows if number(r.get("frame_id")) is not None or event_key(r.get("event_id")) not in known_receipts]
     rows = [r for r in rows if number(r.get("period_id")) in (1, 2)]
     uncertainty_windows = []
     for index, row in enumerate(rows):

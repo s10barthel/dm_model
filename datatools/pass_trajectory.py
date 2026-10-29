@@ -1,7 +1,7 @@
 """Synchronized official pass endpoints shared by features, labels and visuals."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from bisect import bisect_right
 from itertools import islice
@@ -12,16 +12,24 @@ import pandas as pd
 from datatools.input_diagnostics import read_parquet
 
 PASS_DURATION_KEY = "pass_duration_definition"
-PASS_DURATION = "canonical_official_pass_end_v3"
+PASS_DURATION = "independent_official_receipt_observation_v4"
 ANGLE_ONLY_KEY = "angle_only_definition"
-ANGLE_ONLY = "canonical_official_ball_direction_1s_v3"
+ANGLE_ONLY = "independent_clean_ball_direction_1s_v4"
 ORIGINAL_KEY = "original_receiver_definition"
-ORIGINAL = "canonical_official_distance_angle_v3"
+ORIGINAL = "independent_official_distance_angle_v4"
 MAX_DURATION_KEY = "max_pass_duration"
 TRAJECTORY_WINDOW_SECONDS = 1.0
 ENDPOINT_COLUMNS = ("observed_end_frame_id", "trajectory_end_frame_id", "pass_endpoint_source",
     "pass_endpoint_event_id", "pass_endpoint_definition", "pass_duration", "pass_endpoint_reason",
     "candidate_end_frame_id", "candidate_pass_duration")
+RECEIPT_COLUMNS = ("official_receipt_frame_id", "receipt_status", "receipt_reason", "duration_status", "duration_reason",
+                   "observation_reason", "observation_source", "observation_clean_intervals")
+
+
+def successful(action):
+    return str(action.get("success", action.get("source_event_success", False))).lower() in {"true", "1", "1.0"}
+
+
 PHYSICAL_TAGS = {"Play", "ShotAtGoal", "OtherBallAction", "BallClaiming", "TacklingGame"}
 STOPPAGE_TAGS = {"Foul", "Offside", "FinalWhistle"}
 OUT_TAGS = {"BallOut", "BallOutOfPlay", "OutOfPlay"}
@@ -111,6 +119,8 @@ class PassEndpoint:
     reason: str = "missing_official_endpoint"
     candidate: int | None = None
     candidate_duration: float = np.nan
+    observation_reason: str = ""
+    observation_source: str = ""
 
 
 class PassEndpointResolver:
@@ -150,7 +160,85 @@ class PassEndpointResolver:
             self.event_frames[period] = [int(f) for f, _, _ in entries]
             self.restarts[period] = [(int(f), tag) for f, tag, _ in entries if tag in RESTART_TAGS]
 
+    def receipt(self, action):
+        """Provider receipt evidence, never a generic endpoint or detector cutoff."""
+        key = event_key(action.get("original_event_id"))
+        if key in self.receptions:
+            return self.receptions[key]
+        if action.get("pass_endpoint_definition") == PASS_DURATION:
+            return action.get("official_receipt_frame_id")
+        for prefix in ("original_", ""):
+            if action.get(prefix + "endpoint_source") in {"kpi_csv", "reception", "official_reception"}:
+                return action.get(prefix + "receive_frame_id")
+        return None
+
     def resolve(self, action):
+        endpoint = self._resolve_endpoint(action)
+        if action.get("pass_endpoint_definition") == PASS_DURATION:
+            cutoff = action.get("trajectory_end_frame_id")
+            return replace(endpoint, trajectory=None if pd.isna(cutoff) else int(cutoff),
+                observation_reason=action.get("observation_reason", ""),
+                observation_source=action.get("observation_source", ""))
+        cutoff, reason, source = self.observation_bound(action)
+        return replace(endpoint, trajectory=cutoff, observation_reason=reason, observation_source=source)
+
+    def observation_bound(self, action):
+        """Bound a clean first-second prefix without requiring a full endpoint."""
+        frame = action.get("frame_id")
+        if pd.isna(frame) or frame not in self.tracking.index:
+            return None, "missing_launch_tracking", "tracking"
+        frame = int(frame)
+        period = self.period.at[frame]
+        if pd.notna(action.get("period_id")) and action.get("period_id") != period:
+            return None, "launch_period_mismatch", "tracking"
+        end = min(frame + int(round(self.fps)), self.period_ends[period])
+        source = "first_second"
+        receipt = self.receipt(action)
+        if successful(action):
+            # A bad launch state affects trajectory inputs only. The official
+            # receipt/duration remains authoritative for other training tasks.
+            state = self.tracking.at[frame, "ball_state"] if "ball_state" in self.tracking else "alive"
+            if pd.isna(state) or state != "alive":
+                return None, "unusable_launch_state", "tracking"
+            if pd.notna(receipt):
+                if receipt not in self.tracking.index or self.period.at[receipt] != period or receipt <= frame:
+                    return None, "invalid_official_receipt_interval", "official_reception"
+                end = min(end, int(receipt))
+                source = "official_reception"
+        else:
+            rows = self.tracking.loc[frame:end]
+            if "ball_state" in rows:
+                stopped = rows.index[~rows.ball_state.eq("alive").fillna(False)]
+                if len(stopped):
+                    end, source = min(end, int(stopped[0]) - 1), "live_state"
+            key = event_key(action.get("original_event_id"))
+            for contact, tag, eid in self.ordered.get(period, ()):
+                if eid != key and frame <= contact <= end:
+                    end, source = int(contact) - 1, "official_contact"
+                    break
+            if pd.notna(receipt) and frame <= receipt <= end and receipt in self.tracking.index and self.period.at[receipt] == period:
+                end, source = int(receipt) - 1, "official_reception"
+            # Raw order supplies conservative bounds for untimed relevant flags.
+            # Once a timed event reaches the window, later untimed flags do not
+            # invalidate it. An untimed flag before that bound is unresolved.
+            for following in islice(self.sequence, self.following.get(key, len(self.sequence)), None):
+                next_period = following.get("period_id")
+                if pd.notna(next_period) and next_period != period:
+                    break
+                if following.get("raw_tag") not in CONTACT_TAGS:
+                    continue
+                next_frame = following.get("frame_id")
+                if pd.isna(next_frame):
+                    return None, "uncertain_early_contact", "untimed_official_contact"
+                if next_frame >= end + 1:
+                    break
+            if end - frame < 3:
+                return None, "insufficient_clean_intervals", source
+        if end <= frame:
+            return None, "insufficient_observation", source
+        return end, "", source
+
+    def _resolve_endpoint(self, action):
         if isinstance(action.get("pass_endpoint_definition"), str) and action.get("pass_endpoint_definition") == PASS_DURATION:
             stored_limit = action.get(MAX_DURATION_KEY)
             same_limit = (self.max_pass_duration is None if pd.isna(stored_limit) else stored_limit == self.max_pass_duration)
@@ -162,7 +250,8 @@ class PassEndpointResolver:
                         reason=action.get("pass_endpoint_reason") or "missing_official_endpoint",
                         candidate=action.get("candidate_end_frame_id"),
                         candidate_duration=action.get("candidate_pass_duration", np.nan))
-                return PassEndpoint(int(end), int(action["trajectory_end_frame_id"]),
+                cutoff = action.get("trajectory_end_frame_id")
+                return PassEndpoint(int(end), None if pd.isna(cutoff) else int(cutoff),
                     action["pass_endpoint_source"], action.get("pass_endpoint_event_id", ""),
                     float(action["pass_duration"]), "", int(end), float(action["pass_duration"]))
         frame = action.get("frame_id")
@@ -173,6 +262,15 @@ class PassEndpointResolver:
         period = self.period.at[frame]
         if pd.notna(action.get("period_id")) and action.get("period_id") != period:
             return PassEndpoint(reason="launch_period_mismatch")
+        if successful(action):
+            receipt = self.receipt(action)
+            if pd.isna(receipt):
+                return PassEndpoint(reason="missing_official_receipt")
+            if receipt not in self.tracking.index or self.period.at[receipt] != period or receipt <= frame:
+                return PassEndpoint(reason="invalid_official_receipt_interval")
+            duration = float((receipt - frame) / self.fps)
+            return PassEndpoint(int(receipt), None, "official_reception",
+                event_key(action.get("original_event_id")), duration, "", int(receipt), duration)
         if "ball_state" in snapshot and pd.isna(snapshot.ball_state):
             return PassEndpoint(reason="missing_launch_state")
         if "ball_state" in snapshot and snapshot.ball_state != "alive":
@@ -191,7 +289,7 @@ class PassEndpointResolver:
             return (pd.notna(end) and end in self.tracking.index and frame < end <= limit
                     and self.period.at[end] == period)
 
-        reception = self.receptions.get(key)
+        reception = self.receipt(action)
         # Explicit official provenance also supports non-Sportec/injected actions.
         if pd.isna(reception) and action.get("endpoint_source") in {"kpi_csv", "reception", "official_reception"}:
             reception = action.get("receive_frame_id")
@@ -246,12 +344,24 @@ class PassEndpointResolver:
                 result[audit] = result.get(column)
         for column in ENDPOINT_COLUMNS:
             result[column] = np.nan if column.endswith("frame_id") or column.endswith("duration") else ""
+        for column in RECEIPT_COLUMNS:
+            result[column] = np.nan if column.endswith(("frame_id", "intervals")) else ""
         mask = result.get("action_type", pd.Series("", index=result.index)).eq("pass")
         mask |= result.get("spadl_type", pd.Series("", index=result.index)).isin(["pass", "cross"])
         for index, action in actions.loc[mask].iterrows():
             end = self.resolve(action)
             result.loc[index, list(ENDPOINT_COLUMNS)] = [end.observed, end.trajectory, end.source,
                 end.event_id, PASS_DURATION, end.duration, end.reason, end.candidate, end.candidate_duration]
+            receipt = self.receipt(action)
+            receipt_valid = (pd.notna(receipt) and receipt in self.tracking.index
+                and (pd.isna(action.get("period_id")) or self.period.at[receipt] == action.get("period_id")))
+            result.loc[index, list(RECEIPT_COLUMNS)] = [receipt,
+                "valid" if receipt_valid else "unknown" if pd.isna(receipt) else "invalid",
+                "" if receipt_valid else "missing_official_receipt" if pd.isna(receipt) else "invalid_receipt_tracking",
+                "valid" if np.isfinite(end.duration) else "invalid" if end.reason == "invalid_official_receipt_interval" else "unknown",
+                end.reason,
+                end.observation_reason, end.observation_source,
+                end.trajectory - action.frame_id if end.trajectory is not None else np.nan]
             result.loc[index, "receive_frame_id"] = end.observed if end.observed is not None else np.nan
             result.loc[index, "endpoint_source"] = end.source
             for axis in ("x", "y"):
@@ -324,7 +434,7 @@ def apply_pinned_endpoints(actions, root, match_id):
     result = actions.copy()
     keys = result.original_event_id.map(event_key)
     mask = keys.isin(pinned.index)
-    for column in (*ENDPOINT_COLUMNS, MAX_DURATION_KEY, "receive_frame_id", "receive_ts", "endpoint_source", "end_x", "end_y"):
+    for column in (*ENDPOINT_COLUMNS, *RECEIPT_COLUMNS, MAX_DURATION_KEY, "receive_frame_id", "receive_ts", "endpoint_source", "end_x", "end_y"):
         if column in pinned:
             if column not in result:
                 result[column] = np.nan if pd.api.types.is_numeric_dtype(pinned[column]) else None

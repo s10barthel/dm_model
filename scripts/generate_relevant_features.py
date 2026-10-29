@@ -1733,10 +1733,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         }
     from datatools.reception_policy import KEY, RETIRED
     metadata[KEY] = RETIRED
-    if getattr(args, "failed_pass_contact_detection", False):
-        from datatools.failed_pass_trajectory import KEY as detector_key, VERSION, SETTINGS
-        metadata[detector_key] = VERSION
-        metadata["failed_pass_detector_settings"] = SETTINGS
+    from datatools.pass_eligibility import policy_metadata
+    metadata.update(policy_metadata())
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
     print(f"Feature run id: {args.run_id}")

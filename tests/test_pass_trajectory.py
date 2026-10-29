@@ -25,7 +25,7 @@ def fixture(*, contact=.76, tag="OtherBallAction", success=False, reception=170,
     tracking = pd.DataFrame(dict(period_id=1, episode_id=1, ball_state="alive", timestamp=elapsed,
                                  ball_x=elapsed * 10, ball_y=elapsed * 2, ball_z=elapsed,
                                  home_1_x=0., home_1_y=0., home_2_x=10., home_2_y=2.,
-                                 home_3_x=10., home_3_y=20.), index=frames)
+                                 home_3_x=10., home_3_y=20., away_1_x=1000., away_1_y=1000.), index=frames)
     actions = pd.DataFrame([dict(frame_id=100, receive_frame_id=reception, action_type="pass", spadl_type="pass",
                                  original_event_id="launch", period_id=1, object_id="home_1", receiver_id="away_1",
                                  success=success, endpoint_source=source, start_x=0., start_y=0.,
@@ -34,7 +34,7 @@ def fixture(*, contact=.76, tag="OtherBallAction", success=False, reception=170,
     events = pd.DataFrame(dict(event_id=["launch", "same_time_annotation", "contact"],
                                utc_timestamp=[time, time, time + pd.Timedelta(seconds=contact)],
                                raw_tag=["Play", "Play", tag], frame_id=[100, 100, 100 + round(contact * 25)]))
-    return SimpleNamespace(actions=actions, tracking=tracking, fps=25, official_pass_events=events)
+    return SimpleNamespace(actions=actions, tracking=tracking, fps=25, official_pass_events=events.drop(index=1))
 
 
 @pytest.mark.parametrize("tag", ["OtherBallAction", "BallClaiming", "TacklingGame", "Play", "ShotAtGoal", "Foul", "Offside"])
@@ -43,7 +43,8 @@ def test_failed_pass_uses_synchronized_contact_instead_of_raw_delta(tag):
     match.official_pass_events.loc[2, "utc_timestamp"] += pd.Timedelta(seconds=15)
     ensure_pass_endpoints(match)
     action = match.actions.loc[7]
-    assert action.observed_end_frame_id == action.trajectory_end_frame_id == 119
+    assert action.observed_end_frame_id == 119
+    assert action.trajectory_end_frame_id == 118
     assert action.pass_endpoint_event_id == "contact"
     assert action.pass_endpoint_source == ("official_stoppage" if tag in {"Foul", "Offside"} else "official_contact")
     assert action.pass_duration == .76
@@ -64,7 +65,7 @@ def test_success_uses_earliest_official_endpoint():
 
 
 @pytest.mark.parametrize("period_boundary", [False, True])
-def test_invalid_endpoint_does_not_fall_back_to_arbitrary_boundary(period_boundary):
+def test_missing_full_endpoint_preserves_independent_first_second(period_boundary):
     match = fixture(contact=3, success=period_boundary, source="kpi_csv")
     if period_boundary:
         match.tracking.loc[140:, "period_id"] = 2
@@ -72,15 +73,16 @@ def test_invalid_endpoint_does_not_fall_back_to_arbitrary_boundary(period_bounda
         match.tracking.loc[140:, ["ball_state", "episode_id"]] = ["dead", 0]
     ensure_pass_endpoints(match)
     assert pd.isna(match.actions.at[7, "observed_end_frame_id"])
-    assert pd.isna(match.actions.at[7, "trajectory_end_frame_id"])
+    cutoff = match.actions.at[7, "trajectory_end_frame_id"]
+    assert pd.isna(cutoff) if period_boundary else cutoff == 125
     assert pd.isna(match.actions.at[7, "pass_duration"])
 
 
-def test_one_frame_segment_arrow_and_endpoint_share_tracking_inputs():
+def test_one_frame_failed_segment_is_unusable_but_endpoint_remains_known():
     match = fixture(contact=.04)
     summary = summarize_ball_trajectory(match, 7)
-    np.testing.assert_allclose(summary, [np.sqrt(105), 10 / np.sqrt(105), 2 / np.sqrt(105), 1 / np.sqrt(105)])
-    np.testing.assert_allclose(resolve_ball_velocity_xy(match, 7, "success_intent"), [10, 2])
+    assert summary is None
+    assert resolve_ball_velocity_xy(match, 7, "success_intent") is None
     np.testing.assert_allclose(resolve_pass_endpoint(match, 7), [.4, .08])
     ensure_pass_endpoints(match)
     assert match.actions.at[7, "pass_duration"] == .04
@@ -172,7 +174,8 @@ def test_refreshed_duration_filters_every_component_model(tmp_path, task, minimu
     x = torch.zeros((3, 24 if task == "success_intent" else config.NODE_FEATURE_CORE_DIM))
     x[:2, config.NODE_FEATURE_IS_TEAMMATE] = 1
     x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
-    graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.zeros((2, 2)))
+    graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(3), torch.arange(3)).T.contiguous(),
+                 edge_attr=torch.zeros((9, 2)))
     graph.trajectory_speed_definition = TRAJECTORY_SPEED
     features, label_dir = tmp_path / "graphs", tmp_path / "labels"
     features.mkdir()

@@ -47,6 +47,8 @@ BASE_PREPARATION_FILES = (
     "datatools/utils.py",
     "datatools/trajectory.py",
     "datatools/pass_trajectory.py",
+    "datatools/pass_eligibility.py",
+    "datatools/endpoint_policy.py",
     "datatools/failed_pass_trajectory.py",
 )
 PHYSICAL_PREPARATION_FILES = (
@@ -238,6 +240,7 @@ class PreparedActionDataset(IterableDataset):
 
     def _source_signatures(self, match_id):
         paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
+        paths.append(self.feature_dir.parent / "failed_pass_trajectories" / f"{match_id}.parquet")
         metadata_path = self.feature_dir.parent / "metadata.json"
         if metadata_path.is_file() or self.options.get("task") == "success_intent":
             paths.append(metadata_path)

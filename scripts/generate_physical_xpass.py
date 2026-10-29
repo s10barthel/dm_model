@@ -145,7 +145,8 @@ from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_f
 
 from datatools.possession_frames import add_frame_selection_arguments, resolve_frame_selection_arguments, STATE_CONTRACT
 from datatools.sportec_possessions import STATE_CONTRACT as SPORTEC_STATE_CONTRACT, state_contract_for_run
-from datatools.carry_policy import STATE_CONTRACT as VALIDATED_SPORTEC_STATE_CONTRACT
+from datatools.carry_policy import (STATE_CONTRACT as VALIDATED_SPORTEC_STATE_CONTRACT,
+                                   ENDPOINT_COUPLED_STATE_CONTRACT, PREVIOUS_STATE_CONTRACT)
 from datatools.sportec_possessions import build_sportec_possessions
 from datatools.sportec_seasons import add_season_argument, select_season_match_ids
 
@@ -1664,7 +1665,8 @@ def write_runtime_dataset_metadata(
             storage="wide_parquet_one_row_per_match_possession_frame_player_id_columns",
             state_identity="match_id + possession_id + state_frame_id",
         )
-    elif source_inputs.get("state_contract") in {SPORTEC_STATE_CONTRACT, VALIDATED_SPORTEC_STATE_CONTRACT}:
+    elif source_inputs.get("state_contract") in {SPORTEC_STATE_CONTRACT, VALIDATED_SPORTEC_STATE_CONTRACT,
+                                                 ENDPOINT_COUPLED_STATE_CONTRACT, PREVIOUS_STATE_CONTRACT}:
         metadata.update(state_contract=source_inputs["state_contract"],
                         storage="wide_parquet_one_row_per_physical_state_player_id_columns",
                         state_identity="match_id + period_id + state_frame_id + possessor_id + provenance")

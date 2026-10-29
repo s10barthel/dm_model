@@ -132,7 +132,7 @@ parser.add_argument("--ipw_model_id", type=str, default="none", help="model ID t
 parser.add_argument("--weight_bce", action="store_true", default=False, help="use weighted BCE to balance classes")
 
 parser.add_argument("--augment_blocks", action="store_true", default=False, help="include augmented data")
-parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5, help="minimum pass duration in seconds (default: 0.5)")
+parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.0, help="legacy minimum pass duration in seconds (default: 0; new inputs require 0)")
 parser.add_argument("--shot_success", type=str, required=False, default="unblocked", choices=["goal", "unblocked"])
 parser.add_argument("--xy_only", action="store_true", default=False, help="only use xy locations as features")
 parser.add_argument("--possessor_aware", action="store_true", default=False, help="use possessor features")
@@ -856,6 +856,9 @@ def main(cache_session):
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    from datatools.pass_eligibility import resolve_training_policy
+    resolve_training_policy(args, feature_metadata,
+                            vars(args).copy() if args.refit_recipe is not None else resume_record)
     resolve_training_height(args, feature_metadata, resume=resume_record is not None)
     args.split_manifest, args.split_resolution_source = resolve_artifact_split(
         args, feature_metadata, feature_run_id=args.feature_run_id, checkpoint=resume_record,
@@ -1049,6 +1052,7 @@ def main(cache_session):
             "keep_cache": getattr(args, "keep_cache", False),
         }] if resume_checkpoint is not None else []),
         "feature_run_id": args.feature_run_id,
+        "pass_input_policy": args.pass_input_policy,
         "use_carries": bool(args.use_carries),
         "min_pass_dur": args.min_pass_dur,
         **split_metadata(args),

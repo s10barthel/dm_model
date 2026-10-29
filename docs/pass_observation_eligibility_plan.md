@@ -1,6 +1,6 @@
 # Plan: separate pass receipts, trajectory observations, and training eligibility
 
-Status: implementation plan, 2026-10-29. Policy decisions marked pending below require an explicit user answer. This document does not authorize a data rebuild or model-training run.
+Status: implementation authorized, 2026-10-29. The user selected option A for G, C and U. The policy is implemented; see pass_observation_policy.md for artifact regeneration and audit commands.
 
 ## Agreed behavior
 
@@ -12,7 +12,7 @@ Status: implementation plan, 2026-10-29. Policy decisions marked pending below r
 - A failed pass with valid intended-receiver supervision and a usable observation can remain in the affected training datasets even when full duration is unknown.
 - Replace the blanket minimum-pass-duration filter with the failed-pass quality decision for the affected tasks. Successful passes are exempt from the failed-pass minimum.
 - Excluding an action as a training example does not delete it from the underlying real-event sequence or shift other actions' future-return targets.
-- A successful receipt with a known, usable timestamp and receiver is control evidence for starting a carry candidate, independently of pass-training eligibility. The handling of subsequent carry validation is pending below.
+- A successful receipt with a known, usable timestamp and receiver is control evidence for starting a carry candidate, independently of pass-training eligibility. The handling of subsequent carry validation is retained (decision C, option A).
 
 ## Technical findings that affect the plan
 
@@ -22,7 +22,7 @@ All current affected models consume a graph at the action's launch. `dataset.py`
 
 `success_intent` additionally consumes trajectory features. Its augmented graph can be unavailable while the ordinary launch graph remains usable. This distinction allows successful examples to survive missing trajectory inputs without changing the other model architectures.
 
-Pending decision G below determines whether this distinction captures the user's meaning of "launch graph."
+Decision G is resolved: retain ordinary launch graphs for all current graph models; only success-intent needs trajectory augmentation.
 
 ### Current carry start coupling
 
@@ -53,7 +53,7 @@ Primary modules: `datatools/pass_trajectory.py`, `datatools/endpoint_policy.py`,
 - Keep failed-pass endpoint information when defensible, but do not require it before constructing an observation of at most one second.
 - Apply conservative failed-pass contact/stoppage bounds and tracking-quality checks to the observation only.
 - Restrict event association to relevant periods/actions and audit raw/synchronized ordering conflicts. Do not silently reinterpret an earlier action as the end of a successful pass.
-- Resolve untimed potentially relevant flags according to pending decision U.
+- Resolve untimed potentially relevant flags according to decision U (option A).
 
 Primary modules: `datatools/pass_trajectory.py`, `datatools/graph_feature.py`, `datatools/failed_pass_trajectory.py`.
 
@@ -75,7 +75,7 @@ Primary modules: `datatools/failed_pass_trajectory.py`, `datatools/failed_pass_r
 
 ### 4. Apply task-specific eligibility and retire the blanket duration filter
 
-Subject to decision G:
+With decision G resolved as option A:
 
 | Use | Required inputs |
 |---|---|
@@ -135,7 +135,7 @@ This is a later execution stage, after implementation verification and decisions
 
 Include the policy versions and relevant source/model identities in dataset, feature, receiver-prediction, and downstream cache fingerprints. Do not patch old checkpoints' recorded input semantics to label them compatible with new inputs.
 
-## Pending decisions
+## Resolved decisions: A for G, C and U
 
 ### G. Meaning of launch graph
 
@@ -152,4 +152,4 @@ Include the policy versions and relevant source/model identities in dataset, fea
 - **Recommended conservative option:** a missing timestamp elsewhere does not reject the observation, but if relevant evidence cannot rule out a contact inside the proposed clean prefix, record an explicit uncertain-observation rejection. Bound or truncate the uncertainty where reliable evidence permits it.
 - **Alternative:** ignore untimed flags and rely on tracking-based detection. This can retain more examples but can also admit a contaminated prefix.
 
-These choices remain pending until the user answers; elapsed time does not resolve them.
+The user explicitly selected the recommended option A for all three decisions.

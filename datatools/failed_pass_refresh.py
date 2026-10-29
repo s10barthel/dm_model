@@ -46,11 +46,14 @@ def refresh_match(task):
     records = []
     for index, action in match.actions.loc[match.actions.action_type.eq("pass") & ~match.actions.success].iterrows():
         key = event_key(action.get("original_event_id"))
-        record = detect(action, tracking, resolver.resolve(action).trajectory, match.fps)
+        endpoint = resolver.resolve(action)
+        evidence = action.copy()
+        evidence["observation_reason"] = getattr(endpoint, "observation_reason", "")
+        record = detect(evidence, tracking, endpoint.trajectory, match.fps)
         if not key:
             key = f"missing-event:{index}"
             record.update(status="unavailable", reason="missing_event_identity")
-        record.update(event_key=key, action_index=int(index))
+        record.update(event_key=key, action_index=int(index), launch_frame_id=action.get("frame_id"))
         original = summarize_ball_trajectory(match, index)
         record["original_features"] = original.tolist() if original is not None else None
         records.append(record)
@@ -104,8 +107,7 @@ def refresh_match(task):
                 if (graph.x.ndim != 2 or graph.x.shape[1] < col+4
                         or not graph.x.is_floating_point()):
                     raise ValueError(f"Malformed success-intent graph for action {index}: {path}")
-                if by_index[index]["status"] == "shortened":
-                    graph.x[:, col:col+4] = graph.x.new_tensor(summary)
+                graph.x[:, col:col+4] = graph.x.new_tensor(summary)
                 graph.trajectory_end_frame_id = observation(match, action, resolver.resolve(action).trajectory)
                 setattr(graph, KEY, VERSION)
         validate_graphs(graphs, context=path, labels=labels, graph_validation=enabled, stats=stats)
@@ -144,6 +146,8 @@ def run_failed_pass_refresh(args):
     root = get_feature_run_root(output_id)
     if not resume and root.exists():
         raise FileExistsError(root)
+    from datatools.pass_eligibility import policy_metadata
+    metadata.update(policy_metadata())
     metadata.update(run_id=output_id, status="in_progress", refresh_operation=KEY, refresh_phase="copying",
                     **{KEY: VERSION}, failed_pass_detector_settings=SETTINGS,
                     failed_pass_refresh_matches=match_ids)

@@ -14,7 +14,7 @@ import torch
 import datatools.preprocess as proc
 from models.edge_schema import generation_kwargs
 from datatools import config, utils
-from datatools.endpoint_policy import sample_is_eligible, valid_interval
+from datatools.endpoint_policy import valid_interval
 from datatools.pass_trajectory import ensure_pass_endpoints
 from datatools.epv import merge_epv_annotations
 from datatools.goal_distance import merge_goal_distance_annotations
@@ -459,7 +459,8 @@ class Match(ABC):
 
         valid_mask = actions.apply(lambda row: self.has_valid_action_snapshot(row["frame_id"], row["object_id"]), axis=1)
         if "training_sample_eligible" in actions:
-            valid_mask &= actions["training_sample_eligible"].map(sample_is_eligible)
+            from datatools.endpoint_policy import sample_eligibility
+            valid_mask &= sample_eligibility(actions)
         return actions[valid_mask].copy()
 
     # To make the home team always play from left to right (not needed for the current dataset)
@@ -484,13 +485,17 @@ class Match(ABC):
     def filter_passes(self, failure_only=False) -> pd.DataFrame:
         from datatools.reception_policy import RETIRED
         retired = getattr(self, "reception_policy", "legacy_elastic_v1") == RETIRED
+        from datatools.pass_trajectory import PASS_DURATION
+        from datatools.endpoint_policy import sample_eligibility
+        independent = self.events.get("pass_endpoint_definition", pd.Series("", index=self.events.index)).eq(PASS_DURATION)
         required = ["frame_id"] if retired else ["frame_id", "receive_frame_id"]
-        pass_mask = self.events["spadl_type"].isin(config.PASS) & self.events[required].notna().all(axis=1)
+        pass_mask = self.events["spadl_type"].isin(config.PASS) & (
+            self.events[required].notna().all(axis=1) | (independent & self.events.frame_id.notna()))
         if "training_sample_eligible" in self.events:
-            pass_mask &= self.events["training_sample_eligible"].map(sample_is_eligible)
+            pass_mask &= sample_eligibility(self.events)
         if self.next_action_conditions_enabled:
             pass_mask &= (
-                (self.events["receiver_id"] == self.events["next_player_id"])
+                independent | (self.events["receiver_id"] == self.events["next_player_id"])
                 | (self.events["receiver_id"] == "out")
                 | (self.events["next_type"].isin(["foul", "freekick_short"]))
             )
@@ -504,7 +509,7 @@ class Match(ABC):
         pass_team = passes["object_id"].str[:4]
         receive_team = passes["receiver_id"].str[:4]
         passes.loc[(pass_team == receive_team) & ~passes["offside"], "success"] = True
-        if retired:
+        if retired or independent.any():
             known = self.events.get("source_event_success", pd.Series(index=self.events.index, dtype="object"))
             explicit = known.map(lambda x: str(x).lower() if pd.notna(x) else "")
             values = explicit.map({"true": True, "1": True, "1.0": True, "false": False, "0": False, "0.0": False})
@@ -513,7 +518,7 @@ class Match(ABC):
             mask = values.reindex(passes.index).notna()
             passes.loc[mask, "success"] = values.reindex(passes.index)[mask] & ~passes.loc[mask, "offside"]
             passes["success_known"] = passes.success.notna()
-            passes["success"] = passes.success.fillna(False).astype(bool)
+            passes["success"] = passes.success.eq(True)
 
         if failure_only:
             known_mask = passes.get("success_known", pd.Series(True, index=passes.index))
@@ -686,7 +691,8 @@ class Match(ABC):
             from datatools.reception_policy import apply_policy
             self.actions = apply_policy(resolved_actions, getattr(self, "reception_policy", "legacy_elastic_v1"), mode=intended_receiver_mode)
             if "training_sample_eligible" in self.actions:
-                self.actions = self.actions[self.actions["training_sample_eligible"].map(sample_is_eligible)].copy()
+                from datatools.endpoint_policy import sample_eligibility
+                self.actions = self.actions[sample_eligibility(self.actions)].copy()
         ensure_pass_endpoints(self)
         if resolved_actions is None and relabel_intended_receivers:
             if intended_receiver_mode == INTENDED_RECEIVER_MODE_MODEL:

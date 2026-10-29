@@ -11,8 +11,9 @@ from datatools.pass_trajectory import event_key
 from datatools.input_diagnostics import read_json, read_parquet
 
 KEY = "failed_pass_trajectory_policy"
-VERSION = "proximity_xy_peak_v1"
-SETTINGS = dict(radius=1., guard_seconds=.12, velocity_seconds=.08,
+LEGACY_VERSION = "proximity_xy_peak_v1"
+VERSION = "clean_three_intervals_xy_peak_v2"
+SETTINGS = dict(radius=1., minimum_clean_intervals=3, velocity_seconds=.08,
                 angle_degrees=10., speed_change=5., minimum_incoming_speed=3.,
                 jump_residual=1., jump_speed=60., jump_angle=120.)
 
@@ -27,16 +28,24 @@ def changes(incoming, outgoing):
 
 
 def detect(action, tracking, cutoff, fps=25):
+    result = _detect(action, tracking, cutoff, fps)
+    start, end = action.get("frame_id"), result.get("cutoff")
+    result["clean_intervals"] = None if pd.isna(start) or pd.isna(end) else int(end - start)
+    if result["status"] != "unavailable" and result["clean_intervals"] < SETTINGS["minimum_clean_intervals"]:
+        result.update(status="unavailable", reason="insufficient_clean_intervals")
+    return result
+
+
+def _detect(action, tracking, cutoff, fps=25):
     """Return a deterministic diagnostic, including negative and unavailable results."""
     result = dict(status="unavailable", reason=None, original_cutoff=cutoff,
                   cutoff=cutoff, impact=None, defender=None, angle=None, speed_change=None,
                   score=None, policy=VERSION, tracking_jump_frames=[])
     if pd.isna(cutoff) or pd.isna(action.get("frame_id")):
-        result["reason"] = "missing_official_observation"
+        result["reason"] = action.get("observation_reason") or "missing_clean_observation"
         return result
     start, end = int(action.frame_id), int(cutoff)
     width = int(round(SETTINGS["velocity_seconds"]*fps))
-    guard = int(np.ceil(SETTINGS["guard_seconds"]*fps))
     if width < 1 or end <= start:
         result["reason"] = "insufficient_prefix"
         return result
@@ -59,7 +68,7 @@ def detect(action, tracking, cutoff, fps=25):
     result["tracking_jump_frames"] = frames[bad].tolist()
 
     def velocity(a, b):
-        if a < 0 or b >= len(rows) or not valid[a:b+1].all() or bad[a:b+1].any():
+        if a < 0 or b <= a or b >= len(rows) or not valid[a:b+1].all() or bad[a:b+1].any():
             return None
         if not np.allclose(np.diff(times[a:b+1]), 1/fps, atol=1e-6, rtol=0):
             return None
@@ -83,7 +92,7 @@ def detect(action, tracking, cutoff, fps=25):
     near = distances.min(axis=1) <= SETTINGS["radius"]
     last = min(end-start, round(fps))
     peaks = []
-    i = guard
+    i = 1  # Early contacts matter; the old search guard was not a quality gate.
     while i <= last:
         if not near[i]:
             i += 1
@@ -92,12 +101,12 @@ def detect(action, tracking, cutoff, fps=25):
         while i+1 <= last and near[i+1] and nearest[i+1] == player:
             i += 1
         departure = i
-        incoming, outgoing = velocity(entry-width, entry), velocity(departure, departure+width)
+        incoming, outgoing = velocity(max(0, entry-width), entry), velocity(departure, departure+width)
         gate = changes(incoming, outgoing) if incoming is not None and outgoing is not None else None
         if gate is not None and gate[2] >= 1:
             cluster = []
             for j in range(entry, departure+2):
-                a, b = velocity(j-width, j), velocity(j, j+width)
+                a, b = velocity(max(0, j-width), j), velocity(j, j+width)
                 local = changes(a, b) if j <= departure and a is not None and b is not None else None
                 if local is not None and local[2] >= 1:
                     cluster.append((j, local))
@@ -110,7 +119,9 @@ def detect(action, tracking, cutoff, fps=25):
     if peaks:
         peak, values, player = peaks[0]
         clean = start+peak-1
-        if velocity(0, peak-1) is None:
+        if peak - 1 < SETTINGS["minimum_clean_intervals"]:
+            result.update(status="unavailable", reason="insufficient_clean_intervals", cutoff=clean, impact=start+peak)
+        elif velocity(0, peak-1) is None:
             result.update(status="unavailable", reason="untrustworthy_prefix")
         elif clean < end:
             result.update(status="shortened", reason=None, cutoff=clean, impact=start+peak,
@@ -126,7 +137,8 @@ def observation(match, action, original_cutoff):
         return original_cutoff
     root = getattr(match, "runtime_feature_root", None)
     if root is None:
-        return original_cutoff
+        decision = detect(action, match.tracking, original_cutoff, match.fps)
+        return None if decision["status"] == "unavailable" else decision["cutoff"]
     root = Path(root)
     metadata_path = root / "metadata.json"
     stamp = (str(metadata_path), metadata_path.stat().st_mtime_ns if metadata_path.exists() else None)
@@ -134,14 +146,16 @@ def observation(match, action, original_cutoff):
         match._failed_pass_metadata = read_json(metadata_path) if metadata_path.exists() else {}
         match._failed_pass_metadata_stamp = stamp
     metadata = match._failed_pass_metadata
-    policy = metadata.get(KEY) or getattr(match, "failed_pass_trajectory_policy", None)
+    policy = getattr(match, "failed_pass_trajectory_policy", None) or metadata.get(KEY)
     if not policy:
-        return original_cutoff
-    if policy != VERSION:
+        decision = detect(action, match.tracking, original_cutoff, match.fps)
+        return None if decision["status"] == "unavailable" else decision["cutoff"]
+    if policy not in {VERSION, LEGACY_VERSION}:
         raise ValueError(f"Unsupported failed-pass trajectory policy: {policy}")
     path = root / "failed_pass_trajectories" / f"{match.match_id}.parquet"
     cache_key = (str(path), path.stat().st_mtime_ns if path.exists() else None)
-    if getattr(match, "_failed_pass_cache_key", None) != cache_key:
+    staged_records = getattr(match, "_failed_pass_staged_records", None)
+    if staged_records is None and getattr(match, "_failed_pass_cache_key", None) != cache_key:
         if not path.exists():
             raise ValueError(f"Missing failed-pass refresh coverage: {path}. Run --refresh-failed-pass-trajectories.")
         table = read_parquet(path)
@@ -152,44 +166,59 @@ def observation(match, action, original_cutoff):
     key = event_key(action.get("original_event_id"))
     if not key:
         return None  # A missing identity cannot safely borrow another pass's decision.
-    record = match._failed_pass_records.get(key)
+    records = staged_records if staged_records is not None else match._failed_pass_records
+    record = records.get(key)
     if record is None:
         raise ValueError(f"Missing failed-pass trajectory coverage for event {key}")
-    if record.get("policy") != VERSION or record["status"] not in {"shortened", "unchanged", "unavailable"}:
+    if record.get("policy") != policy or record["status"] not in {"shortened", "unchanged", "unavailable"}:
         raise ValueError(f"Invalid failed-pass trajectory decision for event {key}; refresh coverage.")
     if record["status"] == "unavailable":
         return None
     cutoff = record["cutoff"]
     original = record.get("original_cutoff")
-    if (pd.isna(original_cutoff) or pd.isna(original) or original != original_cutoff
+    # Stored legacy graphs replay their recorded observation, never a newly
+    # computed cutoff or the new minimum. New on-demand inputs use VERSION.
+    expected_original = original if policy == LEGACY_VERSION else original_cutoff
+    minimum = 1 if policy == LEGACY_VERSION else 3
+    if (pd.isna(expected_original) or pd.isna(original) or original != expected_original
             or pd.isna(cutoff) or cutoff != int(cutoff)
-            or not action.get("frame_id", cutoff) < cutoff <= original_cutoff):
+            or not action.get("frame_id", cutoff) + minimum <= cutoff <= expected_original):
         raise ValueError(f"Stale failed-pass trajectory cutoff for event {key}; run --refresh-failed-pass-trajectories.")
     return int(cutoff)
 
 
-def prepare_new_match(match):
+def prepare_new_match(match, *, overwrite=False, staged_path=None):
     """Create coverage once before any receiver relabeling in fresh generation."""
     from datatools.pass_trajectory import ensure_pass_endpoints
     from datatools.artifact_storage import atomic_parquet_save
     path = Path(match.runtime_feature_root) / "failed_pass_trajectories" / f"{match.match_id}.parquet"
-    if path.exists():
+    if path.exists() and not overwrite and staged_path is None:
         # Reading it also validates version/coverage when observations are used.
         return
     resolver = ensure_pass_endpoints(match, annotate=False)
     records = []
     for index, action in match.actions.loc[match.actions.action_type.eq("pass") & ~match.actions.success].iterrows():
         key = event_key(action.get("original_event_id"))
-        record = detect(action, match.tracking, resolver.resolve(action).trajectory, match.fps)
+        endpoint = resolver.resolve(action)
+        evidence = action.copy()
+        evidence["observation_reason"] = getattr(endpoint, "observation_reason", "")
+        record = detect(evidence, match.tracking, endpoint.trajectory, match.fps)
         if not key:
             key = f"missing-event:{index}"
             record.update(status="unavailable", reason="missing_event_identity")
-        record.update(event_key=key, action_index=int(index))
+        record.update(event_key=key, action_index=int(index), launch_frame_id=action.get("frame_id"))
         records.append(record)
-    table = pd.DataFrame(records, columns=None if records else ["event_key", "status", "cutoff"])
+    table = pd.DataFrame(records, columns=None if records else ["event_key", "action_index", "status", "cutoff"])
     if table.event_key.duplicated().any():
         raise ValueError("Duplicate failed-pass event identities")
-    atomic_parquet_save(table, path)
+    if staged_path is None:
+        atomic_parquet_save(table, path)
+    else:
+        staged_path = Path(staged_path)
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        table.to_parquet(staged_path)
+        match._failed_pass_staged_records = table.set_index("event_key").to_dict("index")
+    return table
 
 
 def validate_graph_coverage(match, graphs, labels, action_indices=None, selected_indices=None):
@@ -215,5 +244,5 @@ def validate_graph_coverage(match, graphs, labels, action_indices=None, selected
         if action.get("action_type") != "pass" or bool(action.get("success", False)):
             continue
         expected = observation(match, action, ensure_pass_endpoints(match, annotate=False).resolve(action).trajectory)
-        if expected is None or getattr(graph, KEY, None) != VERSION or getattr(graph, "trajectory_end_frame_id", None) != expected:
+        if expected is None or getattr(graph, KEY, None) != metadata[KEY] or getattr(graph, "trajectory_end_frame_id", None) != expected:
             raise ValueError(f"Stale/unavailable failed-pass graph for action {index}; refresh failed-pass trajectories.")

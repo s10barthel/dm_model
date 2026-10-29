@@ -618,7 +618,8 @@ def construct_graph_for_action(
         graph.trajectory_start_frame_id = int(match.actions.at[action_index, "frame_id"])
         from datatools.failed_pass_trajectory import observation, KEY, VERSION
         graph.trajectory_end_frame_id = observation(match, match.actions.loc[action_index], endpoint.trajectory)
-        if getattr(match, "_failed_pass_cache_key", None) is not None:
+        if (getattr(match, "_failed_pass_cache_key", None) is not None
+                or getattr(match, "_failed_pass_staged_records", None) is not None):
             setattr(graph, KEY, VERSION)
         graph.pass_endpoint_definition = PASS_DURATION
     return graph
@@ -1743,7 +1744,8 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
             if definitions is not None and definitions.fillna("").isin(["", PASS_DURATION]).all():
                 match.actions = pinned_actions.copy()
                 break
-    if getattr(args, "failed_pass_contact_detection", False):
+    if (getattr(args, "failed_pass_contact_detection", False)
+            or match.actions.get("pass_endpoint_definition", pd.Series(dtype=str)).eq(PASS_DURATION).any()):
         from datatools.failed_pass_trajectory import prepare_new_match, VERSION
         match.failed_pass_trajectory_policy = VERSION
         prepare_new_match(match)

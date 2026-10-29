@@ -328,11 +328,19 @@ class ActionDataset(Dataset):
             pass_height_threshold = positive_height(pass_height_threshold)
         feature_root = Path(feature_dir)
         maximum_duration = None
+        feature_metadata = {}
+        policy_root = feature_root.parent
         for parent in (feature_root, *feature_root.parents):
             metadata_path = parent / "metadata.json"
             if metadata_path.is_file():
-                maximum_duration = json.loads(metadata_path.read_text(encoding="utf-8-sig")).get("max_pass_duration")
+                feature_metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+                maximum_duration = feature_metadata.get("max_pass_duration")
+                policy_root = parent
                 break
+        from datatools.pass_eligibility import independent_policy, failed_pass_reasons
+        independent_passes = independent_policy(feature_metadata)
+        if independent_passes and min_pass_dur > 0:
+            raise ValueError("--min_pass_dur must be 0 for independent receipt/observation inputs; failed passes use the three-clean-interval quality gate.")
         label_root = Path(label_dir)
         diagnostic_label_root = Path(diagnostic_label_dir) if diagnostic_label_dir else None
         pass_height_diagnostic_label_root = (
@@ -394,6 +402,7 @@ class ActionDataset(Dataset):
         feature_source_indices: list[int] = []
         label_tensors: list[torch.Tensor] = []
         evaluation_diagnostics = []
+        observation_reasons = []
 
         for match_id in tqdm(self.requested_match_ids):
             feature_path = feature_root / f"{match_id}.pt"
@@ -489,6 +498,8 @@ class ActionDataset(Dataset):
                 evaluation_diagnostics.extend(values)
             features.extend(match_features)
             feature_match_ids.extend([match_id] * len(match_features))
+            observation_reasons.extend(failed_pass_reasons(policy_root, match_id, match_labels)
+                                       if independent_passes else [""] * len(match_features))
             feature_source_indices.extend(range(len(match_features)))
             label_tensors.append(match_labels)
             self.loaded_match_ids.append(match_id)
@@ -575,7 +586,13 @@ class ActionDataset(Dataset):
             self.selection_counts["excluded_by_filter"] = int((condition & ~pass_rows).sum())
             condition &= pass_rows
 
-        if maximum_duration is not None:
+        if independent_passes:
+            usable = torch.tensor([not reason for reason in observation_reasons], dtype=torch.bool)
+            for pos in (condition & ~usable).nonzero().flatten().tolist():
+                _increment_count(self.skipped_rows, "failed_observation:" + observation_reasons[pos])
+            self.selection_counts["excluded_by_observation"] = int((condition & ~usable).sum())
+            condition &= usable
+        if maximum_duration is not None and not independent_passes:
             duration = labels[:, LABEL_INDEX["duration"]]
             dependent = (labels[:, LABEL_INDEX["is_pass"]] == 1) | (
                 (labels[:, LABEL_INDEX["is_real"]] == 0) & ~torch.isfinite(duration))

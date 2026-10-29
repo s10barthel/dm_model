@@ -15,7 +15,7 @@ from project_config import SAVED_DIR
 PROVENANCE = "receiver_prediction_provenance"
 POLICY_KEYS = ("graph_schema", "reception_policy", "failed_pass_trajectory_policy",
                "failed_pass_detector_settings", "trajectory_speed_definition",
-               "pass_duration_definition", "max_pass_duration")
+               "pass_duration_definition", "max_pass_duration", "pass_eligibility_policy")
 IDENTITY_COLUMNS = ("period_id", "frame_id", "object_id", "observed_end_frame_id",
                     "trajectory_end_frame_id", "pass_endpoint_definition", "pass_duration")
 

@@ -17,6 +17,13 @@ def sample_is_eligible(value=True) -> bool:
     return pd.isna(value) or str(value).lower() not in {"false", "0"}
 
 
+def sample_eligibility(actions):
+    """New pass inputs defer endpoint exclusions to task/trajectory gates."""
+    from datatools.pass_trajectory import PASS_DURATION
+    eligible = actions.get("training_sample_eligible", pd.Series(True, index=actions.index)).map(sample_is_eligible)
+    return eligible | actions.get("pass_endpoint_definition", pd.Series("", index=actions.index)).eq(PASS_DURATION)
+
+
 def valid_interval(tracking, start, end, *, allow_equal=False, period=None) -> bool:
     if pd.isna(start) or pd.isna(end):
         return False

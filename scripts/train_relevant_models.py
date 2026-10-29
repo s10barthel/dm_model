@@ -882,8 +882,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sparsify", choices=["none", "delaunay"], default="none",
         help="Graph connectivity for every selected task: all pairwise edges (none, default) or Delaunay neighbours.",
     )
-    parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.5,
-                        help="Minimum pass duration in seconds for every selected component (default: 0.5).")
+    parser.add_argument("--min_pass_dur", type=nonnegative_duration, default=0.0,
+                        help="Legacy minimum pass duration in seconds (default: 0; new inputs require 0).")
     add_split_arguments(parser)
     parser._option_string_actions["--train-split"].help = "Optional development percentage assertion against the saved feature-run manifest."
     parser._option_string_actions["--train-count"].help = "Optional exact development match count assertion; defaults to the feature-run split."
@@ -1577,7 +1577,7 @@ def intent_command(
             feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
-        "0.5",
+        "0.0",
         "--lambda_l1",
         "0.0001",
         "--start_lr",
@@ -1618,7 +1618,7 @@ def success_intent_command(
             feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
-        "0.5",
+        "0.0",
         "--lambda_l1",
         "0.0001",
         "--start_lr",
@@ -1669,7 +1669,7 @@ def pass_success_command(
             feature_flags.get("feature_selections"),
         ),
         "--min_pass_dur",
-        "0.5",
+        "0.0",
         "--lambda_l1",
         "0.0001",
         "--start_lr",
@@ -2025,7 +2025,7 @@ def build_training_commands(
             )
             trained_model_ids["failure_receiver"] = model_ids["failure_receiver"]
 
-    duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.5))
+    duration = nonnegative_duration(getattr(args, "min_pass_dur", 0.0))
     commands = [_replace_cli_value(command, "--min_pass_dur", duration) for command in commands]
     commands = [command + dataset_loading_flags(args) + ipw_flags(args) for command in commands]
     for index, command in enumerate(commands):
@@ -2399,6 +2399,7 @@ def _main(cli_args) -> None:
     bundle_shared = derive_bundle_shared_context(final_model_ids, cli_args, resolved_feature_run_id)
     effective_feature_run_id = str(bundle_shared.get("feature_run_id")) if bundle_shared.get("feature_run_id") else None
     feature_run_metadata = load_feature_run_metadata(effective_feature_run_id, required=False) or {} if effective_feature_run_id else {}
+    from datatools.pass_eligibility import training_policy
     timestamp = datetime.now().isoformat(timespec="seconds")
     metadata = {
         "bundle_id": bundle_id,
@@ -2406,9 +2407,10 @@ def _main(cli_args) -> None:
         "updated_at": timestamp,
         "command": subprocess.list2cmdline(sys.argv),
         "feature_run_id": effective_feature_run_id,
+        "pass_input_policy": training_policy(feature_run_metadata),
         "use_carries": bool(bundle_shared.get("use_carries", getattr(cli_args, "use_carries", False))),
         **split_metadata(cli_args),
-        "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.5)),
+        "min_pass_dur": float(getattr(cli_args, "min_pass_dur", 0.0)),
         "split_manifest_id": split_manifest["manifest_id"],
         "split_manifest": split_manifest["metadata"],
         "validation_mode": validation_mode,

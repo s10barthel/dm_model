@@ -101,17 +101,18 @@ def test_invalid_legacy_reception_does_not_manufacture_endpoint(start, end):
     match.tracking = tracking()
     match.fps = 25
     match.actions = pd.DataFrame([dict(frame_id=start, receive_frame_id=end, period_id=1,
-                                     receiver_id="out", object_id="home_1", start_x=0., start_y=0., end_x=5., end_y=0.)])
+                                     receiver_id="out", object_id="home_1", action_type="pass", success=False,
+                                     start_x=0., start_y=0., end_x=5., end_y=0.)])
     assert all(np.isnan(v) for v in match.pass_height_labels(start, end))
     summary = graph_feature.summarize_ball_trajectory(match, 0)
-    assert summary is None  # A live boundary alone is not a pass endpoint.
+    assert summary is None  # These fixtures lack a usable failed-pass observation.
 
 
 def test_valid_height_and_trajectory_unchanged():
     match = Match.__new__(Match)
     match.tracking = tracking()
     match.fps = 25
-    match.actions = pd.DataFrame([dict(frame_id=10, receive_frame_id=13, period_id=1, receiver_id="home_2", object_id="home_1", endpoint_source="kpi_csv")])
+    match.actions = pd.DataFrame([dict(frame_id=10, receive_frame_id=13, period_id=1, receiver_id="home_2", object_id="home_1", endpoint_source="kpi_csv", action_type="pass", success=True)])
     assert match.pass_height_labels(10, 13) == (3., 1.)
     assert np.isfinite(graph_feature.summarize_ball_trajectory(match, 0)).all()
 
@@ -227,7 +228,7 @@ def test_dataset_duration_filters_passes_but_keeps_short_carries_and_shots(tmp_p
     x = torch.zeros((2, config.NODE_FEATURE_CORE_DIM))
     x[:, config.NODE_FEATURE_IS_TEAMMATE] = 1
     x[0, config.NODE_FEATURE_IS_POSSESSOR] = 1
-    graph = Data(x=x, edge_index=torch.tensor([[0, 1], [1, 0]]), edge_attr=torch.zeros((2, 2)))
+    graph = Data(x=x, edge_index=torch.cartesian_prod(torch.arange(2), torch.arange(2)).T.contiguous(), edge_attr=torch.zeros((4, 2)))
     labels = torch.zeros((4, len(config.LABEL_COLUMNS)))
     labels[:, config.LABEL_INDEX["action_index"]] = torch.arange(4)
     labels[:, config.LABEL_INDEX["intent_index"]] = 1
