@@ -302,6 +302,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
             bool(args.get("use_xt", False)),
             bool(args.get("use_goal_distance", False)),
             bool(args.get("use_epv", False)),
+            bool(args.get("use_progression", False)),
         )
     if target_family is None and legacy_context is not None:
         target_family = legacy_context.get("target_family")
@@ -606,6 +607,7 @@ def resolve_relevant_model_ids(
     explicit_model_ids: dict[str, str | None] | None = None,
     include_pass_intent: bool = False,
     include_success_intent: bool = False,
+    use_progression: bool = False,
 ) -> dict[str, str]:
     explicit_model_ids = explicit_model_ids or {}
     target_family = infer_target_family(
@@ -613,6 +615,7 @@ def resolve_relevant_model_ids(
         use_xt=bool(use_xt),
         use_goal_distance=bool(use_goal_distance),
         use_epv=bool(use_epv),
+        use_progression=bool(use_progression),
     )
 
     resolved = {}
@@ -1667,10 +1670,10 @@ def validate_target_flags(args) -> None:
         int(
             bool(getattr(args, name, False))
         )
-        for name in ["use_xg", "use_xt", "use_goal_distance", "use_epv"]
+        for name in ["use_xg", "use_xt", "use_goal_distance", "use_epv", "use_progression"]
     )
     if enabled_flags > 1:
-        raise ValueError("--use_xg, --use_xt, --use_goal_distance, and --use_epv are mutually exclusive.")
+        raise ValueError("--use_xg, --use_xt, --use_goal_distance, --use_epv, and --use_progression are mutually exclusive.")
 
 
 def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
@@ -1679,6 +1682,12 @@ def get_label_slice(labels: torch.Tensor, name: str) -> torch.Tensor:
 
 def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor, torch.Tensor]:
     validate_target_flags(args)
+    if getattr(args, "use_progression", False):
+        column = LABEL_INDEX["scores_progression"]
+        if batch_labels.shape[1] <= column or not torch.isfinite(batch_labels[:, column]).all():
+            raise ValueError("Progression labels are missing or invalid. Extend the feature run with "
+                             "--refresh-target-family progression before training.")
+        return batch_labels[:, column], get_label_slice(batch_labels, "concedes_goal_distance")
     if getattr(args, "use_goal_distance", False):
         return get_label_slice(batch_labels, "scores_goal_distance"), get_label_slice(
             batch_labels, "concedes_goal_distance"

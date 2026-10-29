@@ -61,7 +61,7 @@ OUTCOME_DIAGNOSTIC_TASKS = {
 }
 DIAGNOSTIC_IDENTITY_COLUMNS = ("action_index", "is_pass", "is_dribble", "is_shot", "success")
 PASS_HEIGHT_LABEL_COLUMNS = ("pass_max_ball_z", "pass_high")
-PRE_PASS_HEIGHT_LABEL_WIDTH = len(LABEL_COLUMNS) - len(PASS_HEIGHT_LABEL_COLUMNS)
+PRE_PASS_HEIGHT_LABEL_WIDTH = LABEL_INDEX["pass_max_ball_z"]
 
 
 def _zero_offside_node_feature(graph: Data) -> None:
@@ -165,7 +165,9 @@ def _normalize_label_width(labels: torch.Tensor) -> torch.Tensor:
     if labels.shape[1] > expected_width:
         raise ValueError(f"label tensor has {labels.shape[1]} columns, expected at most {expected_width}.")
     padding = torch.zeros((labels.shape[0], expected_width - labels.shape[1]), dtype=labels.dtype, device=labels.device)
-    return torch.cat([labels, padding], dim=1)
+    normalized = torch.cat([labels, padding], dim=1)
+    normalized[:, LABEL_INDEX["scores_progression"]] = float("nan")
+    return normalized
 
 
 def _validate_diagnostic_labels(match_id: str, selected_labels: torch.Tensor, diagnostic_labels: torch.Tensor) -> None:

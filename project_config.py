@@ -635,10 +635,13 @@ def infer_target_family(
     use_xt: bool = False,
     use_goal_distance: bool = False,
     use_epv: bool = False,
+    use_progression: bool = False,
 ) -> str:
-    enabled_flags = int(bool(use_xg)) + int(bool(use_xt)) + int(bool(use_goal_distance)) + int(bool(use_epv))
+    enabled_flags = int(bool(use_xg)) + int(bool(use_xt)) + int(bool(use_goal_distance)) + int(bool(use_epv)) + int(bool(use_progression))
     if enabled_flags > 1:
-        raise ValueError("use_xg, use_xt, use_goal_distance, and use_epv are mutually exclusive.")
+        raise ValueError("use_xg, use_xt, use_goal_distance, use_epv, and use_progression are mutually exclusive.")
+    if use_progression:
+        return "progression"
     if use_epv:
         return "epv"
     if use_goal_distance:
@@ -655,6 +658,7 @@ RETURN_TYPE_DEFAULTS = {
     "xg": "disc_0.9",
     "xt": "next_5",
     "goal_distance": "next_5",
+    "progression": "next_5",
     "epv": "next_5",
 }
 
@@ -751,7 +755,9 @@ def validate_return_type_for_target_family(
         raise ValueError(f"Unsupported target family for return_type validation: {family!r}.")
 
     kind, _, _ = parse_return_type(normalized)
-    if kind == "in" and family not in {"xt", "goal_distance", "epv"}:
+    if family == "progression" and kind not in {"next", "in"}:
+        raise ValueError("progression supports only next_N, next_N_skip1, and in_N returns.")
+    if kind == "in" and family not in {"xt", "goal_distance", "epv", "progression"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
         )

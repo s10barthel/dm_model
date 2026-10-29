@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     add_dataset_loading_arguments(parser)
     parser.add_argument(
         "--target-family",
-        choices=["goal", "xg", "xt", "goal_distance", "epv"],
+        choices=["goal", "xg", "xt", "goal_distance", "epv", "progression"],
         default=None,
         help="Outcome target family for retained outcome models.",
     )
@@ -135,7 +135,7 @@ def parse_args() -> argparse.Namespace:
             "Resolved return type to generate and train against: disc_<gamma>, disc_<gamma>_skip1, "
             "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>[_spstop], "
             "next_<N>, next_<N>_skip1, or in_<N> "
-            "(disc_max/in: xt/goal_distance/epv only; disc_poly_max: xt/goal_distance only)."
+            "(progression: next_N[_skip1]/in_N only; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
         ),
     )
     parser.add_argument(
@@ -495,7 +495,7 @@ def validate_goal_distance_artifacts(require_match_sidecars: bool) -> None:
 
 
 def maybe_validate_goal_distance_skip(args: argparse.Namespace) -> None:
-    if args.target_family != "goal_distance" or not args.skip_goal_distance or args.dry_run:
+    if args.target_family not in {"goal_distance", "progression"} or not args.skip_goal_distance or args.dry_run:
         return
 
     needs_goal_distance_artifacts = any(
@@ -666,7 +666,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         if args.overwrite:
             xt_command.append("--overwrite")
         commands.append(xt_command)
-    if args.target_family == "goal_distance" and not args.skip_goal_distance:
+    if args.target_family in {"goal_distance", "progression"} and not args.skip_goal_distance:
         goal_distance_command = [python, "scripts/generate_goal_distance.py"]
         if args.overwrite:
             goal_distance_command.append("--overwrite")

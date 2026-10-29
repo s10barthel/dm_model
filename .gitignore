@@ -156,3 +156,5 @@ _vendor/defcon/saved
 !tests/test_pc_xpass_high_pass.py
 !tests/test_pc_xpass_uncertainty.py
 !tests/test_pc_xpass_partial_coverage.py
+
+!tests/test_progression.py

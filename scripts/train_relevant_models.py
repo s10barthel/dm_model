@@ -893,7 +893,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Refit a completed validation source, skipping all validation. Repeat for independent jobs.")
     parser.add_argument(
         "--target-family",
-        choices=["goal", "xg", "xt", "goal_distance", "epv"],
+        choices=["goal", "xg", "xt", "goal_distance", "epv", "progression"],
         default=None,
         help="Outcome target family for the retained outcome models.",
     )
@@ -904,7 +904,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Resolved outcome return type to use for label generation: disc_<gamma>, disc_<gamma>_skip1, "
             "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>[_spstop], "
             "next_<N>, next_<N>_skip1, or in_<N> "
-            "(disc_max/in: xt/goal_distance/epv only; disc_poly_max: xt/goal_distance only)."
+            "(progression: next_N[_skip1]/in_N only; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
         ),
     )
     parser.add_argument("--feature-run-id", default=None, help="Pinned feature-artifact run id.")
@@ -1724,7 +1724,9 @@ def outcome_command(
         "--min_lr",
         "1e-5",
     ]
-    if target_family == "goal_distance":
+    if target_family == "progression":
+        command.append("--use_progression")
+    elif target_family == "goal_distance":
         command.append("--use_goal_distance")
     elif target_family == "epv":
         command.append("--use_epv")

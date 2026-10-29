@@ -280,6 +280,7 @@ parser.add_argument(
     default=False,
     help="use goal-distance labels instead of xG, xT, EPV, or actual goal labels",
 )
+parser.add_argument("--use_progression", action="store_true", default=False, help="use relative goal-distance progression scoring labels")
 parser.add_argument("--use_epv", action="store_true", default=False, help="use EPV labels instead of xG, xT, goal-distance, or actual goal labels")
 parser.add_argument(
     "--return_type",
@@ -793,6 +794,7 @@ def main(cache_session):
         bool(args.use_xt),
         bool(args.use_goal_distance),
         bool(args.use_epv),
+        bool(args.use_progression),
     )
     args.return_type = resolve_effective_return_type(args.target_family, args.return_type)
 

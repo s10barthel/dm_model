@@ -744,6 +744,9 @@ class Match(ABC):
         assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
         assign_return_pair("scores_goal_next10", "concedes_goal_next10", "scores", "concedes", diagnostic_events)
 
+        from datatools.progression import action_progression
+        self.actions["scores_progression"] = action_progression(self.actions, return_type)
+
         labels_list = []
 
         for i in self.actions.index:
@@ -886,6 +889,7 @@ class Match(ABC):
                     self.actions.at[i, "concedes_goal_next10"],
                     pass_max_ball_z,
                     pass_high,
+                    self.actions.at[i, "scores_progression"],
                 ]
             )
 
