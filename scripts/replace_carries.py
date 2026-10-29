@@ -86,6 +86,21 @@ def match_ids(source, metadata):
     return ids
 
 
+def carry_labels_in_source_schema(base_labels, carry_labels, *, context):
+    """Keep appended carries in the canonical labels' saved column schema."""
+    from datatools import config
+
+    current_width = len(config.LABEL_COLUMNS)
+    supported_widths = {config.LABEL_INDEX["pass_max_ball_z"],
+                        config.LABEL_INDEX["scores_progression"], current_width}
+    if (base_labels.ndim != 2 or carry_labels.ndim != 2
+            or base_labels.shape[1] not in supported_widths
+            or carry_labels.shape[1] != current_width):
+        raise ValueError(f"Unsupported carry label schema for {context}: "
+                         f"canonical={tuple(base_labels.shape)}, generated={tuple(carry_labels.shape)}")
+    return carry_labels[:, :base_labels.shape[1]]
+
+
 def rebuild_match(task):
     source, output, metadata, match_id, policy_values, thread_limit = task
     source, output = Path(source), Path(output)
@@ -177,6 +192,8 @@ def rebuild_match(task):
             match.actions = carry_actions.copy()
             extra = match.construct_labels(resolved_actions=carry_actions.copy(), relabel_intended_receivers=False,
                                            intended_receiver_mode=mode, return_type=ret) if carry_ids else base_labels[:0]
+            if carry_ids:
+                extra = carry_labels_in_source_schema(base_labels, extra, context=f"{match_id}/{mode}/{ret}")
             if len(extra) != len(carry_ids) or len(base_labels) != expected_rows - len(carry_ids):
                 raise ValueError("Carry label alignment failed")
             if carry_ids and extra[:, 0].long().tolist() != carry_ids:

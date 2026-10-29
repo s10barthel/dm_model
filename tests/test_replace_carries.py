@@ -6,7 +6,28 @@ import torch
 
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.carry_policy import DEFINITION
+from datatools import config
 from scripts import replace_carries as rc
+
+
+@pytest.mark.parametrize("base_width", [config.LABEL_INDEX["pass_max_ball_z"],
+                                           config.LABEL_INDEX["scores_progression"],
+                                           len(config.LABEL_COLUMNS)])
+def test_carry_labels_follow_saved_canonical_schema(base_width):
+    base = torch.arange(base_width, dtype=torch.float32)[None, :]
+    generated = torch.arange(len(config.LABEL_COLUMNS), dtype=torch.float32)[None, :]
+    carry = rc.carry_labels_in_source_schema(base, generated, context="match/original/next_10")
+    combined = torch.cat([base, carry])
+    assert combined.shape == (2, base_width)
+    torch.testing.assert_close(combined[0], base[0])
+    torch.testing.assert_close(combined[1], generated[0, :base_width])
+
+
+def test_carry_labels_reject_unknown_saved_schema():
+    base = torch.zeros((1, config.LABEL_INDEX["scores_progression"] - 1))
+    generated = torch.zeros((1, len(config.LABEL_COLUMNS)))
+    with pytest.raises(ValueError, match="Unsupported carry label schema"):
+        rc.carry_labels_in_source_schema(base, generated, context="match/original/next_10")
 
 
 def test_clone_excludes_old_carries_and_preserves_shared_source(tmp_path):
