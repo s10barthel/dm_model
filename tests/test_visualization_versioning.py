@@ -208,6 +208,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                     "resolved_time_norm": [0.0],
                     "loc_situation_id": ["action__loc__7__hash"],
                     "id": ["action"],
+                    "pass_intent": [0.5],
                 }
             )
             tracking = pd.DataFrame({"id": ["action"], "BallReceipt": [10.0]})
@@ -362,6 +363,8 @@ class VisualizationVersioningTests(unittest.TestCase):
 
             with (
                 patch.object(visualize_action_components, "parse_args", return_value=args),
+                patch.object(visualize_action_components, "load_bundle_record",
+                             return_value={"model_ids": {**resolved_model_ids, "success_intent": "success_intent/1"}}),
                 patch.object(visualize_action_components.torch.cuda, "is_available", return_value=False),
                 patch.object(
                     visualize_action_components,
@@ -740,7 +743,9 @@ class VisualizationVersioningTests(unittest.TestCase):
                     visualize_hawkeye,
                     "load_hawkeye_component_run",
                     return_value=(
-                        pd.DataFrame({"id": ["sit1"]}),
+                        pd.DataFrame({"id": ["sit1"], "pass_success": [.5],
+                                      "outcome_scoring_success": [.3], "outcome_scoring_failure": [.1],
+                                      "outcome_conceding_success": [.05], "outcome_conceding_failure": [.02]}),
                         {
                             "run_id": "hawkeye_component_1",
                             "freeze_ballreceipt": True,
@@ -822,7 +827,9 @@ class VisualizationVersioningTests(unittest.TestCase):
                 patch.object(
                     visualize_hawkeye,
                     "load_hawkeye_component_run",
-                    return_value=(pd.DataFrame({"id": ["sit1"]}), {"run_id": "hawkeye_component_1"}),
+                    return_value=(pd.DataFrame({"id": ["sit1"], "pass_success": [.5],
+                                      "outcome_scoring_success": [.3], "outcome_scoring_failure": [.1],
+                                      "outcome_conceding_success": [.05], "outcome_conceding_failure": [.02]}), {"run_id": "hawkeye_component_1"}),
                 ),
                 patch.object(visualize_hawkeye, "resolve_hawkeye_component_situation_ids", return_value=["sit1"]),
                 patch.object(visualize_hawkeye, "load_hawkeye_tracking", return_value=pd.DataFrame()),
@@ -890,7 +897,10 @@ class VisualizationVersioningTests(unittest.TestCase):
                     visualize_benchmark,
                     "load_benchmark_component_run",
                     return_value=(
-                        pd.DataFrame({"modification": [1, 1], "game_state": [1, 2]}),
+                        pd.DataFrame({"modification": [1, 1], "game_state": [1, 2], "pass_intent": [.5, .5],
+                                      "pass_success": [.5, .5], "outcome_scoring_success": [.3, .3],
+                                      "outcome_scoring_failure": [.1, .1], "outcome_conceding_success": [.05, .05],
+                                      "outcome_conceding_failure": [.02, .02]}),
                         {"run_id": "benchmark_component_1", "models": {"pass_intent": "pass_intent/1"}},
                     ),
                 ),
@@ -1124,7 +1134,7 @@ class VisualizationVersioningTests(unittest.TestCase):
                 ),
                 patch.object(visualize_skillcorner, "get_skillcorner_component_run_root", return_value=root / "component"),
                 patch.object(visualize_skillcorner, "build_skillcorner_match_context", return_value={}),
-                patch.object(visualize_skillcorner, "load_skillcorner_component_tables", return_value={}),
+                patch.object(visualize_skillcorner, "load_skillcorner_component_tables", return_value={"pass_intent": pd.DataFrame({"home_1": [.5]}, index=[0])}),
                 patch.object(
                     visualize_skillcorner,
                     "load_run_metadata",

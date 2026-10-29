@@ -30,6 +30,8 @@ from scripts.visualization_comparison import (
 )
 from scripts.comparison_warnings import metadata_differences
 from scripts.visualization_carries import carry_visualization_warnings
+from scripts.visualization_availability import select_inference_components, finish_inference_selection
+from scripts.visualization_selection import selection_metadata
 
 
 DERIVED_OUTCOMES = {"outcome_success", "outcome_failure", "pass_score"}
@@ -61,12 +63,23 @@ def resolve_variants(args, mod, sportec):
     bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
     bundle_ids = dict((bundle or {}).get("model_ids") or {})
     explicit = {task: selection_list(getattr(args, f"{task}_model_id", None)) for task in MODEL_TASKS}
-    selection = mod.resolve_component_selection(args, **({"include_success_intent": bool(
-        explicit["success_intent"] or bundle_ids.get("success_intent")
-        or getattr(args, "only_success_intent", False) or getattr(args, "success_intent", False)
-        or getattr(args, "compare_intended_receiver", False)
-    )} if sportec else {}))
+    available_ids = dict(bundle_ids)
+    available_ids.update({task: identifiers[0] for task, identifiers in explicit.items() if identifiers})
+    requested = mod.resolve_component_selection(args, include_success_intent=sportec)
+    varied_outcomes = {task for task, ids in explicit.items() if len(ids) > 1} & set(OUTCOME_TASKS)
+    if (args.visualization_comparison == "checkpoints" and len(varied_outcomes) == 1
+            and requested.selection_mode == "only" and set(OUTCOME_TASKS).issubset(requested.required_component_groups)):
+        raise ValueError("Selected outcome outputs require explicit scoring/conceding checkpoint pairs. "
+                         "Repeat --outcome-scoring-model-id and --outcome-conceding-model-id equally, "
+                         "including repeating a fixed counterpart explicitly for each pair.")
+    selection = select_inference_components(args, available_ids, include_success_intent=sportec)
     required = [task for task in selection.required_component_groups if task in MODEL_TASKS]
+    if args.visualization_comparison in {"masks", "checkpoints"} and not required:
+        raise ValueError("Checkpoint/mask comparisons require at least one model-backed selected output.")
+    if (getattr(args, "comparison_dimension", None) == "weight"
+            and not {"pass_success", "pass_score"}.intersection(selection.rendered_components)):
+        raise ValueError("pc-xPass weight comparisons require final pass-success or pass-score output.")
+
     varied = [task for task, ids in explicit.items() if len(ids) > 1]
     paired = set(varied) == set(OUTCOME_TASKS)
     for task in varied:
@@ -181,6 +194,7 @@ def configure_physical(args, mod, variants, dataset):
         return
     cache = args.physical_cache_dir or str(mod.pc_versions.cache_dir(dataset, args) if args.pc_xpass
                                          else mod.get_runtime_physical_xpass_dir(dataset))
+    args._explicit_physical_cache = bool(args.physical_cache_dir or args.pc_xpass_id)
     args.physical_cache_dir = cache
     seen = set()
     for variant in variants:
@@ -415,7 +429,7 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
                 with active_variant(variant, f"match {args.match_id}, action {display_id}"):
                     values = mod.collect_action_components(subject, variant.models, feature_root, device, action_index,
                         display_id, Path(args.output_dir), show_trajectories=args.show_trajectories,
-                        show_physical_xpass=args.show_physical_xpass, physical_cache_dir=variant.provenance.get("physical_cache_dir", args.physical_cache_dir),
+                        show_physical_xpass="physical_xpass" in selection.rendered_components, physical_cache_dir=variant.provenance.get("physical_cache_dir", args.physical_cache_dir),
                         physical_xpass_metric_name=variant.provenance.get("physical_xpass_metric") or mod.physical_xpass_metric(args),
                         physical_xpass_version_name=variant.provenance.get("x_pass_version", args.x_pass_version),
                         rendered_components=selection.rendered_components, prediction_cache=cache,
@@ -459,6 +473,10 @@ def run_comparison(args, mod):
     variants, selection, shared, bundle, schema = resolve_variants(args, mod, sportec)
     with cli_blending_guard(args):
         configure_physical(args, mod, variants, dataset)
+    if args.visualization_comparison != "pc_xpass":
+        selection = finish_inference_selection(args, args.physical_cache_dir,
+                                                mod.physical_xpass_metric(args), args.x_pass_version)
+
     # Validate all scopes/schemas before any expensive inference or artifact output.
     for variant in variants:
         with active_variant(variant, "preflight"):
@@ -468,6 +486,7 @@ def run_comparison(args, mod):
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
+    report.metadata.update(selection_metadata(args))
     if args.visualization_comparison == "pc_xpass":
         report.metadata["comparison_dimension"] = getattr(args, "comparison_dimension", None) or "cache_id"
     if "physical_xpass" in names and args.visualization_comparison != "pc_xpass":

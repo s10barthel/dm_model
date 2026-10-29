@@ -27,12 +27,13 @@ def selection(*flags):
 
 def test_default_and_exclusion_selection():
     default = selection().rendered_components
-    assert default[-2:] == ["outcome_failure", "outcome_success"]
-    assert selection("--no-outcome-failure", "--no-outcome-success").rendered_components == default[:-2]
+    assert {"outcome_failure", "outcome_success"} <= set(default)
+    assert selection("--no-outcome-failure", "--no-outcome-success").rendered_components == [
+        name for name in default if name not in {"outcome_failure", "outcome_success"}]
     assert "outcome_success" in selection("--no-outcome-failure").rendered_components
     assert "outcome_failure" in selection("--no-outcome-success").rendered_components
     assert selection("--only-pass-success").rendered_components == ["pass_success"]
-    assert selection("--only-outcome-failure", "--only-outcome-success", "--no-outcome-failure").rendered_components == ["outcome_success"]
+    assert selection("--only-outcome-success", "--no-outcome-failure").rendered_components == ["outcome_success"]
     for case in ("failure", "success"):
         with pytest.raises(SystemExit):
             selection(f"--show-outcome-{case}")
@@ -184,6 +185,9 @@ def test_inference_commands_load_hidden_dependencies(tmp_path, module, component
         expected.add("pass_success")
         if weight == "v5":
             expected.add("pass_intent")
+    # Availability is discovered from supplied selectors before resolving/loading models.
+    for task in expected:
+        setattr(args, f"{task}_model_id", f"{task}/fixture")
     resolved = {}
     loaded = []
     def resolve(required_tasks, **kwargs):

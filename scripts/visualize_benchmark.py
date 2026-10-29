@@ -50,10 +50,12 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
-from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
+from datatools.pass_success import (model_pass_success_metadata, model_pass_success_row)
 from scripts.visualization_pass_success import (
     comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
 )
+from scripts.visualization_availability import select_saved_components
+from scripts.visualization_selection import selection_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -222,12 +224,11 @@ def main() -> None:
     if args.component_dir:
         component_dir = Path(args.component_dir)
     elif args.component_run_id or component_selection.required_component_groups:
-        component_run_id = resolve_named_component_run_id("benchmark_component", args.component_run_id, required=True)
-        component_dir = get_benchmark_component_run_root(component_run_id)
+        component_run_id = resolve_named_component_run_id("benchmark_component", args.component_run_id, required=bool(args.component_run_id))
+        component_dir = get_benchmark_component_run_root(component_run_id) if component_run_id else None
 
     if component_dir is not None:
         component_export, component_metadata = load_benchmark_component_run(component_dir)
-        require_model_pass_success(component_export, needs_model_pass_success(args))
         state_pairs = resolve_benchmark_component_states(
             component_export,
             metadata=component_metadata,
@@ -238,7 +239,8 @@ def main() -> None:
         modifications, discovery_skips = discover_benchmark_modifications(args.input_dir, args.modification)
         state_pairs = [(modification, state) for modification in modifications for state in (args.game_state or [1, 2])]
 
-    xpass = resolve_saved_xpass(args, component_metadata, "benchmark", component_id=component_run_id)
+    component_selection, xpass = select_saved_components(
+        args, component_export, component_metadata, "benchmark", resolve_saved_xpass, component_id=component_run_id)
     component_names = list(component_selection.rendered_components)
     pairs_by_modification: dict[int, set[int]] = {}
     for modification_id, game_state_id in state_pairs:
@@ -356,10 +358,11 @@ def main() -> None:
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available=(component_export is not None and "model_pass_success" in component_export), output_root=output_root,
     ))
     attach_membership_report(metadata, "benchmark", source=component_metadata)
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Benchmark visualization run id: {visualization_run_id}")
     print(f"Benchmark visualization metadata: {metadata_path}")

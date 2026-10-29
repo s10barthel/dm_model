@@ -7,8 +7,11 @@ import numpy as np
 import pandas as pd
 
 from models.inference_masks import flatten_mask_values
-from datatools.pass_success import require_model_pass_success
 from scripts.saved_visualization_xpass import resolve_saved_xpass, saved_xpass_metadata
+from scripts.visualization_availability import select_saved_components, saved_component_inputs
+from scripts.visualization_selection import (
+    bind_component_selection, filter_component_selection, selection_metadata, source_inputs,
+)
 from scripts.visualization_comparison import (
     ComparisonExport, ComparisonGroup, Variant, derive_components,
     require_row, require_same_selection, selection_list, source_components,
@@ -314,14 +317,14 @@ def load_fixed_source(args, mod, kind):
     location = kind == "hawkeye" and args.mode in {"loc", "freeze"}
     if folder is None and (identifier or selection.required_component_groups or location):
         component_kind = "hawkeye_loc_component" if location else kind + "_component"
-        identifier = mod.resolve_named_component_run_id(component_kind, identifier, required=kind != "skillcorner")
+        identifier = mod.resolve_named_component_run_id(component_kind, identifier, required=bool(identifier) or location)
         if kind == "hawkeye":
             getter = mod.get_hawkeye_loc_component_run_root if location else mod.get_hawkeye_component_run_root
-            folder = getter(identifier)
+            folder = getter(identifier) if identifier else None
         elif kind == "benchmark":
-            folder = mod.get_benchmark_component_run_root(identifier)
+            folder = mod.get_benchmark_component_run_root(identifier) if identifier else None
         else:
-            folder = mod.get_skillcorner_component_run_root(identifier) if identifier else mod.COMPONENT_DIR / "skillcorner"
+            folder = mod.get_skillcorner_component_run_root(identifier) if identifier else (mod.COMPONENT_DIR / "skillcorner" if (mod.COMPONENT_DIR / "skillcorner").exists() else None)
     raw, info = ({} if kind == "skillcorner" else None), {}
     if folder is not None:
         if kind == "hawkeye":
@@ -331,9 +334,8 @@ def load_fixed_source(args, mod, kind):
         elif kind == "benchmark":
             raw, info = mod.load_benchmark_component_run(folder)
         else:
-            raw = mod.load_skillcorner_component_tables(folder, args.match_id)
+            raw = mod.load_skillcorner_component_tables(folder, args.match_id, allow_partial=True)
             info = mod.load_run_metadata(folder, required=False) or {}
-        require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
     return identifier, folder, raw, info
 
 
@@ -350,6 +352,7 @@ def run_comparison(args, mod):
             options.pc_xpass_id = identifier
             # Preflight every explicitly compared cache even when only stored outputs are selected.
             options.show_physical_xpass = True
+            options._component_selection = None
             try:
                 xpass = resolve_saved_xpass(options, info, dataset, component_id=source_id)
             except (ValueError, FileNotFoundError) as exc:
@@ -366,7 +369,7 @@ def run_comparison(args, mod):
         for identifier in identifiers:
             if kind == "hawkeye":
                 getter = mod.get_hawkeye_loc_component_run_root if args.mode in {"loc", "freeze"} else mod.get_hawkeye_component_run_root
-                folder = getter(identifier)
+                folder = getter(identifier) if identifier else None
                 try:
                     raw, info = mod.load_hawkeye_component_run(folder)
                 except FileNotFoundError:
@@ -377,17 +380,17 @@ def run_comparison(args, mod):
                     folder = alternate_folder
                     raw, info = mod.load_hawkeye_component_run(folder)
             elif kind == "benchmark":
-                folder = mod.get_benchmark_component_run_root(identifier)
+                folder = mod.get_benchmark_component_run_root(identifier) if identifier else None
                 raw, info = mod.load_benchmark_component_run(folder)
             else:
                 folder = mod.get_skillcorner_component_run_root(identifier)
                 info = mod.load_run_metadata(folder, required=False) or {}
-                raw = mod.load_skillcorner_component_tables(folder, args.match_id)
-            require_model_pass_success(raw, getattr(args, "show_model_pass_success", False))
+                raw = mod.load_skillcorner_component_tables(folder, args.match_id, allow_partial=True)
             dataset = kind
             if kind == "hawkeye" and info.get("inference_mode", args.mode) in {"loc", "freeze"}:
                 dataset = "hawkeye_loc"
-            xpass = resolve_saved_xpass(args, info, dataset, component_id=identifier)
+            _, xpass = select_saved_components(args, raw, info, dataset, resolve_saved_xpass,
+                                               component_id=identifier, report=False, allow_empty=True)
             xpass_settings.append(xpass)
             recorded_masks = info.get("inference_masks") or {}
             requested_masks = flatten_mask_values(recorded_masks.get("requested", [])) if isinstance(recorded_masks, dict) else []
@@ -396,14 +399,28 @@ def run_comparison(args, mod):
                  "inference_masks": recorded_masks, **saved_xpass_metadata(xpass)}, requested_masks))
             exports.append(raw)
             metadata.append(info)
-    names = mod.resolve_component_selection(args).rendered_components
+    selection = mod.resolve_component_selection(args)
+    common = None
+    reasons = {}
+    for variant, raw, info, xpass in zip(variants, exports, metadata, xpass_settings):
+        available = saved_component_inputs(raw, info)
+        if xpass is not None:
+            available.add("physical_xpass")
+        # Validate explicit outputs against each source, with its identifier in the error.
+        filter_component_selection(selection, available, context=f"Variant {variant.identifier}", allow_empty=True)
+        reasons.update({leaf: f"not available in variant {variant.identifier}" for leaf in
+                        set().union(*(set(source_inputs(c)) for c in selection.rendered_components)) - available})
+        common = available if common is None else common & available
+    selection = bind_component_selection(args, filter_component_selection(
+        selection, common or set(), reasons=reasons, context="Compared sources"))
+    names = selection.rendered_components
     root = Path(args.output_dir) / (args.run_id or mod.generate_run_id(kind + "_visualization_comparison"))
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
+    report.metadata.update(selection_metadata(args))
     adapters = {"hawkeye": hawkeye_groups, "benchmark": benchmark_groups, "skillcorner": skillcorner_groups}
     try:
-        selection = mod.resolve_component_selection(args)
         tasks = ["success_intent" if name == "intended_recipient" else name for name in selection.required_component_groups]
         validate_metadata_definitions(metadata, report.policy, tasks=tasks)
         for index, raw in enumerate(exports):

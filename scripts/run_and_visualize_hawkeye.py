@@ -34,7 +34,7 @@ from datatools.hawkeye import (
 from inference import configure_lane_survival_runtime_cache, inference_gnn
 from models.inference_masks import add_inference_mask_arguments, configure_inference_masks
 from models.edge_schema import generation_kwargs
-from models.utils import load_model, resolve_model_selection, validate_model_graph_schemas
+from models.utils import load_bundle_record, load_model, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
 from scripts.xpass_cli import (add_top_pass_selector, resolve_top_pass_selector,
                                XPassVersionSelection, validate_xpass_weight_options)
@@ -78,6 +78,8 @@ from scripts.hawkeye_visualization_overlays import (
     load_overlay_data,
 )
 from datatools.pass_success import model_pass_success_metadata
+from scripts.visualization_availability import select_inference_components, finish_inference_selection
+from scripts.visualization_selection import selection_metadata, LegacyInclusion
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.saved_visualization_xpass import resolve_saved_xpass
 from scripts.visualization_pass_success import (
@@ -142,7 +144,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="counts",
         help="Format selection labels as raw counts (default) or percentages.",
     )
-    parser.add_argument("--show-physical-xpass", action="store_true", help="Render cached runtime physical xPass.")
+    parser.add_argument("--show-physical-xpass", action=LegacyInclusion, default=False, help="Render cached runtime physical xPass.")
     parser.add_argument("--output", choices=["png", "mp4", "gif"], default="png")
     parser.add_argument(
         "--time-norm",
@@ -555,7 +557,6 @@ def main() -> None:
     comparison_xpass = (resolve_saved_xpass(args, {}, "hawkeye")
                         if compare_pass_success_requested(args) else None)
     args._pass_success_comparison_xpass = comparison_xpass
-    component_selection = resolve_component_selection(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     visualization_run_id = args.run_id or generate_run_id("hawkeye_visualization")
     output_parent = Path(args.output_dir)
@@ -611,6 +612,10 @@ def main() -> None:
         "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
         "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
     }
+    selected_bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
+    available_ids = dict((selected_bundle or {}).get("model_ids") or {})
+    available_ids.update({k: v for k, v in explicit_model_ids.items() if v})
+    component_selection = select_inference_components(args, available_ids)
     required_model_tasks = [
         task
         for task in [
@@ -661,8 +666,11 @@ def main() -> None:
         )
     lane_survival_cache_dir = pc_versions.lane_cache_dir("hawkeye", args, model_specs)
     configure_lane_survival_runtime_cache(model_specs, lane_survival_cache_dir)
+    args._explicit_physical_cache = bool(args.physical_cache_dir or getattr(args, "pc_xpass_id", None))
     args.physical_cache_dir = physical_cache_dir
     selected_physical_xpass_metric = physical_xpass_metric(args)
+    component_selection = finish_inference_selection(
+        args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
     pass_success_model = model_specs.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -837,7 +845,7 @@ def main() -> None:
         "graph_schema": graph_schema,
     }
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available=needs_model_pass_success(args), output_root=output_root,
     ))
     metadata.update(comparison_metadata(args, output_root))
@@ -848,6 +856,7 @@ def main() -> None:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))
     metadata.update(finalize_pc_xpass_attempt())
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
@@ -861,6 +870,7 @@ def main() -> None:
         skipped_stats=physical_xpass_skipped_actions,
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved Hawkeye {selected_output_mode} visualizations for {len(output_dirs)} situation(s).")
     print(f"Hawkeye visualization run id: {visualization_run_id}")

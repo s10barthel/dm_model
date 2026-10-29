@@ -214,6 +214,8 @@ def test_ordinary_visualizations_warn_and_record_carry_availability(tmp_path, mo
         return (values * .1, values * .5) if model.args["task"].startswith("outcome_") else (values, None)
     monkeypatch.setattr(script, "inference_gnn", predict)
     args = script.parse_args([*required, "--only-pass-score", "--output-dir", str(tmp_path), "--run-id", "ordinary"])
+    for task, identifier in identifiers.items():
+        setattr(args, f"{task}_model_id", identifier)
     monkeypatch.setattr(script, "parse_args", lambda: args)
     with pytest.warns(UserWarning, match="Ball-carrier"):
         script.main()

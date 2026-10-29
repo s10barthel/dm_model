@@ -679,10 +679,16 @@ Useful options:
 
 ### 7. Visualize action components
 
+All five visualization commands render every available standalone component by default, including pass height, model pass success, and physical xPass. Availability comes from the selected checkpoints/bundle, component export, and existing caches. Missing default inputs are reported as skipped components; no extra checkpoints are discovered and no caches are generated. Explicit `--only-*` selections require their inputs and fail clearly if unavailable. Comparisons default to outputs available in every compared variant and report omissions.
+
+Use `--only-X` to select a subset (multiple selections combine), or `--no-X` to exclude a plot. Both exist for each supported standalone group. `--only-X --no-X` is an error; different groups can be combined, such as `--only-pass-score --no-pass-success`. Excluding a plot does not disable computations needed by other outputs. An empty available selection is an error.
+
+Component `--show-pass-height`, `--show-model-pass-success`, `--show-physical-xpass`, and Sportec's `--success-intent` are deprecated explicit inclusion options. They retain additive behaviour alongside `--only-*` and require their inputs. `--show-trajectories` remains an independent overlay option. The PNG composite `--compare-pass-success` / `--only-compare-pass-success` remains explicitly selected and is not included in defaults.
+
 ```powershell
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id>
-python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
-python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --show-pass-height
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass
+python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-pass-height
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --action-id 456 --bundle-id <bundle_id>
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --run-id visualization_20260414T123456_abcdef12
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --only-outcome-scoring
@@ -707,7 +713,7 @@ Outputs:
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/action_intent.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_intent.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_success.png`
-- optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_height.png` when `--show-pass-height` or `--only-pass-height` is selected and a model is available
+- optionally `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/pass_height.png` when its model is available and the component is not excluded
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_success.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_scoring_failure.png`
 - `data/visualizations/sportec/<visualization_run_id>/<match_id>/<action_id>/outcome_conceding_success.png`
@@ -730,22 +736,20 @@ Useful options:
 - `--bundle-id <bundle_id>` to use the model set recorded by one training wrapper run
 - `--feature-run-id <feature_run_id>` to override the automatically selected runtime feature run
 - `--run-id <visualization_run_id>` to pin the created visualization run id instead of auto-generating one
-- `--success-intent` adds the success-intent image alongside selected component groups; `--only-success-intent` selects it alone and `--no-success-intent` suppresses it. These replace the old intended-recipient options, which are no longer accepted. A success-intent checkpoint must be selected explicitly or through the bundle.
+- Success intent is enabled when its selected checkpoint is available; `--only-success-intent` selects it alone and `--no-success-intent` suppresses it. `--success-intent` remains a deprecated explicit inclusion option. These replace the old intended-recipient options, which are no longer accepted. A success-intent checkpoint must be selected explicitly or through the bundle.
 - `--compare-intended-receiver` adds receiver rings only to the success-intent image and automatically includes that image, even alongside another `--only-*` selection. It conflicts with `--no-success-intent` and also works in checkpoint/mask comparison panels.
 - `--pass-endpoint true/false` controls the actual pass-end marker on every pass image; default: `true`.
-- `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-success-intent` to render only selected component groups; repeated `--only-*` flags are additive
-- `--show-pass-height` to include the optional pass-height component when a `pass_height` checkpoint is selected
+- `--only-pass-height` to select pass height alone; available pass-height outputs are enabled by default
 - `--only-action-intent`, `--only-pass-intent`, `--only-pass-success`, `--only-pass-height`, `--only-outcome-scoring`, `--only-outcome-conceding`, `--only-pass-score`, and `--only-success-intent` to render only selected component groups; repeated `--only-*` flags are additive
-- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-success-intent` to suppress selected component groups; `--no-*` takes precedence over `--only-*`
+- `--no-action-intent`, `--no-pass-intent`, `--no-pass-success`, `--no-pass-height`, `--no-outcome-scoring`, `--no-outcome-conceding`, `--no-pass-score`, and `--no-success-intent` to suppress selected component groups; only a same-group `--only-X --no-X` combination is rejected
 - `outcome_failure` and `outcome_success` are rendered by default across Sportec, Benchmark, SkillCorner, Hawkeye, and the combined Hawkeye inference/visualization command, in each command's supported output formats. They subtract conceding from scoring for the corresponding failure/success case, using three-decimal numerical annotations (including negatives and zero), without value-based colour coding.
 - `--no-outcome-failure` and `--no-outcome-success` remove the new plots; `--only-outcome-failure` and `--only-outcome-success` select them alone or together. There are no `--show-outcome-*` flags. Existing `--only-*` selections do not implicitly add the new plots.
 - `--only-pass-score` automatically loads its required pass-success, scoring, and conceding inputs without displaying their plots. Combined outcome plots likewise load their inputs independently; `--no-*` suppresses plots, not dependency computation.
-- Derived values align by player/action/frame identifiers. Missing operands remain missing; an unavailable source component produces a clear error. Derived plots use the existing output directories and metadata, with component names `outcome_failure` and `outcome_success`; no additional model or saved component table is required.
+- Derived values align by player/action/frame identifiers. Missing operands remain missing; absent inputs skip default derived plots and produce a clear error for explicit selections. Derived plots use the existing output directories and metadata, with component names `outcome_failure` and `outcome_success`; no additional model or saved component table is required.
 - `--show-trajectories` to render dashed recent player trajectories
 - `--use-physical-xpass` to blend the pass-success inference output with cached runtime physical xPass
-- `--show-physical-xpass` to render the cached physical xPass metric itself
 - `--only-physical-xpass` to render cached physical xPass alone, without model IDs, checkpoint loading, or inference. Combine it with other `--only-*` selections to add outputs and their dependencies; `--show-*` additions still work.
-- `--show-model-pass-success` to render **Model Pass Success** separately: the selected checkpoint's probability after normal offside handling and before inference-time physical xPass blending. Physical inputs used inside a checkpoint remain part of its prediction. This flag works independently of `--show-physical-xpass`, with or without blending, and adds its plot even when `--only-*` or `--no-pass-success` hides ordinary pass success.
+- `--only-model-pass-success` to select **Model Pass Success** alone (also enabled by default when available): the selected checkpoint's probability after normal offside handling and before inference-time physical xPass blending. Physical inputs used inside a checkpoint remain part of its prediction. This output works with or without blending and independently of the physical xPass plot. `--no-pass-success` hides final pass success without hiding model pass success.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` to select the cached xPass metric for both blending and physical xPass rendering; default: `top10`
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
 - `--xpass-weight {v0,v1,v2,v3,v4,v5}` to select the xPass/model blend weight; default: `v3`
@@ -776,7 +780,7 @@ The separate model view is available in all five visualization commands, includi
 python scripts/visualize_action_components.py --match-id DFL-MAT-... --action-id 123 --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass --show-model-pass-success
 
 # Display only checkpoint pass success, with ordinary pass success hidden.
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --pass-success-model-id pass_success/<model_id> --only-pass-success --no-pass-success --show-model-pass-success
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --pass-success-model-id pass_success/<model_id> --only-model-pass-success
 
 # Render the separate checkpoint result from a newly generated saved component run.
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --show-model-pass-success
@@ -852,7 +856,7 @@ python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situ
 
 ```powershell
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id>
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --coach-ratings --selections
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --selections --selection-format percentages
 python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id_1> --situation-id <hawkeye_id_2> --bundle-id <bundle_id>
@@ -1549,13 +1553,13 @@ Inference reads physical xPass caches only. It does not compute or prewarm missi
 
 ### Visualization
 
-Use `--show-physical-xpass` to render the cached physical xPass surface/option values next to the model visualizations. Visualization scripts also read runtime caches only and fail clearly if the requested cache or metric is missing.
+Available cached physical xPass surface/option values are rendered next to model visualizations by default. Use `--only-physical-xpass` to select them alone or `--no-physical-xpass` to hide them. Visualization scripts also read runtime caches only and fail clearly if the requested cache or metric is missing.
 
 ```powershell
 python scripts/visualize_action_components.py --match-id <match_id> --action-id <action_id> --bundle-id <bundle_id> --show-physical-xpass
-python scripts/visualize_action_components.py --match-id <match_id> --action-id <action_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/visualize_action_components.py --match-id <match_id> --action-id <action_id> --bundle-id <bundle_id> --use-physical-xpass
 python scripts/visualize_hawkeye.py --component-run-id <component_run_id> --situation-id <hawkeye_id> --show-physical-xpass
-python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass --show-physical-xpass
+python scripts/run_and_visualize_hawkeye.py --situation-id <hawkeye_id> --bundle-id <bundle_id> --use-physical-xpass
 python scripts/visualize_benchmark.py --modification 1 --game-state 1 --component-run-id <component_run_id> --show-physical-xpass
 python scripts/visualize_skillcorner.py --match-id <match_id> --index <player_possession_index> --component-run-id <component_run_id> --show-physical-xpass
 ```
@@ -2658,8 +2662,8 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--bundle-id <bundle_id>`: preferred explicit model bundle to run.
 - `--feature-run-id <feature_run_id>`: optional runtime feature run used to load Sportec graphs and resolved actions. Default: newest compatible source feature run from the selected models or bundle.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
-- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
+- `--only-pass-height` / `--no-pass-height`: select or exclude pass-height plots. Enabled by default when available; `--show-pass-height` is deprecated.
+- `--only-physical-xpass` / `--no-physical-xpass`: select or exclude cached physical xPass plots. Enabled by default when available; `--show-physical-xpass` is deprecated.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
@@ -2686,7 +2690,7 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--outcome-conceding-model-id <model_id>`: explicit `outcome_conceding` checkpoint id.
 - `--run-id <visualization_run_id>`: pin the created Sportec visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/sportec`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `success-intent`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, `pass-score`, and `success-intent`, plus `model-pass-success`, `physical-xpass`, `outcome-failure`, and `outcome-success`. Repeated `--only-*` flags are additive; same-group `--only-X --no-X` combinations are rejected; different groups can be combined.
 
 ### `scripts/visualize_hawkeye.py`
 
@@ -2705,13 +2709,13 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--time-norm-start <seconds>` / `--time_norm_start <seconds>` and `--time-norm-end <seconds>` / `--time_norm_end <seconds>`: in `mp4`/`gif` mode, render the inclusive frame range whose boundaries are nearest to `abs_time - BallReceipt`. Default: render all frames.
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
-- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
-- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
+- `--only-physical-xpass` / `--no-physical-xpass`: select or exclude cached physical xPass plots. Enabled by default when available; `--show-physical-xpass` is deprecated.
+- `--only-pass-height` / `--no-pass-height`: select or exclude pass-height plots. Enabled by default when available; `--show-pass-height` is deprecated.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/hawkeye`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
-- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`. Repeated `--only-*` flags are additive; `--no-*` takes precedence.
+- `--only-*` / `--no-*` component group flags: select or suppress `action-intent`, `pass-intent`, `pass-success`, `pass-height`, `outcome-scoring`, `outcome-conceding`, and `pass-score`, plus `model-pass-success`, `physical-xpass`, `outcome-failure`, and `outcome-success`. Repeated `--only-*` flags are additive; same-group `--only-X --no-X` combinations are rejected; different groups can be combined.
 
 ### `scripts/visualize_benchmark.py`
 
@@ -2723,8 +2727,8 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--run-id <visualization_run_id>`: pin the created benchmark visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/benchmark`.
 - `--show-trajectories`: draw dashed recent player trajectories. Default: off.
-- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
-- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
+- `--only-physical-xpass` / `--no-physical-xpass`: select or exclude cached physical xPass plots. Enabled by default when available; `--show-physical-xpass` is deprecated.
+- `--only-pass-height` / `--no-pass-height`: select or exclude pass-height plots. Enabled by default when available; `--show-pass-height` is deprecated.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/benchmark`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.
@@ -2758,8 +2762,8 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--run-id <visualization_run_id>`: pin the created HawkEye visualization run id. Default: auto-generate one.
 - `--output-dir <path>`: parent directory for the created visualization run folder. Default: `data/visualizations/hawkeye`.
 - `--use-physical-xpass` / `--use_physical_xpass`: blend `pass_success` inference with cached runtime physical xPass. Default: off.
-- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
-- `--show-pass-height`: include the optional pass-height component when a `pass_height` checkpoint is selected. Default: off.
+- `--only-physical-xpass` / `--no-physical-xpass`: select or exclude cached physical xPass plots. Enabled by default when available; `--show-physical-xpass` is deprecated.
+- `--only-pass-height` / `--no-pass-height`: select or exclude pass-height plots. Enabled by default when available; `--show-pass-height` is deprecated.
 - `--pc-xpass` / `--pc_xpass`: read pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric for both blending and rendering. Default: `top10`.
 - `--top-pass N` / `--top_pass N`: select one cached top-pass count directly, for example `--pc-xpass --top-pass 5`. No `--xpass-version` flag is needed. Requires `--pc-xpass`; equivalent to `--xpass-version top-passN`.
@@ -2788,8 +2792,8 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 - `--output {png,mp4,gif}`: visualization format. Default: `png`.
 - `--only-first`: in PNG mode, render only the first addressable possession frame. Default: off.
 - `--only-last`: in PNG mode, render only the last addressable possession frame. Default: off.
-- `--show-physical-xpass`: render cached runtime physical xPass. Default: off.
-- `--show-pass-height`: include the optional pass-height component when present in the component run. Default: off.
+- `--only-physical-xpass` / `--no-physical-xpass`: select or exclude cached physical xPass plots. Enabled by default when available; `--show-physical-xpass` is deprecated.
+- `--only-pass-height` / `--no-pass-height`: select or exclude pass-height plots. Enabled by default when available; `--show-pass-height` is deprecated.
 - `--physical-cache-dir <path>`: runtime physical xPass cache override. Default: `data/runtime_physical_xpass/skillcorner`.
 - `--pc-xpass` / `--pc_xpass`: render pc-xPass caches instead of runtime physical xPass caches. Default: off.
 - `--xpass-version <max|noise-kernel|topN|top-passN|uncertainty>` / `--x_pass_version <...>`: select the cached xPass metric to render. Default: `top10`.

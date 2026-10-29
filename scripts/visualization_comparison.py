@@ -52,6 +52,8 @@ def add_compare_argument(parser):
 def validate_comparison_args(parser, args, *, inference=False):
     from scripts.visualization_pass_success import compare_pass_success_requested
     try:
+        from scripts.visualization_selection import resolve_component_selection
+        resolve_component_selection(args, include_success_intent=inference and hasattr(args, "success_intent_model_id"))
         pass_success_comparison = compare_pass_success_requested(args)
         if pass_success_comparison:
             if args.compare:
@@ -368,7 +370,7 @@ class ComparisonExport:
         if len(identities) != len(set(identities)):
             raise ValueError("Duplicate comparison variant identities.")
         self.metadata = {"status": "running", "created_at": datetime.now().isoformat(timespec="seconds"),
-                         "comparison_mode": mode, "arguments": vars(args), "variants": [
+                         "comparison_mode": mode, "arguments": {key: value for key, value in vars(args).items() if not key.startswith("_")}, "variants": [
                              {"id": variant.identifier, "label": variant.label, "requested_masks": variant.masks,
                               "provenance": variant.provenance} for variant in variants], "warnings": self.warnings,
                          "scenes": self.scenes, "output_paths": self.outputs}
@@ -463,7 +465,7 @@ class ComparisonExport:
             self.metadata["aligned_predictions"] = str(path.resolve())
         self.policy.confirm()
         self.metadata.update(self.policy.metadata(), status="completed", aligned_export_available=self.export_aligned)
-        requested = bool(self.metadata["arguments"].get("show_model_pass_success", False))
+        requested = "model_pass_success" in self.metadata.get("rendered_components", [])
         self.metadata.update(model_pass_success_metadata(
             requested=requested, available=requested, output_root=self.root,
         ))

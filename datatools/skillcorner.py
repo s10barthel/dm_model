@@ -863,12 +863,14 @@ def load_skillcorner_models(
     return model_specs
 
 
-def load_skillcorner_component_tables(component_dir: str | Path, match_id: str) -> dict[str, pd.DataFrame]:
+def load_skillcorner_component_tables(component_dir: str | Path, match_id: str, *, allow_partial=False) -> dict[str, pd.DataFrame]:
     match_dir = Path(component_dir) / str(match_id)
     tables: dict[str, pd.DataFrame] = {}
     for component in COMPONENT_COLUMNS:
         path = match_dir / f"{component}.parquet"
         if not path.exists():
+            if allow_partial:
+                continue
             if component in {"pass_height", "model_pass_success"}:
                 if component == "pass_height":
                     tables[component] = pd.DataFrame()

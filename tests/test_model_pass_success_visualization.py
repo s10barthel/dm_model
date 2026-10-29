@@ -157,8 +157,7 @@ def test_other_tasks_keep_second_result_semantics(checkpoint):
 ])
 def test_all_cli_selections(module, required):
     for physical in ([], ["--show-physical-xpass"]):
-        args = module.parse_args([*required, "--only-pass-success", "--no-pass-success",
-                                  "--show-model-pass-success", *physical])
+        args = module.parse_args([*required, "--only-model-pass-success", *physical])
         selected = resolve_component_selection(args)
         assert selected.rendered_components == ["model_pass_success", *(["physical_xpass"] if physical else [])]
         assert selected.required_component_groups == ["pass_success"]
@@ -222,7 +221,7 @@ def test_direct_comparison_exports_model_result(tmp_path, monkeypatch, inference
     flags = (["--compare", "--pass-success-model-id", "pass_success/b"] if comparison == "checkpoints"
              else ["--inference-mask-1", "accel"])
     args = direct.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a",
-                             "--only-pass-success", "--no-pass-success", "--show-model-pass-success",
+                             "--only-model-pass-success",
                              "--output-dir", str(tmp_path), "--run-id", "direct", *flags])
     monkeypatch.setattr(direct, "parse_args", lambda: args)
     direct.main()
@@ -243,8 +242,7 @@ def test_saved_comparison_extra_component(tmp_path, monkeypatch, saved_fixture, 
         return raw, {"status": "completed", "processed_situation_ids": ["s"], "freeze_ballreceipt": True}
     monkeypatch.setattr(hawkeye, "load_hawkeye_component_run", load)
     args = hawkeye.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a",
-                              "--component-run-id", "b", "--only-pass-success", "--no-pass-success",
-                              "--show-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "saved"])
+                              "--component-run-id", "b", "--only-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "saved"])
     monkeypatch.setattr(hawkeye, "parse_args", lambda: args)
     if missing:
         with pytest.raises(ValueError, match="Regenerate the source component run"):
@@ -366,7 +364,7 @@ def test_direct_animation_includes_model_component(tmp_path, monkeypatch, infere
         assert all(image.width > 0 for image in frames)
         written.append(path)
     monkeypatch.setattr(direct, "save_animation", save)
-    args = direct.parse_args(["--only-pass-success", "--no-pass-success", "--show-model-pass-success", "--output", output])
+    args = direct.parse_args(["--only-model-pass-success", "--output", output])
     direct.render_situation("s", tracking, ball, {"pass_success": model},
                             {"add_v_edge_features": False}, args, "cpu", tmp_path, ["model_pass_success"])
     assert [path.name for path in written] == [f"model_pass_success.{output}"]
@@ -390,7 +388,7 @@ def test_missing_model_comparison_renders_unavailable_panel(tmp_path, monkeypatc
     monkeypatch.setattr(direct, "inference_gnn", lambda *a, **kw: (pd.DataFrame(), pd.DataFrame()))
     args = direct.parse_args(["--accept-comparison-warnings", "--compare",
                              "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
-                             "--only-pass-success", "--no-pass-success", "--show-model-pass-success",
+                             "--only-model-pass-success",
                              "--output-dir", str(tmp_path), "--run-id", "unavailable"])
     monkeypatch.setattr(direct, "parse_args", lambda: args)
     direct.main()
@@ -414,8 +412,7 @@ def test_location_model_view_renders(tmp_path, monkeypatch, saved_fixture, mode,
     monkeypatch.setattr(hawkeye, "load_overlay_data", lambda **kw: SimpleNamespace(metadata={}))
     flags = ["--compare", "--component-run-id", "b"] if compare else []
     args = hawkeye.parse_args(["--accept-comparison-warnings", "--mode", mode, "--component-run-id", "a",
-                              "--physical-cache-dir", str(tmp_path / "cache"), "--only-pass-success", "--no-pass-success",
-                              "--show-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "location", *flags])
+                              "--physical-cache-dir", str(tmp_path / "cache"), "--only-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "location", *flags])
     monkeypatch.setattr(hawkeye, "parse_args", lambda: args)
     hawkeye.main()
     assert (tmp_path / "location/s_1/model_pass_success.png").exists()
@@ -439,8 +436,7 @@ def test_benchmark_model_view_renders_paired_states(tmp_path, monkeypatch, compa
     monkeypatch.setattr(benchmark, "load_benchmark_modification_data", lambda *a: {
         "game_state_1": source, "game_state_2": source, "higher_state_id": 2})
     flags = ["--compare", "--component-run-id", "b"] if compare else []
-    args = benchmark.parse_args(["--accept-comparison-warnings", "--component-run-id", "a", "--only-pass-success",
-                                "--no-pass-success", "--show-model-pass-success", "--output-dir", str(tmp_path),
+    args = benchmark.parse_args(["--accept-comparison-warnings", "--component-run-id", "a", "--only-model-pass-success", "--output-dir", str(tmp_path),
                                 "--run-id", "benchmark", *flags])
     monkeypatch.setattr(benchmark, "parse_args", lambda: args)
     benchmark.main()
@@ -455,13 +451,12 @@ def test_skillcorner_model_view_renders(tmp_path, monkeypatch, compare):
     monkeypatch.setattr(skillcorner, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
     monkeypatch.setattr(skillcorner, "resolve_named_component_run_id", lambda kind, identifier, **kw: identifier)
     monkeypatch.setattr(skillcorner, "load_run_metadata", lambda *a, **kw: {"status": "completed"})
-    monkeypatch.setattr(skillcorner, "load_skillcorner_component_tables", lambda *a: {"model_pass_success": table})
+    monkeypatch.setattr(skillcorner, "load_skillcorner_component_tables", lambda *a, **kw: {"model_pass_success": table})
     monkeypatch.setattr(skillcorner, "build_skillcorner_match_context", lambda *a: object())
     monkeypatch.setattr(skillcorner, "build_skillcorner_possession", lambda *a: (subject, {}))
     flags = ["--compare", "--component-run-id", "b"] if compare else []
     args = skillcorner.parse_args(["--accept-comparison-warnings", "--match-id", "s", "--index", "1",
-                                  "--component-run-id", "a", "--only-pass-success", "--no-pass-success",
-                                  "--show-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "sc", *flags])
+                                  "--component-run-id", "a", "--only-model-pass-success", "--output-dir", str(tmp_path), "--run-id", "sc", *flags])
     monkeypatch.setattr(skillcorner, "parse_args", lambda: args)
     skillcorner.main()
     assert (tmp_path / "sc/s/1/model_pass_success_first.png").exists()
@@ -484,7 +479,7 @@ def test_sportec_model_comparison_renders(tmp_path, monkeypatch, inference_fixtu
     monkeypatch.setattr(sportec, "inference_gnn", predict)
     args = sportec.parse_args(["--accept-comparison-warnings", "--match-id", "s", "--compare",
                               "--pass-success-model-id", "pass_success/a", "--pass-success-model-id", "pass_success/b",
-                              "--only-pass-success", "--no-pass-success", "--show-model-pass-success",
+                              "--only-model-pass-success",
                               "--output-dir", str(tmp_path), "--run-id", "sp"])
     monkeypatch.setattr(sportec, "parse_args", lambda: args)
     sportec.main()

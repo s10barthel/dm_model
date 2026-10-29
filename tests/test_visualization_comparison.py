@@ -555,6 +555,75 @@ def test_saved_hawkeye_synthetic_end_to_end(tmp_path, monkeypatch, saved_fixture
     assert table.loc[table.candidate_id.eq("home_2"), "prediction:b"].iloc[0] == pytest.approx(0.6)
 
 
+def test_default_comparison_uses_common_outputs(tmp_path, monkeypatch, saved_fixture):
+    def load(path):
+        raw = _raw_hawkeye()
+        if str(path) == "a":
+            raw["model_pass_success"] = [.8, np.nan]
+        return raw, {"status": "completed", "processed_situation_ids": ["s"], "freeze_ballreceipt": True}
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    args = hv.parse_args(["--accept-comparison-warnings", "--compare", "--component-run-id", "a",
+                          "--component-run-id", "b", "--output-dir", str(tmp_path), "--run-id", "common"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    metadata = json.loads((tmp_path / "common/metadata.json").read_text())
+    assert metadata["rendered_components"] == ["pass_intent"]
+    assert "variant b" in metadata["skipped_components"]["model_pass_success"]
+    assert not list((tmp_path / "common").rglob("model_pass_success*.png"))
+
+
+def test_default_saved_run_renders_available_optional_outputs(tmp_path, monkeypatch, saved_fixture):
+    monkeypatch.setattr(hv, "load_overlay_data", lambda **kw: SimpleNamespace(metadata={}))
+    def load(path):
+        raw = _raw_hawkeye()
+        raw["model_pass_success"] = [.8, np.nan]
+        raw["pass_height"] = [.2, .3]
+        return raw, {"status": "completed", "processed_situation_ids": ["s"], "freeze_ballreceipt": True}
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", load)
+    args = hv.parse_args(["--component-dir", "a", "--output-dir", str(tmp_path), "--run-id", "available"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    metadata = json.loads((tmp_path / "available/metadata.json").read_text())
+    assert set(metadata["rendered_components"]) == {"pass_intent", "pass_height", "model_pass_success"}
+    assert metadata["show_model_pass_success"]
+    assert "physical_xpass" in metadata["skipped_components"]
+
+
+def test_default_saved_run_renders_inherited_physical_cache(tmp_path, monkeypatch, saved_fixture):
+    monkeypatch.setattr(hv, "load_overlay_data", lambda **kw: SimpleNamespace(metadata={}))
+    from test_saved_visualization_xpass import component, write_cache
+    cache = write_cache(tmp_path / "cache")
+    monkeypatch.setattr(hv, "load_hawkeye_component_run", lambda path: (
+        _raw_hawkeye(), component(physical_cache_dir=str(cache), processed_situation_ids=["s"])))
+    loader = Mock(return_value=pd.DataFrame({"home_1": [.2], "home_2": [.3]}, index=[10]))
+    monkeypatch.setattr(hv, "load_runtime_physical_xpass_visualization_table", loader)
+    args = hv.parse_args(["--component-dir", "a", "--output-dir", str(tmp_path), "--run-id", "physical"])
+    monkeypatch.setattr(hv, "parse_args", lambda: args)
+    hv.main()
+    metadata = json.loads((tmp_path / "physical/metadata.json").read_text())
+    assert metadata["rendered_components"] == ["pass_intent", "physical_xpass"]
+    assert (tmp_path / "physical/s/physical_xpass_0.png").exists()
+    loader.assert_called_once()
+
+
+def test_default_inference_comparison_shares_model_and_final_inference(tmp_path, monkeypatch, inference_fixture):
+    _, _, calls, _ = inference_fixture
+    previous = dv.inference_gnn
+    def predict(scene, model, **kwargs):
+        final, _ = previous(scene, model, **kwargs)
+        return final, final + .1 if kwargs.get("return_model_pass_success") else None
+    monkeypatch.setattr(dv, "inference_gnn", predict)
+    monkeypatch.setattr(dv, "get_runtime_physical_xpass_dir", lambda dataset: tmp_path / "absent")
+    args = dv.parse_args(["--accept-comparison-warnings", "--pass-success-model-id", "pass_success/a",
+                          "--inference-mask-1", "accel", "--output-dir", str(tmp_path), "--run-id", "defaults"])
+    monkeypatch.setattr(dv, "parse_args", lambda: args)
+    dv.main()
+    metadata = json.loads((tmp_path / "defaults/metadata.json").read_text())
+    assert metadata["rendered_components"] == ["pass_success", "model_pass_success"]
+    assert len(calls) == 2  # One call per variant, reusing it for both views.
+    assert "physical_xpass" in metadata["skipped_components"]
+
+
 @pytest.mark.parametrize("override", [False, True])
 def test_saved_comparison_resolves_pc_xpass_per_variant(tmp_path, monkeypatch, saved_fixture, override):
     from test_saved_visualization_xpass import component, write_cache
@@ -750,7 +819,7 @@ def test_skillcorner_saved_visualization_preserves_shot_export(tmp_path, monkeyp
     monkeypatch.setattr(sv, "load_runtime_physical_xpass_visualization_table", physical)
     selection = Mock(return_value=object())
     monkeypatch.setattr(sv.match_cache, "selection_for", selection)
-    def load(folder, match):
+    def load(folder, match, **kwargs):
         value = 0.4 if str(folder) == "a" else 0.6
         return {"pass_success": pd.DataFrame(),
                 "action_intent": pd.DataFrame({"index": [1, 1], "frame": [10, 11], "1": [0., 0.],
@@ -1048,7 +1117,7 @@ def test_skillcorner_saves_before_building_next_possession(tmp_path, monkeypatch
     monkeypatch.setattr(sv, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
     monkeypatch.setattr(sv, "load_run_metadata", lambda *a, **kw: {"status": "completed"})
     raw = pd.DataFrame({"index": [1, 1, 2, 2], "frame": [10, 11, 10, 11], "1": [.2] * 4})
-    monkeypatch.setattr(sv, "load_skillcorner_component_tables", lambda *a: {"pass_intent": raw})
+    monkeypatch.setattr(sv, "load_skillcorner_component_tables", lambda *a, **kw: {"pass_intent": raw})
     monkeypatch.setattr(sv, "build_skillcorner_match_context", lambda *a: object())
     def build(context, index):
         if index == 2:
@@ -1066,7 +1135,7 @@ def test_skillcorner_saves_before_building_next_possession(tmp_path, monkeypatch
 
 def test_benchmark_saves_both_states_before_loading_next_modification(tmp_path, monkeypatch):
     root = tmp_path / "progressive"
-    raw = pd.DataFrame({"modification": [1, 1, 2, 2], "game_state": [1, 2, 1, 2]})
+    raw = pd.DataFrame({"modification": [1, 1, 2, 2], "game_state": [1, 2, 1, 2], "pass_intent": [.3] * 4})
     monkeypatch.setattr(bv, "get_benchmark_component_run_root", lambda identifier: Path(identifier))
     monkeypatch.setattr(bv, "load_benchmark_component_run", lambda *a: (raw, {"status": "completed"}))
     def load(modification, *a):

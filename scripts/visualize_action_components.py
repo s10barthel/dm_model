@@ -91,6 +91,8 @@ from scripts.visualization_pass_success import (
     COMPARISON_COMPONENT, compare_pass_success_requested, comparison_metadata,
     input_components, needs_model_pass_success, needs_physical_xpass, physical_xpass_panel_source, save_component_pngs,
 )
+from scripts.visualization_availability import select_inference_components, finish_inference_selection
+from scripts.visualization_selection import selection_metadata, LegacyInclusion
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 from scripts.visualization_carries import carry_visualization_warnings, mask_unsupported_carry_success
 from scripts.visualization_receivers import (
@@ -172,7 +174,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--show-physical-xpass",
-        action="store_true",
+        action=LegacyInclusion, default=False,
         help="Render max_player_cum_prob.png from physical xPass sidecars.",
     )
     parser.add_argument("--physical-cache-dir", help="Physical xPass sidecar directory override.")
@@ -1043,16 +1045,7 @@ def main() -> None:
     output_root = output_parent / visualization_run_id
     start_inference_attempt(output_root, args)
     output_root.mkdir(parents=True, exist_ok=True)
-    initial_component_selection = resolve_component_selection(
-        args,
-        include_success_intent=bool(
-            args.success_intent_model_id
-            or getattr(args, "only_success_intent", False)
-            or getattr(args, "no_success_intent", False)
-            or getattr(args, "success_intent", False)
-            or getattr(args, "compare_intended_receiver", False)
-        ),
-    )
+    selected_bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
     explicit_model_ids = {
         "action_intent": getattr(args, "action_intent_model_id", None),
         "pass_intent": getattr(args, "pass_intent_model_id", None),
@@ -1061,6 +1054,11 @@ def main() -> None:
         "outcome_scoring": getattr(args, "outcome_scoring_model_id", None),
         "outcome_conceding": getattr(args, "outcome_conceding_model_id", None),
     }
+    available_ids = dict((selected_bundle or {}).get("model_ids") or {})
+    available_ids.update({k: v for k, v in explicit_model_ids.items() if v})
+    if args.success_intent_model_id:
+        available_ids["success_intent"] = args.success_intent_model_id
+    initial_component_selection = select_inference_components(args, available_ids, include_success_intent=True)
     required_model_tasks = [
         task
         for task in [
@@ -1087,18 +1085,13 @@ def main() -> None:
         )
     else:
         resolved_model_ids = {}
-        bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
+        bundle = selected_bundle
         shared_context = shared_context_from_bundle(bundle)
 
     success_intent_model_id = args.success_intent_model_id
     if not success_intent_model_id and bundle is not None:
         success_intent_model_id = bundle.get("model_ids", {}).get("success_intent")
-    if not success_intent_model_id and "success_intent" in initial_component_selection.rendered_components:
-        raise ValueError("Success-intent visualization requires --success-intent-model-id or a bundle success_intent checkpoint.")
-    component_selection = resolve_component_selection(
-        args,
-        include_success_intent=bool(success_intent_model_id),
-    )
+    component_selection = initial_component_selection
     if success_intent_model_id and "success_intent" in component_selection.required_component_groups:
         shared_context = merge_success_intent_context(shared_context, str(success_intent_model_id))
     carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
@@ -1158,6 +1151,8 @@ def main() -> None:
     lane_survival_cache_dir = pc_versions.lane_cache_dir("sportec", args, loaded_models)
     configure_lane_survival_runtime_cache(loaded_models, lane_survival_cache_dir)
     selected_physical_xpass_metric = physical_xpass_metric(args)
+    component_selection = finish_inference_selection(
+        args, physical_cache_dir, selected_physical_xpass_metric, getattr(args, "x_pass_version", "top10"))
     pass_success_model = loaded_models.get("pass_success")
     if pass_success_model is not None and bool(getattr(args, "use_physical_xpass", False)):
         pass_success_model.args["inference_use_physical_xpass"] = True
@@ -1216,7 +1211,7 @@ def main() -> None:
                 display_action_id=display_action_id,
                 output_dir=output_dir,
                 show_trajectories=args.show_trajectories,
-                show_physical_xpass=args.show_physical_xpass,
+                show_physical_xpass="physical_xpass" in component_selection.rendered_components,
                 physical_cache_dir=physical_cache_dir,
                 physical_xpass_metric_name=selected_physical_xpass_metric,
                 physical_xpass_version_name=getattr(args, "x_pass_version", "top10"),
@@ -1352,7 +1347,7 @@ def main() -> None:
         "physical_xpass_skipped_actions": physical_xpass_skipped_actions,
     }
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available=needs_model_pass_success(args), output_root=output_root,
     ))
     metadata.update(comparison_metadata(args, output_root))
@@ -1363,6 +1358,7 @@ def main() -> None:
         metadata["compare_pass_success_xpass"] = comparison_xpass.metadata()
     attach_membership_report(metadata, "sportec", records=shared_context.get("model_records", {}))
     metadata.update(finalize_pc_xpass_attempt())
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)
@@ -1376,6 +1372,7 @@ def main() -> None:
         skipped_stats=physical_xpass_skipped_actions,
     )
     metadata["physical_xpass_cache_summary"] = physical_xpass_cache_summary
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved component plots for {len(saved_dirs)} action(s).")
     print(f"Visualization run id: {visualization_run_id}")

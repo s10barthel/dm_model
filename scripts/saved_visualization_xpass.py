@@ -18,10 +18,15 @@ from physical_pass_model import (
 from project_config import PROJECT_ROOT
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from scripts.visualization_pass_success import compare_pass_success_requested, needs_physical_xpass
+from scripts.visualization_selection import LegacyInclusion
+
+
+class UnavailablePhysicalXpass(ValueError):
+    """An optional physical panel has no recorded cache or metric selection."""
 
 
 def add_saved_xpass_arguments(parser: ArgumentParser) -> None:
-    parser.add_argument("--show-physical-xpass", action="store_true",
+    parser.add_argument("--show-physical-xpass", action=LegacyInclusion, default=False,
                         help="Render cached pc-xPass; inherit settings from the component run.")
     parser.add_argument("--physical-cache-dir", help="Explicit pc-xPass dataset cache directory override.")
     parser.add_argument("--pc-xpass", "--pc_xpass", dest="pc_xpass", action="store_true",
@@ -140,8 +145,8 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
         raise ValueError("--pc-xpass-id cannot be combined with --physical-cache-dir.")
     if usage != "pc_xpass" and not ((explicit_dir or explicit_id) and explicit_version):
         option = ("--compare-pass-success" if compare_pass_success_requested(args) else
-                  "--only-physical-xpass" if getattr(args, "only_physical_xpass", False) else "--show-physical-xpass")
-        raise ValueError(
+                  "--only-physical-xpass" if getattr(args, "only_physical_xpass", False) else "Physical xPass output")
+        raise UnavailablePhysicalXpass(
             f"pc-xPass usage is {usage}. {option} requires both an explicit "
             "--pc-xpass-id or --physical-cache-dir and --xpass-version (or --top-pass)."
         )
@@ -179,7 +184,7 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
         cache_dir = cache_dir.resolve()
         cache_origin = dir_origin
     else:
-        raise ValueError("No recorded pc-xPass cache; specify --pc-xpass-id or --physical-cache-dir.")
+        raise UnavailablePhysicalXpass("No recorded pc-xPass cache; specify --pc-xpass-id or --physical-cache-dir.")
 
     # A pc metric column can identify its selector; generic topmean cannot.
     saved_metric = saved.get("physical_xpass_metric")
@@ -194,7 +199,7 @@ def _resolve(args: Namespace, metadata: Mapping[str, Any], dataset: str) -> Save
         (options.get("x_pass_version"), "component.invocation.effective_cli_options.x_pass_version"),
     )
     if version is None:
-        raise ValueError("No recorded pc-xPass metric; specify --xpass-version or --top-pass.")
+        raise UnavailablePhysicalXpass("No recorded pc-xPass metric; specify --xpass-version or --top-pass.")
     version = normalize_x_pass_version(version)
     metric = physical_xpass_metric_for_version(version, pc_xpass=True)
     cache_metadata = versions.read_metadata(cache_dir)

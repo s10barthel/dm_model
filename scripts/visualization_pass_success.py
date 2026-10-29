@@ -15,11 +15,17 @@ def compare_pass_success_requested(args):
 
 
 def needs_physical_xpass(args):
+    selection = getattr(args, "_component_selection", None)
+    if selection is not None:
+        return bool({"physical_xpass", COMPARISON_COMPONENT}.intersection(selection.rendered_components))
     return bool(getattr(args, "show_physical_xpass", False) or
                 getattr(args, "only_physical_xpass", False) or compare_pass_success_requested(args))
 
 
 def needs_model_pass_success(args):
+    selection = getattr(args, "_component_selection", None)
+    if selection is not None:
+        return bool({"model_pass_success", COMPARISON_COMPONENT}.intersection(selection.rendered_components))
     return bool(getattr(args, "show_model_pass_success", False) or compare_pass_success_requested(args))
 
 

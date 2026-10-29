@@ -63,10 +63,12 @@ from scripts.hawkeye_visualization_overlays import (
     filter_coach_rated_situation_ids,
     load_overlay_data,
 )
-from datatools.pass_success import (require_model_pass_success, model_pass_success_metadata, model_pass_success_row)
+from datatools.pass_success import (model_pass_success_metadata, model_pass_success_row)
 from scripts.visualization_pass_success import (
     comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
 )
+from scripts.visualization_availability import select_saved_components
+from scripts.visualization_selection import selection_metadata
 from scripts.visualization_selection import (
     COMPONENT_GROUPS,
     OPTIONAL_COMPONENT_GROUPS,
@@ -173,7 +175,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--only-tracking is only supported with --mode standard")
         component_flag_names = [
             f"{prefix}_{group}"
-            for group in (*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS)
+            for group in (*COMPONENT_GROUPS, *OPTIONAL_COMPONENT_GROUPS, "model_pass_success", "physical_xpass")
             for prefix in ("only", "no", "show")
         ]
         conflicts = []
@@ -529,7 +531,8 @@ def run_location_visualization(
         situation_ids=args.situation_id,
         limit=args.limit,
     )
-    xpass = resolve_saved_xpass(args, component_metadata, "hawkeye_loc", component_id=component_run_id)
+    component_selection, xpass = select_saved_components(
+        args, component_export, component_metadata, "hawkeye_loc", resolve_saved_xpass, component_id=component_run_id)
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     overlay_data = load_overlay_data(
@@ -670,11 +673,12 @@ def run_location_visualization(
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available="model_pass_success" in component_export, output_root=output_root,
     ))
     attach_membership_report(metadata, "hawkeye", source=component_metadata,
                              identities=[(item["loc_situation_id"], None) for item in rendered_situations])
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye location visualization run id: {visualization_run_id}")
     print(f"Hawkeye location visualization metadata: {metadata_path}")
@@ -825,10 +829,11 @@ def run_tracking_only_visualization(
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available=False, output_root=output_root,
     ))
     attach_membership_report(metadata, "hawkeye")
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye tracking-only visualization run id: {visualization_run_id}")
     print(f"Hawkeye tracking-only visualization metadata: {metadata_path}")
@@ -857,16 +862,15 @@ def main() -> None:
         component_dir = Path(args.component_dir)
     elif args.component_run_id or component_selection.required_component_groups or mode in {"loc", "freeze"}:
         component_kind = "hawkeye_loc_component" if mode in {"loc", "freeze"} else "hawkeye_component"
-        component_run_id = resolve_named_component_run_id(component_kind, args.component_run_id, required=True)
+        component_run_id = resolve_named_component_run_id(component_kind, args.component_run_id, required=bool(args.component_run_id) or mode in {"loc", "freeze"})
         component_dir = (
             get_hawkeye_loc_component_run_root(component_run_id)
             if mode in {"loc", "freeze"}
-            else get_hawkeye_component_run_root(component_run_id)
+            else (get_hawkeye_component_run_root(component_run_id) if component_run_id else None)
         )
 
     if component_dir is not None:
         component_export, component_metadata = load_hawkeye_component_run(component_dir)
-        require_model_pass_success(component_export, needs_model_pass_success(args))
     if mode in {"loc", "freeze"}:
         component_mode = component_metadata.get("inference_mode")
         if component_mode != mode:
@@ -886,7 +890,8 @@ def main() -> None:
             visualization_run_id,
         )
         return
-    xpass = resolve_saved_xpass(args, component_metadata, "hawkeye", component_id=component_run_id)
+    component_selection, xpass = select_saved_components(
+        args, component_export, component_metadata, "hawkeye", resolve_saved_xpass, component_id=component_run_id)
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
     if component_export is not None:
@@ -1080,10 +1085,11 @@ def main() -> None:
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available=component_export is not None and "model_pass_success" in component_export, output_root=output_root,
     ))
     attach_membership_report(metadata, "hawkeye", source=component_metadata)
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Hawkeye visualization run id: {visualization_run_id}")
     print(f"Hawkeye visualization metadata: {metadata_path}")

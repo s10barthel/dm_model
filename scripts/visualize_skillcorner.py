@@ -52,10 +52,12 @@ from project_config import (
     resolve_named_component_run_id,
     write_run_metadata,
 )
-from datatools.pass_success import require_model_pass_success, model_pass_success_metadata
+from datatools.pass_success import model_pass_success_metadata
 from scripts.visualization_pass_success import (
     comparison_metadata, needs_model_pass_success, needs_physical_xpass, save_component_pngs,
 )
+from scripts.visualization_availability import select_saved_components
+from scripts.visualization_selection import selection_metadata
 from scripts.visualization_selection import add_component_selection_args, resolve_component_selection
 
 
@@ -356,14 +358,14 @@ def main() -> None:
     elif args.component_run_id or component_selection.required_component_groups:
         component_run_id = resolve_named_component_run_id("skillcorner_component", args.component_run_id, required=False)
         component_dir = (
-            get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else COMPONENT_DIR / "skillcorner"
+            get_skillcorner_component_run_root(component_run_id) if component_run_id is not None else (COMPONENT_DIR / "skillcorner" if (COMPONENT_DIR / "skillcorner").exists() else None)
         )
 
     if component_dir is not None:
-        component_tables = load_skillcorner_component_tables(component_dir, args.match_id)
-        require_model_pass_success(component_tables, needs_model_pass_success(args))
+        component_tables = load_skillcorner_component_tables(component_dir, args.match_id, allow_partial=True)
         component_metadata = load_run_metadata(component_dir, required=False) or {}
-    xpass = resolve_saved_xpass(args, component_metadata, "skillcorner", component_id=component_run_id)
+    component_selection, xpass = select_saved_components(
+        args, component_tables, component_metadata, "skillcorner", resolve_saved_xpass, component_id=component_run_id)
     context = build_skillcorner_match_context(args.match_id, args.input_dir)
     rendered_components = list(component_selection.rendered_components)
 
@@ -430,10 +432,11 @@ def main() -> None:
     }
     metadata.update(comparison_metadata(args, output_root))
     metadata.update(model_pass_success_metadata(
-        requested=getattr(args, "show_model_pass_success", False),
+        requested=needs_model_pass_success(args),
         available="model_pass_success" in component_tables, output_root=output_root,
     ))
     attach_membership_report(metadata, "skillcorner", source=component_metadata)
+    metadata.update(selection_metadata(args))
     metadata_path = write_run_metadata(output_root, metadata)
     print(f"Saved SkillCorner {selected_output_mode} visualizations for {len(output_dirs)} possession(s).")
     print(f"SkillCorner visualization run id: {visualization_run_id}")

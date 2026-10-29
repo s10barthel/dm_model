@@ -50,7 +50,7 @@ def test_cli_selection_and_conflicts(module, required, flag):
 
 
 def test_selection_keeps_composite_inputs_when_standalone_is_hidden():
-    args = direct.parse_args(["--only-compare-pass-success", "--only-pass-success", "--no-pass-success"])
+    args = direct.parse_args(["--only-compare-pass-success", "--no-pass-success"])
     selection = resolve_component_selection(args)
     assert selection.rendered_components == [COMPARISON_COMPONENT]
     assert selection.required_component_groups == ["pass_success"]
@@ -279,7 +279,7 @@ def test_skillcorner_preserves_frame_selection(tmp_path, monkeypatch, frame_flag
     monkeypatch.setattr(skillcorner, "get_skillcorner_component_run_root", lambda identifier: Path(identifier))
     monkeypatch.setattr(skillcorner, "resolve_named_component_run_id", lambda kind, identifier, **kw: identifier)
     monkeypatch.setattr(skillcorner, "load_run_metadata", lambda *a, **kw: component(physical_cache_dir=str(cache)))
-    monkeypatch.setattr(skillcorner, "load_skillcorner_component_tables", lambda *a: {
+    monkeypatch.setattr(skillcorner, "load_skillcorner_component_tables", lambda *a, **kw: {
         "model_pass_success": table, "pass_success": table.assign(**{"1": .4, "2": .35})})
     monkeypatch.setattr(skillcorner, "build_skillcorner_match_context", lambda *a: object())
     monkeypatch.setattr(skillcorner, "build_skillcorner_possession", lambda *a: (subject, {}))

@@ -988,6 +988,10 @@ def validate_physical_xpass_cache_metadata(
     return metadata
 
 
+class PhysicalXpassMetricUnavailable(ValueError):
+    """The selected metric is absent; cache validity errors remain separate."""
+
+
 def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | None = None, x_pass_version: str, metric: str, memo: dict | None = None) -> dict[str, Any]:
     metadata_path = Path(cache_dir) / "metadata.json"
     if not metadata_path.exists():
@@ -1014,11 +1018,12 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
         if selected_metric != uncertainty.METRIC:
             raise ValueError("--xpass-version uncertainty must select uncertainty_xpass")
         if uncertainty.METRIC not in available_metrics:
-            raise ValueError("Cache lacks uncertainty_xpass; generate a new PC-xPass cache with --uncertainty true")
+            raise PhysicalXpassMetricUnavailable("Cache lacks uncertainty_xpass; generate a new PC-xPass cache with --uncertainty true")
     if version.startswith("top-pass"):
         expected_metric = physical_xpass_metric_for_version(version, pc_xpass=resolved_source == PC_XPASS_SOURCE)
-        if (expected_metric not in available_metrics
-                or metadata.get("top_pass_definition") != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION)):
+        if expected_metric not in available_metrics:
+            raise PhysicalXpassMetricUnavailable(f"Cache at {cache_dir} lacks compatible {expected_metric}. Regenerate with scripts/generate_physical_xpass.py --pc-xpass --top-pass {version[8:]}.")
+        if metadata.get("top_pass_definition") != high_pass.top_pass_definition(metadata, PC_XPASS_TOP_PASS_DEFINITION):
             raise ValueError(f"Cache at {cache_dir} lacks compatible {expected_metric}. Regenerate with scripts/generate_physical_xpass.py --pc-xpass --top-pass {version[8:]}.")
     elif version.startswith("top"):
         requested_top_n = int(version[3:])
@@ -1030,19 +1035,19 @@ def validate_x_pass_version_available(cache_dir: str | Path, *, source: str | No
                     f"Regenerate with scripts/generate_physical_xpass.py --top-n {requested_top_n}."
                 )
             if PHYSICAL_XPASS_METRIC_TOPMEAN not in available_metrics:
-                raise ValueError(f"Requested --xpass-version {version}, but cache at {cache_dir} has no topmean_xpass metric.")
+                raise PhysicalXpassMetricUnavailable(f"Requested --xpass-version {version}, but cache at {cache_dir} has no topmean_xpass metric.")
         else:
             expected_metric = pc_xpass_top_metric(requested_top_n)
             if expected_metric not in available_metrics and version not in available_versions:
-                raise ValueError(f"Requested --xpass-version {version}, but cache at {cache_dir} has no {expected_metric} metric.")
+                raise PhysicalXpassMetricUnavailable(f"Requested --xpass-version {version}, but cache at {cache_dir} has no {expected_metric} metric.")
     elif version == X_PASS_VERSION_NOISE_KERNEL and PHYSICAL_XPASS_METRIC_NOISE_KERNEL not in available_metrics:
-        raise ValueError(f"Requested --xpass-version noise-kernel, but cache at {cache_dir} has no noise_kernel_xpass metric.")
+        raise PhysicalXpassMetricUnavailable(f"Requested --xpass-version noise-kernel, but cache at {cache_dir} has no noise_kernel_xpass metric.")
     elif version == X_PASS_VERSION_MAX and PHYSICAL_XPASS_METRIC_MAX not in available_metrics:
-        raise ValueError(f"Requested --xpass-version max, but cache at {cache_dir} has no max_xpass metric.")
+        raise PhysicalXpassMetricUnavailable(f"Requested --xpass-version max, but cache at {cache_dir} has no max_xpass metric.")
     if selected_metric not in available_metrics and not (
         selected_metric.startswith("top") and selected_metric.endswith("_xpass") and version in available_versions
     ):
-        raise ValueError(f"Requested metric {selected_metric!r}, but cache at {cache_dir} does not advertise it.")
+        raise PhysicalXpassMetricUnavailable(f"Requested metric {selected_metric!r}, but cache at {cache_dir} does not advertise it.")
     return metadata
 
 
