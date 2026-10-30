@@ -192,6 +192,13 @@ def rebuild_match(task):
             match.actions = carry_actions.copy()
             extra = match.construct_labels(resolved_actions=carry_actions.copy(), relabel_intended_receivers=False,
                                            intended_receiver_mode=mode, return_type=ret) if carry_ids else base_labels[:0]
+            if carry_ids and ret == metadata["return_types"][0]:
+                # Persist primary-return targets after construction; carry_actions has no returns yet.
+                target_names = ["scores_goal_distance", "concedes_goal_distance"]
+                if base_labels.shape[1] > config.LABEL_INDEX["scores_progression"]:
+                    target_names.append("scores_progression")
+                for name in target_names:
+                    resolved.loc[carry_ids, name] = match.actions.loc[carry_ids, name].to_numpy()
             if carry_ids:
                 extra = carry_labels_in_source_schema(base_labels, extra, context=f"{match_id}/{mode}/{ret}")
             if len(extra) != len(carry_ids) or len(base_labels) != expected_rows - len(carry_ids):

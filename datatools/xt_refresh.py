@@ -140,7 +140,8 @@ def read_annotated_events(event_path, sidecar_path):
     return events
 
 
-def action_return_pairs(actions, events):
+def action_return_pairs(actions, events, *, source_columns=("scores_xT", "concedes_xT"),
+                        target_columns=("scores_xt", "concedes_xt")):
     if not actions.index.is_unique:
         raise ValueError("Resolved action indices are not unique.")
     indices = pd.to_numeric(pd.Series(actions.index, index=actions.index), errors="coerce")
@@ -171,15 +172,15 @@ def action_return_pairs(actions, events):
                 or not synthetic.original_event_id.astype(str).str.startswith("carry:").all()):
             raise ValueError("Unknown synthetic action or missing carry anchor.")
     selected = events.loc[anchors.astype(int).to_numpy()]
-    pairs = selected[["scores_xT", "concedes_xT"]].to_numpy(copy=True)
+    pairs = selected[list(source_columns)].to_numpy(copy=True)
     teams = actions.object_id.astype(str).str[:4].to_numpy()
     if not np.isin(teams, ["home", "away"]).all():
         raise ValueError("Unknown action team perspective.")
     swap = selected.object_id.astype(str).str[:4].to_numpy() != teams
     pairs[swap] = pairs[swap, ::-1]
     if not np.isfinite(pairs).all():
-        raise ValueError("Non-finite computed xT returns.")
-    return pd.DataFrame(pairs, index=actions.index, columns=["scores_xt", "concedes_xt"])
+        raise ValueError(f"Non-finite computed returns: {source_columns}.")
+    return pd.DataFrame(pairs, index=actions.index, columns=list(target_columns))
 
 
 def patch_labels(labels, pairs):

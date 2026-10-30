@@ -27,7 +27,7 @@ from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.input_diagnostics import read_json, read_parquet
 from datatools.xt_refresh import refresh_xt
-from datatools.progression_refresh import refresh_progression
+from datatools.goal_distance_refresh import (preflight_goal_distance, refresh_goal_distance, targeted_goal_distance)
 from datatools.progression import DEFINITION as PROGRESSION_DEFINITION, supported as progression_supported
 from datatools.trajectory import TRAJECTORY_SPEED
 from datatools.trajectory_refresh import run_trajectory_refresh
@@ -174,7 +174,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "With --extend-feature-run-id, refresh label targets from current sidecar artifacts without "
-            "rebuilding graphs. Progression uses saved goal-distance labels. xT and progression refreshes run separately."
+            "rebuilding graphs. goal_distance and progression can refresh together; xT refresh runs separately."
         ),
     )
     parser.add_argument(
@@ -348,8 +348,8 @@ def parse_args() -> argparse.Namespace:
             args.next_action_conditions_enabled = metadata_next_action_conditions_enabled(base)
     if args.extend_feature_run_id and args.max_pass_duration is not None and not args.refresh_trajectory:
         parser.error("Changing --max-pass-duration on an existing run requires --refresh-trajectory.")
-    if set(args.refresh_target_families) & {"xt", "progression"}:
-        if args.use_carries or len(args.refresh_target_families) != 1:
+    if "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
+        if args.use_carries or ("xt" in args.refresh_target_families and len(args.refresh_target_families) != 1):
             parser.error("Target-only refresh must run separately from carry generation and other target refreshes.")
         # A target-only operation inherits the source split/selection settings unless
         # the caller explicitly supplies them (build_extension_plan checks equality).
@@ -360,6 +360,8 @@ def parse_args() -> argparse.Namespace:
                 vars(args).update(split_selector(base))
             if not supplied.intersection({"--next-action-conditions-on", "--next-action-conditions-off"}):
                 args.next_action_conditions_enabled = metadata_next_action_conditions_enabled(base)
+    if "progression" in args.refresh_target_families and not targeted_goal_distance(args.refresh_target_families):
+        parser.error("Progression refresh can only combine with goal_distance.")
     if args.refresh_target_families and not args.extend_feature_run_id:
         parser.error("--refresh-target-family requires --extend-feature-run-id.")
     if args.pass_height_threshold is not None and not args.pass_height:
@@ -992,8 +994,9 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     else:
         final_model_id = base_model_id
 
-    if set(refresh_target_families) & {"xt", "progression"}:
-        if (len(refresh_target_families) != 1 or added_return_types or added_modes or replace_model
+    if "xt" in refresh_target_families or "progression" in refresh_target_families or targeted_goal_distance(refresh_target_families):
+        if ((not targeted_goal_distance(refresh_target_families) and refresh_target_families != ["xt"])
+                or added_return_types or added_modes or replace_model
                 or regenerate_model_mode or refresh_pass_height_labels or extend_relative_speed_edge_features
                 or extend_interaction_edge_features or bool(getattr(args, "use_carries", False))):
             raise ValueError("Target-only refresh must run separately from other refreshes, new return types, "
@@ -1085,7 +1088,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
                ["--pass-height-threshold", str(extension_pass_height_threshold_from_base(args, base_metadata))])])
             for step in command_steps]
     commands = [step.command for step in command_steps]
-    if refresh_target_families in (["xt"], ["progression"]):
+    if refresh_target_families == ["xt"] or targeted_goal_distance(refresh_target_families):
         command_steps, commands = [], []
     final_graph_schema = copy.deepcopy(graph_schema)
     if extend_relative_speed_edge_features:
@@ -1131,7 +1134,7 @@ def extension_pass_height_threshold_from_base(args, metadata):
 
 
 def extension_pass_height_threshold(args, plan):
-    if plan.refresh_target_families in (["xt"], ["progression"]):
+    if plan.refresh_target_families == ["xt"] or targeted_goal_distance(plan.refresh_target_families):
         return plan.base_metadata.get("pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS)
     if plan.receiver_extension_attempt and not plan.refresh_pass_height_labels:
         return extension_pass_height_threshold_from_base(args, plan.base_metadata)
@@ -1438,6 +1441,21 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     plan = build_extension_plan(args)
     derived = plan.extension_mode == EXTENSION_MODE_DERIVED
     target_root = get_feature_run_root(plan.target_run_id)
+    goal_preflight = None
+    refresh_result = None
+    if targeted_goal_distance(plan.refresh_target_families):
+        goal_preflight = preflight_goal_distance(get_feature_run_root(plan.base_run_id), plan.base_metadata)
+
+    def publish_target_metadata(payload, final):
+        if final and refresh_result is not None:
+            if "goal_distance" in plan.refresh_target_families:
+                payload["goal_distance_targets"] = dict(refresh_result["goal_distance_definition"], return_types=plan.final_return_types,
+                    report="goal_distance_refresh_report.json")
+            if refresh_result["progression_present"]:
+                payload["progression_targets"] = dict(PROGRESSION_DEFINITION,
+                    return_types=refresh_result["progression_return_types"],
+                    report="goal_distance_refresh_report.json")
+        return payload
 
     def metadata_factory(status, error, final):
         if derived:
@@ -1450,16 +1468,10 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                                intended_receiver_model_id=plan.base_metadata.get("intended_receiver_model_id"),
                                pass_height_threshold_meters=plan.base_metadata.get(
                                    "pass_height_threshold_meters", config.PASS_HEIGHT_THRESHOLD_METERS))
-            if final and plan.refresh_target_families == ["progression"]:
-                payload["progression_targets"] = dict(PROGRESSION_DEFINITION,
-                    return_types=[r for r in plan.final_return_types if progression_supported(r)])
-            return payload
+            return publish_target_metadata(payload, final)
         payload = mutating_metadata(args, plan, status, error=error, advertise_final_state=final,
                                  history_status="failed" if error is not None else status)
-        if final and plan.refresh_target_families == ["progression"]:
-            payload["progression_targets"] = dict(PROGRESSION_DEFINITION,
-                return_types=[r for r in plan.final_return_types if progression_supported(r)])
-        return payload
+        return publish_target_metadata(payload, final)
 
     target = dict(graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)), graph_schema=plan.graph_schema, return_types=plan.final_return_types,
                   intended_receiver_modes=plan.final_intended_receiver_modes,
@@ -1478,6 +1490,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             copy_base_feature_run(plan.base_run_id, plan.output_run_id,
                                   mode=getattr(args, "artifact_copy_mode", "hardlink"), diagnostics=attempt.data)
             attempt.mutation_finished()
+            attempt.data["clone_complete"] = True
         else:
             attempt.enter("staging")
         if plan.regenerate_model_mode:
@@ -1487,8 +1500,9 @@ def run_extension_generation(args: argparse.Namespace) -> None:
         if plan.refresh_target_families == ["xt"]:
             refresh_xt(target_root, plan.base_metadata, xt_match_dir=getattr(args, "xt_match_dir", XT_MATCH_DIR),
                        attempt=attempt)
-        elif plan.refresh_target_families == ["progression"]:
-            refresh_progression(target_root, plan.base_metadata, attempt=attempt)
+        elif targeted_goal_distance(plan.refresh_target_families):
+            refresh_result = refresh_goal_distance(target_root, plan.base_metadata,
+                target_families=plan.refresh_target_families, preflight=goal_preflight, attempt=attempt)
         else:
             run_generation_steps(plan.command_steps, attempt=attempt)
             if plan.receiver_extension_attempt:

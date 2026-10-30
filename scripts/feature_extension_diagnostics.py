@@ -115,7 +115,10 @@ class ExtensionAttempt:
         self.data["primary_traceback"] = "".join(traceback.format_exception(error))
         status = "completed" if self.published or (self.mode == "in_place" and self.artifact_state == "unchanged") else "failed"
         self.data["artifact_state"] = self.artifact_state
-        print(f"Feature extension failed during {self.data['phase']}; artifacts={self.artifact_state}; "
+        target_state = (f"clone_complete={self.data.get('clone_complete', False)}; "
+                        f"target_replacements={self.data['target_replacements']}; "
+                        if "target_replacements" in self.data else "")
+        print(f"Feature extension failed during {self.data['phase']}; artifacts={self.artifact_state}; {target_state}"
               f"metadata={self.root / 'metadata.json'}; manual inspection may be required.", file=sys.stderr)
         try:
             self.persist(status, str(error), final=self.published)

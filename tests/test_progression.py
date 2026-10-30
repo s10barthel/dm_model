@@ -10,6 +10,8 @@ import torch
 from datatools import config, utils
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.goal_distance import GOAL_DISTANCE_MAX_RAW
+from datatools.goal_distance_returns import label_goal_distance_for_return_type
+from datatools.xt_refresh import action_return_pairs
 from datatools.match import Match
 from datatools.progression import action_start_closeness, relative_progression, action_progression
 from datatools.progression_refresh import patch_progression, refresh_progression
@@ -112,15 +114,31 @@ def test_return_validation_and_extension_plan():
 
 
 def prepare_progression_fixture(sample):
-    root, _, _, metadata, *_ = sample
+    root, event_dir, sidecars, metadata, events, *_ = sample
+    events["goal_distance"] = events.xT
+    events[["action_id", "goal_distance"]].to_csv(sidecars / "m.csv", index=False)
     inventory, _, _, _ = refresh_inventory(root, metadata)
-    for path in root.glob("resolved_actions*/*.parquet"):
-        actions = pd.read_parquet(path)
-        actions["scores_goal_distance"] = 0.8
-        actions.to_parquet(path)
+    returns = {ret: label_goal_distance_for_return_type(events, ret) for ret in metadata["return_types"]}
+    pairs = {}
+    for mode in metadata["intended_receiver_modes"]:
+        for carry in [False, True]:
+            from project_config import get_resolved_action_dir
+            path = get_resolved_action_dir(mode, root=root, use_carries=carry) / "m.parquet"
+            actions = pd.read_parquet(path)
+            for ret, labeled in returns.items():
+                pairs[mode, carry, ret] = action_return_pairs(actions, labeled,
+                    source_columns=("scores_goal_distance", "concedes_goal_distance"),
+                    target_columns=("scores_goal_distance", "concedes_goal_distance"))
+            actions[["scores_goal_distance", "concedes_goal_distance"]] = pairs[mode, carry, metadata["return_types"][0]]
+            # Actual production carries have missing table returns, but valid tensor returns.
+            if carry:
+                actions.loc[9, ["scores_goal_distance", "concedes_goal_distance"]] = np.nan
+            actions.to_parquet(path)
     for artifact in inventory["m"]:
         labels = torch.load(artifact.path, weights_only=True)[:, :-1]
-        labels[:, config.LABEL_INDEX["scores_goal_distance"]] = 0.8
+        ids = labels[:, 0].numpy().astype(int)
+        labels[:, [config.LABEL_INDEX[c] for c in ["scores_goal_distance", "concedes_goal_distance"]]] = torch.tensor(
+            pairs[artifact.mode, artifact.carries, artifact.return_type].loc[ids].to_numpy(), dtype=labels.dtype)
         torch.save(labels, artifact.path)
     return root, metadata
 
@@ -131,7 +149,8 @@ def test_refresh_all_variants_source_preservation_and_noop(sample, tmp_path):
     output = tmp_path / "derived"
     clone_feature_artifacts(root, output)
     report = refresh_progression(output, metadata,
-        attempt=ExtensionAttempt(output, "progression", "derived", {}))
+        attempt=ExtensionAttempt(output, "progression", "derived", {}),
+        event_dir=sample[1], goal_distance_match_dir=sample[2])
     assert report["rewritten_files"] > 0
     assert report["graph_files_loaded"] == 0
     for relative, digest in before.items():
@@ -143,7 +162,8 @@ def test_refresh_all_variants_source_preservation_and_noop(sample, tmp_path):
             new = torch.load(output / relative, weights_only=True)
             assert torch.equal(old, new[:, :-1])
     second = refresh_progression(output, metadata,
-        attempt=ExtensionAttempt(output, "progression", "derived", {}))
+        attempt=ExtensionAttempt(output, "progression", "derived", {}),
+        event_dir=sample[1], goal_distance_match_dir=sample[2])
     assert second["rewritten_files"] == 0
 
 
@@ -155,6 +175,7 @@ def test_invalid_last_variant_leaves_all_artifacts_unchanged(sample):
     torch.save(labels, path)
     before = {p: fingerprint(p) for p in root.rglob("*") if p.suffix in {".pt", ".parquet"}}
     with pytest.raises(ValueError, match="action IDs"):
-        refresh_progression(root, metadata, attempt=ExtensionAttempt(root, "progression", "in_place", {}))
+        refresh_progression(root, metadata, attempt=ExtensionAttempt(root, "progression", "in_place", {}),
+                            event_dir=sample[1], goal_distance_match_dir=sample[2])
     assert all(fingerprint(p) == digest for p, digest in before.items())
     assert not list(root.rglob("*.tmp"))

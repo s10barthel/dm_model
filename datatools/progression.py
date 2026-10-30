@@ -35,12 +35,11 @@ def action_start_closeness(actions):
         raise ValueError("Unknown progression action team perspective.")
     x = pd.to_numeric(actions.start_x, errors="coerce").copy()
     y = pd.to_numeric(actions.start_y, errors="coerce").copy()
-    if (not np.isfinite(x).all() or not np.isfinite(y).all()
-            or (x == -config.FIELD_SIZE[0]).any() or (y == -config.FIELD_SIZE[1]).any()):
-        raise ValueError("Progression requires valid action starting coordinates.")
-    if (not np.isfinite(x).all() or not np.isfinite(y).all()
-            or (x == -config.FIELD_SIZE[0]).any() or (y == -config.FIELD_SIZE[1]).any()):
-        raise ValueError("Progression requires valid action starting coordinates.")
+    invalid = (~np.isfinite(x) | ~np.isfinite(y)
+               | (x == -config.FIELD_SIZE[0]) | (y == -config.FIELD_SIZE[1]))
+    if invalid.any():
+        raise ValueError("Progression requires valid action starting coordinates; "
+                         f"action indices={actions.index[invalid].tolist()[:8]}.")
     away = teams.eq("away")
     x.loc[away] = config.FIELD_SIZE[0] - x.loc[away]
     y.loc[away] = config.FIELD_SIZE[1] - y.loc[away]
