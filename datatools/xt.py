@@ -15,7 +15,7 @@ from socceraction.spadl import play_left_to_right
 from socceraction.xthreat import ExpectedThreat
 
 from datatools import config, utils
-from project_config import XT_DIR, XT_MATCH_DIR
+from project_config import XT_MATCH_DIR
 
 XT_GRID_L = 12
 XT_GRID_W = 8
@@ -768,19 +768,32 @@ def annotate_match_xt(events: pd.DataFrame, xt_fit: XTXYGLMFit | XTXYLogitModel 
     return sorted_events, user_export[export_cols].copy()
 
 
-def merge_xt_annotations(events: pd.DataFrame, match_id: str | None, xt_match_dir: str | Path = XT_MATCH_DIR) -> pd.DataFrame:
+def merge_xt_annotations(events: pd.DataFrame, match_id: str | None,
+                         xt_match_dir: str | Path = XT_MATCH_DIR, *, strict: bool = False) -> pd.DataFrame:
     events = events.copy()
     if match_id is None:
+        if strict:
+            raise ValueError("A match ID is required to load pinned xT annotations.")
         return events
 
     sidecar_path = Path(xt_match_dir) / f"{match_id}.csv"
     if not sidecar_path.exists():
+        if strict:
+            raise FileNotFoundError(f"Pinned xT match sidecar is missing: {sidecar_path}")
         return events
 
     xt_columns = ["action_id", "xT", "scores_xT", "concedes_xT"]
     xt_sidecar = pd.read_csv(sidecar_path, usecols=lambda c: c in xt_columns)
     if xt_sidecar.empty:
+        if strict:
+            raise ValueError(f"Pinned xT match sidecar is empty: {sidecar_path}")
         return events
+    if strict:
+        missing = set(xt_columns) - set(xt_sidecar.columns)
+        if missing or xt_sidecar["action_id"].duplicated().any():
+            raise ValueError(f"Pinned xT match sidecar has missing columns or duplicate action IDs: {sidecar_path}; {missing}")
+        if not events["action_id"].isin(xt_sidecar["action_id"]).all():
+            raise ValueError(f"Pinned xT match sidecar does not cover all event action IDs: {sidecar_path}")
 
     events = events.drop(columns=[c for c in ["xT", "scores_xT", "concedes_xT"] if c in events.columns])
     return events.merge(xt_sidecar, on="action_id", how="left")
@@ -790,8 +803,8 @@ def save_xt_outputs(
     all_events: Iterable[pd.DataFrame],
     xt_fit: XTXYGLMFit | np.ndarray,
     fit_metadata: dict,
-    output_dir: str | Path = XT_DIR,
-    xt_match_dir: str | Path = XT_MATCH_DIR,
+    output_dir: str | Path,
+    xt_match_dir: str | Path,
 ) -> None:
     output_dir = Path(output_dir)
     xt_match_dir = Path(xt_match_dir)

@@ -1029,6 +1029,7 @@ class WrapperValidationTests(unittest.TestCase):
             skip_epv=True,
             skip_features=False,
             feature_run_id="feature_run",
+            xt_version="legacy",
             bundle_id="bundle",
             skip_train=False,
             overwrite=False,

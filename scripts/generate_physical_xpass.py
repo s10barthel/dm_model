@@ -135,11 +135,13 @@ from project_config import (
     get_runtime_physical_xpass_dir,
     infer_feature_run_intended_receiver_modes,
     infer_feature_run_return_types,
+    load_feature_run_metadata,
     load_match_universe,
     resolve_feature_root,
     resolve_feature_run_id,
     write_run_metadata,
 )
+from xt_versions import resolve_xt_version
 from scripts.visualize_hawkeye import resolve_ballreceipt, resolve_hawkeye_png_frames
 
 
@@ -270,6 +272,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="pc-xPass only: rank max/top-N target locations by xPass times interpolated xT, while exporting xPass values.",
     )
+    parser.add_argument("--xt-version", default=None,
+                        help="Completed xT version for --top-xt; defaults to the selected Sportec feature run's version.")
     parser.add_argument(
         "--reaction-time",
         "--reaction_time",
@@ -616,6 +620,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--top-n-values is only supported with --pc-xpass.")
     if bool(args.top_xt) and not bool(args.pc_xpass):
         parser.error("--top-xt requires --pc-xpass.")
+    if args.xt_version and not args.top_xt:
+        parser.error("--xt-version requires --top-xt.")
     for attr_name, flag_name in [
         ("lane_power", "--lane-power"),
         ("control_power", "--control-power"),
@@ -676,6 +682,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     uncertainty.configure_args(parser, args)
     if args.pc_xpass and not enabled_physical_xpass_metrics_from_args(args):
         parser.error("At least one pc-xPass metric must be exported; uncertainty supports max and top-pass<N>")
+    if args.top_xt:
+        source_run = args.sportec_feature_run_id
+        if source_run is None and not args.no_sportec:
+            source_run = resolve_feature_run_id(None, required=True, allow_latest=True)
+        source_version = None
+        if source_run:
+            run_id = resolve_feature_run_id(source_run, required=True, allow_latest=True)
+            source_version = (load_feature_run_metadata(run_id, required=True) or {}).get("xt_version") or "legacy"
+        requested_version = resolve_xt_version(args.xt_version).version if args.xt_version else None
+        if source_version and requested_version and requested_version != source_version:
+            parser.error(f"--xt-version {requested_version!r} differs from feature run xT version {source_version!r}.")
+        if not (args.xt_version or source_version):
+            parser.error("--top-xt requires --xt-version when no Sportec feature run is selected.")
+        args.xt_version = requested_version or resolve_xt_version(source_version).version
     return args
 
 
@@ -1377,6 +1397,7 @@ def prewarm_runtime_items(
             position_discount_power=float(args.position_discount_power),
             position_discount_distance=float(args.position_discount_distance),
             top_xt=bool(getattr(args, "top_xt", False)),
+            xt_version=getattr(args, "xt_version", None),
             pass_height_model=None if args.pc_xpass else getattr(args, "_pass_height_model", None),
             pass_height_model_id=None if args.pc_xpass else getattr(args, "pass_height_model_id", None),
             pass_height_identity=None if args.pc_xpass else getattr(args, "_pass_height_identity", None),
@@ -1610,6 +1631,7 @@ def write_runtime_dataset_metadata(
             position_discount_power=float(args.position_discount_power),
             position_discount_distance=float(args.position_discount_distance),
             top_xt=bool(getattr(args, "top_xt", False)),
+            xt_version=getattr(args, "xt_version", None),
         )
         if bool(getattr(args, "pc_xpass", False))
         else physical_xpass_as_default_metadata(

@@ -7515,7 +7515,7 @@ class PhysicalXPassTests(unittest.TestCase):
         self.assertEqual(defense_args.max_player_speed_def, 4)
 
     def test_generate_physical_xpass_cli_accepts_top_xt_for_pc_xpass_only(self) -> None:
-        args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-xt"])
+        args = generate_physical_xpass.parse_args(["--pc-xpass", "--top-xt", "--no-sportec", "--xt-version", "legacy"])
 
         self.assertTrue(args.top_xt)
         with self.assertRaises(SystemExit):

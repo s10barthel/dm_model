@@ -73,15 +73,17 @@ The refresh validates their contents. If regeneration is needed:
 ```powershell
 .\.venv\Scripts\python.exe scripts/generate_xt.py `
   --train-count 765 --use-interaction `
-  --use-nonlinear x --use-nonlinear y --overwrite
+  --use-nonlinear x --use-nonlinear y
 ```
 
-Wait for annotation generation to finish. Create a new derived feature run:
+The command prints a new xT version ID under `data/xT/<version>/`. Wait for
+annotation generation to finish. Create a new derived feature run:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
   --extend-feature-run-id feature_20260910T110759_053479_8b508137 `
   --refresh-target-family xt `
+  --xt-version <version> `
   --artifact-copy-mode hardlink
 ```
 
@@ -91,6 +93,7 @@ To refresh under the same feature-run ID instead:
 .\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
   --extend-feature-run-id feature_20260910T110759_053479_8b508137 `
   --refresh-target-family xt `
+  --xt-version <version> `
   --in-place
 ```
 

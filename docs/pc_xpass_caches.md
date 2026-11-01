@@ -54,6 +54,12 @@ python scripts/generate_physical_xpass.py --pc-xpass --pc-xpass-id dec045
 python scripts/run_hawkeye.py --pc-xpass --pc-xpass-id dec045
 ```
 
+For `--top-xt`, the command uses the selected Sportec feature run's recorded xT
+version (the latest feature run by default). With `--no-sportec`, pass
+`--xt-version <version>`. An explicit version must agree with the selected
+feature run. The selected surface path and checksum are recorded in pc-xPass
+cache metadata.
+
 Each version lives in `data/pc_xpass/<pc_xpass_id>/`, with root metadata and separate
 `sportec`, `skillcorner`, `benchmark`, and `hawkeye` subdirectories. The command
 prints its generated ID.

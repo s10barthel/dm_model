@@ -62,6 +62,7 @@ def make_args(
         intended_receiver_model_id=model_id,
         replace_intended_receiver_model=replace_model,
         refresh_target_families=refresh_target_families or [],
+        xt_version="fixture_xt" if refresh_target_families and "xt" in refresh_target_families else None,
         pass_height=pass_height,
         pass_height_threshold=pass_height_threshold,
         extend_relative_speed_edge_features=extend_relative_speed_edge_features,
@@ -109,6 +110,8 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
                 patch.object(generator, "load_feature_run_metadata", return_value=loaded_metadata),
                 patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(generator, "generate_run_id", return_value="generated"),
+                patch.object(generator, "resolve_xt_version", return_value=SimpleNamespace(
+                    version="fixture_xt", metadata_sha256="fixture_sha256")),
             ):
                 return generator.build_extension_plan(args, python="python")
 
@@ -188,6 +191,14 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         plan = self.build_plan(make_args(refresh_target_families=["epv", "epv", "goal_distance"]))
 
         self.assertEqual(plan.refresh_target_families, ["epv", "goal_distance"])
+
+    def test_non_xt_extension_inherits_and_forwards_pinned_version(self) -> None:
+        metadata = make_metadata()
+        metadata.update(xt_version="fixture_xt", xt_fit_metadata_sha256="fixture_sha256")
+        plan = self.build_plan(make_args(requested_return_types=["next_3"]), metadata)
+        self.assertTrue(plan.commands)
+        self.assertTrue(all(command[command.index("--xt-version") + 1] == "fixture_xt"
+                            for command in plan.commands))
 
     def test_xt_refresh_is_dedicated_and_rejects_mixed_changes(self) -> None:
         plan = self.build_plan(make_args(refresh_target_families=["xt", "xt"]))
@@ -725,6 +736,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             next_action_conditions_enabled=False,
         )
         metadata["train_split_percent"] = 60
+        metadata["xt_version"] = "fixture_xt"
         args = make_args(run_id=None, in_place=True, num_workers="3", worker_thread_limit=2)
 
         steps = generator.carry_extension_steps(args, metadata, "base")
@@ -741,6 +753,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
             self.assertIn("--next-action-conditions-off", command)
             self.assertEqual(command[command.index("--train-split") + 1], "60")
             self.assertEqual(command[command.index("--run-id") + 1], "base")
+            self.assertEqual(command[command.index("--xt-version") + 1], "fixture_xt")
             self.assertEqual(
                 [command[index + 1] for index, value in enumerate(command) if value == "--return_type"],
                 ["next_5", "in_3"],
@@ -918,6 +931,7 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
             return_types=["disc_0.9"],
             intended_receiver_modes=["original", "angle_only"],
             intended_receiver_model_id=None,
+            xt_version="fixture_xt",
             next_action_conditions_enabled=True,
             num_workers="auto",
             worker_thread_limit=2,
@@ -929,6 +943,8 @@ class FeatureRunExtensionExecutionTests(unittest.TestCase):
                 patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(generator, "run_generation_steps"),
                 patch.object(generator, "write_latest_run"),
+                patch.object(generator, "resolve_xt_version", return_value=SimpleNamespace(
+                    version="fixture_xt", metadata_sha256="fixture_sha256")),
             ):
                 generator.run_full_generation(args)
 

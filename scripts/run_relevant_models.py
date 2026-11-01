@@ -75,6 +75,7 @@ from project_config import (
     write_run_metadata,
 )
 from datatools.sportec_seasons import add_season_argument, select_season_match_ids
+from xt_versions import xt_match_dir_for_feature_root
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -258,7 +259,8 @@ def load_match(
     raw_events = events
     events = apply_run_policy(events, feature_root, match_id) if feature_root is not None else events
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True,
-                  reception_policy=run_version(feature_root))
+                  reception_policy=run_version(feature_root),
+                  xt_match_dir=xt_match_dir_for_feature_root(feature_root))
     match.sportec_canonical_source = raw_events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,

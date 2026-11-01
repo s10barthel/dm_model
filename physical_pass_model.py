@@ -31,12 +31,14 @@ from torch_geometric.data import Batch, Data
 from datatools import config
 from datatools.config import FIELD_SIZE, LABEL_INDEX
 from datatools.utils import filter_features_and_labels
-from project_config import get_physical_xpass_match_path
+from project_config import XT_LEGACY_DIR, get_physical_xpass_match_path
+from xt_versions import resolve_xt_version
 
-PC_XPASS_XT_SURFACE_PATH = Path(__file__).resolve().parent / "data" / "xT" / "xT_xy_surface.csv"
+PC_XPASS_XT_SURFACE_PATH = XT_LEGACY_DIR / "xT_xy_surface.csv"
 PC_XPASS_XT_RANKING_MODE = "xpass_times_xt"
 PC_XPASS_DEFAULT_RANKING_MODE = "xpass"
 _PC_XPASS_XT_SURFACE_CACHE: dict[Path, dict[str, Any]] = {}
+_PC_XPASS_XT_VERSION_PATHS: dict[str, Path] = {}
 
 PHYSICAL_XPASS_SOURCE = "accessible_space_max_player_cum_prob_as_defaults"
 PHYSICAL_XPASS_LEGACY_SOURCE = "accessible_space_player_cum_prob"
@@ -331,9 +333,17 @@ def physical_xpass_as_default_metadata(
     }
 
 
-def _load_pc_xpass_xt_surface() -> dict[str, Any]:
+def _load_pc_xpass_xt_surface(xt_version: str | None = None) -> dict[str, Any]:
     """Load the canonical xT surface once per process and validate its grid."""
-    path = PC_XPASS_XT_SURFACE_PATH
+    if xt_version is None:
+        path = PC_XPASS_XT_SURFACE_PATH
+    elif xt_version == "latest":
+        path = resolve_xt_version(xt_version).root / "xT_xy_surface.csv"
+    else:
+        path = _PC_XPASS_XT_VERSION_PATHS.get(xt_version)
+        if path is None:
+            path = resolve_xt_version(xt_version).root / "xT_xy_surface.csv"
+            _PC_XPASS_XT_VERSION_PATHS[xt_version] = path
     cached = _PC_XPASS_XT_SURFACE_CACHE.get(path)
     if cached is not None:
         return cached
@@ -371,9 +381,10 @@ def _load_pc_xpass_xt_surface() -> dict[str, Any]:
     return cached
 
 
-def _pc_xpass_xt_values(target_x: np.ndarray, target_y: np.ndarray) -> np.ndarray:
+def _pc_xpass_xt_values(target_x: np.ndarray, target_y: np.ndarray,
+                        xt_version: str | None = None) -> np.ndarray:
     """Bilinearly interpolate xT at centred pc-xPass target coordinates."""
-    surface = _load_pc_xpass_xt_surface()
+    surface = _load_pc_xpass_xt_surface(xt_version)
     x_grid = surface["x"]
     y_grid = surface["y"]
     values = surface["values"]
@@ -436,6 +447,7 @@ def pc_xpass_metadata(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
 ) -> dict[str, Any]:
     if teammate_policy not in {PHYSICAL_XPASS_TEAMMATE_POLICY_IGNORE, PHYSICAL_XPASS_TEAMMATE_POLICY_CONSIDER}:
         raise ValueError(
@@ -498,7 +510,7 @@ def pc_xpass_metadata(
     reaction_time_value = None if reaction_time_mode == PC_XPASS_REACTION_TIME_MODE_DIST_PASS else float(reaction_time)
     v0_values = as_default_v0_values(max_speed=max_speed_value, speed_step=speed_step_value, min_speed=min_speed_value)
     ranking_mode = PC_XPASS_XT_RANKING_MODE if bool(top_xt) else PC_XPASS_DEFAULT_RANKING_MODE
-    xt_surface = _load_pc_xpass_xt_surface() if bool(top_xt) else None
+    xt_surface = _load_pc_xpass_xt_surface(xt_version) if bool(top_xt) else None
     return {
         "metric": top_metric,
         "metric_family": PC_XPASS_SOURCE,
@@ -520,6 +532,7 @@ def pc_xpass_metadata(
             "uncertainty_metric_definition": uncertainty.DEFINITION} if uncertainty_config else {}),
         "ranking_mode": ranking_mode,
         "top_xt": bool(top_xt),
+        **({"xt_version": xt_version} if bool(top_xt) and xt_version is not None else {}),
         "xt_surface": None if xt_surface is None else {
             "path": xt_surface["path"],
             "sha256": xt_surface["sha256"],
@@ -3376,6 +3389,7 @@ def compute_graph_pc_xpass_metrics(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
 ) -> pd.Series:
     validate_ball_dec(ball_dec)
     distance_settings = distance_control.configuration(
@@ -3570,7 +3584,8 @@ def compute_graph_pc_xpass_metrics(
                 np.nan,
             )
 
-    xt_values = _pc_xpass_xt_values(target_x, target_y) if bool(top_xt) else None
+    xt_values = (_pc_xpass_xt_values(target_x, target_y) if xt_version is None
+                 else _pc_xpass_xt_values(target_x, target_y, xt_version)) if bool(top_xt) else None
     uncertainty_weights = uncertainty.neighbourhood(speeds, elevations, angles, uncertainty_config) if uncertainty_config else None
     if diagnostic_details is not None and uncertainty_config:
         diagnostic_details["uncertainty_outcomes"] = {}
@@ -3758,6 +3773,7 @@ def compute_graphs_pc_xpass_metrics(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
 ) -> list[pd.Series]:
     return [
         compute_graph_pc_xpass_metrics(
@@ -3807,6 +3823,7 @@ def compute_graphs_pc_xpass_metrics(
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
             top_xt=top_xt,
+            xt_version=xt_version,
         )
         for index, graph in enumerate(graphs)
     ]
@@ -4711,6 +4728,7 @@ def _runtime_cache_metadata(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
 ) -> dict[str, Any]:
     if (blocking_radius or uncertainty_config) and source != PC_XPASS_SOURCE:
         raise ValueError("Blocking radius and uncertainty are supported only for pc-xPass")
@@ -4763,6 +4781,7 @@ def _runtime_cache_metadata(
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
             top_xt=top_xt,
+            xt_version=xt_version,
         )
     if source == PHYSICAL_XPASS_SOURCE:
         return physical_xpass_as_default_metadata(
@@ -4865,6 +4884,7 @@ def _ensure_runtime_physical_xpass_cache(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
     create_if_missing: bool = True,
 ) -> dict[str, Any]:
     cache_root = Path(cache_dir)
@@ -4921,6 +4941,7 @@ def _ensure_runtime_physical_xpass_cache(
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
         top_xt=top_xt,
+        xt_version=xt_version,
     )
     if metadata_path.exists():
         if source == PC_XPASS_SOURCE:
@@ -5850,6 +5871,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
     position_discount_power = float(task.get("position_discount_power", PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER))
     position_discount_distance = float(task.get("position_discount_distance", PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE))
     top_xt = bool(task.get("top_xt", False))
+    xt_version = task.get("xt_version")
 
     if source == PHYSICAL_XPASS_SOURCE:
         computed_probs = compute_graphs_physical_xpass_metrics_as_defaults(
@@ -5920,6 +5942,7 @@ def _compute_runtime_physical_xpass_chunk(task: dict[str, Any]) -> dict[str, obj
             position_discount_power=position_discount_power,
             position_discount_distance=position_discount_distance,
             top_xt=top_xt,
+            xt_version=xt_version,
         )
     else:
         computed_probs = [
@@ -6298,6 +6321,7 @@ def prewarm_physical_xpass_runtime_cache(
     position_discount_power: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_POWER,
     position_discount_distance: float = PC_XPASS_DEFAULT_POSITION_DISCOUNT_DISTANCE,
     top_xt: bool = False,
+    xt_version: str | None = None,
     dry_run: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
@@ -6400,6 +6424,7 @@ def prewarm_physical_xpass_runtime_cache(
         position_discount_power=position_discount_power,
         position_discount_distance=position_discount_distance,
         top_xt=top_xt,
+        xt_version=xt_version,
         create_if_missing=not bool(dry_run),
     )
     refresh = bool(refresh) or bool(cache_metadata.get("_force_refresh_runtime_rows", False))
@@ -6797,6 +6822,7 @@ def prewarm_physical_xpass_runtime_cache(
             "position_discount_power": float(position_discount_power),
             "position_discount_distance": float(position_discount_distance),
             "top_xt": bool(top_xt),
+            "xt_version": xt_version,
         }
         progress = tqdm(
             total=len(misses),

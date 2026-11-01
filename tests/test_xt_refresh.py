@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -116,6 +117,26 @@ def test_all_variants_preserved_source_safe_and_noop(sample, tmp_path):
     second = refresh_xt(output, metadata, xt_match_dir=sidecars, event_dir=event_dir)
     assert second["rewritten_files"] == 0
     assert signatures == {p: p.stat().st_ino for p in signatures}
+
+
+def test_two_selected_xt_versions_produce_distinct_derived_targets(sample, tmp_path):
+    root, event_dir, sidecars_a, metadata, _, _, _ = sample
+    sidecars_b = tmp_path / "version_b" / "matches"
+    sidecars_b.mkdir(parents=True)
+    alternate = pd.read_csv(sidecars_a / "m.csv")
+    alternate["xT"] = [0.2, 0.1, 0.9]
+    alternate.to_csv(sidecars_b / "m.csv", index=False)
+    outputs = []
+    for version, sidecars in (("version_a", sidecars_a), ("version_b", sidecars_b)):
+        output = tmp_path / f"derived_{version}"
+        clone_feature_artifacts(root, output)
+        report = refresh_xt(output, metadata, xt_match_dir=sidecars,
+                            xt_version=version, event_dir=event_dir)
+        assert report["xt_version"] == version
+        labels = torch.load(get_action_label_dir("next_3", "original", root=output) / "m.pt",
+                            weights_only=True)
+        outputs.append(labels[:, TARGET_COLUMNS])
+    assert not torch.equal(*outputs)
 
 
 @pytest.mark.parametrize("problem", ["missing", "empty", "duplicate", "incomplete", "invalid", "bad_id", "bad_anchor", "identity", "metadata"])
@@ -261,8 +282,10 @@ def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, mo
     monkeypatch.setattr(generator, "resolve_feature_run_id", lambda *a, **kw: "source")
     monkeypatch.setattr(generator, "load_feature_run_metadata", lambda *a, **kw: metadata.copy())
     monkeypatch.setattr(generator, "get_feature_run_root", lambda run_id: tmp_path / run_id)
+    monkeypatch.setattr(generator, "resolve_xt_version", lambda *a, **kw: SimpleNamespace(
+        version="fixture_xt", match_dir=sidecars, metadata_sha256="fixture_sha256"))
     argv = ["generate_relevant_features.py", "--extend-feature-run-id", "source",
-            "--refresh-target-family", "xt", "--xt-match-dir", str(sidecars), *destination_flags]
+            "--refresh-target-family", "xt", "--xt-version", "fixture_xt", *destination_flags]
     if not overwrite:
         argv.extend(["--run-id", "derived"])
     monkeypatch.setattr(sys, "argv", argv)
@@ -307,6 +330,9 @@ def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, mo
         assert latest == ([] if overwrite else [("feature", "derived")])
         output = json.loads((target / "metadata.json").read_text())
         assert output["status"] == "completed" and output["carry_variant"] == metadata["carry_variant"]
+        assert output["xt_version"] == "fixture_xt"
+        assert output["xt_fit_metadata_sha256"] == "fixture_sha256"
+        assert json.loads((target / "xt_refresh_report.json").read_text())["xt_version"] == "fixture_xt"
         assert output["return_types"] == RETURNS
         assert output["pass_height_threshold_meters"] == 3.5
         assert output["intended_receiver_model_id"] == metadata["intended_receiver_model_id"]
@@ -320,4 +346,5 @@ def test_refresh_execution_publication_and_source_integrity(sample, tmp_path, mo
         assert output["extension_history"][0] == historical_entry
         assert output["extension_history"][-1]["mode"] == "in_place"
         assert output["extension_history"][-1]["status"] == ("failed" if failure else "completed")
+        assert output["extension_history"][-1]["xt_version"] == "fixture_xt"
         assert output["command"] == generator.subprocess.list2cmdline(argv)

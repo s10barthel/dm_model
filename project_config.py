@@ -39,7 +39,9 @@ ACTION_GRAPH_DIR = FEATURE_DIR / "action_graphs"
 ACTION_GRAPH_INTENT_TRAIN_DIR = FEATURE_DIR / "action_graphs_intent_train"
 POST_ACTION_GRAPH_DIR = FEATURE_DIR / "post_action_graphs"
 XT_DIR = DATA_ROOT / "xT"
-XT_MATCH_DIR = XT_DIR / "matches"
+XT_LEGACY_VERSION = "legacy"
+XT_LEGACY_DIR = XT_DIR / XT_LEGACY_VERSION
+XT_MATCH_DIR = XT_LEGACY_DIR / "matches"
 GOAL_DISTANCE_DIR = DATA_ROOT / "goal_distance"
 GOAL_DISTANCE_MATCH_DIR = GOAL_DISTANCE_DIR / "matches"
 EPV_DIR = DATA_ROOT / "epv"
@@ -173,7 +175,6 @@ def ensure_project_dirs() -> None:
         FEATURE_DIR,
         FEATURE_RUNS_DIR,
         XT_DIR,
-        XT_MATCH_DIR,
         GOAL_DISTANCE_DIR,
         GOAL_DISTANCE_MATCH_DIR,
         EPV_DIR,

@@ -22,6 +22,7 @@ from datatools.xt import XTXYLogitModel, annotate_match_xt
 from datatools.xt_refresh import (TARGET_COLUMNS, file_signature, fingerprint, read_annotated_events,
                                  refresh_inventory, refresh_xt)
 from project_config import atomic_write_json, get_resolved_action_dir
+from xt_versions import resolve_xt_version
 
 
 def main():
@@ -29,7 +30,9 @@ def main():
     parser.add_argument('--source', type=Path,
                         default=Path('data/features/runs/feature_20260910T110759_053479_8b508137'))
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--xt-version', required=True)
     args = parser.parse_args()
+    selected_xt = resolve_xt_version(args.xt_version)
     output = args.output or args.source.parent.parent / 'xt_refresh_pilots' / datetime.now().strftime('pilot_%Y%m%dT%H%M%S')
     if output.exists():
         raise FileExistsError(output)
@@ -53,9 +56,9 @@ def main():
     atomic_write_json(seed / 'metadata.json', metadata)
     original_signatures = {p: file_signature(p) for p in source_files}
     original_hashes = {p: fingerprint(p) for p in source_files if 'graphs' not in p.parent.name}
-    production_annotations = {mid: fingerprint(Path('data/xT/matches') / f'{mid}.csv') for mid in match_ids}
+    production_annotations = {mid: fingerprint(selected_xt.match_dir / f'{mid}.csv') for mid in match_ids}
     for mid in match_ids[1:]:
-        shutil.copy2(Path('data/xT/matches') / f'{mid}.csv', sidecars / f'{mid}.csv')
+        shutil.copy2(selected_xt.match_dir / f'{mid}.csv', sidecars / f'{mid}.csv')
     atomic_write_json(output / 'source_baseline.json', {str(p): {'signature': original_signatures[p], 'sha256': original_hashes.get(p)} for p in source_files})
     clone_stats = clone_feature_artifacts(seed, derived)
     try:
@@ -65,7 +68,7 @@ def main():
     else:
         raise AssertionError('Missing annotation was accepted')
     assert all(file_signature(p) == original_signatures[p] for p in source_files)
-    fit = json.loads(Path('data/xT/fit_metadata.json').read_text())
+    fit = selected_xt.metadata
     model = XTXYLogitModel(coefficients=fit['coefficients'], terms=tuple(fit['terms']))
     events = pd.read_csv(Path('data/event_synced') / f'{match_ids[0]}.csv')
     annotated, _ = annotate_match_xt(events, model)
@@ -131,7 +134,7 @@ def main():
     assert not changed_signatures, changed_signatures
     changed_source = [str(p) for p, digest in original_hashes.items() if fingerprint(p) != digest]
     assert not changed_source, changed_source
-    changed_annotations = [mid for mid, digest in production_annotations.items() if fingerprint(Path('data/xT/matches') / f'{mid}.csv') != digest]
+    changed_annotations = [mid for mid, digest in production_annotations.items() if fingerprint(selected_xt.match_dir / f'{mid}.csv') != digest]
     assert not changed_annotations, changed_annotations
     graphs = [p for p in source_files if 'graphs' in p.parent.name]
     assert all(os.path.samefile(p, derived / p.relative_to(args.source)) for p in graphs)

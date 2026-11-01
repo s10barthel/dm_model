@@ -27,6 +27,7 @@ from project_config import (
     DEFAULT_INTENDED_RECEIVER_MODEL_ID,
     INTENDED_RECEIVER_MODE_ANGLE_ONLY,
     INTENDED_RECEIVER_MODE_MODEL,
+    XT_MATCH_DIR,
     parse_return_type,
 )
 
@@ -50,6 +51,7 @@ class Match(ABC):
         next_action_conditions_enabled: bool = True,
         reception_policy: str = "legacy_elastic_v1",
         max_pass_duration: float | None = None,
+        xt_match_dir=None,
     ):
         from datatools.reception_policy import apply_policy
         self.reception_policy = reception_policy
@@ -67,7 +69,9 @@ class Match(ABC):
         self.graph_features_by_dir: Dict[str, object] = {}
         self.graph_feature_action_indices_by_dir: Dict[str, object] = {}
         self.events = utils.sanitize_expected_goal(self.events)
-        self.events = merge_xt_annotations(self.events, self.match_id)
+        self.events = merge_xt_annotations(self.events, self.match_id,
+                                           xt_match_dir=XT_MATCH_DIR if xt_match_dir is None else xt_match_dir,
+                                           strict=xt_match_dir is not None)
         self.events = merge_goal_distance_annotations(self.events, self.match_id)
         self.events = merge_epv_annotations(self.events, self.match_id)
 

@@ -265,10 +265,10 @@ Then install PyTorch and PyTorch Geometric for the machine that will actually ru
 Use `scripts/main.py` when you want the scoped end-to-end runner without any visualization steps.
 
 ```powershell
-python scripts/main.py --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only
+python scripts/main.py --target-family goal --return_type disc_0.9 --intended-receiver-mode angle_only --xt-version <matching_xt_version>
 python scripts/main.py --target-family xt --return_type next_5 --intended-receiver-mode angle_only
-python scripts/main.py --target-family goal_distance --return_type next_3 --intended-receiver-mode original
-python scripts/main.py --target-family epv --return_type next_5 --intended-receiver-mode angle_only --bundle-id <source_bundle_id>
+python scripts/main.py --target-family goal_distance --return_type next_3 --intended-receiver-mode original --xt-version <matching_xt_version>
+python scripts/main.py --target-family epv --return_type next_5 --intended-receiver-mode angle_only --bundle-id <source_bundle_id> --xt-version <matching_xt_version>
 ```
 
 The runner executes these stages in order:
@@ -292,7 +292,8 @@ Useful options:
 - `scripts/main.py` still forwards the legacy velocity-edge switches `--v-edge-features`, `--v-edge-features-no-poss`, and `--no-v-edge-features` (default: off), plus the older boolean feature-profile switches listed in its [CLI reference](#scriptsmainpy).
 - For explicit selections such as `--vel-node-features none --vx defending --vy defending`, call `scripts/train_relevant_models.py` directly. These selectors are shared with `train.py` and are not forwarded by `scripts/main.py`. Use `--skip-train --bundle-id <bundle_id>` when continuing the pipeline with a separately trained bundle. See [training input controls](#training-input-controls-and-automatic-exclusions).
 - `--benchmark-input-dir <path>` to point `scripts/run_benchmark.py` at a local benchmark checkout
-- `--overwrite` to rebuild supported preprocessing and target-artifact outputs
+- `--overwrite` to rebuild supported preprocessing and non-xT target artifacts; xT generation always creates a new version
+- `--xt-version <id>` to select a completed version when feature generation runs without generating xT
 - `--relevant-split train|test|all` to control `scripts/run_relevant_models.py`
 - `--device cuda:0|cpu` for evaluation and inference scripts
 - `--dry-run` to print the resolved commands without running them
@@ -381,15 +382,10 @@ Inputs:
 
 Outputs:
 
-- for xT:
-  - `data/xT/xT.csv`
-  - `data/xT/xT_grid.csv`
-  - `data/xT/xT_source_grid.csv`
-  - `data/xT/xT_xy_surface.csv`
-  - `data/xT/xT_glm_fit_sample.csv`
-  - `data/xT/xT_xy_surface_3d.png`
-  - `data/xT/fit_metadata.json`
-  - `data/xT/matches/*.csv`
+- for xT: `data/xT/<version>/` contains `xT.csv`, `xT_grid.csv`,
+  `xT_source_grid.csv`, `xT_xy_surface.csv`, `xT_glm_fit_sample.csv`,
+  `xT_xy_surface_3d.png`, `fit_metadata.json`, and `matches/*.csv`.
+  `data/xT/latest.json` points to the latest complete version.
 - for goal-distance:
   - `data/goal_distance/goal_distance.csv`
   - `data/goal_distance/metadata.json`
@@ -405,33 +401,36 @@ Useful options:
 - `--match-id DFL-MAT-...` to export only selected matches
 - `--limit N` to restrict export generation to the first `N` available synced matches
 - `--source-grid-l N` and `--source-grid-w N` to fit the socceraction source xT grid at custom dimensions; defaults are `12` and `8`
-- `--reuse-source-grid` to load `data/xT/xT_source_grid.csv` and skip socceraction source-grid fitting
+- `--reuse-source-grid --source-xt-version <version>` to reuse a completed version's source grid
 - `--use-interaction` to add the x-depth by centrality interaction to the x/y logit GLM
 - `--use-nonlinear x` and `--use-nonlinear y` to add constrained squared and cubic GLM terms; repeat the flag to use both axes
-- `--fit-only` to write only model artifacts for testing, without updating `data/xT/xT.csv` or `data/xT/matches/*.csv`
-- `--overwrite` to rebuild existing outputs
+- `--fit-only` to save a partial version containing model artifacts only; it cannot be used for a feature run
+- `--version <id>` to name the new version; otherwise a unique ID is generated
 
 This is a separate post-preprocessing step. It reads canonical synced event CSVs, fits or exports the sidecar targets, and writes per-match artifacts used later during feature generation.
-xT generation fits an upstream socceraction grid on training actions, writes it to `xT_source_grid.csv`, then distills that source grid into a smooth x/y logit GLM surface. `normalized_x` is `start_x / 105`; `normalized_centrality` is the smooth symmetric feature `sin(pi * start_y / 68)`. Optional interaction and constrained squared/cubic terms can make this surface more flexible. Monotonicity toward goal and toward the pitch center is enforced during fitting and checked again before outputs are written; if the final guardrail detects a tiny violation, generation records the warning in metadata and still writes the outputs for inspection. Event-level `xT` values come from the GLM surface with shot values floored by `xG`; `xT_grid.csv` is retained as a compatibility projection of that surface onto the legacy 12x8 cell centers. Use `--fit-only` when comparing model variants without changing event-level sidecars. For one-time migration from an old xT run, rename the old socceraction `data/xT/xT_grid.csv` to `data/xT/xT_source_grid.csv`, then run `python scripts/generate_xt.py --reuse-source-grid --overwrite`.
+xT generation fits an upstream socceraction grid on training actions, writes it to `xT_source_grid.csv`, then distills that source grid into a smooth x/y logit GLM surface. `normalized_x` is `start_x / 105`; `normalized_centrality` is the smooth symmetric feature `sin(pi * start_y / 68)`. Optional interaction and constrained squared/cubic terms can make this surface more flexible. Monotonicity toward goal and toward the pitch center is enforced during fitting and checked again before outputs are written; if the final guardrail detects a tiny violation, generation records the warning in metadata and still writes the outputs for inspection. Event-level `xT` values come from the GLM surface with shot values floored by `xG`; `xT_grid.csv` is retained as a compatibility projection of that surface onto the legacy 12x8 cell centers. Each invocation publishes a new version; subset and fit-only builds are marked partial and cannot be selected for feature runs. Historical unversioned artifacts were moved once with `scripts/migrate_xt_legacy.py` to `data/xT/legacy`.
+
+The selected xT version and feature run must use the same split manifest. For the migrated `legacy` version, use `--train-count 765` when creating or refreshing a feature run.
 
 EPV computes `sum(pass_intent * pass_score)` across players, where `pass_score` combines pass success with the scoring and conceding outcome models. Shot actions use `max(epv, xG)`, matching the xT shot-value convention.
 
 ### 3. Generate graph features and labels
 
 ```powershell
-python scripts/generate_relevant_features.py --return_type disc_0.9
-python scripts/generate_relevant_features.py --return_type disc_0.9 --return_type next_5 --return_type next_3
-python scripts/generate_relevant_features.py --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
-python scripts/generate_relevant_features.py --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
-python scripts/generate_relevant_features.py --return_type disc_0.9 --next-action-conditions-off
-python scripts/generate_relevant_features.py --return_type disc_0.9 --num-workers auto --worker-thread-limit 1
+python scripts/generate_relevant_features.py --xt-version <version> --return_type disc_0.9
+python scripts/generate_relevant_features.py --xt-version <version> --return_type disc_0.9 --return_type next_5 --return_type next_3
+python scripts/generate_relevant_features.py --xt-version <version> --return_type next_5 --return_type next_5_skip1 --return_type disc_0.9_skip1
+python scripts/generate_relevant_features.py --xt-version <version> --run-id feature_20260414T123456_abcdef12 --return_type disc_0.9 --intended-receiver-model-id success_intent/<model_run_id>
+python scripts/generate_relevant_features.py --xt-version <version> --return_type disc_0.9 --next-action-conditions-off
+python scripts/generate_relevant_features.py --xt-version <version> --return_type disc_0.9 --num-workers auto --worker-thread-limit 1
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<model_run_id>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --return_type disc_max_0.9 --in-place
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --intended-receiver-model-id success_intent/<new_model_run_id> --replace-intended-receiver-model
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv
+python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family xt --xt-version <version>
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --refresh-target-family epv --in-place
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height
-python scripts/generate_relevant_features.py --return_type disc_0.9 --pass-height --pass-height-threshold 1.8
+python scripts/generate_relevant_features.py --xt-version <version> --return_type disc_0.9 --pass-height --pass-height-threshold 1.8
 python scripts/generate_relevant_features.py --extend-feature-run-id <base_feature_run_id> --pass-height --pass-height-threshold 1.8
 ```
 
@@ -441,10 +440,10 @@ Inputs:
 - `data/event_synced/*.csv`
 - `data/lineup/line_up.parquet`
 - `data/splits/match_splits.json`
-- optional sidecars from `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
+- xT sidecars from the completed `data/xT/<xt_version>/matches/*.csv` selected by `--xt-version`, plus optional goal-distance and EPV sidecars
 - optional learned intended-receiver checkpoint referenced by `--intended-receiver-model-id`
 
-By default, each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. `--extend-feature-run-id` creates a derived run by default, hard-linking unchanged artifacts from a completed base run and generating only the requested additions or refreshes. `--artifact-copy-mode copy` explicitly opts into a full copy. `--in-place` applies the requested extension or refresh to the existing run; `--overwrite-feature-run` is a compatibility alias with identical behavior. Both spellings may be supplied together. In-place operations do not accept `--run-id`, retain the base run ID, and leave `latest.json` unchanged. Operation flags still authorize specific changes: a different receiver model requires `--replace-intended-receiver-model`, and target refresh requires `--refresh-target-family`. A destination flag alone does not regenerate artifacts. Extensions must preserve the base run's split and next-action selection setting. xT-only refresh inherits those settings unless explicitly supplied.
+By default, each invocation creates a new feature-artifact run under `data/features/runs/<feature_run_id>/` and updates `data/features/runs/latest.json` after completion. New runs require `--xt-version <id>`; explicit `--xt-version latest` resolves once and records the concrete ID in run metadata. An xT refresh also requires `--xt-version`. Other extensions inherit the base run's xT version. `--extend-feature-run-id` creates a derived run by default, hard-linking unchanged artifacts from a completed base run and generating only the requested additions or refreshes. `--artifact-copy-mode copy` explicitly opts into a full copy. `--in-place` applies the requested extension or refresh to the existing run; `--overwrite-feature-run` is a compatibility alias with identical behavior. Both spellings may be supplied together. In-place operations do not accept `--run-id`, retain the base run ID, and leave `latest.json` unchanged. Operation flags still authorize specific changes: a different receiver model requires `--replace-intended-receiver-model`, and target refresh requires `--refresh-target-family`. A destination flag alone does not regenerate artifacts. Extensions must preserve the base run's split and next-action selection setting. xT-only refresh inherits those settings unless explicitly supplied.
 
 In-place failure handling preserves the original completed state when data artifacts are known to be unchanged, while recording the failed attempt. Partial or uncertain changes mark the run failed. Artifact replacement remains atomic per file, not transactional across the run. Use a derived run when other processes must continue reading the affected artifacts.
 
@@ -1445,7 +1444,7 @@ Endpoint receiver control defaults to `--endpoint-normalization normal`, which k
 
 pc-xPass also applies a target-position discount by default for pass end locations that move the receiver farther from the opponent goal than the receiver's current position. Disable it with `--use-position-discount false`. The default discount uses `--position-discount-power 2.0` and `--position-discount-distance 20.0`: no backward goal-distance change gives discount `1`, a `10m` backward goal-distance change gives `0.5`, and `20m` or more gives `0`.
 
-Use `--pc-xpass --top-xt` to rank max and top-N target locations by `xPass × xT`, using the bilinearly interpolated canonical surface at `data/xT/xT_xy_surface.csv`. This changes only location selection: `__max_xpass`, `__top<N>_xpass`, and the unsuffixed top-N column still contain xPass values, not xPass×xT. The selected detail columns describe the highest xT-ranked location. xT-ranked and normal pc-xPass caches are incompatible, so rerun generation when switching this flag.
+Use `--pc-xpass --top-xt` to rank max and top-N target locations by `xPass × xT`, using the bilinearly interpolated surface at `data/xT/<version>/xT_xy_surface.csv`. When Sportec is included, the selected feature run (latest by default) supplies its recorded xT version; an explicit differing `--xt-version` is rejected. With `--no-sportec`, supply `--xt-version <version>`. This changes only location selection: `__max_xpass`, `__top<N>_xpass`, and the unsuffixed top-N column still contain xPass values, not xPass×xT. The selected detail columns describe the highest xT-ranked location. xT-ranked and normal pc-xPass caches are incompatible, so rerun generation when switching this flag.
 
 ### Inference-time blending
 
@@ -1723,7 +1722,8 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--v-edge-features` / `--v-edge-features-no-poss` / `--no-v-edge-features`: legacy pipeline switches forwarded to training for velocity-angle edge inputs. Default: off. The training entry points additionally accept `--velocity-angle-edge-features {all,no-poss,none}`.
 - `--xy-only` / `--no-xy-only`, `--possessor-aware` / `--no-possessor-aware`, `--keeper-aware` / `--no-keeper-aware`, `--ball-z-aware` / `--no-ball-z-aware`, `--poss-vel-aware` / `--no-poss-vel-aware`, `--poss-rel-vel-aware` / `--no-poss-rel-vel-aware`, `--offside` / `--no-offside`, `--extend-features` / `--no-extend-features`, `--pass-lane-features` / `--no-pass-lane-features`: legacy boolean switches forwarded to the training profile. These pipeline switches do not take retention values.
 - Explicit selectors such as `--vx defending`, `--vel-node-features none`, `--poss-geometry none`, `--goal-features none`, and `--goal-nodes false` are available on `scripts/train_relevant_models.py` and `train.py`, not on `scripts/main.py`. Train separately and use `--skip-train --bundle-id <bundle_id>` for later pipeline stages.
-- `--overwrite`: allow supported preprocessing and target-artifact outputs to be rebuilt.
+- `--overwrite`: allow supported preprocessing and non-xT target artifacts to be rebuilt. xT generation always creates a new version.
+- `--xt-version <id>`: select an existing xT version, or name the new version when xT generation is enabled. With `--skip-xt` and feature generation enabled, supply an existing version explicitly.
 - `--relevant-split {train,test,all}`: split passed through to `scripts/run_relevant_models.py`.
 - `--device <device>`: device passed to evaluation and inference stages.
 - `--dry-run`: print the resolved commands without executing them.
@@ -1746,11 +1746,12 @@ This appendix covers every current `scripts/*.py` CLI entrypoint, including `scr
 - `--limit <N>`: process only the first `N` available matches. Default: no limit.
 - `--source-grid-l <N>`: socceraction source-grid length bins. Default: `12`.
 - `--source-grid-w <N>`: socceraction source-grid width bins. Default: `8`.
-- `--reuse-source-grid`: load `data/xT/xT_source_grid.csv` and skip socceraction source-grid fitting. Default: off.
+- `--version <id>`: ID for the new xT version. Default: generated unique ID.
+- `--reuse-source-grid --source-xt-version <id>`: reuse a completed xT version's source grid. Default: fit a new grid.
 - `--use-interaction`: include `normalized_x * normalized_centrality` in the x/y logit GLM. Default: off.
 - `--use-nonlinear {x,y}`: include constrained squared and cubic GLM terms for the selected axis. Repeat to include both axes. Default: off.
 - `--fit-only`: write only model-level xT artifacts and skip `xT.csv` plus per-match sidecars. `--match-id` and `--limit` are ignored in this mode. Default: off.
-- `--overwrite`: overwrite existing xT outputs. Default: off.
+- Full builds update `data/xT/latest.json`; fit-only and subset builds are marked partial and cannot be selected for feature runs.
 
 ### `scripts/generate_goal_distance.py`
 
@@ -2843,14 +2844,14 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/*.csv`
   - `data/splits/match_splits.json`
 - Outputs:
-  - `data/xT/xT.csv`
-  - `data/xT/xT_grid.csv`
-  - `data/xT/xT_source_grid.csv`
-  - `data/xT/xT_xy_surface.csv`
-  - `data/xT/xT_glm_fit_sample.csv`
-  - `data/xT/xT_xy_surface_3d.png`
-  - `data/xT/fit_metadata.json`
-  - `data/xT/matches/*.csv`
+  - `data/xT/<version>/xT.csv`
+  - `data/xT/<version>/xT_grid.csv`
+  - `data/xT/<version>/xT_source_grid.csv`
+  - `data/xT/<version>/xT_xy_surface.csv`
+  - `data/xT/<version>/xT_glm_fit_sample.csv`
+  - `data/xT/<version>/xT_xy_surface_3d.png`
+  - `data/xT/<version>/fit_metadata.json`
+  - `data/xT/<version>/matches/*.csv`
 
 ### `scripts/generate_goal_distance.py`
 
@@ -2900,7 +2901,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
   - `data/event_synced/*.csv`
   - `data/lineup/line_up.parquet`
   - `data/splits/match_splits.json`
-  - optional target sidecars under `data/xT/matches/*.csv`, `data/goal_distance/matches/*.csv`, and `data/epv/matches/*.csv`
+  - xT sidecars under `data/xT/<xt_version>/matches/*.csv`, plus optional goal-distance and EPV sidecars
   - optional learned intended-receiver checkpoint `saved/success_intent/<model_run_id>/...`
     That checkpoint also determines the edge schema of the transient failed-pass relabeling graphs used during feature generation.
 - Outputs:

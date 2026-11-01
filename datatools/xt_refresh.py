@@ -197,7 +197,8 @@ def patch_labels(labels, pairs):
     return updated, int(changed.sum()), values
 
 
-def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, event_dir="data/event_synced", attempt=None):
+def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
+               event_dir="data/event_synced", attempt=None):
     """Validate and stage the entire refresh before replacing any data artifact."""
     root, xt_match_dir, event_dir = Path(root), Path(xt_match_dir), Path(event_dir)
     attempt = attempt or ExtensionAttempt(root, "xt_refresh", "derived", {})
@@ -210,7 +211,8 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, event_dir="data/eve
             if not path.is_file():
                 raise FileNotFoundError(f"Required refresh input is missing: {path}")
             inputs[str(path.resolve())] = fingerprint(path)
-    report = dict(source_run_id=metadata.get("run_id"), matches=len(inventory), return_types=returns,
+    report = dict(source_run_id=metadata.get("run_id"), xt_version=xt_version,
+                  matches=len(inventory), return_types=returns,
                   carries=carries, input_sha256=inputs, artifacts=[], changed_rows=0,
                   rewritten_files=0, rewritten_bytes=0, graph_files_loaded=0, graph_files_written=0)
     attempt.enter("staging_xt_targets")

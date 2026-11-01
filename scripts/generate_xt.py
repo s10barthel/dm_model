@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from datetime import datetime, UTC
 from pathlib import Path
@@ -32,10 +33,12 @@ from project_config import (
     split_metadata,
     EVENT_SYNCED_DIR,
     XT_DIR,
-    XT_MATCH_DIR,
+    atomic_write_json,
+    generate_run_id,
     ensure_project_dirs,
     load_split_manifest,
 )
+from xt_versions import REQUIRED_FILES, get_xt_version_root, resolve_xt_version, validate_xt_version_id
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     add_split_arguments(parser)
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
+    parser.add_argument("--version", help="New xT version ID; generated automatically when omitted.")
     parser.add_argument("--source-grid-l", type=int, default=None, help="Socceraction source-grid length bins. Default: 12.")
     parser.add_argument("--source-grid-w", type=int, default=None, help="Socceraction source-grid width bins. Default: 8.")
     parser.add_argument("--use-interaction", action="store_true", help="Include normalized_x * normalized_centrality in the xT GLM.")
@@ -56,18 +60,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reuse-source-grid",
         action="store_true",
-        help=f"Load {XT_SOURCE_GRID_FILENAME} and skip socceraction source-grid fitting.",
+        help=f"Load {XT_SOURCE_GRID_FILENAME} from --source-xt-version and skip source-grid fitting.",
     )
+    parser.add_argument("--source-xt-version", help="Completed xT version supplying --reuse-source-grid.")
     parser.add_argument(
         "--fit-only",
         action="store_true",
         help="Fit xT model artifacts only; do not write xT.csv or per-match xT sidecars.",
     )
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing xT outputs.")
     args = parser.parse_args()
     vars(args).update(split_selector(args))
     if args.reuse_source_grid and (args.source_grid_l is not None or args.source_grid_w is not None):
         parser.error("--source-grid-l/--source-grid-w cannot be combined with --reuse-source-grid; reuse infers dimensions from the CSV.")
+    if args.reuse_source_grid != bool(args.source_xt_version):
+        parser.error("--reuse-source-grid and --source-xt-version must be supplied together.")
+    if args.version:
+        try:
+            validate_xt_version_id(args.version)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if args.version.lower() == "legacy":
+            parser.error("The legacy xT version ID is reserved for migrated artifacts.")
     args.source_grid_l = XT_GRID_L if args.source_grid_l is None else args.source_grid_l
     args.source_grid_w = XT_GRID_W if args.source_grid_w is None else args.source_grid_w
     if args.source_grid_l < 1 or args.source_grid_w < 1:
@@ -233,32 +246,22 @@ def main() -> None:
     args = parse_args()
     ensure_project_dirs()
     manifest = load_split_manifest(**split_selector(args))
+    version = args.version or generate_run_id("xt")
+    output_dir = get_xt_version_root(version, xt_dir=XT_DIR)
+    if output_dir.exists():
+        raise FileExistsError(f"xT version {version!r} already exists at {output_dir}.")
+    stage = XT_DIR / ".staging" / version
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    stage.mkdir(exist_ok=False)
+    try:
+        _build_version(args, manifest, version, output_dir, stage)
+    except BaseException:
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
 
-    output_csv = XT_DIR / "xT.csv"
-    output_grid = XT_DIR / "xT_grid.csv"
-    output_source_grid = XT_DIR / XT_SOURCE_GRID_FILENAME
-    output_surface = XT_DIR / "xT_xy_surface.csv"
-    output_fit_sample = XT_DIR / "xT_glm_fit_sample.csv"
-    output_surface_plot = XT_DIR / "xT_xy_surface_3d.png"
-    output_metadata = XT_DIR / "fit_metadata.json"
-    model_outputs = [
-        output_grid,
-        output_source_grid,
-        output_surface,
-        output_fit_sample,
-        output_surface_plot,
-        output_metadata,
-    ]
-    expected_outputs = model_outputs if args.fit_only else [output_csv, *model_outputs]
-    if not args.overwrite and all(path.exists() for path in expected_outputs):
-        existing_metadata = json.loads(output_metadata.read_text(encoding="utf-8"))
-        if existing_metadata.get("split_manifest_id") != manifest.get("manifest_id"):
-            raise ValueError(
-                "Existing xT artifacts were fitted with a different or legacy split. "
-                "Use --overwrite to rebuild them for the requested split."
-            )
-        print(f"xT outputs already exist in {XT_DIR}. Use --overwrite to rebuild them.")
-        return
+
+def _build_version(args, manifest, version: str, output_dir: Path, stage: Path) -> None:
     train_ids = [match_id for match_id in manifest["train"] if (EVENT_SYNCED_DIR / f"{match_id}.csv").exists()]
     all_events: list[pd.DataFrame] = []
     skipped_export_matches: list[dict[str, str]] = []
@@ -268,9 +271,11 @@ def main() -> None:
 
     rotated_train_actions, fit_match_ids, skipped_fit_matches = fit_actions_for_train_split(train_ids)
     if args.reuse_source_grid:
-        source_grid_frame = load_source_grid(output_source_grid)
+        source_version = resolve_xt_version(args.source_xt_version, xt_dir=XT_DIR,
+                                            split_manifest_id=manifest["manifest_id"])
+        source_grid_frame = load_source_grid(source_version.root / XT_SOURCE_GRID_FILENAME)
         source_xt_grid = source_grid_frame.to_numpy(dtype=float)
-        source_grid_origin = "reused_source_grid"
+        source_grid_origin = f"reused_from:{source_version.version}"
     else:
         source_xt_grid = fit_xt_surface(
             rotated_train_actions,
@@ -286,13 +291,19 @@ def main() -> None:
     )
     source_grid_w, source_grid_l = xt_fit.source_grid.shape
 
-    save_model_outputs(xt_fit, XT_DIR)
+    save_model_outputs(xt_fit, stage)
     processed_export_ids: list[str] = []
     skipped_export_write_matches: list[dict[str, str]] = []
     if not args.fit_only:
-        processed_export_ids, skipped_export_write_matches, _ = save_export_outputs(all_events, xt_fit, XT_DIR, XT_MATCH_DIR)
+        processed_export_ids, skipped_export_write_matches, _ = save_export_outputs(all_events, xt_fit, stage, stage / "matches")
+
+    complete = (not args.fit_only and not args.match_id and args.limit is None
+                and len(train_ids) == len(manifest["train"])
+                and not skipped_fit_matches and not skipped_export_matches and not skipped_export_write_matches)
 
     fit_metadata = {
+        "version": version,
+        "status": "complete" if complete else "partial",
         "created_at_utc": datetime.now(UTC).isoformat(),
         "xt_model_type": "xy_logit_glm",
         "fit_only": bool(args.fit_only),
@@ -326,7 +337,7 @@ def main() -> None:
         "xT_grid_semantics": "xy_logit_glm_projection_to_legacy_12x8_cell_centers",
         "source_grid_l": int(source_grid_l),
         "source_grid_w": int(source_grid_w),
-        "source_grid_path": str((XT_DIR / XT_SOURCE_GRID_FILENAME).relative_to(ROOT)),
+        "source_grid_path": str((output_dir / XT_SOURCE_GRID_FILENAME).relative_to(ROOT)),
         "source_grid_origin": source_grid_origin,
         "reuse_source_grid": bool(args.reuse_source_grid),
         "shot_xT_policy": "max_glm_xT_xG",
@@ -337,24 +348,38 @@ def main() -> None:
         "source_grid_fit_samples": int(len(rotated_train_actions)),
         "fit_samples": int(len(xt_fit.fit_sample)),
         "output_files": {
-            "xT": str((XT_DIR / "xT.csv").relative_to(ROOT)),
-            "xT_grid": str((XT_DIR / "xT_grid.csv").relative_to(ROOT)),
-            "xT_source_grid": str((XT_DIR / XT_SOURCE_GRID_FILENAME).relative_to(ROOT)),
-            "xT_xy_surface": str((XT_DIR / "xT_xy_surface.csv").relative_to(ROOT)),
-            "xT_glm_fit_sample": str((XT_DIR / "xT_glm_fit_sample.csv").relative_to(ROOT)),
-            "xT_xy_surface_3d": str((XT_DIR / "xT_xy_surface_3d.png").relative_to(ROOT)),
+            "xT": str((output_dir / "xT.csv").relative_to(ROOT)),
+            "xT_grid": str((output_dir / "xT_grid.csv").relative_to(ROOT)),
+            "xT_source_grid": str((output_dir / XT_SOURCE_GRID_FILENAME).relative_to(ROOT)),
+            "xT_xy_surface": str((output_dir / "xT_xy_surface.csv").relative_to(ROOT)),
+            "xT_glm_fit_sample": str((output_dir / "xT_glm_fit_sample.csv").relative_to(ROOT)),
+            "xT_xy_surface_3d": str((output_dir / "xT_xy_surface_3d.png").relative_to(ROOT)),
         },
         "diagnostics": xt_fit.diagnostics,
         "skipped_fit_matches": skipped_fit_matches,
         "skipped_export_matches": skipped_export_matches + skipped_export_write_matches,
     }
-    (XT_DIR / "fit_metadata.json").write_text(json.dumps(fit_metadata, indent=2), encoding="utf-8")
+    (stage / "fit_metadata.json").write_text(json.dumps(fit_metadata, indent=2), encoding="utf-8")
+    required = [name for name in REQUIRED_FILES if name != "xT.csv" or not args.fit_only]
+    missing = [name for name in required if not (stage / name).is_file()]
+    if missing:
+        raise RuntimeError(f"xT version {version!r} is missing generated outputs: {missing}.")
+    if complete:
+        missing_sidecars = [match_id for match_id in resolve_match_ids(None, None)
+                            if not (stage / "matches" / f"{match_id}.csv").is_file()]
+        if missing_sidecars:
+            raise RuntimeError(f"xT version {version!r} is missing {len(missing_sidecars)} match sidecars.")
+    if output_dir.exists():
+        raise FileExistsError(f"xT version {version!r} was created concurrently at {output_dir}.")
+    stage.rename(output_dir)
+    if complete:
+        atomic_write_json(XT_DIR / "latest.json", {"version": version, "updated_at_utc": datetime.now(UTC).isoformat()})
     if skipped_fit_matches:
         print(f"Skipped {len(skipped_fit_matches)} training matches while fitting xT.")
     total_skipped_export = len(skipped_export_matches) + len(skipped_export_write_matches)
     if total_skipped_export:
         print(f"Skipped {total_skipped_export} export matches while generating xT outputs.")
-    print(f"Saved xT outputs to {XT_DIR}")
+    print(f"Saved {'complete' if complete else 'partial'} xT version {version} to {output_dir}")
 
 
 if __name__ == "__main__":

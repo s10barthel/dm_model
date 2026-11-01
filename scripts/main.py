@@ -24,11 +24,10 @@ from project_config import (
     GOAL_DISTANCE_DIR,
     GOAL_DISTANCE_MATCH_DIR,
     PROJECT_ROOT,
-    XT_DIR,
-    XT_MATCH_DIR,
     generate_run_id,
     validate_return_type_for_target_family,
 )
+from xt_versions import resolve_xt_version, validate_xt_version_id
 from models.utils import (
     normalize_relative_speed_edge_feature_mode,
     normalize_v_edge_feature_mode,
@@ -190,6 +189,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-preprocess", action="store_true", help="Skip scripts/preprocess_sportec.py.")
     parser.add_argument("--skip-xt", action="store_true", help="Skip scripts/generate_xt.py.")
+    parser.add_argument("--xt-version", default=None,
+                        help="xT version for feature generation; required with --skip-xt. 'latest' is explicit.")
     parser.add_argument("--skip-goal-distance", action="store_true", help="Skip scripts/generate_goal_distance.py.")
     parser.add_argument("--skip-epv", action="store_true", help="Skip scripts/generate_epv.py.")
     parser.add_argument("--skip-features", action="store_true", help="Skip scripts/generate_relevant_features.py.")
@@ -413,61 +414,22 @@ def run_command(command: list[str], dry_run: bool) -> None:
     subprocess.run(command, cwd=ROOT, check=True)
 
 
-def validate_xt_artifacts(require_match_sidecars: bool) -> None:
-    missing_paths = [
-        path
-        for path in [
-            XT_DIR / "xT.csv",
-            XT_DIR / "xT_grid.csv",
-            XT_DIR / "xT_source_grid.csv",
-            XT_DIR / "xT_xy_surface.csv",
-            XT_DIR / "xT_glm_fit_sample.csv",
-            XT_DIR / "xT_xy_surface_3d.png",
-            XT_DIR / "fit_metadata.json",
-        ]
-        if not path.exists()
-    ]
-    if missing_paths:
-        missing = ", ".join(str(path.relative_to(ROOT)) for path in missing_paths)
-        raise FileNotFoundError(
-            f"Missing required xT artifacts: {missing}. Run scripts/generate_xt.py or rerun without --skip-xt."
-        )
-
-    if not require_match_sidecars:
-        return
-
-    synced_match_ids = sorted(path.stem for path in EVENT_SYNCED_DIR.glob("*.csv"))
-    missing_sidecars = [match_id for match_id in synced_match_ids if not (XT_MATCH_DIR / f"{match_id}.csv").exists()]
-    if missing_sidecars:
-        preview = ", ".join(missing_sidecars[:5])
-        if len(missing_sidecars) > 5:
-            preview += f", ... ({len(missing_sidecars)} total)"
-        raise FileNotFoundError(
-            "Missing per-match xT sidecars for synced events: "
-            f"{preview}. Run scripts/generate_xt.py or rerun without --skip-xt."
-        )
+def validate_xt_artifacts(version: str, require_match_sidecars: bool) -> str:
+    selected = resolve_xt_version(
+        version,
+        required_match_ids=(sorted(path.stem for path in EVENT_SYNCED_DIR.glob("*.csv"))
+                            if require_match_sidecars else ()),
+    )
+    return selected.version
 
 
 def maybe_validate_xt_skip(args: argparse.Namespace) -> None:
     if args.target_family != "xt" or not args.skip_xt or args.dry_run:
         return
-
-    needs_xt_artifacts = any(
-        not skipped
-        for skipped in [
-            args.skip_features,
-            args.skip_train,
-            args.skip_evaluate,
-            args.skip_run_relevant,
-            args.skip_hawkeye,
-            args.skip_skillcorner,
-        ]
-    )
-    if not needs_xt_artifacts:
+    if args.skip_features:
         return
-
-    require_match_sidecars = not args.skip_features or not args.skip_run_relevant
-    validate_xt_artifacts(require_match_sidecars=require_match_sidecars)
+    args.xt_version = validate_xt_artifacts(getattr(args, "xt_version", None),
+                                            require_match_sidecars=True)
 
 
 def validate_goal_distance_artifacts(require_match_sidecars: bool) -> None:
@@ -654,6 +616,16 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
     validation_mode = str(getattr(args, "validation_mode", "holdout"))
     feature_run_id = args.feature_run_id if args.skip_features else (args.feature_run_id or generate_run_id("feature"))
     bundle_id = args.bundle_id if args.skip_train else (args.bundle_id or generate_run_id("model_bundle"))
+    xt_version = getattr(args, "xt_version", None)
+    if args.target_family == "xt" and not args.skip_xt:
+        if xt_version == "latest":
+            raise ValueError("'latest' cannot name a new xT version.")
+        xt_version = validate_xt_version_id(xt_version or generate_run_id("xt"))
+        if xt_version.lower() == "legacy":
+            raise ValueError("The legacy xT version ID is reserved for migrated artifacts.")
+    elif not args.skip_features:
+        xt_version = resolve_xt_version(xt_version).version
+    args.xt_version = xt_version
 
     if not args.skip_preprocess:
         preprocess_command = [python, "scripts/preprocess_sportec.py"]
@@ -662,9 +634,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
         commands.append(preprocess_command)
 
     if args.target_family == "xt" and not args.skip_xt:
-        xt_command = [python, "scripts/generate_xt.py", *split_cli_args(args)]
-        if args.overwrite:
-            xt_command.append("--overwrite")
+        xt_command = [python, "scripts/generate_xt.py", *split_cli_args(args), "--version", xt_version]
         commands.append(xt_command)
     if args.target_family in {"goal_distance", "progression"} and not args.skip_goal_distance:
         goal_distance_command = [python, "scripts/generate_goal_distance.py"]
@@ -683,6 +653,7 @@ def build_commands(args: argparse.Namespace) -> list[list[str]]:
             args,
         )
         feature_command.extend(split_cli_args(args))
+        feature_command.extend(["--xt-version", xt_version])
         feature_command.extend(graph_validation_flags(args))
         if args.intended_receiver_model_id:
             feature_command.extend(["--intended-receiver-model-id", args.intended_receiver_model_id])
