@@ -1855,6 +1855,7 @@ Sportec generation processes the canonical match universe in order, or the expli
 - `--no-sportec`, `--no-skillcorner`, `--no-benchmark`, `--no-hawkeye`: skip selected runtime datasets.
 - `--match-id <id>`: restrict Sportec matches. Default: all matches in the canonical preprocessed match universe.
 - `--season {22_23,23_24,24_25}`: restrict Sportec to selected seasons; repeat to select multiple seasons. Intersects with `--match-id`. Requires accessible raw match-information files and unambiguous membership for every candidate match; missing membership, conflicting seasons, or an empty selection fail. Other datasets remain enabled. Cannot be combined with `--no-sportec`. Default: no season filter.
+- `--season-half {first,second}`: requires `--season`; restrict Sportec to matchdays 1-17 (`first`) or 18-34 (`second`) in each selected season. Uses `MatchDay` from raw match information with matchplan fallback, matching evaluation. Missing/invalid matchdays or an empty selection fail. Applies to runtime physical xPass, runtime pc-xPass, and legacy feature-run sidecars. Default: the full selected season(s).
 - `--skillcorner-input-dir`, `--skillcorner-match-id`, `--skillcorner-limit`: SkillCorner runtime selectors.
 - `--scope {actions,frames}` and `--frames N`: pc-xPass-only frame selection for Sportec and SkillCorner. Sportec `actions` selects exact spell endpoints and preserved canonical observations; `frames` adds every Nth interior frame in supported control intervals. SkillCorner retains its endpoint/stride selection. N defaults to 1. These options do not affect Benchmark/Hawkeye and are rejected without `--pc-xpass` or in legacy feature-sidecar mode.
 - `--sportec-feature-run-id <feature_run_id>`: input feature run for Sportec pc-xPass. Default for a new version: latest; on resume: the recorded resolved run. Explicitly selecting a different run is rejected. Select the **same feature run as inference**. Both paths reconstruct inference spells from canonical actions and `data/control_events_synced/<match_id>.parquet`; training carry audits do not control inference eligibility.
@@ -3066,6 +3067,7 @@ This appendix summarizes the primary input and output files for each `scripts/*.
 
 ```bash
 python scripts/generate_physical_xpass.py --season 24_25
+python scripts/generate_physical_xpass.py --pc-xpass --season 24_25 --season-half second --no-skillcorner --no-benchmark --no-hawkeye
 python scripts/run_relevant_models.py --split all --season 24_25
 ```
 
@@ -3075,6 +3077,16 @@ season. Repeat `--season` to select multiple seasons. Cache generation filters
 Sportec only: other datasets remain enabled unless explicitly disabled.
 `--season` cannot be combined with `--no-sportec`. Existing limits and cache
 reuse/overwrite behavior are unchanged.
+
+For cache generation, add `--season-half first` (matchdays 1-17) or
+`--season-half second` (matchdays 18-34). This requires `--season` and applies
+to each selected season, intersecting with the existing eligible match set and
+`--match-id`. Half selection uses `MatchDay` from raw match information with
+matchplan fallback, as in `evaluate_relevant_models.py`; missing or invalid
+matchdays fail explicitly. Omitting the half retains filename-based season
+selection. The requested half is recorded alongside the selected match IDs in
+cache metadata. Compatible pc-xPass versions can be filled in separate runs
+for the first and second halves.
 
 Membership is discovered from `DFL-MAT-*` match-information filenames under
 `RAW_SEASON_ROOTS`; raw events and tracking are not required. Requested season

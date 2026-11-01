@@ -168,6 +168,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_frame_selection_arguments(parser)
     add_season_argument(parser)
+    parser.add_argument("--season-half", choices=("first", "second"),
+                        help="Requires --season: restrict Sportec to matchdays 1-17 (first) or 18-34 (second) in each selected season.")
     parser.add_argument("--sportec-feature-run-id", help="Input feature run for Sportec pc-xPass possession states; defaults to latest. Use the same run as inference.")
     parser.add_argument("--feature-run-id", help="Legacy mode: write Sportec sidecars under data/features/runs/<id>/physical_xpass.")
     parser.add_argument("--match-id", action="append", help="Restrict Sportec matches. Repeat for multiple matches.")
@@ -418,6 +420,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pc_versions.add_selection_argument(parser)
     reach.add_arguments(parser)
     args = parser.parse_args(argv)
+    if args.season_half and not args.season:
+        parser.error("--season-half requires --season.")
     if args.season and args.no_sportec:
         parser.error("--season cannot be combined with --no-sportec.")
     resolve_frame_selection_arguments(parser, args, pc_only=True)
@@ -740,10 +744,12 @@ def resolve_match_ids(args: argparse.Namespace, graph_dir: Path) -> list[str]:
     if getattr(args, "_preflight_season_match_ids", None) is not None:
         return list(args._preflight_season_match_ids)
     candidates = args.match_id or load_match_universe()["match_ids"]
-    selected = select_season_match_ids(candidates, getattr(args, "season", None))
+    season_half = getattr(args, "season_half", None)
+    selected = select_season_match_ids(candidates, getattr(args, "season", None), season_half)
     args.selected_sportec_match_ids = selected
     if getattr(args, "season", None):
-        print(f"Selected {len(selected)} Sportec matches for seasons: {', '.join(dict.fromkeys(args.season))}")
+        half_description = f"; season half: {season_half}" if season_half else ""
+        print(f"Selected {len(selected)} Sportec matches for seasons: {', '.join(dict.fromkeys(args.season))}{half_description}")
     return selected
 
 
@@ -1556,6 +1562,7 @@ def write_runtime_dataset_metadata(
         source_inputs = {
             **source_inputs,
             "requested_seasons": list(dict.fromkeys(getattr(args, "season", None) or [])),
+            "requested_season_half": getattr(args, "season_half", None),
             "selected_match_ids": getattr(args, "selected_sportec_match_ids", []),
         }
     base_metadata = (
@@ -1844,6 +1851,7 @@ def run_legacy_feature_mode(args: argparse.Namespace) -> None:
         "reuse_cache_dir": str(reuse_cache_dir) if reuse_cache_dir is not None else None,
         "output_root": str(output_root),
         "requested_seasons": list(dict.fromkeys(getattr(args, "season", None) or [])),
+        "requested_season_half": getattr(args, "season_half", None),
         "selected_match_ids": match_ids,
         "match_ids": written_match_ids,
         "skipped_match_ids": skipped_match_ids,

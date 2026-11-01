@@ -1,4 +1,4 @@
-"""Runtime Sportec season membership from raw match-information filenames."""
+"""Sportec season and season-half selection from raw match information."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,12 @@ def add_season_argument(parser: argparse.ArgumentParser, *, help_text=None) -> N
 
 def select_season_match_ids(
     candidate_ids: Iterable[str], requested_seasons: Iterable[str] | None,
+    season_half: str | None = None,
 ) -> list[str]:
+    if season_half is not None and season_half not in ("first", "second"):
+        raise ValueError(f"Unknown Sportec season half: {season_half}.")
+    if season_half and not requested_seasons:
+        raise ValueError("--season-half requires --season.")
     candidates = [str(value) for value in candidate_ids]
     if not requested_seasons:
         return candidates
@@ -59,8 +64,12 @@ def select_season_match_ids(
             f"Inspected match-information locations: {'; '.join(inspected)}"
         )
     selected = [match_id for match_id in candidates if membership[match_id] in seasons]
+    if season_half:
+        half_match_ids = set(heldout_season_match_ids(sorted(seasons), season_half))
+        selected = [match_id for match_id in selected if match_id in half_match_ids]
     if not selected:
-        raise ValueError("No Sportec matches selected after season filtering; check match IDs, split and available artifacts.")
+        selection = "season/season-half" if season_half else "season"
+        raise ValueError(f"No Sportec matches selected after {selection} filtering; check match IDs, split and available artifacts.")
     return selected
 
 
