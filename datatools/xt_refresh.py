@@ -15,7 +15,7 @@ from datatools import config, utils
 from datatools.artifact_storage import staged_path
 from datatools.xt_returns import label_xt_for_return_type
 from datatools.xt_targets import (target_settings, surface_from_metadata, transform_action_targets,
-                                  validate_surface_returns)
+                                  unavailable_xt_returns)
 from project_config import (XT_MATCH_DIR, atomic_write_json, get_action_label_dir,
                             get_intent_train_label_dir, get_augmented_label_dir,
                             get_resolved_action_dir)
@@ -193,7 +193,8 @@ def patch_labels(labels, pairs):
     if not np.isfinite(action_ids).all() or (action_ids % 1 != 0).any() or not np.isin(action_ids, pairs.index).all():
         raise ValueError("Label action IDs do not resolve to saved actions.")
     values = torch.as_tensor(pairs.loc[action_ids.astype(int)].to_numpy(), dtype=labels.dtype, device=labels.device)
-    changed = (labels[:, TARGET_COLUMNS] != values).any(dim=1)
+    current = labels[:, TARGET_COLUMNS]
+    changed = (~((current == values) | (torch.isnan(current) & torch.isnan(values)))).any(dim=1)
     updated = labels.clone()
     updated[:, TARGET_COLUMNS] = values
     return updated, int(changed.sum()), values
@@ -212,7 +213,7 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
     if surface_metadata is None and metadata_path.is_file():
         import json
         surface_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    validate_surface_returns(surface_metadata, returns)
+    unavailable = unavailable_xt_returns(surface_metadata, returns)
     surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" and surface_metadata else None
     if settings["representation"] == "gain" and surface is None:
         raise ValueError("Gain refresh requires a pinned surface definition.")
@@ -225,7 +226,7 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                 raise FileNotFoundError(f"Required refresh input is missing: {path}")
             inputs[str(path.resolve())] = fingerprint(path)
     report = dict(source_run_id=metadata.get("run_id"), xt_version=xt_version,
-                  xt_targets=settings,
+                  xt_targets=settings, xt_unavailable_return_types=unavailable,
                   matches=len(inventory), return_types=returns,
                   carries=carries, input_sha256=inputs, artifacts=[], changed_rows=0,
                   rewritten_files=0, rewritten_bytes=0, graph_files_loaded=0, graph_files_written=0)
@@ -258,16 +259,22 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
 
         for mid, artifacts in inventory.items():
             events = read_annotated_events(event_dir / f"{mid}.csv", xt_match_dir / f"{mid}.csv")
-            event_returns = {ret: label_xt_for_return_type(events, ret) for ret in returns}
+            event_returns = {ret: label_xt_for_return_type(events, ret)
+                             for ret in returns if ret not in unavailable}
             pairs = {}
             for carry in ([False, True] if carries else [False]):
                 for mode in modes:
                     path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
                     attempt.data["current_file"] = str(path)
                     actions = pd.read_parquet(path)
-                    pairs.update({(mode, carry, ret): transform_action_targets(
-                                      actions, action_return_pairs(actions, values), settings, surface)
-                                  for ret, values in event_returns.items()})
+                    raw_pairs = action_return_pairs(actions, events) if unavailable else None
+                    for ret in returns:
+                        if ret in unavailable:
+                            pairs[(mode, carry, ret)] = raw_pairs.copy()
+                            pairs[(mode, carry, ret)].loc[:, :] = np.nan
+                        else:
+                            pairs[(mode, carry, ret)] = transform_action_targets(
+                                actions, action_return_pairs(actions, event_returns[ret]), settings, surface)
                     updated = actions.copy()
                     updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]
                     # Refresh the saved raw annotation columns for canonical rows;
@@ -285,8 +292,12 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                 attempt.data["current_file"] = str(artifact.path)
                 labels = torch.load(artifact.path, map_location="cpu", weights_only=True)
                 updated, changed, values = patch_labels(labels, pairs[(artifact.mode, artifact.carries, artifact.return_type)])
-                stats = dict(rows=len(labels), target_mean=values.double().mean(dim=0).tolist() if len(labels) else [0, 0],
-                             nonzero_rows=int((values != 0).any(dim=1).sum()))
+                available = torch.isfinite(values).all(dim=1)
+                stats = dict(rows=len(labels),
+                             target_mean=values[available].double().mean(dim=0).tolist()
+                             if available.any() else [None, None],
+                             nonzero_rows=int((available & (values != 0).any(dim=1)).sum()),
+                             unavailable_rows=int((~available).sum()))
                 stage(artifact.path, updated, changed, stats)
         # No destination artifact has been replaced yet. Validate all inputs again.
         for path, digest in inputs.items():

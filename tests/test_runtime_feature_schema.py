@@ -111,6 +111,23 @@ def test_explicit_feature_run_accepts_mixed_checkpoint_requirements(feature_run)
     assert selected["feature_schema"] == required
 
 
+def test_runtime_rejects_unavailable_xt_return_but_allows_other_families(feature_run, tmp_path):
+    root = tmp_path / feature_run
+    metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+    metadata["xt_unavailable_return_types"] = ["disc_poly_max_0.1_1"]
+    (root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    required = utils.validate_model_graph_schemas(mixed_models())
+    shared = {"target_family": "xt", "return_type": "disc_poly_max_0.1_1"}
+    with pytest.raises(ValueError, match="Runtime xT targets.*unavailable"):
+        utils.resolve_runtime_feature_run_context(feature_run, shared, None, None, required)
+    shared["target_family"] = "goal_distance"
+    assert utils.resolve_runtime_feature_run_context(feature_run, shared, None, None, required)["feature_run_id"] == feature_run
+    with pytest.raises(ValueError, match="Runtime xT targets.*unavailable"):
+        utils.resolve_runtime_return_type({"target_family": "xt", "return_type": "next_3"},
+                                          "disc_poly_max_0.1_1", metadata)
+    assert utils.resolve_runtime_return_type(shared, "disc_poly_max_0.1_1", metadata) == "disc_poly_max_0.1_1"
+
+
 def test_real_missing_node_feature_still_rejected(feature_run):
     required = utils.validate_model_graph_schemas({"pass_intent": model()})
     with pytest.raises(ValueError, match="incompatible.*node_in_dim.*27"):

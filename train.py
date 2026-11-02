@@ -858,7 +858,7 @@ def main(cache_session):
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
     if args.use_xt:
         from datatools.xt_targets import validate_training_targets, training_target_definition
-        validate_training_targets(feature_metadata)
+        validate_training_targets(feature_metadata, args.return_type)
         definition = training_target_definition(feature_metadata)
         if resume_record is not None:
             saved_definition = resume_record.get("xt_target_definition") or resume_record.get("args", {}).get("xt_target_definition")

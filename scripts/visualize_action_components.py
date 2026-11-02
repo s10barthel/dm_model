@@ -1137,7 +1137,8 @@ def main() -> None:
         runtime_feature_context["selection"] = "physical_xpass_cache"
     feature_run_id = str(runtime_feature_context["feature_run_id"])
     intended_receiver_mode = str(runtime_feature_context["intended_receiver_mode"])
-    return_type = resolve_runtime_return_type(shared_context, args.return_type)
+    return_type = resolve_runtime_return_type(shared_context, args.return_type,
+                                              runtime_feature_context.get("metadata"))
     feature_root = Path(runtime_feature_context["feature_root"])
     shared_context = dict(shared_context)
     shared_context["feature_run_id"] = feature_run_id

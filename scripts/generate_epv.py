@@ -398,7 +398,8 @@ def main() -> None:
         graph_schema,
         context="Selected EPV feature artifacts",
     )
-    runtime_return_type = resolve_runtime_return_type(shared_context, args.return_type)
+    runtime_return_type = resolve_runtime_return_type(shared_context, args.return_type,
+                                                     runtime_feature_context.get("metadata"))
     shared_context = dict(shared_context)
     shared_context["feature_run_id"] = runtime_feature_context["feature_run_id"]
     shared_context["runtime_feature_run_id"] = runtime_feature_context["feature_run_id"]

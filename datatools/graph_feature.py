@@ -34,7 +34,7 @@ from datatools.ball_carries import augment_match_actions_with_carries, validate_
 from datatools.match import Match
 from xt_versions import get_xt_version_root, resolve_xt_version, xt_options_for_metadata
 from datatools.xt_targets import (add_target_arguments, configure_targets, surface_from_metadata,
-                                  validate_surface_returns)
+                                  unavailable_xt_returns)
 from datatools.success_intent import build_success_intent_resolved_actions
 from datatools.trajectory import TRAJECTORY_SPEED
 from datatools.pass_trajectory import ensure_pass_endpoints, trajectory_samples, positive_duration, PASS_DURATION
@@ -1976,7 +1976,7 @@ def validate_args(args: argparse.Namespace) -> None:
         selected = resolve_xt_version(args.xt_version)
         args.xt_version = selected.version
         args.xt_surface_metadata = selected.metadata
-        validate_surface_returns(selected.metadata, args.return_types)
+        args.xt_unavailable_return_types = unavailable_xt_returns(selected.metadata, args.return_types)
     elif args.xt_targets["representation"] == "gain":
         raise ValueError("Gain targets require --xt-version.")
     if args.use_carries and (args.action_type != "all" or args.feature_variant != "base"):

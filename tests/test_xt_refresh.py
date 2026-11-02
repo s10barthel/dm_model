@@ -154,6 +154,82 @@ def test_all_variants_preserved_source_safe_and_noop(sample, tmp_path):
     assert signatures == {p: p.stat().st_ino for p in signatures}
 
 
+def test_mixed_log_refresh_preserves_discounted_labels_and_restores_learned_xt(sample, tmp_path):
+    from datatools.xt_targets import LogProgressionSurface, validate_training_targets
+
+    source, event_dir, sidecars, metadata, events, actions, _ = sample
+    derived = tmp_path / "derived_mixed"
+    clone_feature_artifacts(source, derived)
+    settings = dict(representation="gain", clip_negative_gains=True)
+    surface_metadata = dict(surface_type="log_progression", k=5., min_goal_distance=5.)
+    source_hashes = {p.relative_to(source): fingerprint(p) for p in source.rglob("*") if p.is_file()}
+    before = {artifact.path.relative_to(derived): torch.load(artifact.path, weights_only=True)
+              for artifacts in refresh_inventory(derived, metadata)[0].values() for artifact in artifacts}
+
+    report = refresh_xt(derived, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                        xt_targets=settings, surface_metadata=surface_metadata)
+    discounted = [r for r in RETURNS if r.startswith("disc")]
+    assert report["xt_unavailable_return_types"] == discounted
+    assert report["return_types"] == RETURNS
+    assert report["graph_files_loaded"] == 0
+    for relative, old in before.items():
+        current = torch.load(derived / relative, weights_only=True)
+        keep = [i for i in range(old.shape[1]) if i not in TARGET_COLUMNS]
+        torch.testing.assert_close(current[:, keep], old[:, keep], rtol=0, atol=0, equal_nan=True)
+        if any(f"_{ret}" in relative.parent.name for ret in discounted):
+            assert torch.isnan(current[:, TARGET_COLUMNS]).all()
+        else:
+            assert torch.isfinite(current[:, TARGET_COLUMNS]).all()
+            assert (current[:, TARGET_COLUMNS[0]] >= 0).all()
+    assert all(fingerprint(source / relative) == digest for relative, digest in source_hashes.items())
+    assert refresh_xt(derived, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                      xt_targets=settings, surface_metadata=surface_metadata)["rewritten_files"] == 0
+
+    match = Match.__new__(Match)
+    match.events = events.copy()
+    match.tracking = pd.DataFrame({"home_1_x": [1.], "home_1_y": [2.],
+                                   "away_1_x": [3.], "away_1_y": [4.]})
+    match.action_type, match.fps, match.include_goals = "all", 25, False
+    match.xt_targets = settings
+    match.xt_surface = LogProgressionSurface(k=5., min_goal_distance=5.)
+    match.xt_surface_metadata = surface_metadata
+    normal = match.construct_labels(resolved_actions=actions, relabel_intended_receivers=False,
+                                    return_type="disc_poly_max_0.1_1")
+    assert torch.isnan(normal[:, TARGET_COLUMNS]).all()
+    assert torch.isfinite(normal[:, config.LABEL_INDEX["scores"]]).all()
+    with pytest.raises(ValueError, match="unavailable"):
+        validate_training_targets({"xt_targets": settings, "xt_unavailable_return_types": discounted},
+                                  "disc_poly_max_0.1_1")
+    validate_training_targets({"xt_targets": settings, "xt_unavailable_return_types": discounted}, "next_3")
+
+    restored = refresh_xt(derived, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                          xt_targets=dict(representation="absolute", clip_negative_gains=False),
+                          surface_metadata={})
+    assert restored["xt_unavailable_return_types"] == []
+    discounted_labels = torch.load(get_action_label_dir("disc_poly_max_0.1_1", "original", root=derived) / "m.pt",
+                                   weights_only=True)
+    assert torch.isfinite(discounted_labels[:, TARGET_COLUMNS]).all()
+
+
+def test_unsupported_primary_return_marks_resolved_and_auxiliary_xt_unavailable(sample):
+    root, event_dir, sidecars, metadata, _, _, _ = sample
+    metadata["return_types"] = ["disc_poly_max_0.1_1", *[r for r in RETURNS if r != "disc_poly_max_0.1_1"]]
+    report = refresh_xt(root, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                        xt_targets=dict(representation="absolute", clip_negative_gains=False),
+                        surface_metadata=dict(surface_type="log_progression", k=5., min_goal_distance=5.))
+    assert "disc_poly_max_0.1_1" in report["xt_unavailable_return_types"]
+    for mode in metadata["intended_receiver_modes"]:
+        for carry in (False, True):
+            actions = pd.read_parquet(get_resolved_action_dir(mode, root=root, use_carries=carry) / "m.parquet")
+            assert actions[["scores_xt", "concedes_xt"]].isna().all().all()
+    for directory in (root / "success_intent_labels", root / "augmented_labels",
+                      root / "augmented_labels_angle_only", root / "augmented_labels_model"):
+        labels = torch.load(directory / "m.pt", weights_only=True)
+        assert torch.isnan(labels[:, TARGET_COLUMNS]).all()
+    supported = torch.load(get_action_label_dir("next_3", "original", root=root) / "m.pt", weights_only=True)
+    assert torch.isfinite(supported[:, TARGET_COLUMNS]).all()
+
+
 def test_two_selected_xt_versions_produce_distinct_derived_targets(sample, tmp_path):
     root, event_dir, sidecars_a, metadata, _, _, _ = sample
     sidecars_b = tmp_path / "version_b" / "matches"

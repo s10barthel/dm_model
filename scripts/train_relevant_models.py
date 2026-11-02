@@ -1472,7 +1472,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
             if args.target_family == "xt":
                 from datatools.xt_targets import validate_training_targets
-                validate_training_targets(feature_metadata)
+                validate_training_targets(feature_metadata, args.return_type)
         except ValueError as exc:
             parser.error(str(exc))
     else:

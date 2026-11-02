@@ -19,7 +19,7 @@ import torch
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.match import Match
 from datatools.xt import annotate_match_xt
-from datatools.xt_targets import surface_from_metadata, target_settings, validate_surface_returns
+from datatools.xt_targets import surface_from_metadata, target_settings, unavailable_xt_returns
 from datatools.xt_refresh import (TARGET_COLUMNS, file_signature, fingerprint, read_annotated_events,
                                  refresh_inventory, refresh_xt)
 from project_config import atomic_write_json, get_resolved_action_dir
@@ -41,7 +41,7 @@ def main():
     seed.mkdir(parents=True)
     sidecars.mkdir()
     metadata = json.loads((args.source / 'metadata.json').read_text())
-    validate_surface_returns(selected_xt.metadata, metadata['return_types'])
+    metadata['xt_unavailable_return_types'] = unavailable_xt_returns(selected_xt.metadata, metadata['return_types'])
     atomic_write_json(output / 'fit_metadata.json', selected_xt.metadata)
     match_ids = ['DFL-MAT-J03WEL', 'DFL-MAT-J03YDU', 'DFL-MAT-J04034']
     metadata['split_manifest'] = {**metadata.get('split_manifest', {}), 'universe_count': len(match_ids)}
@@ -127,9 +127,11 @@ def main():
             before, after = [torch.load(path, weights_only=True) for path in (source, artifact.path)]
             reference = normal_labels[(artifact.mode, artifact.carries, artifact.return_type)]
             expected = torch.as_tensor(reference.loc[after[:, 0].numpy().astype(int)].to_numpy(), dtype=after.dtype)
-            difference = float((after[:, TARGET_COLUMNS] - expected).abs().max())
-            maximum_difference = max(maximum_difference, difference)
-            torch.testing.assert_close(after[:, TARGET_COLUMNS], expected, rtol=0, atol=0)
+            finite = torch.isfinite(expected)
+            if finite.any():
+                difference = float((after[:, TARGET_COLUMNS][finite] - expected[finite]).abs().max())
+                maximum_difference = max(maximum_difference, difference)
+            torch.testing.assert_close(after[:, TARGET_COLUMNS], expected, rtol=0, atol=0, equal_nan=True)
             keep = [i for i in range(before.shape[1]) if i not in TARGET_COLUMNS]
             torch.testing.assert_close(after[:, keep], before[:, keep], rtol=0, atol=0, equal_nan=True)
             compared_rows += len(after)

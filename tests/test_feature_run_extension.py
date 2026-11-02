@@ -98,6 +98,7 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         args: SimpleNamespace,
         metadata: dict[str, object] | None | object = DEFAULT_METADATA,
         existing_output: bool = False,
+        surface_metadata: dict[str, object] | None = None,
     ) -> generator.FeatureExtensionPlan:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -111,7 +112,8 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
                 patch.object(generator, "get_feature_run_root", side_effect=lambda run_id: root / str(run_id)),
                 patch.object(generator, "generate_run_id", return_value="generated"),
                 patch.object(generator, "resolve_xt_version", return_value=SimpleNamespace(
-                    version="fixture_xt", metadata_sha256="fixture_sha256")),
+                    version="fixture_xt", metadata_sha256="fixture_sha256",
+                    metadata=surface_metadata or {})),
             ):
                 return generator.build_extension_plan(args, python="python")
 
@@ -199,6 +201,25 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
         self.assertTrue(plan.commands)
         self.assertTrue(all(command[command.index("--xt-version") + 1] == "fixture_xt"
                             for command in plan.commands))
+
+    def test_mixed_log_refresh_marks_discounted_unavailable_and_requires_derived_run(self) -> None:
+        metadata = make_metadata(return_types=["next_10", "next_3", "disc_poly_max_0.1_1"])
+        surface = {"surface_type": "log_progression", "k": 5., "min_goal_distance": 5.}
+        args = make_args(refresh_target_families=["xt"])
+        plan = self.build_plan(args, metadata, surface_metadata=surface)
+        self.assertEqual(plan.final_return_types, metadata["return_types"])
+        self.assertEqual(args.xt_unavailable_return_types, ["disc_poly_max_0.1_1"])
+        self.assertEqual(generator.derived_metadata(args, plan, "completed")["xt_unavailable_return_types"],
+                         ["disc_poly_max_0.1_1"])
+        in_place = make_args(refresh_target_families=["xt"], in_place=True, run_id=None)
+        with self.assertRaisesRegex(ValueError, "In-place logarithmic xT refresh"):
+            self.build_plan(in_place, metadata, surface_metadata=surface)
+
+        pinned = {**metadata, "xt_version": "fixture_xt", "xt_fit_metadata_sha256": "fixture_sha256"}
+        extension = make_args(requested_return_types=["in_2"])
+        extension_plan = self.build_plan(extension, pinned, surface_metadata=surface)
+        self.assertEqual(extension_plan.final_return_types[-1], "in_2")
+        self.assertEqual(extension.xt_unavailable_return_types, ["disc_poly_max_0.1_1"])
 
     def test_xt_refresh_is_dedicated_and_rejects_mixed_changes(self) -> None:
         plan = self.build_plan(make_args(refresh_target_families=["xt", "xt"]))

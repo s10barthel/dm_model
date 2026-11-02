@@ -93,11 +93,16 @@ def target_cli(settings):
             *(["--xt-clip-negative-gains"] if settings["clip_negative_gains"] else [])]
 
 
-def validate_surface_returns(surface_metadata, return_types):
+def unavailable_xt_returns(surface_metadata, return_types):
     if (surface_metadata or {}).get("surface_type", (surface_metadata or {}).get("xt_model_type")) == "log_progression":
-        unsupported = [r for r in return_types if parse_return_type(r)[0] not in {"next", "in"}]
-        if unsupported:
-            raise ValueError(f"Log progression supports next_N[_skip1] and in_N returns only: {unsupported}.")
+        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "in"}]
+    return []
+
+
+def validate_surface_returns(surface_metadata, return_types):
+    unsupported = unavailable_xt_returns(surface_metadata, return_types)
+    if unsupported:
+        raise ValueError(f"Log progression supports next_N[_skip1] and in_N returns only: {unsupported}.")
 
 
 def transform_action_targets(actions, pairs, settings=None, surface=None):
@@ -132,8 +137,11 @@ def training_target_definition(metadata):
                 xt_targets=target_settings(metadata))
 
 
-def validate_training_targets(metadata):
+def validate_training_targets(metadata, return_type=None):
     settings = target_settings(metadata)
+    unavailable = (metadata or {}).get("xt_unavailable_return_types") or []
+    if return_type is not None and return_type in unavailable:
+        raise ValueError(f"xT targets for return_type={return_type!r} are unavailable in this feature run.")
     if settings["representation"] == "gain" and not settings["clip_negative_gains"]:
         raise ValueError("Existing xT outcome training requires --xt-clip-negative-gains; "
                          "refresh the feature targets with clipping before training.")

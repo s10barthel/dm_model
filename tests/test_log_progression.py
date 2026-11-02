@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from datatools.xt import annotate_match_xt
 from datatools.xt_targets import (LogProgressionSurface, configure_targets, target_settings,
@@ -91,6 +92,18 @@ def test_target_option_inheritance_and_validation():
     validate_surface_returns(surface_metadata(), ["next_3", "next_3_skip1", "in_1"])
     with pytest.raises(ValueError, match="returns only"):
         validate_surface_returns(surface_metadata(), ["disc_max_0.9"])
+
+
+def test_direct_xt_training_rejects_nonfinite_labels_without_metadata():
+    from datatools import config
+    from models.utils import get_outcome_targets
+
+    labels = torch.zeros((2, len(config.LABEL_COLUMNS)), dtype=torch.float32)
+    labels[0, config.LABEL_INDEX["scores_xt"]] = float("nan")
+    args = SimpleNamespace(use_xt=True, use_xg=False, use_epv=False,
+                           use_goal_distance=False, use_progression=False)
+    with pytest.raises(ValueError, match="xT labels are missing or invalid"):
+        get_outcome_targets(labels, args)
 
 
 def test_learned_xt_gains_preserve_conceding_values():

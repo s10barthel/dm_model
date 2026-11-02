@@ -763,7 +763,8 @@ def main() -> None:
         or shared_context.get("intended_receiver_mode")
         or DEFAULT_INTENDED_RECEIVER_MODE
     )
-    return_type = resolve_runtime_return_type(shared_context, getattr(args, "return_type", None))
+    return_type = resolve_runtime_return_type(shared_context, getattr(args, "return_type", None),
+                                              runtime_feature_context.get("metadata"))
     feature_root = Path(runtime_feature_context["feature_root"])
     feature_schema = runtime_feature_context.get("feature_schema", {})
     shared_context = dict(shared_context)

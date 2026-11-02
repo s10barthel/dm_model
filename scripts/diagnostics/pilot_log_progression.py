@@ -19,7 +19,7 @@ import torch
 from datatools import config
 from datatools.match import Match
 from datatools.xt import annotate_match_xt
-from datatools.xt_targets import LogProgressionSurface, target_settings
+from datatools.xt_targets import LogProgressionSurface, target_settings, unavailable_xt_returns
 from datatools.xt_refresh import refresh_xt, refresh_inventory, fingerprint, file_signature, TARGET_COLUMNS
 from project_config import (atomic_write_json, get_action_label_dir, get_intent_train_label_dir,
                             get_augmented_label_dir, get_resolved_action_dir, parse_return_type)
@@ -31,8 +31,8 @@ def run_pilot(source, output, match_ids, *, k=2., min_goal_distance=1.):
     saved = json.loads((source / "metadata.json").read_text(encoding="utf-8-sig"))
     if saved.get("status") != "completed":
         raise ValueError("Pilot source must be a completed feature run.")
-    returns = [r for r in saved["return_types"] if parse_return_type(r)[0] in {"next", "in"}]
-    if not returns or returns[0] != saved["return_types"][0]:
+    returns = list(saved["return_types"])
+    if not returns or parse_return_type(returns[0])[0] not in {"next", "in"}:
         raise ValueError("Pilot requires a supported primary return in the source run.")
     modes = saved["intended_receiver_modes"]
     carries = bool((saved.get("carry_variant") or {}).get("available"))
@@ -46,8 +46,10 @@ def run_pilot(source, output, match_ids, *, k=2., min_goal_distance=1.):
     save_model_outputs(model, version)
     atomic_write_json(version / "fit_metadata.json", surface_metadata)
     (version / "matches").mkdir()
+    unavailable = unavailable_xt_returns(surface_metadata, returns)
     metadata = {**saved, "run_id": "isolated_log_progression_pilot", "return_types": returns,
-                "xt_targets": settings, "split_manifest": {"universe_count": len(match_ids)}}
+                "xt_targets": settings, "xt_unavailable_return_types": unavailable,
+                "split_manifest": {"universe_count": len(match_ids)}}
     directories = {"action_graphs", "post_action_graphs", "action_graphs_intent_train",
                    "action_graphs_success_intent", "success_intent_labels"}
     if carries:
@@ -99,8 +101,11 @@ def run_pilot(source, output, match_ids, *, k=2., min_goal_distance=1.):
                 references[key] = pd.DataFrame(labels[:, TARGET_COLUMNS].numpy(), index=labels[:, 0].numpy().astype(int))
             actual = torch.load(artifact.path, map_location="cpu", weights_only=True)
             expected = torch.as_tensor(references[key].loc[actual[:, 0].numpy().astype(int)].to_numpy(), dtype=actual.dtype)
-            torch.testing.assert_close(actual[:, TARGET_COLUMNS], expected, rtol=0, atol=0)
-            maximum_difference = max(maximum_difference, float((actual[:, TARGET_COLUMNS] - expected).abs().max()) if len(actual) else 0.)
+            torch.testing.assert_close(actual[:, TARGET_COLUMNS], expected, rtol=0, atol=0, equal_nan=True)
+            finite = torch.isfinite(expected)
+            if finite.any():
+                maximum_difference = max(maximum_difference, float(
+                    (actual[:, TARGET_COLUMNS][finite] - expected[finite]).abs().max()))
             before = torch.load(source / artifact.path.relative_to(derived), map_location="cpu", weights_only=True)
             keep = [i for i in range(actual.shape[1]) if i not in TARGET_COLUMNS]
             torch.testing.assert_close(actual[:, keep], before[:, keep], rtol=0, atol=0, equal_nan=True)
@@ -122,7 +127,8 @@ def run_pilot(source, output, match_ids, *, k=2., min_goal_distance=1.):
     repeated = refresh_xt(derived, metadata, xt_match_dir=version / "matches", surface_metadata=surface_metadata,
                           event_dir=ROOT / "data/event_synced", xt_targets=settings)
     assert repeated["rewritten_files"] == 0
-    result = dict(source=str(source), matches=match_ids, return_types=returns, k=k,
+    result = dict(source=str(source), matches=match_ids, return_types=returns,
+        xt_unavailable_return_types=unavailable, k=k,
         min_goal_distance=min_goal_distance, compared_rows=rows, maximum_target_difference=maximum_difference,
         source_artifacts_unchanged=True, graph_payloads_loaded_by_refresh=report["graph_files_loaded"],
         repeated_refresh_rewritten_files=0, region_statistics=statistics,

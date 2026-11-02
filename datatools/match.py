@@ -268,9 +268,12 @@ class Match(ABC):
             )
 
         events = label_goal_distance_for_return_type(events, return_type)
-        from datatools.xt_targets import validate_surface_returns
-        validate_surface_returns(getattr(self, "xt_surface_metadata", None), [return_type])
-        events = label_xt_for_return_type(events, return_type)
+        from datatools.xt_targets import unavailable_xt_returns
+        if unavailable_xt_returns(getattr(self, "xt_surface_metadata", None), [return_type]):
+            events["scores_xT"] = np.nan
+            events["concedes_xT"] = np.nan
+        else:
+            events = label_xt_for_return_type(events, return_type)
         self._cached_events_by_return_type[return_type] = events
         return events
 
@@ -734,10 +737,13 @@ class Match(ABC):
             "scores_goal_distance", "concedes_goal_distance", "scores_goal_distance", "concedes_goal_distance", self.events
         )
         assign_return_pair("scores_xt", "concedes_xt", "scores_xT", "concedes_xT", self.events)
-        from datatools.xt_targets import transform_action_targets
-        self.actions[["scores_xt", "concedes_xt"]] = transform_action_targets(
-            self.actions, self.actions[["scores_xt", "concedes_xt"]],
-            getattr(self, "xt_targets", None), getattr(self, "xt_surface", None))
+        from datatools.xt_targets import transform_action_targets, unavailable_xt_returns
+        if unavailable_xt_returns(getattr(self, "xt_surface_metadata", None), [return_type]):
+            self.actions[["scores_xt", "concedes_xt"]] = np.nan
+        else:
+            self.actions[["scores_xt", "concedes_xt"]] = transform_action_targets(
+                self.actions, self.actions[["scores_xt", "concedes_xt"]],
+                getattr(self, "xt_targets", None), getattr(self, "xt_surface", None))
         assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
         assign_return_pair("scores_goal_next10", "concedes_goal_next10", "scores", "concedes", diagnostic_events)
 

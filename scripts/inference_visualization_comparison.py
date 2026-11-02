@@ -402,7 +402,7 @@ def sportec_groups(args, mod, variants, selection, shared, bundle, schema, devic
     runtime = mod.resolve_runtime_feature_run_context(feature_run_id, shared, bundle, args.intended_receiver_mode,
                                                      schema, context="Selected comparison visualization feature artifacts")
     feature_root = Path(runtime["feature_root"])
-    return_type = mod.resolve_runtime_return_type(shared, args.return_type)
+    return_type = mod.resolve_runtime_return_type(shared, args.return_type, runtime.get("metadata"))
     subject = mod.load_match(args.match_id, intended_receiver_mode=runtime["intended_receiver_mode"],
         return_type=return_type, feature_root=feature_root, add_v_edge_features=bool(schema["add_v_edge_features"]),
         add_relative_speed_edge_features=bool(schema.get("add_relative_speed_edge_features", False)),

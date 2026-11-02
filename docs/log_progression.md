@@ -87,12 +87,12 @@ These target options also work with learned xT versions. Gain targets require a
 pinned version with an evaluable surface; unversioned historical sidecars alone
 do not define a baseline.
 
-**Initially, logarithmic progression supports only `next_N`, `next_N_skip1`, and
-`in_N`.** A refresh checks every recorded return type before modifying artifacts.
-A source containing discounted returns cannot be refreshed to logarithmic
-progression in this implementation. Generate a feature run containing supported
-returns, or continue using its learned-xT version. Learned xT retains its existing
-return types.
+Logarithmic progression supplies xT targets for `next_N`, `next_N_skip1`, and
+`in_N`. Discounted returns remain in the run for other target families; their
+`scores_xt` and `concedes_xt` labels are `NaN`. Feature metadata and the refresh
+report list them in `xt_unavailable_return_types`. A mixed-return refresh must
+create a derived run, preserving the source run's discounted xT labels. A later
+refresh to learned xT recalculates every return and clears the unavailable list.
 
 ## Training and provenance
 
@@ -122,8 +122,8 @@ invalidate affected entries without manual cache deletion.
   --match-id <match-id> --match-id <another-match-id>
 ```
 
-The pilot selects supported returns from the source, preserving its primary
-return. It constructs a private surface and annotations, links a small artifact
+The pilot keeps all source returns and requires a supported primary return. It
+constructs a private surface and annotations, links a small artifact
 subset, and verifies refresh against normal label generation with real tracking.
 It checks source signatures and non-xT labels, graph hard-link preservation, and
 zero replacements on a repeated refresh. Its report includes pitch-region target

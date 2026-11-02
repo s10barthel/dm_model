@@ -66,7 +66,7 @@ from project_config import (
 )
 from xt_versions import resolve_xt_version
 from datatools.xt_targets import (add_target_arguments, configure_targets, target_cli, target_settings,
-                                  validate_surface_returns)
+                                  unavailable_xt_returns)
 
 EXPECTED_GRAPH_SCHEMA = {
     "node_in_dim": infer_node_feature_dim(extend=True),
@@ -971,7 +971,11 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             f"requested={args.next_action_conditions_enabled!r}."
         )
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
-    validate_surface_returns(getattr(args, "xt_surface_metadata", None), final_return_types)
+    args.xt_unavailable_return_types = unavailable_xt_returns(
+        getattr(args, "xt_surface_metadata", None), final_return_types)
+    if refreshes_xt and args.xt_unavailable_return_types and getattr(args, "in_place", False):
+        raise ValueError("In-place logarithmic xT refresh would replace existing xT labels for "
+                         f"unsupported returns {args.xt_unavailable_return_types}; create a derived run instead.")
     refresh_target_families = args_refresh_target_families(args)
     refresh_pass_height_labels = bool(getattr(args, "pass_height", False))
     extend_relative_speed_edge_features = bool(getattr(args, "extend_relative_speed_edge_features", False))
@@ -1188,6 +1192,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "xt_version": args.xt_version,
         "xt_fit_metadata_sha256": args.xt_metadata_sha256,
         "xt_targets": args.xt_targets,
+        "xt_unavailable_return_types": args.xt_unavailable_return_types,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "derived_from_feature_run_id": plan.base_run_id,
@@ -1299,6 +1304,8 @@ def mutating_metadata(
             "xt_fit_metadata_sha256": (args.xt_metadata_sha256 if advertise_final_state
                                         else plan.base_metadata.get("xt_fit_metadata_sha256")),
             "xt_targets": args.xt_targets if advertise_final_state else target_settings(plan.base_metadata),
+            "xt_unavailable_return_types": (args.xt_unavailable_return_types if advertise_final_state
+                                            else plan.base_metadata.get("xt_unavailable_return_types", [])),
             **split_metadata(args),
             "split_manifest_id": split_manifest["manifest_id"],
             "split_manifest": split_manifest["metadata"],
@@ -1772,7 +1779,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
     args.xt_version = selected_xt.version
     args.xt_metadata_sha256 = selected_xt.metadata_sha256
     configure_targets(args)
-    validate_surface_returns(getattr(selected_xt, "metadata", {}), args.return_types)
+    args.xt_unavailable_return_types = unavailable_xt_returns(
+        getattr(selected_xt, "metadata", {}), args.return_types)
     args.run_id = args.run_id or generate_run_id("feature")
     python = sys.executable
     command_steps = [
@@ -1787,6 +1795,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "xt_version": args.xt_version,
         "xt_fit_metadata_sha256": args.xt_metadata_sha256,
         "xt_targets": args.xt_targets,
+        "xt_unavailable_return_types": args.xt_unavailable_return_types,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "intended_receiver_modes": args.intended_receiver_modes,

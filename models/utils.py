@@ -1148,19 +1148,25 @@ def _resolve_runtime_feature_run_candidate(
 def resolve_runtime_return_type(
     shared_context: dict[str, Any],
     explicit_return_type: str | None = None,
+    feature_metadata: dict[str, Any] | None = None,
     *,
     preferred_task: str = "outcome_scoring",
     fallback: str = DEFAULT_RUNTIME_RETURN_TYPE,
 ) -> str:
     if explicit_return_type:
-        return str(explicit_return_type)
-
-    source_return_types = shared_context.get("source_return_types", {})
-    if isinstance(source_return_types, dict) and source_return_types.get(preferred_task):
-        return str(source_return_types[preferred_task])
-
-    return_type = shared_context.get("return_type")
-    return str(return_type) if return_type else fallback
+        selected = str(explicit_return_type)
+    else:
+        source_return_types = shared_context.get("source_return_types", {})
+        if isinstance(source_return_types, dict) and source_return_types.get(preferred_task):
+            selected = str(source_return_types[preferred_task])
+        else:
+            selected = str(shared_context.get("return_type") or fallback)
+    source_families = shared_context.get("source_target_families") or {}
+    uses_xt = shared_context.get("target_family") == "xt" or source_families.get(preferred_task) == "xt"
+    unavailable = (feature_metadata or {}).get("xt_unavailable_return_types") or []
+    if uses_xt and selected in unavailable:
+        raise ValueError(f"Runtime xT targets for return_type={selected!r} are unavailable in this feature run.")
+    return selected
 
 
 def resolve_runtime_feature_run_context(
@@ -1175,6 +1181,16 @@ def resolve_runtime_feature_run_context(
     candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
 
     def validate_xt_context(resolved):
+        unavailable = (resolved.get("metadata") or {}).get("xt_unavailable_return_types") or []
+        source_families = shared_context.get("source_target_families") or {}
+        source_returns = shared_context.get("source_return_types") or {}
+        xt_returns = [return_type for task, return_type in source_returns.items()
+                      if source_families.get(task) == "xt"]
+        if shared_context.get("target_family") == "xt":
+            xt_returns.append(shared_context.get("return_type"))
+        for return_type in xt_returns:
+            if return_type in unavailable:
+                raise ValueError(f"Runtime xT targets for return_type={return_type!r} are unavailable in this feature run.")
         expected = shared_context.get("xt_target_definition")
         if expected is not None:
             from datatools.xt_targets import training_target_definition
@@ -1708,7 +1724,13 @@ def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor,
             batch_labels, "concedes_goal_distance"
         )
     if getattr(args, "use_xt", False):
-        return get_label_slice(batch_labels, "scores_xt"), get_label_slice(batch_labels, "concedes_xt")
+        if batch_labels.ndim != 2 or batch_labels.shape[1] <= max(LABEL_INDEX["scores_xt"], LABEL_INDEX["concedes_xt"]):
+            raise ValueError("xT labels are missing or invalid for this return type. Choose an available xT return.")
+        scores = get_label_slice(batch_labels, "scores_xt")
+        concedes = get_label_slice(batch_labels, "concedes_xt")
+        if not torch.isfinite(scores).all() or not torch.isfinite(concedes).all():
+            raise ValueError("xT labels are missing or invalid for this return type. Choose an available xT return.")
+        return scores, concedes
     if getattr(args, "use_epv", False):
         return get_label_slice(batch_labels, "scores_epv"), get_label_slice(batch_labels, "concedes_epv")
     if getattr(args, "use_xg", False):
