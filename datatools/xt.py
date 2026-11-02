@@ -15,6 +15,7 @@ from socceraction.spadl import play_left_to_right
 from socceraction.xthreat import ExpectedThreat
 
 from datatools import config, utils
+from datatools.xt_targets import LogProgressionSurface
 from project_config import XT_MATCH_DIR
 
 XT_GRID_L = 12
@@ -644,7 +645,7 @@ def project_xt_glm_to_grid(model: XTXYLogitModel, grid_l: int = XT_GRID_L, grid_
     return projected
 
 
-def build_xt_xy_surface(model: XTXYLogitModel) -> pd.DataFrame:
+def build_xt_xy_surface(model: XTXYLogitModel | LogProgressionSurface) -> pd.DataFrame:
     xs = np.arange(XT_SURFACE_X_POINTS, dtype=float) + 0.5
     ys = np.arange(XT_SURFACE_Y_POINTS, dtype=float) + 0.5
     xx, yy = np.meshgrid(xs, ys)
@@ -657,7 +658,7 @@ def build_xt_xy_surface(model: XTXYLogitModel) -> pd.DataFrame:
             "normalized_centrality": normalized_centrality,
         }
     )
-    surface["xT"] = model.predict_features(normalized_x, normalized_centrality)
+    surface["xT"] = model.predict_xy(xx.ravel(), yy.ravel())
     return surface
 
 
@@ -681,7 +682,7 @@ def save_xt_xy_surface_plot(surface: pd.DataFrame, output_path: str | Path) -> N
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("xT")
-    ax.set_title("x/y GLM xT surface")
+    ax.set_title("xT positional surface")
     ax.view_init(elev=28, azim=-132)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=160)
@@ -704,7 +705,7 @@ def zone_value_from_grid(start_x: pd.Series, start_y: pd.Series, grid: np.ndarra
     return values
 
 
-def annotate_match_xt(events: pd.DataFrame, xt_fit: XTXYGLMFit | XTXYLogitModel | np.ndarray) -> tuple[pd.DataFrame, pd.DataFrame]:
+def annotate_match_xt(events: pd.DataFrame, xt_fit: XTXYGLMFit | XTXYLogitModel | LogProgressionSurface | np.ndarray) -> tuple[pd.DataFrame, pd.DataFrame]:
     sorted_events = sort_events(events)
     sorted_events = utils.sanitize_expected_goal(sorted_events)
     sorted_events["xT"] = np.nan
@@ -715,13 +716,13 @@ def annotate_match_xt(events: pd.DataFrame, xt_fit: XTXYGLMFit | XTXYLogitModel 
     if not xt_actions.empty:
         home_team_id = infer_home_team_id(sorted_events)
         rotated_actions = rotate_xt_actions(xt_actions, home_team_id)
-        if isinstance(glm_model, XTXYLogitModel):
+        if isinstance(glm_model, (XTXYLogitModel, LogProgressionSurface)):
             rotated_actions["xT"] = glm_model.predict_xy(rotated_actions["start_x"], rotated_actions["start_y"])
         else:
             # Backward-compatible fallback for tests or callers that still pass a legacy grid.
             rotated_actions["xT"] = zone_value_from_grid(rotated_actions["start_x"], rotated_actions["start_y"], glm_model)
         shot_mask = rotated_actions["spadl_type"].eq("shot")
-        if shot_mask.any():
+        if shot_mask.any() and not isinstance(glm_model, LogProgressionSurface):
             rotated_actions.loc[shot_mask, "xT"] = np.maximum(
                 rotated_actions.loc[shot_mask, "xT"].to_numpy(dtype=float),
                 rotated_actions.loc[shot_mask, "xG"].fillna(0.0).to_numpy(dtype=float),

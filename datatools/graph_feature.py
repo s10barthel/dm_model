@@ -32,7 +32,9 @@ from datatools.config import LABEL_INDEX
 from models.pass_height import positive_height
 from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
-from xt_versions import get_xt_version_root, resolve_xt_version
+from xt_versions import get_xt_version_root, resolve_xt_version, xt_options_for_metadata
+from datatools.xt_targets import (add_target_arguments, configure_targets, surface_from_metadata,
+                                  validate_surface_returns)
 from datatools.success_intent import build_success_intent_resolved_actions
 from datatools.trajectory import TRAJECTORY_SPEED
 from datatools.pass_trajectory import ensure_pass_endpoints, trajectory_samples, positive_duration, PASS_DURATION
@@ -681,6 +683,13 @@ def build_match_for_feature_generation(
     match_lineup: pd.DataFrame,
     args: argparse.Namespace,
 ) -> Match:
+    xt_options = (xt_options_for_metadata(args.xt_feature_metadata) if hasattr(args, "xt_feature_metadata") else dict(
+        xt_match_dir=(get_xt_version_root(args.xt_version) / "matches") if getattr(args, "xt_version", None) else None,
+        xt_targets=getattr(args, "xt_targets", None),
+        xt_surface=(surface_from_metadata(args.xt_surface_metadata)
+                    if (getattr(args, "xt_targets", None) or {}).get("representation") == "gain" else None),
+        xt_surface_metadata=getattr(args, "xt_surface_metadata", None)))
+    xt_options = {name: value for name, value in xt_options.items() if value is not None}
     return Match(
         events,
         tracking,
@@ -689,7 +698,7 @@ def build_match_for_feature_generation(
         include_goals=True,
         max_pass_duration=getattr(args, "max_pass_duration", None),
         next_action_conditions_enabled=args.next_action_conditions_enabled,
-        xt_match_dir=(get_xt_version_root(args.xt_version) / "matches") if getattr(args, "xt_version", None) else None,
+        **xt_options,
         **({"reception_policy": args.reception_policy} if hasattr(args, "reception_policy") else {}),
     )
 
@@ -1846,6 +1855,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", type=str, default=None)
     parser.add_argument("--xt-version", type=str, default=None,
                         help="Completed xT version supplying match sidecars.")
+    add_target_arguments(parser)
     parser.add_argument("--receiver-extension-attempt", default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--labels-only",
@@ -1959,8 +1969,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    feature_root = get_feature_run_root(args.run_id) if args.run_id else None
+    saved = read_json(feature_root / "metadata.json") if feature_root and (feature_root / "metadata.json").is_file() else None
+    configure_targets(args, saved)
     if getattr(args, "xt_version", None):
-        args.xt_version = resolve_xt_version(args.xt_version).version
+        selected = resolve_xt_version(args.xt_version)
+        args.xt_version = selected.version
+        args.xt_surface_metadata = selected.metadata
+        validate_surface_returns(selected.metadata, args.return_types)
+    elif args.xt_targets["representation"] == "gain":
+        raise ValueError("Gain targets require --xt-version.")
     if args.use_carries and (args.action_type != "all" or args.feature_variant != "base"):
         raise ValueError("--use-carries is supported only with --action_type all --feature_variant base.")
     if args.use_carries and (args.augment_blocks or args.augment_blocks_from_existing_graphs):

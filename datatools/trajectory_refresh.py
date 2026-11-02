@@ -48,6 +48,7 @@ def load_refresh_match(match_id, metadata):
         path.parent.mkdir(parents=True, exist_ok=True)
         events.to_parquet(path)
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
+        xt_feature_metadata=metadata,
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
         reception_policy=metadata.get("reception_policy", "legacy_elastic_v1"),
         max_pass_duration=metadata.get(MAX_DURATION_KEY)))

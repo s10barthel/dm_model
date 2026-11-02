@@ -14,6 +14,8 @@ import torch
 from datatools import config, utils
 from datatools.artifact_storage import staged_path
 from datatools.xt_returns import label_xt_for_return_type
+from datatools.xt_targets import (target_settings, surface_from_metadata, transform_action_targets,
+                                  validate_surface_returns)
 from project_config import (XT_MATCH_DIR, atomic_write_json, get_action_label_dir,
                             get_intent_train_label_dir, get_augmented_label_dir,
                             get_resolved_action_dir)
@@ -198,20 +200,32 @@ def patch_labels(labels, pairs):
 
 
 def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
-               event_dir="data/event_synced", attempt=None):
+               event_dir="data/event_synced", attempt=None, xt_targets=None, surface_metadata=None):
     """Validate and stage the entire refresh before replacing any data artifact."""
     root, xt_match_dir, event_dir = Path(root), Path(xt_match_dir), Path(event_dir)
     attempt = attempt or ExtensionAttempt(root, "xt_refresh", "derived", {})
     started = time.perf_counter()
     attempt.enter("validating_xt_inventory")
     inventory, returns, modes, carries = refresh_inventory(root, metadata)
+    settings = target_settings({"xt_targets": xt_targets}) if xt_targets is not None else target_settings(metadata)
+    metadata_path = xt_match_dir.parent / "fit_metadata.json"
+    if surface_metadata is None and metadata_path.is_file():
+        import json
+        surface_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    validate_surface_returns(surface_metadata, returns)
+    surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" and surface_metadata else None
+    if settings["representation"] == "gain" and surface is None:
+        raise ValueError("Gain refresh requires a pinned surface definition.")
     inputs = {}
+    if metadata_path.is_file():
+        inputs[str(metadata_path.resolve())] = fingerprint(metadata_path)
     for mid in inventory:
         for path in (event_dir / f"{mid}.csv", xt_match_dir / f"{mid}.csv"):
             if not path.is_file():
                 raise FileNotFoundError(f"Required refresh input is missing: {path}")
             inputs[str(path.resolve())] = fingerprint(path)
     report = dict(source_run_id=metadata.get("run_id"), xt_version=xt_version,
+                  xt_targets=settings,
                   matches=len(inventory), return_types=returns,
                   carries=carries, input_sha256=inputs, artifacts=[], changed_rows=0,
                   rewritten_files=0, rewritten_bytes=0, graph_files_loaded=0, graph_files_written=0)
@@ -251,7 +265,8 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                     path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
                     attempt.data["current_file"] = str(path)
                     actions = pd.read_parquet(path)
-                    pairs.update({(mode, carry, ret): action_return_pairs(actions, values)
+                    pairs.update({(mode, carry, ret): transform_action_targets(
+                                      actions, action_return_pairs(actions, values), settings, surface)
                                   for ret, values in event_returns.items()})
                     updated = actions.copy()
                     updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]

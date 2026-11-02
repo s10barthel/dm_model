@@ -18,7 +18,8 @@ import psutil
 import torch
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.match import Match
-from datatools.xt import XTXYLogitModel, annotate_match_xt
+from datatools.xt import annotate_match_xt
+from datatools.xt_targets import surface_from_metadata, target_settings, validate_surface_returns
 from datatools.xt_refresh import (TARGET_COLUMNS, file_signature, fingerprint, read_annotated_events,
                                  refresh_inventory, refresh_xt)
 from project_config import atomic_write_json, get_resolved_action_dir
@@ -40,6 +41,8 @@ def main():
     seed.mkdir(parents=True)
     sidecars.mkdir()
     metadata = json.loads((args.source / 'metadata.json').read_text())
+    validate_surface_returns(selected_xt.metadata, metadata['return_types'])
+    atomic_write_json(output / 'fit_metadata.json', selected_xt.metadata)
     match_ids = ['DFL-MAT-J03WEL', 'DFL-MAT-J03YDU', 'DFL-MAT-J04034']
     metadata['split_manifest'] = {**metadata.get('split_manifest', {}), 'universe_count': len(match_ids)}
     source_files = []
@@ -69,7 +72,7 @@ def main():
         raise AssertionError('Missing annotation was accepted')
     assert all(file_signature(p) == original_signatures[p] for p in source_files)
     fit = selected_xt.metadata
-    model = XTXYLogitModel(coefficients=fit['coefficients'], terms=tuple(fit['terms']))
+    model = surface_from_metadata(fit)
     events = pd.read_csv(Path('data/event_synced') / f'{match_ids[0]}.csv')
     annotated, _ = annotate_match_xt(events, model)
     annotated[['action_id', 'xT', 'scores_xT', 'concedes_xT']].to_csv(sidecars / f'{match_ids[0]}.csv', index=False)
@@ -110,6 +113,8 @@ def main():
                 actions = pd.read_parquet(get_resolved_action_dir(mode, root=seed, use_carries=carry) / f'{mid}.parquet')
                 # Skip __init__ so the reference cannot consult production sidecars.
                 match = Match.__new__(Match)
+                match.xt_targets = target_settings(metadata)
+                match.xt_surface, match.xt_surface_metadata = model, selected_xt.metadata
                 match.events = events.copy()
                 match.tracking, match.action_type, match.fps, match.include_goals = tracking, 'all', 25, False
                 for ret in returns:

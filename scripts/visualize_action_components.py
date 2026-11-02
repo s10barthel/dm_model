@@ -31,7 +31,7 @@ from datatools import config
 from datatools.graph_feature import construct_graph_features, construct_graph_for_action, summarize_ball_trajectory
 from datatools.pass_trajectory import PASS_DURATION
 from datatools.match import Match
-from xt_versions import xt_match_dir_for_feature_root
+from xt_versions import xt_options_for_feature_root
 from datatools.viz_helpers import (
     figure_to_rgb_image,
     compute_outcome,
@@ -296,7 +296,7 @@ def load_match(
     match = Match(events, tracking, match_lineup, action_type="all", include_goals=True,
                   reception_policy=run_version(feature_root),
                   max_pass_duration=feature_metadata.get("max_pass_duration"),
-                  xt_match_dir=xt_match_dir_for_feature_root(feature_root))
+                  **xt_options_for_feature_root(feature_root))
     match.sportec_canonical_source = raw_events
     match.runtime_feature_root = feature_root
     match.runtime_graph_options = dict(add_v_edge_features=add_v_edge_features,

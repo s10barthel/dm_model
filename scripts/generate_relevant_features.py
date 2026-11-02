@@ -65,6 +65,8 @@ from project_config import (
     EVENT_SYNCED_DIR,
 )
 from xt_versions import resolve_xt_version
+from datatools.xt_targets import (add_target_arguments, configure_targets, target_cli, target_settings,
+                                  validate_surface_returns)
 
 EXPECTED_GRAPH_SCHEMA = {
     "node_in_dim": infer_node_feature_dim(extend=True),
@@ -140,6 +142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--xt-version", default=None,
                         help="Completed xT version; required for a new feature run and xT refresh. 'latest' resolves once.")
+    add_target_arguments(parser)
     parser.add_argument("--artifact-copy-mode", choices=("hardlink", "copy"), default="hardlink",
                         help="Storage for unchanged derived-run artifacts; copying requires explicit opt-in.")
     parser.add_argument(
@@ -427,6 +430,7 @@ def with_mode_flags(command: list[str], args: argparse.Namespace) -> list[str]:
         command.extend(["--run-id", args.run_id])
     if getattr(args, "xt_version", None):
         command.extend(["--xt-version", args.xt_version])
+    command.extend(target_cli(getattr(args, "xt_targets", target_settings())))
     command.extend(split_cli_args(args))
     command.extend(["--num-workers", str(getattr(args, "num_workers", "1"))])
     command.extend(["--worker-thread-limit", str(getattr(args, "worker_thread_limit", 1))])
@@ -915,6 +919,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     if base_metadata is None:
         raise FileNotFoundError(f"Feature run {base_run_id} does not have metadata.json.")
     refreshes_xt = "xt" in args_refresh_target_families(args)
+    configure_targets(args, base_metadata, allow_change=refreshes_xt)
     requested_xt = getattr(args, "xt_version", None)
     if refreshes_xt and not requested_xt:
         raise ValueError("--refresh-target-family xt requires --xt-version.")
@@ -931,6 +936,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         )
         args.xt_version = selected.version
         args.xt_metadata_sha256 = selected.metadata_sha256
+        args.xt_surface_metadata = getattr(selected, "metadata", {})
         if not refreshes_xt and base_metadata.get("xt_fit_metadata_sha256") not in (None, selected.metadata_sha256):
             raise ValueError(f"xT version {selected.version!r} changed after the base feature run was created.")
     else:
@@ -965,6 +971,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             f"requested={args.next_action_conditions_enabled!r}."
         )
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
+    validate_surface_returns(getattr(args, "xt_surface_metadata", None), final_return_types)
     refresh_target_families = args_refresh_target_families(args)
     refresh_pass_height_labels = bool(getattr(args, "pass_height", False))
     extend_relative_speed_edge_features = bool(getattr(args, "extend_relative_speed_edge_features", False))
@@ -1117,6 +1124,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         command_steps = [FeatureGenerationStep(step.description,
             step.command if "--xt-version" in step.command else [*step.command, "--xt-version", args.xt_version])
             for step in command_steps]
+    command_steps = [FeatureGenerationStep(step.description,
+        [*step.command[:2], *target_cli(args.xt_targets), *step.command[2:]]) for step in command_steps]
     commands = [step.command for step in command_steps]
     if refresh_target_families == ["xt"] or targeted_goal_distance(refresh_target_families):
         command_steps, commands = [], []
@@ -1178,6 +1187,7 @@ def derived_metadata(args: argparse.Namespace, plan: FeatureExtensionPlan, statu
         "run_id": plan.output_run_id,
         "xt_version": args.xt_version,
         "xt_fit_metadata_sha256": args.xt_metadata_sha256,
+        "xt_targets": args.xt_targets,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "derived_from_feature_run_id": plan.base_run_id,
@@ -1288,6 +1298,7 @@ def mutating_metadata(
             "xt_version": args.xt_version if advertise_final_state else plan.base_metadata.get("xt_version"),
             "xt_fit_metadata_sha256": (args.xt_metadata_sha256 if advertise_final_state
                                         else plan.base_metadata.get("xt_fit_metadata_sha256")),
+            "xt_targets": args.xt_targets if advertise_final_state else target_settings(plan.base_metadata),
             **split_metadata(args),
             "split_manifest_id": split_manifest["manifest_id"],
             "split_manifest": split_manifest["metadata"],
@@ -1538,6 +1549,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             refresh_xt(target_root, plan.base_metadata,
                        xt_match_dir=(resolve_xt_version(args.xt_version).match_dir),
                        xt_version=args.xt_version,
+                       xt_targets=args.xt_targets,
+                       surface_metadata=args.xt_surface_metadata,
                        attempt=attempt)
         elif targeted_goal_distance(plan.refresh_target_families):
             refresh_result = refresh_goal_distance(target_root, plan.base_metadata,
@@ -1640,6 +1653,7 @@ def carry_extension_steps(
         common.extend(["--pass-height-threshold", str(float(threshold))])
     if metadata.get("xt_version"):
         common.extend(["--xt-version", metadata["xt_version"]])
+    common.extend(target_cli(target_settings(metadata)))
 
     steps: list[FeatureGenerationStep] = []
     for split in ("train", "test"):
@@ -1665,6 +1679,7 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
     metadata = load_feature_run_metadata(base_run_id, required=True)
     if metadata is None or metadata.get("status") != "completed":
         raise ValueError(f"Feature run {base_run_id} must be completed before adding carries.")
+    configure_targets(args, metadata)
     if metadata.get(PASS_DURATION_KEY) != PASS_DURATION:
         raise ValueError("Adding carries to an existing run requires --refresh-trajectory first.")
     if bool((metadata.get("carry_variant") or {}).get("available", False)):
@@ -1756,6 +1771,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
                                      split_manifest_id=split_manifest["manifest_id"])
     args.xt_version = selected_xt.version
     args.xt_metadata_sha256 = selected_xt.metadata_sha256
+    configure_targets(args)
+    validate_surface_returns(getattr(selected_xt, "metadata", {}), args.return_types)
     args.run_id = args.run_id or generate_run_id("feature")
     python = sys.executable
     command_steps = [
@@ -1769,6 +1786,7 @@ def run_full_generation(args: argparse.Namespace) -> None:
         "run_id": args.run_id,
         "xt_version": args.xt_version,
         "xt_fit_metadata_sha256": args.xt_metadata_sha256,
+        "xt_targets": args.xt_targets,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": subprocess.list2cmdline(sys.argv),
         "intended_receiver_modes": args.intended_receiver_modes,

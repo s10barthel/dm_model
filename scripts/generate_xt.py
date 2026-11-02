@@ -26,7 +26,9 @@ from datatools.xt import (
     rotate_xt_actions,
     save_xt_xy_surface_plot,
     validate_xt_grid_shape,
+    project_xt_glm_to_grid,
 )
+from datatools.xt_targets import LogProgressionSurface
 from project_config import (
     add_split_arguments,
     split_selector,
@@ -38,7 +40,7 @@ from project_config import (
     ensure_project_dirs,
     load_split_manifest,
 )
-from xt_versions import REQUIRED_FILES, get_xt_version_root, resolve_xt_version, validate_xt_version_id
+from xt_versions import required_files, get_xt_version_root, resolve_xt_version, validate_xt_version_id
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +49,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", action="append", help="Restrict export generation to one or more match ids.")
     parser.add_argument("--limit", type=int, help="Only process the first N available matches.")
     parser.add_argument("--version", help="New xT version ID; generated automatically when omitted.")
+    parser.add_argument("--log-progression", action="store_true", help="Construct an analytical logarithmic progression surface instead of fitting xT.")
+    parser.add_argument("--k", type=float, default=None, help="Log progression lateral-distance weight (default: 2).")
+    parser.add_argument("--min-goal-distance", type=float, default=None, help="Log progression saturation distance in metres (default: 1).")
     parser.add_argument("--source-grid-l", type=int, default=None, help="Socceraction source-grid length bins. Default: 12.")
     parser.add_argument("--source-grid-w", type=int, default=None, help="Socceraction source-grid width bins. Default: 8.")
     parser.add_argument("--use-interaction", action="store_true", help="Include normalized_x * normalized_centrality in the xT GLM.")
@@ -69,6 +74,19 @@ def parse_args() -> argparse.Namespace:
         help="Fit xT model artifacts only; do not write xT.csv or per-match xT sidecars.",
     )
     args = parser.parse_args()
+    if args.log_progression:
+        if (args.source_grid_l is not None or args.source_grid_w is not None or args.use_interaction
+                or args.use_nonlinear or args.reuse_source_grid or args.source_xt_version):
+            parser.error("--log-progression cannot be combined with source-grid or GLM fitting options.")
+        try:
+            LogProgressionSurface(args.k if args.k is not None else 2.0,
+                                  args.min_goal_distance if args.min_goal_distance is not None else 1.0)
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif args.k is not None or args.min_goal_distance is not None:
+        parser.error("--k/--min-goal-distance require --log-progression.")
+    args.k = args.k if args.k is not None else 2.0
+    args.min_goal_distance = args.min_goal_distance if args.min_goal_distance is not None else 1.0
     vars(args).update(split_selector(args))
     if args.reuse_source_grid and (args.source_grid_l is not None or args.source_grid_w is not None):
         parser.error("--source-grid-l/--source-grid-w cannot be combined with --reuse-source-grid; reuse infers dimensions from the CSV.")
@@ -219,6 +237,12 @@ def save_export_outputs(
 
 def save_model_outputs(xt_fit, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(xt_fit, LogProgressionSurface):
+        pd.DataFrame(project_xt_glm_to_grid(xt_fit), columns=grid_columns(XT_GRID_L)).to_csv(output_dir / "xT_grid.csv", index=False)
+        surface = build_xt_xy_surface(xt_fit)
+        surface.to_csv(output_dir / "xT_xy_surface.csv", index=False)
+        save_xt_xy_surface_plot(surface, output_dir / "xT_xy_surface_3d.png")
+        return
     pd.DataFrame(xt_fit.projection_grid, columns=[f"X{i}" for i in range(XT_GRID_L)]).to_csv(
         output_dir / "xT_grid.csv",
         index=False,
@@ -262,6 +286,9 @@ def main() -> None:
 
 
 def _build_version(args, manifest, version: str, output_dir: Path, stage: Path) -> None:
+    if args.log_progression:
+        _build_log_version(args, manifest, version, output_dir, stage)
+        return
     train_ids = [match_id for match_id in manifest["train"] if (EVENT_SYNCED_DIR / f"{match_id}.csv").exists()]
     all_events: list[pd.DataFrame] = []
     skipped_export_matches: list[dict[str, str]] = []
@@ -306,6 +333,8 @@ def _build_version(args, manifest, version: str, output_dir: Path, stage: Path) 
         "status": "complete" if complete else "partial",
         "created_at_utc": datetime.now(UTC).isoformat(),
         "xt_model_type": "xy_logit_glm",
+        "surface_type": "xy_logit_glm",
+        "surface_definition_version": 1,
         "fit_only": bool(args.fit_only),
         **split_metadata(args),
         "split_manifest_id": manifest["manifest_id"],
@@ -360,7 +389,7 @@ def _build_version(args, manifest, version: str, output_dir: Path, stage: Path) 
         "skipped_export_matches": skipped_export_matches + skipped_export_write_matches,
     }
     (stage / "fit_metadata.json").write_text(json.dumps(fit_metadata, indent=2), encoding="utf-8")
-    required = [name for name in REQUIRED_FILES if name != "xT.csv" or not args.fit_only]
+    required = [name for name in required_files(fit_metadata) if name != "xT.csv" or not args.fit_only]
     missing = [name for name in required if not (stage / name).is_file()]
     if missing:
         raise RuntimeError(f"xT version {version!r} is missing generated outputs: {missing}.")
@@ -380,6 +409,45 @@ def _build_version(args, manifest, version: str, output_dir: Path, stage: Path) 
     if total_skipped_export:
         print(f"Skipped {total_skipped_export} export matches while generating xT outputs.")
     print(f"Saved {'complete' if complete else 'partial'} xT version {version} to {output_dir}")
+
+
+def _build_log_version(args, manifest, version, output_dir, stage):
+    model = LogProgressionSurface(args.k, args.min_goal_distance)
+    save_model_outputs(model, stage)
+    processed, skipped = [], []
+    if not args.fit_only:
+        match_ids = resolve_match_ids(args.match_id, args.limit)
+        events, _, skipped_read = collect_export_matches(match_ids)
+        processed, skipped_write, _ = save_export_outputs(events, model, stage, stage / "matches")
+        skipped = skipped_read + skipped_write
+    complete = not args.fit_only and not args.match_id and args.limit is None and not skipped
+    metadata = dict(version=version, status="complete" if complete else "partial",
+                    created_at_utc=datetime.now(UTC).isoformat(), surface_type="log_progression",
+                    xt_model_type="log_progression", surface_definition_version=1,
+                    k=model.k, min_goal_distance=model.min_goal_distance, max_goal_distance=model.max_distance,
+                    formula="log(D / clip(sqrt((105-x)^2 + k*(y-34)^2), d_min, D)) / log(D/d_min)",
+                    shot_xT_policy="surface_only", fit_only=bool(args.fit_only),
+                    fit_match_ids=[], export_match_ids=processed, skipped_export_matches=skipped,
+                    split_manifest_id=manifest["manifest_id"], split_manifest=manifest["metadata"],
+                    match_sidecars_written=not args.fit_only, xT_csv_written=not args.fit_only,
+                    grid_l=XT_GRID_L, grid_w=XT_GRID_W, eligible_action_types=["pass", "cross", "shot"],
+                    ignored_export_filters=ignored_export_filters(args) if args.fit_only else {},
+                    output_files={name: str(output_dir / name) for name in required_files({"surface_type": "log_progression"})},
+                    **split_metadata(args))
+    atomic_write_json(stage / "fit_metadata.json", metadata)
+    required = [name for name in required_files(metadata) if name != "xT.csv" or not args.fit_only]
+    missing = [name for name in required if not (stage / name).is_file()]
+    if complete:
+        missing += [f"matches/{mid}.csv" for mid in resolve_match_ids(None, None)
+                    if not (stage / "matches" / f"{mid}.csv").is_file()]
+    if missing:
+        raise RuntimeError(f"Missing log progression outputs: {missing[:5]}.")
+    if output_dir.exists():
+        raise FileExistsError(f"xT version {version!r} was created concurrently.")
+    stage.rename(output_dir)
+    if complete:
+        atomic_write_json(XT_DIR / "latest.json", {"version": version, "updated_at_utc": datetime.now(UTC).isoformat()})
+    print(f"Saved {'complete' if complete else 'partial'} log progression xT version {version} to {output_dir}")
 
 
 if __name__ == "__main__":

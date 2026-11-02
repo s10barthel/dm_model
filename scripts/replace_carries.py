@@ -133,6 +133,7 @@ def rebuild_match(task):
     lineup = pd.read_parquet(DATA_ROOT / "lineup" / "line_up.parquet")
     lineup = lineup.loc[lineup.stats_perform_match_id.eq(match_id)].copy()
     match = build_match_for_feature_generation(events, tracking, lineup, SimpleNamespace(
+        xt_feature_metadata=metadata,
         action_type="all", next_action_conditions_enabled=metadata.get("next_action_conditions_enabled", True),
         reception_policy=policy_version(metadata),
         max_pass_duration=metadata.get("max_pass_duration")))

@@ -856,6 +856,15 @@ def main(cache_session):
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    if args.use_xt:
+        from datatools.xt_targets import validate_training_targets, training_target_definition
+        validate_training_targets(feature_metadata)
+        definition = training_target_definition(feature_metadata)
+        if resume_record is not None:
+            saved_definition = resume_record.get("xt_target_definition") or resume_record.get("args", {}).get("xt_target_definition")
+            if saved_definition is not None and saved_definition != definition:
+                raise ValueError("Resume cannot change the saved xT surface or target definition.")
+        args.xt_target_definition = definition
     from datatools.pass_eligibility import resolve_training_policy
     resolve_training_policy(args, feature_metadata,
                             vars(args).copy() if args.refit_recipe is not None else resume_record)
@@ -1125,6 +1134,7 @@ def main(cache_session):
         },
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
+        "xt_target_definition": getattr(args, "xt_target_definition", None),
         "pass_height_definition": getattr(args, "pass_height_definition", None),
         "early_stopping": bool(args.early_stopping),
         "early_stopping_patience": int(args.early_stopping_patience),

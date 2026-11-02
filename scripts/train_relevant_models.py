@@ -816,6 +816,7 @@ def derive_bundle_shared_context(
             "intended_receiver_mode": getattr(cli_args, "intended_receiver_mode", None),
             "return_type": cli_args.return_type,
             "target_family": cli_args.target_family,
+            "xt_target_definition": shared.get("xt_target_definition"),
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
             "v_edge_feature_mode": v_edge_feature_mode,
@@ -1469,6 +1470,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--return_type is required when outcome models are enabled.")
         try:
             args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
+            if args.target_family == "xt":
+                from datatools.xt_targets import validate_training_targets
+                validate_training_targets(feature_metadata)
         except ValueError as exc:
             parser.error(str(exc))
     else:
@@ -2451,6 +2455,7 @@ def _main(cli_args) -> None:
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
+        "xt_target_definition": bundle_shared.get("xt_target_definition"),
         "return_type": bundle_shared.get("return_type"),
         "source_input_settings": bundle_shared.get("source_input_settings", {}),
         "source_feature_run_ids": bundle_shared.get("source_feature_run_ids", {}),

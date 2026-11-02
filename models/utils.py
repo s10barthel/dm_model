@@ -335,6 +335,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
+        "xt_target_definition": metadata.get("xt_target_definition", args.get("xt_target_definition")),
         "return_type": return_type,
         "use_carries": bool(metadata.get("use_carries", args.get("use_carries", False))),
         "model_name": str(resolve_architecture(args)),
@@ -830,6 +831,11 @@ def validate_model_record_consistency(
     }
 
     outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
+    xt_records = {task: record for task, record in outcome_records.items() if record.get("target_family") == "xt"}
+    xt_definitions = {json.dumps(record.get("xt_target_definition"), sort_keys=True) for record in xt_records.values()}
+    if len(xt_definitions) > 1:
+        raise ValueError("Selected xT outcome checkpoints do not agree on surface and target definition.")
+    shared["xt_target_definition"] = next(iter(xt_records.values())).get("xt_target_definition") if xt_records else None
     return_type_records = outcome_records if outcome_records else model_records
     return_types = {record.get("return_type") for record in return_type_records.values()}
     return_types.discard(None)
@@ -1168,6 +1174,13 @@ def resolve_runtime_feature_run_context(
 ) -> dict[str, Any]:
     candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
 
+    def validate_xt_context(resolved):
+        expected = shared_context.get("xt_target_definition")
+        if expected is not None:
+            from datatools.xt_targets import training_target_definition
+            if training_target_definition(resolved.get("metadata", {})) != expected:
+                raise ValueError("Runtime feature run uses a different xT surface or target definition than the outcome checkpoints.")
+
     if explicit_feature_run_id:
         resolved = _resolve_runtime_feature_run_candidate(
             str(explicit_feature_run_id),
@@ -1175,6 +1188,7 @@ def resolve_runtime_feature_run_context(
             required_graph_schema,
             context=context,
         )
+        validate_xt_context(resolved)
         resolved["selection"] = "explicit"
         resolved["candidate_feature_run_ids"] = candidate_ids
         return resolved
@@ -1190,6 +1204,7 @@ def resolve_runtime_feature_run_context(
                     required_graph_schema,
                     context=context,
                 )
+                validate_xt_context(resolved)
             except Exception as exc:
                 rejected.append(f"{feature_run_id}: {type(exc).__name__}: {exc}")
                 continue

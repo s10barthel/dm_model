@@ -20,6 +20,12 @@ _RESERVED.update({f"com{number}" for number in range(1, 10)})
 _RESERVED.update({f"lpt{number}" for number in range(1, 10)})
 
 
+def required_files(metadata):
+    if metadata.get("surface_type", metadata.get("xt_model_type")) == "log_progression":
+        return tuple(name for name in REQUIRED_FILES if name not in {"xT_source_grid.csv", "xT_glm_fit_sample.csv"})
+    return REQUIRED_FILES
+
+
 @dataclass(frozen=True)
 class XTVersion:
     version: str
@@ -72,7 +78,10 @@ def resolve_xt_version(
             f"xT version {version!r} uses split {metadata.get('split_manifest_id')!r}, "
             f"but the feature run uses {split_manifest_id!r}."
         )
-    missing = [str(root / name) for name in REQUIRED_FILES if not (root / name).is_file()]
+    from datatools.xt_targets import surface_from_metadata
+    if metadata.get("surface_type") == "log_progression":
+        surface_from_metadata(metadata)  # Validate the persisted analytical definition.
+    missing = [str(root / name) for name in required_files(metadata) if not (root / name).is_file()]
     missing += [str(root / "matches" / f"{match_id}.csv") for match_id in required_match_ids
                 if not (root / "matches" / f"{match_id}.csv").is_file()]
     if missing:
@@ -89,3 +98,27 @@ def xt_match_dir_for_feature_root(feature_root: Path | None) -> Path:
         return XT_MATCH_DIR
     version = json.loads(metadata_path.read_text(encoding="utf-8-sig")).get("xt_version")
     return resolve_xt_version(version).match_dir if version else XT_MATCH_DIR
+
+
+def xt_options_for_metadata(metadata):
+    """Construct Match options for runtime and non-CLI feature regeneration."""
+    from datatools.xt_targets import target_settings, surface_from_metadata
+    settings = target_settings(metadata)
+    selected = resolve_xt_version(metadata["xt_version"]) if metadata.get("xt_version") else None
+    if selected and metadata.get("xt_fit_metadata_sha256") not in (None, selected.metadata_sha256):
+        raise ValueError("Pinned xT surface metadata changed after feature generation.")
+    if settings["representation"] == "gain" and selected is None:
+        raise ValueError("Gain targets require a pinned xT version.")
+    return dict(xt_targets=settings,
+                xt_surface=surface_from_metadata(selected.metadata) if settings["representation"] == "gain" else None,
+                xt_surface_metadata=selected.metadata if selected else None,
+                xt_match_dir=selected.match_dir if selected else None)
+
+
+def xt_options_for_feature_root(feature_root):
+    path = Path(feature_root) / "metadata.json" if feature_root is not None else None
+    metadata = json.loads(path.read_text(encoding="utf-8-sig")) if path and path.is_file() else {}
+    options = xt_options_for_metadata(metadata)
+    if options["xt_match_dir"] is None:
+        options["xt_match_dir"] = XT_MATCH_DIR
+    return options

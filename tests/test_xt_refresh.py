@@ -25,6 +25,41 @@ RETURNS = ["next_3", "next_3_skip1", "in_1", "disc_0.9", "disc_0.9_skip1",
            "disc_max_0.9", "disc_max_0.9_skip1", "disc_poly_max_0.1_1", "disc_poly_max_0.1_1_spstop"]
 
 
+@pytest.mark.parametrize("return_type", ["next_3", "next_3_skip1", "in_1"])
+def test_log_gain_refresh_matches_generation_and_uses_carry_start(sample, return_type):
+    from datatools.xt_targets import LogProgressionSurface, transform_action_targets
+    root, event_dir, sidecars, metadata, events, _, actions = sample
+    model = LogProgressionSurface()
+    settings = dict(representation="gain", clip_negative_gains=True)
+    surface_metadata = dict(surface_type="log_progression", k=2, min_goal_distance=1)
+    metadata["return_types"] = [return_type]
+    # Retain only the selected return artifacts for this isolated inventory.
+    for directory in list(root.iterdir()):
+        if directory.is_dir() and directory.name.startswith("action_labels"):
+            known = {get_action_label_dir(return_type, mode, root=root, use_carries=carry)
+                     for mode in metadata["intended_receiver_modes"] for carry in (False, True)}
+            known.update(get_intent_train_label_dir(return_type, mode, root=root) for mode in metadata["intended_receiver_modes"])
+            if directory not in known:
+                (directory / "m.pt").unlink()
+                directory.rmdir()
+    match = Match.__new__(Match)
+    match.events = events.copy()
+    match.action_type, match.fps, match.include_goals = "all", 25, False
+    match.xt_targets, match.xt_surface, match.xt_surface_metadata = settings, model, surface_metadata
+    match.tracking = pd.DataFrame({"home_1_x": [1.], "home_1_y": [2.], "away_1_x": [3.], "away_1_y": [4.]})
+    normal = match.construct_labels(resolved_actions=actions, relabel_intended_receivers=False, return_type=return_type)
+    pairs = transform_action_targets(actions, action_return_pairs(actions, label_xt_for_return_type(events, return_type)), settings, model)
+    np.testing.assert_allclose(normal[:, TARGET_COLUMNS].numpy(), pairs.to_numpy(), rtol=1e-6)
+    report = refresh_xt(root, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                        xt_targets=settings, surface_metadata=surface_metadata)
+    assert report["rewritten_files"] > 0
+    actual = torch.load(get_action_label_dir(return_type, "original", root=root, use_carries=True) / "m.pt", weights_only=True)
+    torch.testing.assert_close(actual[:, TARGET_COLUMNS], normal[:, TARGET_COLUMNS])
+    repeated = refresh_xt(root, metadata, xt_match_dir=sidecars, event_dir=event_dir,
+                          xt_targets=settings, surface_metadata=surface_metadata)
+    assert repeated["rewritten_files"] == 0
+
+
 @pytest.fixture
 def sample(tmp_path):
     root, events_dir, sidecars = [tmp_path / name for name in ("source", "events", "sidecars")]
