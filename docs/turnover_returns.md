@@ -8,12 +8,21 @@ derived runs by default; source artifacts remain unchanged.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
-  --extend-feature-run-id <source> --refresh-stop-conditions
+  --extend-feature-run-id <source> --refresh-stop-conditions `
+  --num-workers 8 --worker-thread-limit 1
 ```
 
 This recomputes outcome labels for all existing returns and target families,
 using saved action identities and without rebuilding graphs. It preserves the
 source xT target definition. It does **not** add set-piece variants.
+
+`--num-workers <N|auto>` also controls this refresh stage (default: `1`). Each
+worker computes and stages one match at a time; the parent validates all inputs
+before replacing any output files. `--worker-thread-limit` limits native compute
+threads in each worker. Progress messages show staged matches and the worker
+count. These options also apply when refreshing existing stop-condition variants
+for xT, goal distance, or newly generated labels. An already running refresh
+keeps its original worker count; it must be restarted to use changed code.
 
 Base stops include a detected goal, then stop; stop at period end and before a
 subsequent goal-kick. No separate kick-off check is added. Set-piece stops also

@@ -9,6 +9,165 @@ from project_config import parse_return_type, validate_return_type_for_target_fa
 from tests.test_xt_refresh import sample
 
 
+@pytest.fixture
+def stop_worker_sample(sample, tmp_path, monkeypatch):
+    import shutil
+    import project_config
+    root, event_dir, sidecars, metadata, source, _, _ = sample
+    source = source.assign(start_x=10., start_y=20.)
+    source.drop(columns="xT").to_csv(event_dir / "m.csv", index=False)
+    folders = [root, event_dir, sidecars]
+    for name in ("goal_distance", "epv"):
+        folder = tmp_path / name
+        folder.mkdir()
+        source[["action_id"]].assign(**{name: [.1, .4, .8]}).to_csv(folder / "m.csv", index=False)
+        monkeypatch.setattr(project_config, name.upper() + "_MATCH_DIR", folder)
+        folders.append(folder)
+    # Pinned controls exercise acquisition-cache staging without external tracking.
+    controls = root / "carry_sidecars" / "control_events"
+    controls.mkdir(parents=True)
+    pd.DataFrame(dict(event_id=source.original_event_id, event_kind="pass", frame_id=0,
+                      period_id=source.period_id, object_id=source.object_id)).to_parquet(controls / "m.parquet")
+    for folder in folders:
+        for path in list(folder.rglob("m.*")):
+            for mid in ("n", "o", "p"):
+                shutil.copy2(path, path.with_name(mid + path.suffix))
+    metadata["split_manifest"] = dict(universe_count=4)
+    return root, event_dir, sidecars, metadata
+
+
+def test_parallel_stop_refresh_matches_serial_and_preserves_source(stop_worker_sample, tmp_path):
+    import copy
+    import os
+    import torch
+    from datatools.artifact_storage import clone_feature_artifacts
+    from datatools.stop_conditions import refresh_labels
+    from datatools.xt_refresh import fingerprint
+    from scripts.feature_extension_diagnostics import ExtensionAttempt
+    source, event_dir, sidecars, metadata = stop_worker_sample
+    originals = {p.relative_to(source): fingerprint(p) for p in source.rglob("*") if p.is_file()}
+    roots = [tmp_path / name for name in ("serial", "parallel")]
+    metas = [copy.deepcopy(metadata) for _ in roots]
+    for root in roots:
+        clone_feature_artifacts(source, root)
+    requests = {r.removesuffix("_spstop"): ["base", "set-pieces"] for r in metadata["return_types"]}
+    options = dict(event_dir=event_dir, xt_match_dir=sidecars)
+
+    def compare_outputs():
+        for path in roots[0].rglob("*"):
+            if not path.is_file() or path.suffix not in {".pt", ".parquet"}:
+                continue
+            other = roots[1] / path.relative_to(roots[0])
+            if "graphs" in path.parent.name:
+                assert fingerprint(path) == fingerprint(other)
+            elif path.suffix == ".pt":
+                torch.testing.assert_close(torch.load(path, weights_only=True),
+                                           torch.load(other, weights_only=True), rtol=0, atol=0, equal_nan=True)
+            else:
+                pd.testing.assert_frame_equal(pd.read_parquet(path), pd.read_parquet(other))
+        assert metas[0] == metas[1]
+
+    for step in ("migrate", "targets", "xt"):
+        kwargs = {}
+        if step == "targets":
+            kwargs["target_families"] = ["goal_distance", "progression"]
+        elif step == "xt":
+            kwargs.update(xt_only=True, surface_metadata=dict(surface_type="log_progression", k=2, min_goal_distance=1))
+            for meta in metas:
+                meta["xt_targets"] = dict(version=2, representation="gain", clip_negative_gains=True)
+        reports = []
+        for workers, root, meta in zip((1, 2), roots, metas):
+            attempt = ExtensionAttempt(root, "stop_conditions", "derived", {})
+            reports.append(refresh_labels(root, meta, requests, attempt=attempt, num_workers=workers,
+                                          **options, **kwargs))
+            assert reports[-1]["workers"] == workers
+            assert reports[-1]["completed_matches"] == reports[-1]["total_matches"] == 4
+            if workers == 2:
+                assert len(attempt.data["worker_pids"]) == 2
+                assert os.getpid() not in attempt.data["worker_pids"]
+        assert reports[0]["changed_rows"] == reports[1]["changed_rows"]
+        assert reports[0]["rewritten_files"] == reports[1]["rewritten_files"]
+        compare_outputs()
+    repeated = refresh_labels(roots[1], metas[1], requests, num_workers=2, **options, **kwargs)
+    assert repeated["rewritten_files"] == 0
+    assert not list(roots[1].rglob("*.tmp"))
+    assert all(fingerprint(source / relative) == digest for relative, digest in originals.items())
+
+
+def _crash_stop_worker(root, mid, artifacts, options, temporary_paths):
+    import os
+    next(iter(temporary_paths.values())).write_bytes(b"interrupted worker output")
+    os._exit(23)
+
+
+@pytest.mark.parametrize("failure", ["worker", "crash", "input", "replacement"])
+def test_parallel_stop_refresh_failure_cleans_temporary_files(stop_worker_sample, monkeypatch, failure):
+    import torch
+    from pathlib import Path
+    from datatools import config, stop_conditions
+    from datatools.xt_refresh import fingerprint
+    from scripts.feature_extension_diagnostics import ExtensionAttempt
+    root, event_dir, sidecars, metadata = stop_worker_sample
+    requests = {r.removesuffix("_spstop"): ["base"] for r in metadata["return_types"]}
+    if failure == "worker":
+        # Fail late in a worker after it has staged other artifacts for this match.
+        path = root / "success_intent_labels" / "n.pt"
+        bad = torch.load(path, weights_only=True)
+        bad[0, config.LABEL_INDEX["action_index"]] = -100
+        torch.save(bad, path)
+    elif failure == "crash":
+        monkeypatch.setattr(stop_conditions, "_stage_match", _crash_stop_worker)
+    elif failure == "input":
+        original = stop_conditions._stage_matches
+        def changed_input(*args):
+            yield from original(*args)
+            with (event_dir / "n.csv").open("a") as stream:
+                stream.write("\n")
+        monkeypatch.setattr(stop_conditions, "_stage_matches", changed_input)
+    else:
+        original_replace = Path.replace
+        def fail_replacement(path, destination):
+            if Path(destination).suffix == ".pt":
+                raise OSError("replacement failed")
+            return original_replace(path, destination)
+        monkeypatch.setattr(Path, "replace", fail_replacement)
+    originals = {p: fingerprint(p) for p in root.rglob("*") if p.is_file()}
+    attempt = ExtensionAttempt(root, "stop_conditions", "derived", {})
+    from concurrent.futures.process import BrokenProcessPool
+    error, message = {"worker": (ValueError, "Invalid action identities"),
+                      "crash": (BrokenProcessPool, "terminated abruptly"),
+                      "input": (RuntimeError, "Input changed"),
+                      "replacement": (OSError, "replacement failed")}[failure]
+    with pytest.raises(error, match=message):
+        stop_conditions.refresh_labels(root, metadata, requests, attempt=attempt, num_workers=2,
+                                       event_dir=event_dir, xt_match_dir=sidecars)
+    assert not list(root.rglob("*.tmp"))
+    assert "stop_conditions" not in metadata
+    if failure != "replacement":
+        assert all(fingerprint(path) == digest for path, digest in originals.items())
+        assert attempt.data["completed_replacements"] == 0
+        assert attempt.artifact_state == "unchanged"
+
+
+def test_stop_migration_forwards_worker_options(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from scripts import generate_relevant_features as generator
+    from tests.test_feature_run_extension import make_args, make_metadata
+    metadata = make_metadata()
+    args = make_args(num_workers="8", worker_thread_limit=2)
+    args.refresh_stop_conditions = True
+    (tmp_path / "base").mkdir()
+    monkeypatch.setattr(generator, "resolve_feature_run_id", lambda *a, **kw: "base")
+    monkeypatch.setattr(generator, "load_feature_run_metadata", lambda *a, **kw: metadata)
+    monkeypatch.setattr(generator, "get_feature_run_root", lambda run_id: tmp_path / run_id)
+    monkeypatch.setattr(generator, "write_latest_run", Mock())
+    refresh = Mock()
+    monkeypatch.setattr("datatools.stop_conditions.refresh_labels", refresh)
+    generator.run_extension_generation(args)
+    assert refresh.call_args.kwargs["num_workers"] == "8"
+    assert refresh.call_args.kwargs["worker_thread_limit"] == 2
+
+
 def events(teams, types=None):
     n = len(teams)
     frame = pd.DataFrame(dict(object_id=[t + "_1" for t in teams],

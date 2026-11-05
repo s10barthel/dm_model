@@ -467,7 +467,7 @@ Useful options:
 - repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
-- `--num-workers <N|auto>` to parallelize matches inside each `datatools/graph_feature.py` subprocess; default: `1`
+- `--num-workers <N|auto>` to parallelize matches during graph generation and stop-condition label refresh; default: `1`
 - `--worker-thread-limit <N>` to cap BLAS/OpenMP-style thread pools per worker; default: `1`
 - `--replace-intended-receiver-model` with `--extend-feature-run-id` and `--intended-receiver-model-id` to regenerate copied model-mode artifacts with a different `success_intent` checkpoint in the derived run
 
@@ -491,6 +491,10 @@ With `--num-workers > 1`, each subprocess still runs the same 5 top-level steps 
 - skipped matches are reported as `SKIP <match_id>: ...`
 
 `--num-workers auto` resolves to `max(1, min(6, cpu_count - 2))`, which is `6` on a 16-logical-core machine. `--worker-thread-limit 1` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` per worker to avoid oversubscription.
+
+Stop-condition label refresh uses the same worker settings and prints
+`Staged stop-condition targets: X/Y (N workers; <match_id>)`. Workers stage
+independent matches; the parent validates all inputs before replacing outputs.
 
 An `--extend-feature-run-id` run with new `--return_type` values only executes 3 steps, printing `Feature generation step X/3: ...` before each step:
 
@@ -1930,7 +1934,7 @@ Dataset/run statistics include a separate `scheduling` record: preparation betwe
 - `--extend-feature-run-id <feature_run_id>`: extend a completed run; by default create a derived run that shares unchanged artifacts through hard links. Use `--in-place` to update the existing run.
 - `--in-place`: with `--extend-feature-run-id`, apply explicitly requested additions, refreshes, or replacements to the existing feature run. Incompatible with `--run-id`; the run ID and latest pointer are unchanged.
 - `--overwrite-feature-run`: compatibility alias for `--in-place`. Both spellings normalize to the same argument and metadata mode; existing commands remain valid.
-- `--num-workers <N|auto>`: parallelize match processing inside each `datatools/graph_feature.py` subprocess. Default: `1`.
+- `--num-workers <N|auto>`: parallelize matches during graph generation and stop-condition label refresh. Default: `1`.
 - `--worker-thread-limit <N>`: set per-worker `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS`. Default: `1`.
 - `--refresh-target-family {xt,goal_distance,epv}`: with `--extend-feature-run-id`, refresh targets from current sidecars without rebuilding graphs. Creates a derived run by default; `--in-place` selects the existing run. xT refresh must run separately from other operations; other target families may be repeated.
 - `--pass-height`: with `--extend-feature-run-id`, overwrite copied label tensors so `pass_max_ball_z` and `pass_high` are available for `pass_height` training. The stored compatibility label uses the feature run's `--pass-height-threshold` (default `2.0`); training can derive a different label from `pass_max_ball_z` without copying this run.

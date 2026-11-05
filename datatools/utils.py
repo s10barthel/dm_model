@@ -1134,13 +1134,15 @@ def label_returns(
     for period in events["period_id"].unique():
         period_events = events[events["period_id"] == period]
         labels = period_events[["team", "goal", "expected_goal"]].copy()
+        # Keep shifts numeric even when the offset exceeds the segment length.
+        outcomes = labels[["goal", "expected_goal"]].astype({"goal": np.int64})
+        outcomes["expected_goal"] = pd.to_numeric(outcomes["expected_goal"]).fillna(0)
         first_future_types = period_events["spadl_type"].shift(-1)
         skip_mask = first_future_types.notna() & first_future_types.ne("shot")
 
         for i in range(lookahead_len):
             shifted_teams = labels["team"].shift(-i)
-            shifted_goals = labels[["goal", "expected_goal"]].shift(-i).fillna(0)
-            # shifted_returns = labels.shift(-i).fillna(0).infer_objects(copy=False)
+            shifted_goals = outcomes.shift(-i, fill_value=0)
             scoring_goals = shifted_goals["goal"] * (shifted_teams == labels["team"]).astype(int)
             conceding_goals = shifted_goals["goal"] * (shifted_teams != labels["team"]).astype(int)
             scoring_xg = shifted_goals["expected_goal"] * (shifted_teams == labels["team"]).astype(int)

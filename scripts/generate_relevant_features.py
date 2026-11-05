@@ -1534,6 +1534,8 @@ def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes
 
 def run_extension_generation(args: argparse.Namespace) -> None:
     started = time.perf_counter()
+    refresh_workers = dict(num_workers=getattr(args, "num_workers", "1"),
+                           worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
     plan = build_extension_plan(args)
     derived = plan.extension_mode == EXTENSION_MODE_DERIVED
     target_root = get_feature_run_root(plan.target_run_id)
@@ -1606,7 +1608,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             from datatools.stop_conditions import refresh_labels
             stop_metadata = copy.deepcopy(plan.base_metadata)
             refresh_labels(target_root, stop_metadata,
-                {r.removesuffix("_spstop"): ["base"] for r in plan.base_return_types}, attempt=attempt)
+                {r.removesuffix("_spstop"): ["base"] for r in plan.base_return_types},
+                attempt=attempt, **refresh_workers)
         elif plan.refresh_target_families == ["xt"] and plan.base_metadata.get("stop_conditions"):
             from datatools.stop_conditions import refresh_labels
             stop_metadata = copy.deepcopy(plan.base_metadata)
@@ -1614,7 +1617,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                                  xt_fit_metadata_sha256=args.xt_metadata_sha256,
                                  xt_unavailable_return_types=args.xt_unavailable_return_types)
             refresh_labels(target_root, stop_metadata, stop_metadata["stop_conditions"]["available"],
-                           attempt=attempt, xt_only=True)
+                           attempt=attempt, xt_only=True, **refresh_workers)
         elif plan.refresh_target_families == ["xt"]:
             refresh_xt(target_root, plan.base_metadata,
                        xt_match_dir=(resolve_xt_version(args.xt_version).match_dir),
@@ -1630,7 +1633,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             if "goal_distance" in families:
                 families.add("progression")
             refresh_result = refresh_labels(target_root, stop_metadata,
-                stop_metadata["stop_conditions"]["available"], target_families=families, attempt=attempt)
+                stop_metadata["stop_conditions"]["available"], target_families=families,
+                attempt=attempt, **refresh_workers)
             refresh_result.update(goal_distance_definition=GOAL_DISTANCE_DEFINITION, progression_present=True,
                 progression_return_types=[ret for ret in plan.final_return_types if progression_supported(ret)])
             atomic_write_json(target_root / "goal_distance_refresh_report.json", refresh_result)
@@ -1653,7 +1657,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                 if getattr(args, "stop_condition", "base") == "set-pieces":
                     for ret in args.requested_return_types:
                         requests.setdefault(ret, []).append("set-pieces")
-                refresh_labels(target_root, stop_metadata, requests, attempt=attempt)
+                refresh_labels(target_root, stop_metadata, requests, attempt=attempt, **refresh_workers)
             set_piece_returns = (args.requested_return_types
                 if getattr(args, "stop_condition", "base") == "set-pieces" else [])
             if plan.added_return_types or set_piece_returns:
@@ -1995,7 +1999,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
     metadata["status"] = "building"
     write_run_metadata(run_root, metadata)
     modes = ["base", "set-pieces"] if getattr(args, "stop_condition", "base") == "set-pieces" else ["base"]
-    refresh_labels(run_root, metadata, {r: modes for r in args.return_types})
+    refresh_labels(run_root, metadata, {r: modes for r in args.return_types},
+                   num_workers=args.num_workers, worker_thread_limit=args.worker_thread_limit)
     metadata["status"] = "completed"
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
