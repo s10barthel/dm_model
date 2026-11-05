@@ -1,5 +1,8 @@
 # Turnover gains and stop conditions
 
+Elapsed-time windows are available as `time_<seconds>`; see [time returns](time_returns.md)
+for clock, carry, cutoff, and missing-timing semantics.
+
 Three separate feature operations are supported. Use the source run's split
 selector (`--train-count` or `--train-split`) for extensions. Extensions create
 derived runs by default; source artifacts remain unchanged.

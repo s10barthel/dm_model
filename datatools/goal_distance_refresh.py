@@ -109,7 +109,7 @@ def _stage_goal_distance_match(task, options):
     repair, add_progression = options["repair"], options["add_progression"]
     inputs = options["inputs"]
     report = dict(artifacts=[], changed_rows=0, rewritten_bytes=0,
-                  progression_present=add_progression, progression_return_types=[])
+                  progression_present=add_progression, progression_return_types=[], time_return_coverage=[])
     staged, context = [], {}
 
     def locate(mid, path, mode=None, ret=None, carry=None):
@@ -147,6 +147,11 @@ def _stage_goal_distance_match(task, options):
                     locate(mid, path, mode, ret, carry)
                     pairs[mode, carry, ret] = action_return_pairs(
                         actions, values, source_columns=PAIR_NAMES, target_columns=PAIR_NAMES, return_type=ret)
+                    from project_config import parse_return_type
+                    if parse_return_type(ret)[0] == "time":
+                        from datatools.time_returns import timing_report
+                        report["time_return_coverage"].append(dict(match_id=mid, return_type=ret, condition="base",
+                            mode=mode, carries=carry, **timing_report(actions, pairs[mode, carry, ret])))
         for artifact in artifacts:
             mode, carry, ret = artifact.mode, artifact.carries, artifact.return_type
             locate(mid, artifact.path, mode, ret, carry)
@@ -155,8 +160,9 @@ def _stage_goal_distance_match(task, options):
             ids = label_action_ids(labels, actions)
             expected = torch.as_tensor(pairs[mode, carry, ret].loc[ids].to_numpy(), dtype=labels.dtype)
             old_pairs = labels[:, PAIR_COLUMNS]
-            if not repair and not torch.equal(old_pairs, expected):
-                bad = (~(old_pairs == expected).all(dim=1)).numpy()
+            equal = (old_pairs == expected) | (old_pairs.isnan() & expected.isnan())
+            if not repair and not equal.all():
+                bad = (~equal.all(dim=1)).numpy()
                 raise ValueError(
                     f"Saved goal-distance labels are stale or invalid; action IDs={ids[bad][:8].tolist()}. "
                     "Use --refresh-target-family goal_distance --refresh-target-family progression together.")
@@ -182,8 +188,10 @@ def _stage_goal_distance_match(task, options):
                     primary_progression[mode, carry] = pd.Series(
                         derived[:, PROGRESSION_COLUMN].numpy(), index=ids)
             changed_rows, changed = changed_tensor_rows(labels, updated)
-            stats = dict(rows=len(labels), goal_distance_mean=updated[:, PAIR_COLUMNS].double().mean(dim=0).tolist()
-                         if len(labels) else [0, 0])
+            values = updated[:, PAIR_COLUMNS]
+            available = torch.isfinite(values).all(dim=1)
+            stats = dict(rows=len(labels), goal_distance_mean=values[available].double().mean(dim=0).tolist()
+                         if available.any() else [None, None], unavailable_rows=int((~available).sum()))
             if needs_progression:
                 values = updated[:, PROGRESSION_COLUMN]
                 stats.update(progression_available=int(torch.isfinite(values).sum()),
@@ -231,7 +239,7 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
     attempt.enter("validating_goal_distance_inventory")
     inventory, returns, modes, carries = refresh_inventory(root, metadata)
     if add_progression and not any(supported(ret) for ret in returns):
-        raise ValueError("Progression requires a saved next_N, extended_possession[_N], or in_N return type.")
+        raise ValueError("Progression requires a saved next_N, time_<seconds>, extended_possession[_N], or in_N return type.")
     inputs = preflight or preflight_goal_distance(root, metadata,
         goal_distance_match_dir=goal_distance_match_dir, event_dir=event_dir)
     if set(inputs["paths"]) != set(inventory):
@@ -242,7 +250,7 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
                   goal_distance_definition=GOAL_DISTANCE_DEFINITION,
                   graph_files_loaded=0, graph_files_written=0, tracking_files_loaded=0,
                   rewritten_files=0, rewritten_bytes=0, changed_rows=0, artifacts=[],
-                  progression_present=add_progression, progression_return_types=[])
+                  progression_present=add_progression, progression_return_types=[], time_return_coverage=[])
     signatures = {artifact.path: file_signature(artifact.path)
                   for artifacts in inventory.values() for artifact in artifacts}
     for mid in inventory:
@@ -304,6 +312,8 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
                        f"{attempt.data.get('clone_complete', False)}")
         raise
     report["elapsed_seconds"] = time.perf_counter() - started
+    from datatools.time_returns import record_timing_coverage
+    record_timing_coverage(metadata, report)
     atomic_write_json(root / "goal_distance_refresh_report.json", report)
     summary = {key: value for key, value in report.items() if key not in {"artifacts", "input_sha256"}}
     summary["report"] = "goal_distance_refresh_report.json"

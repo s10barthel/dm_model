@@ -171,3 +171,4 @@ _vendor/defcon/saved
 !tests/test_epv_target_family.py
 
 !tests/test_feature_worker_runtime.py
+!tests/test_time_returns.py

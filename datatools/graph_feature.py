@@ -1829,7 +1829,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Way of defining future returns. Repeat the flag to generate multiple return types in one run, "
             "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>, "
-            "next_<N>_skip1, next_<N>+[_skip1] (xT only), extended_possession[_<N>] (cap on future eligible actions), "
+            "next_<N>_skip1, next_<N>+[_skip1] (xT only), time_<seconds>, extended_possession[_<N>] (cap on future eligible actions), "
             "and in_<N> for xt/goal_distance/epv training."
         ),
     )

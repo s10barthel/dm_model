@@ -196,13 +196,19 @@ def action_return_pairs(actions, events, *, source_columns=("scores_xT", "conced
     swap = mapping["swap"]
     pairs[swap] = pairs[swap, ::-1]
     kind, max_actions, _ = parse_return_type(return_type) if return_type is not None else (None, None, False)
+    if kind == "time":
+        from datatools.time_returns import time_targets
+        family = {"scores": "goal", "scores_xg": "xg", "scores_xT": "xt",
+                  "scores_goal_distance": "goal_distance", "scores_epv": "epv"}[source_columns[0]]
+        names = ("scores", "concedes") if family == "goal" else ("scores_" + family, "concedes_" + family)
+        pairs = time_targets(actions, events, max_actions, families={family})[list(names)].to_numpy()
     if kind == "extended_possession":
         from datatools.possession_returns import extended_possession_targets
         family = {"scores": "goal", "scores_xg": "xg", "scores_xT": "xt",
                   "scores_goal_distance": "goal_distance", "scores_epv": "epv"}[source_columns[0]]
         names = ("scores", "concedes") if family == "goal" else ("scores_" + family, "concedes_" + family)
         pairs = extended_possession_targets(actions, events, families={family}, max_actions=max_actions)[list(names)].to_numpy()
-    if not np.isfinite(pairs).all():
+    if np.isinf(pairs).any() or (kind != "time" and not np.isfinite(pairs).all()):
         raise ValueError(f"Non-finite computed returns: {source_columns}.")
     return pd.DataFrame(pairs, index=actions.index, columns=list(target_columns))
 
@@ -229,7 +235,7 @@ def _stage_xt_match(task, options):
     returns, modes, carries = options["returns"], options["modes"], options["carries"]
     unavailable = options["unavailable"]
     surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" else None
-    report = dict(artifacts=[], changed_rows=0, rewritten_bytes=0, ball_coordinate_files_loaded=0)
+    report = dict(artifacts=[], changed_rows=0, rewritten_bytes=0, ball_coordinate_files_loaded=0, time_return_coverage=[])
     staged, signatures, inputs = [], {}, {}
 
     def stage(path, value, changed_rows, stats=None):
@@ -274,6 +280,10 @@ def _stage_xt_match(task, options):
                     pairs[(mode, carry, ret)] = transform_action_targets(
                         actions, action_return_pairs(actions, event_returns[ret], return_type=ret), settings, surface,
                         events=events, return_type=ret)
+                    if parse_return_type(ret)[0] == "time":
+                        from datatools.time_returns import timing_report
+                        report["time_return_coverage"].append(dict(match_id=mid, return_type=ret, condition="base",
+                            mode=mode, carries=carry, **timing_report(actions, pairs[(mode, carry, ret)])))
             updated = actions.copy()
             updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]
             # Refresh the saved raw annotation columns for canonical rows;
@@ -335,7 +345,7 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                   xt_targets=settings, xt_unavailable_return_types=unavailable,
                   matches=len(inventory), return_types=returns,
                   carries=carries, input_sha256=inputs, artifacts=[], changed_rows=0,
-                  rewritten_files=0, rewritten_bytes=0, graph_files_loaded=0, graph_files_written=0)
+                  rewritten_files=0, rewritten_bytes=0, graph_files_loaded=0, graph_files_written=0, time_return_coverage=[])
     attempt.enter("staging_xt_targets")
     staged = []
     signatures = {artifact.path: file_signature(artifact.path)
@@ -388,6 +398,8 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
     for path, digest in inputs.items():
         if fingerprint(path) != digest:
             raise RuntimeError(f"Refresh input changed during replacement: {path}")
+    from datatools.time_returns import record_timing_coverage
+    record_timing_coverage(metadata, report)
     atomic_write_json(root / "xt_refresh_report.json", report)
     attempt.data["xt_refresh"] = {k: v for k, v in report.items() if k not in {"artifacts", "input_sha256"}}
     attempt.data["xt_refresh"]["report"] = "xt_refresh_report.json"

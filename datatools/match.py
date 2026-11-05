@@ -237,7 +237,10 @@ class Match(ABC):
             events = event_returns(events, return_type, self.stop_condition, getattr(self, "xt_surface_metadata", None))
             self._cached_events_by_return_type[return_type] = events
             return events
-        if return_kind == "extended_possession":
+        if return_kind == "time":
+            from datatools.time_returns import label_time_events
+            events = label_time_events(events, return_value, families={"goal", "xg", "epv"})
+        elif return_kind == "extended_possession":
             from datatools.possession_returns import label_extended_possession_events
             events = label_extended_possession_events(events, {"goal", "xg", "epv"}, max_actions=return_value)
         elif return_kind == "next_plus":
@@ -760,6 +763,13 @@ class Match(ABC):
             targets = extended_possession_targets(self.actions, self.events, getattr(self, "stop_condition", None),
                                                   max_actions=return_value)
             self.actions[targets.columns] = targets
+        if return_kind == "time":
+            from datatools.time_returns import time_targets, timing_report
+            targets = time_targets(self.actions, self.events, return_value, getattr(self, "stop_condition", None))
+            self.actions[targets.columns] = targets
+            report = timing_report(self.actions, targets)
+            print(f"Time returns {return_type}: {report['missing_timing_actions']}/{report['actions']} actions "
+                  f"missing timing; {report['missing_return_actions']} actions have NaN returns.", flush=True)
         from datatools.epv_coverage import mask_targets
         mask_targets(self.actions, self.events)
         from datatools.xt_targets import transform_action_targets, unavailable_xt_returns

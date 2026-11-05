@@ -78,9 +78,14 @@ def build_action_dataset_kwargs(
         if require_goal_next10_diagnostics is None
         else bool(require_goal_next10_diagnostics)
     )
+    timed_family = None
+    if task.startswith("outcome_") and str(_get_arg(args, "return_type", "")).startswith("time_"):
+        timed_family = next((family for family in ("progression", "goal_distance", "xt", "epv", "xg")
+                             if _get_arg(args, "use_" + family, False)), "goal")
 
     return {
         "task": task,
+        "finite_outcome_target_family": timed_family,
         "graph_validation": _get_arg(args, "graph_validation", True),
         "trajectory_speed_definition": _get_arg(args, "trajectory_speed_definition", None) if task == "success_intent" else None,
         "pass_height_threshold": _get_arg(args, "pass_height_threshold", None),

@@ -7,7 +7,7 @@ from datatools.goal_distance import GOAL_DISTANCE_MAX_RAW, goal_distance_from_xy
 from project_config import parse_return_type
 
 DEFINITION = {"version": 1, "scoring": "relative_goal_distance_reduction",
-              "conceding": "concedes_goal_distance", "return_kinds": ["next", "in", "extended_possession"]}
+              "conceding": "concedes_goal_distance", "return_kinds": ["next", "time", "in", "extended_possession"]}
 
 
 def supported(return_type):
@@ -52,4 +52,15 @@ def action_start_closeness(actions):
 def action_progression(actions, return_type):
     if not supported(return_type):
         return np.full(len(actions), np.nan)
+    if parse_return_type(return_type)[0] == "time":
+        return time_progression(action_start_closeness(actions), actions.scores_goal_distance)
     return relative_progression(action_start_closeness(actions), actions.scores_goal_distance)
+
+
+def time_progression(starts, future):
+    """Keep unknown time returns unknown while validating all available values."""
+    starts, future = np.broadcast_arrays(np.asarray(starts, dtype=float), np.asarray(future, dtype=float))
+    result = np.full(starts.shape, np.nan)
+    valid = ~np.isnan(future)
+    result[valid] = relative_progression(starts[valid], future[valid])
+    return result

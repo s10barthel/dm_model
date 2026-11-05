@@ -99,14 +99,14 @@ def target_cli(settings):
 
 def unavailable_xt_returns(surface_metadata, return_types):
     if (surface_metadata or {}).get("surface_type", (surface_metadata or {}).get("xt_model_type")) == "log_progression":
-        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "next_plus", "in", "extended_possession"}]
+        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "time", "next_plus", "in", "extended_possession"}]
     return []
 
 
 def validate_surface_returns(surface_metadata, return_types):
     unsupported = unavailable_xt_returns(surface_metadata, return_types)
     if unsupported:
-        raise ValueError(f"Log progression supports next_N[+][_skip1], extended_possession[_N], and in_N returns only: {unsupported}.")
+        raise ValueError(f"Log progression supports next_N[+][_skip1], time_<seconds>, extended_possession[_N], and in_N returns only: {unsupported}.")
 
 
 def transform_action_targets(actions, pairs, settings=None, surface=None, *, events=None, return_type=None, stop_condition=None):
@@ -116,7 +116,7 @@ def transform_action_targets(actions, pairs, settings=None, surface=None, *, eve
     conceding_baselines = None
     kind = parse_return_type(return_type)[0] if return_type else None
     if kind == "next_plus" or (settings["version"] == 2 and settings["representation"] == "gain"
-                               and kind in {"next", "extended_possession"}):
+                               and kind in {"next", "time", "extended_possession"}):
         if events is None:
             raise ValueError("Turnover targets require event context")
         from datatools.return_windows import action_xt_windows
@@ -143,7 +143,7 @@ def transform_action_targets(actions, pairs, settings=None, surface=None, *, eve
     if conceding_baselines is not None and settings["version"] == 2:
         gains = updated.iloc[:, 1].to_numpy(dtype=float) - conceding_baselines
         updated.iloc[:, 1] = np.maximum(gains, 0) if settings["clip_negative_gains"] else gains
-    if not np.isfinite(updated.to_numpy()).all():
+    if np.isinf(updated.to_numpy()).any() or (kind != "time" and not np.isfinite(updated.to_numpy()).all()):
         raise ValueError("Non-finite xT gain targets.")
     return updated
 

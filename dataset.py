@@ -307,6 +307,7 @@ class ActionDataset(Dataset):
         speed_aware=True,
         feature_selections=None,
         graph_validation=True,
+        finite_outcome_target_family=None,
     ):
         from models.feature_masks import mask_node_inputs
         mask_settings = dict(locals())
@@ -581,6 +582,16 @@ class ActionDataset(Dataset):
             condition &= labels[:, 6] != -1
 
         self.selection_counts["task_eligible_samples"] = int(condition.sum())
+        if finite_outcome_target_family is not None and task.startswith("outcome_"):
+            family = finite_outcome_target_family
+            scoring = "scores" if family == "goal" else "scores_" + family
+            conceding = "concedes_goal_distance" if family == "progression" else scoring.replace("scores", "concedes", 1)
+            columns = [LABEL_INDEX[name] for name in (scoring, conceding)]
+            available = torch.isfinite(labels[:, columns]).all(dim=1)
+            count = int((condition & ~available).sum())
+            self.selection_counts["excluded_by_missing_time_return"] = count
+            self.skipped_rows["missing_time_return"] = count
+            condition &= available
         if evaluation_filter == "pass":
             pass_rows = labels[:, LABEL_INDEX["is_pass"]] == 1
             self.selection_counts["excluded_by_filter"] = int((condition & ~pass_rows).sum())

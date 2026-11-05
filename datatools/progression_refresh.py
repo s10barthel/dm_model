@@ -17,7 +17,10 @@ def patch_progression(labels, starts, return_type):
         raise ValueError("Progression label action IDs do not resolve to saved actions.")
     values = np.full(len(labels), np.nan)
     if supported(return_type):
-        values = relative_progression(starts.loc[ids.astype(int)].to_numpy(),
+        from project_config import parse_return_type
+        from datatools.progression import time_progression
+        calculate = time_progression if parse_return_type(return_type)[0] == "time" else relative_progression
+        values = calculate(starts.loc[ids.astype(int)].to_numpy(),
                                       labels[:, config.LABEL_INDEX["scores_goal_distance"]].cpu().numpy())
     values = torch.as_tensor(values, dtype=labels.dtype, device=labels.device)
     if labels.shape[1] == column:

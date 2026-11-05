@@ -134,9 +134,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Resolved return type to generate and train against: disc_<gamma>, disc_<gamma>_skip1, "
             "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
-            "next_<N>, next_<N>_skip1, next_<N>+[_skip1] (xT only), extended_possession[_<N>] "
+            "next_<N>, next_<N>_skip1, next_<N>+[_skip1] (xT only), time_<seconds>, extended_possession[_<N>] "
             "(cap on future eligible actions), or in_<N> "
-            "(progression: next_N[_skip1]/extended_possession[_N]/in_N; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
+            "(progression: next_N[_skip1]/time_<seconds>/extended_possession[_N]/in_N; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
         ),
     )
     parser.add_argument(

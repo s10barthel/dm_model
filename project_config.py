@@ -679,6 +679,18 @@ def validate_return_type(return_type: str) -> str:
     value = str(return_type).strip()
     if not value:
         raise ValueError("return_type must be a non-empty string.")
+    if value.startswith("time_"):
+        from decimal import Decimal, InvalidOperation
+        raw = value[len("time_"):]
+        try:
+            seconds = Decimal(raw)
+        except InvalidOperation as exc:
+            raise ValueError(f"Invalid time return type: {return_type!r}. Expected time_<seconds>.") from exc
+        if (not seconds.is_finite() or seconds <= 0 or not np.isfinite(float(seconds))
+                or float(seconds) <= 0 or "_" in raw):
+            raise ValueError("Time horizon must be finite and > 0; time returns do not support suffixes.")
+        normalized = format(seconds, "f")
+        return "time_" + (normalized.rstrip("0").rstrip(".") if "." in normalized else normalized)
     if value == "extended_possession":
         return value
     if value.startswith("extended_possession_"):
@@ -759,7 +771,7 @@ def validate_return_type(return_type: str) -> str:
     raise ValueError(
         f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
         "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
-        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, extended_possession[_<N>], or in_<N>."
+        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, time_<seconds>, extended_possession[_<N>], or in_<N>."
     )
 
 
@@ -778,8 +790,8 @@ def validate_return_type_for_target_family(
     kind, _, _ = parse_return_type(normalized)
     if kind == "next_plus" and family != "xt":
         raise ValueError("next_N+ is supported only for target_family=xt.")
-    if family == "progression" and kind not in {"next", "in", "extended_possession"}:
-        raise ValueError("progression supports only next_N, next_N_skip1, extended_possession[_N], and in_N returns.")
+    if family == "progression" and kind not in {"next", "time", "in", "extended_possession"}:
+        raise ValueError("progression supports only next_N, next_N_skip1, time_<seconds>, extended_possession[_N], and in_N returns.")
     if kind == "in" and family not in {"xt", "goal_distance", "epv", "progression"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
@@ -884,7 +896,7 @@ def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float,
     kind, raw = core_value.split("_", 1)
     if kind == "next" and raw.endswith("+"):
         return "next_plus", int(raw[:-1]), skip_first
-    return kind, float(raw) if kind == "disc" else int(raw), skip_first
+    return kind, float(raw) if kind in {"disc", "time"} else int(raw), skip_first
 
 
 def resolve_effective_return_type(

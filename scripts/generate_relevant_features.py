@@ -133,7 +133,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Resolved return type for generated action labels. Repeat the flag to include multiple return types, "
             "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>, "
-            "next_<N>_skip1, next_<N>+[_skip1] (xT only), extended_possession[_<N>] (cap on future eligible actions), "
+            "next_<N>_skip1, next_<N>+[_skip1] (xT only), time_<seconds>, extended_possession[_<N>] (cap on future eligible actions), "
             "plus in_<N> for xt/goal_distance/epv training."
         ),
     )
@@ -1558,7 +1558,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     def publish_target_metadata(payload, final):
         if final and stop_metadata is not None:
             for key in ("stop_conditions", "label_layout_version", "return_types", "return_type",
-                        "xt_unavailable_return_types", "epv_coverage"):
+                        "xt_unavailable_return_types", "epv_coverage", "time_returns"):
                 if key in stop_metadata:
                     payload[key] = stop_metadata[key]
         if final and refresh_result is not None:
@@ -1915,7 +1915,7 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
                                             sidecar_root="carry_sidecars",
                                             generated_at=datetime.now().isoformat(timespec="seconds"))
             if refreshed_targets is not None:
-                for key in ("stop_conditions", "label_layout_version", "epv_coverage"):
+                for key in ("stop_conditions", "label_layout_version", "epv_coverage", "time_returns"):
                     if key in refreshed_targets:
                         updated[key] = refreshed_targets[key]
         return updated

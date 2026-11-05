@@ -78,6 +78,12 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
     if "progression" in families:
         selected_scores.add("scores_goal_distance")
     possession_targets = None
+    if kind == "time":
+        from datatools.time_returns import time_targets
+        from datatools.xt_refresh import _prepare_return_mapping
+        _prepare_return_mapping(actions, events)
+        possession_targets = time_targets(actions, events, max_actions, condition,
+            {family for family, score in FAMILY_SCORES.items() if score in selected_scores})
     if kind == "extended_possession":
         from datatools.possession_returns import extended_possession_targets
         possession_targets = extended_possession_targets(actions, events, condition,
@@ -98,16 +104,22 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
             continue
         if score == "scores_xg" and kind in {"disc", "disc_max"}:
             source = ("scores_xg_disc", "concedes_xg_disc")
-        pairs = action_return_pairs(actions, computed, source_columns=source, target_columns=(score, concede),
-                                    _mapping=mapping)
-        if possession_targets is not None:
+        if kind == "time":
             pairs = possession_targets[[score, concede]]
+        else:
+            pairs = action_return_pairs(actions, computed, source_columns=source, target_columns=(score, concede),
+                                        _mapping=mapping)
+            if possession_targets is not None:
+                pairs = possession_targets[[score, concede]]
         if score == "scores_xt":
             pairs = transform_action_targets(actions, pairs, settings, surface,
                 events=events, return_type=return_type, stop_condition=condition)
         result[[score, concede]] = pairs
     if "progression" in families:
         result["scores_progression"] = action_progression(result, return_type)
+    if kind == "time":
+        from datatools.time_returns import timing_report
+        result.attrs["time_return_coverage"] = timing_report(actions, possession_targets)
     return result
 
 
@@ -121,7 +133,7 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
     surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" else None
     event_dir, xt_dir = options["event_dir"], options["xt_dir"]
     report = dict(changed_rows=0, ball_coordinate_files_loaded=0,
-                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[], epv_coverage=[])
+                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[])
     staged, signatures, inputs = [], {}, {}
     epv_label_hashes = {}
 
@@ -227,6 +239,10 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
             if key not in cache:
                 cache[key] = action_targets(actions, events, ret, condition, settings, surface, surface_metadata,
                                             xt_only=xt_only, computed=cache[event_key], target_families=families)
+                if "time_return_coverage" in cache[key].attrs:
+                    report["time_return_coverage"].append(dict(match_id=mid, return_type=ret,
+                        condition=condition, mode=artifact.mode, carries=artifact.carries,
+                        **cache[key].attrs["time_return_coverage"]))
             targets = cache[key]
             destination = label_path(artifact.path, root, condition)
             destination = destination.parent.with_name(destination.parent.name.replace(old_ret, ret)) / destination.name
@@ -354,7 +370,7 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
                   intended_receiver_modes=modes, carries=carries,
                   xt_unavailable_return_types=unavailable_xt_returns(surface_metadata,
                       list(dict.fromkeys(ret.removesuffix("_spstop") for ret in returns))),
-                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[], epv_coverage=[])
+                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[])
     workers = min(workers, len(inventory))
     report.update(workers=workers, total_matches=len(inventory), completed_matches=0)
     options = dict(requests=requests, returns=returns, xt_only=xt_only, families=families,
@@ -423,6 +439,8 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
     metadata["return_types"] = list(dict.fromkeys(r.removesuffix("_spstop") for r in returns))
     metadata["xt_unavailable_return_types"] = list(dict.fromkeys(r.removesuffix("_spstop") for r in metadata.get("xt_unavailable_return_types", [])))
     metadata["return_type"] = metadata["return_types"][0] if len(metadata["return_types"]) == 1 else None
+    from datatools.time_returns import record_timing_coverage
+    record_timing_coverage(metadata, report)
     for path, digest in inputs.items():
         if fingerprint(path) != digest:
             raise RuntimeError(f"Input changed during stop refresh replacement: {path}")

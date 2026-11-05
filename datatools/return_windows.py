@@ -247,6 +247,9 @@ def action_xt_windows(actions, events, return_type, surface=None, condition=None
     """Action-perspective maxima and acquisition baselines, including carry anchors."""
     from project_config import parse_return_type
     kind, n, skip = parse_return_type(return_type)
+    if kind == "time":
+        from datatools.time_returns import action_time_xt_windows
+        return action_time_xt_windows(actions, events, n, surface, condition)
     possession = kind == "extended_possession"
     windows = TurnoverWindows(events, (condition or "base") if possession else condition)
     if possession:

@@ -466,7 +466,7 @@ Useful options:
 - `--refresh-target-family <xt|goal_distance|epv>` with `--extend-feature-run-id` to rebuild copied label tensors from current target sidecars without rebuilding graph tensors
 - `--pass-height` to enable pass-height label configuration during a new run, or with `--extend-feature-run-id` to rebuild copied label tensors so `pass_height` training labels are present without rebuilding graph tensors
 - `--pass-height-threshold <meters>` with `--pass-height` to classify a pass as high when its maximum `ball_z` is at least the supplied value; defaults to `2.0` metres and is recorded in run metadata
-- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|in_N>` to include multiple resolved return semantics in one feature run
+- repeat `--return_type <disc_gamma|disc_gamma_skip1|disc_max_gamma|disc_max_gamma_skip1|disc_poly_max_b_z|disc_poly_max_b_z_spstop|next_N|next_N_skip1|time_seconds|in_N>` to include multiple resolved return semantics in one feature run
 - `--intended-receiver-model-id <model_id>` to additionally include the `model` intended-receiver variant
 - `--next-action-conditions-on` / `--next-action-conditions-off` to keep or disable the pass/cross next-action consistency filter; default: on
 - `--num-workers <N|auto>` to parallelize matches during graph generation and refresh, and files during edge extensions; default: `1`
@@ -3189,6 +3189,10 @@ reconstruction for all eight wrapper tasks. Version 1 caches rebuild once;
 [dataset loading and cache lifetime](docs/intent_dataset_loading.md).
 
 For model-only early-contact cutoffs, see [Failed-pass trajectory refresh](docs/failed_pass_trajectories.md).
+
+Elapsed-time returns such as `time_10` and `time_2.5` use synchronized action
+start times. See [time returns](docs/time_returns.md) for window rules and
+missing-timing reports.
 
 Graph connectivity validation and verified output publication default to on. Use
 `--graph-validation off` to disable the added checks for a generation, refresh,
