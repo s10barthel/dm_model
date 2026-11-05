@@ -146,7 +146,7 @@ def read_annotated_events(event_path, sidecar_path):
 
 
 def action_return_pairs(actions, events, *, source_columns=("scores_xT", "concedes_xT"),
-                        target_columns=("scores_xt", "concedes_xt")):
+                        target_columns=("scores_xt", "concedes_xt"), return_type=None):
     if not actions.index.is_unique:
         raise ValueError("Resolved action indices are not unique.")
     indices = pd.to_numeric(pd.Series(actions.index, index=actions.index), errors="coerce")
@@ -183,6 +183,12 @@ def action_return_pairs(actions, events, *, source_columns=("scores_xT", "conced
         raise ValueError("Unknown action team perspective.")
     swap = selected.object_id.astype(str).str[:4].to_numpy() != teams
     pairs[swap] = pairs[swap, ::-1]
+    if return_type == "extended_possession":
+        from datatools.possession_returns import extended_possession_targets
+        family = {"scores": "goal", "scores_xg": "xg", "scores_xT": "xt",
+                  "scores_goal_distance": "goal_distance", "scores_epv": "epv"}[source_columns[0]]
+        names = ("scores", "concedes") if family == "goal" else ("scores_" + family, "concedes_" + family)
+        pairs = extended_possession_targets(actions, events, families={family})[list(names)].to_numpy()
     if not np.isfinite(pairs).all():
         raise ValueError(f"Non-finite computed returns: {source_columns}.")
     return pd.DataFrame(pairs, index=actions.index, columns=list(target_columns))
@@ -286,7 +292,7 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                             pairs[(mode, carry, ret)].loc[:, :] = np.nan
                         else:
                             pairs[(mode, carry, ret)] = transform_action_targets(
-                                actions, action_return_pairs(actions, event_returns[ret]), settings, surface,
+                                actions, action_return_pairs(actions, event_returns[ret], return_type=ret), settings, surface,
                                 events=events, return_type=ret)
                     updated = actions.copy()
                     updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]

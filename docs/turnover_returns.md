@@ -108,6 +108,38 @@ extension. Before publication, the extension checks label coverage and action
 order for canonical, carry, and intent-training labels, including requested
 set-piece variants. An incomplete extension cannot update the latest-run pointer.
 
+## Extended possession
+
+`--return-type extended_possession` uses the remainder of the initial team's
+eligible-action sequence and the complete next opponent sequence. Only passes,
+crosses, and shots define sequences. Stop before the first eligible action by
+the initial team after that opponent sequence. A failed initial pass still
+establishes the first possession; interceptions, tackles, carries, and other
+ineligible events never change sequences. Missing target annotations do not
+hide team changes. If there is no second team change, use the remaining events
+up to the stop boundary.
+
+For `A A A A A A B A`, action 0's window ends at action 6, inclusive. For
+`A B B B B A`, it ends at action 4, inclusive. Starting midway through an A
+sequence uses only its remainder and the next B sequence.
+
+The target aggregations match `next_N`: goal and combined xG returns include
+the initial eligible action, while xT, EPV, and goal-distance maxima use only
+eligible actions strictly after the saved return anchor. All supported target
+families, including progression, can use this return. Version-2 xT gains use
+the same acquisition-start conceding baseline and clipping as `next_N`.
+Carries establish the initial team using their own actor and look forward from
+their saved return anchor, even when that anchor belongs to the other team.
+
+Base stops (including period ends, goals, and goal-kicks) always apply.
+`--stop-condition set-pieces` also generates the shorter set-piece variant.
+There is no `_skip1` or `_spstop` name modifier for this return.
+
+```powershell
+.\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
+  --extend-feature-run-id <run> --return-type extended_possession
+```
+
 ## Training and artifacts
 
 ```text

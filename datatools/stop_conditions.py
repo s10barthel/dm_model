@@ -69,6 +69,11 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
     selected_scores = {score for family, score in FAMILY_SCORES.items() if family in families}
     if "progression" in families:
         selected_scores.add("scores_goal_distance")
+    possession_targets = None
+    if kind == "extended_possession":
+        from datatools.possession_returns import extended_possession_targets
+        possession_targets = extended_possession_targets(actions, events, condition,
+            {family for family, score in FAMILY_SCORES.items() if score in selected_scores})
     for score, source in PAIR_SOURCES.items():
         if score not in selected_scores:
             continue
@@ -82,6 +87,8 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
         if score == "scores_xg" and kind in {"disc", "disc_max"}:
             source = ("scores_xg_disc", "concedes_xg_disc")
         pairs = action_return_pairs(actions, computed, source_columns=source, target_columns=(score, concede))
+        if possession_targets is not None:
+            pairs = possession_targets[[score, concede]]
         if score == "scores_xt":
             pairs = transform_action_targets(actions, pairs, settings, surface,
                 events=events, return_type=return_type, stop_condition=condition)

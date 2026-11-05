@@ -220,7 +220,7 @@ class Match(ABC):
         self,
         return_type: str,
         return_kind: str,
-        return_value: int | float | tuple[float, float],
+        return_value: int | float | tuple[float, float] | None,
         skip_first: bool,
     ) -> pd.DataFrame:
         if not hasattr(self, "_cached_events_by_return_type"):
@@ -237,7 +237,10 @@ class Match(ABC):
             events = event_returns(events, return_type, self.stop_condition, getattr(self, "xt_surface_metadata", None))
             self._cached_events_by_return_type[return_type] = events
             return events
-        if return_kind == "next_plus":
+        if return_kind == "extended_possession":
+            from datatools.possession_returns import label_extended_possession_events
+            events = label_extended_possession_events(events, {"goal", "xg", "epv"})
+        elif return_kind == "next_plus":
             for column in ("scores", "concedes", "scores_xg", "concedes_xg", "scores_epv", "concedes_epv"):
                 events[column] = np.nan
         elif return_kind == "next":
@@ -747,6 +750,11 @@ class Match(ABC):
             "scores_goal_distance", "concedes_goal_distance", "scores_goal_distance", "concedes_goal_distance", self.events
         )
         assign_return_pair("scores_xt", "concedes_xt", "scores_xT", "concedes_xT", self.events)
+        assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
+        if return_kind == "extended_possession":
+            from datatools.possession_returns import extended_possession_targets
+            targets = extended_possession_targets(self.actions, self.events, getattr(self, "stop_condition", None))
+            self.actions[targets.columns] = targets
         from datatools.xt_targets import transform_action_targets, unavailable_xt_returns
         if unavailable_xt_returns(getattr(self, "xt_surface_metadata", None), [return_type]):
             self.actions[["scores_xt", "concedes_xt"]] = np.nan
@@ -755,7 +763,6 @@ class Match(ABC):
                 self.actions, self.actions[["scores_xt", "concedes_xt"]],
                 getattr(self, "xt_targets", None), getattr(self, "xt_surface", None),
                 events=self.events, return_type=return_type, stop_condition=getattr(self, "stop_condition", None))
-        assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
         assign_return_pair("scores_goal_next10", "concedes_goal_next10", "scores", "concedes", diagnostic_events)
 
         from datatools.progression import action_progression

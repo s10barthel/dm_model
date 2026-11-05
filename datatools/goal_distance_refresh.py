@@ -117,7 +117,7 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
     attempt.enter("validating_goal_distance_inventory")
     inventory, returns, modes, carries = refresh_inventory(root, metadata)
     if add_progression and not any(supported(ret) for ret in returns):
-        raise ValueError("Progression requires a saved next_N or in_N return type.")
+        raise ValueError("Progression requires a saved next_N, extended_possession, or in_N return type.")
     inputs = preflight or preflight_goal_distance(root, metadata,
         goal_distance_match_dir=goal_distance_match_dir, event_dir=event_dir)
     if set(inputs["paths"]) != set(inventory):
@@ -176,7 +176,7 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
                         for ret, values in event_returns.items():
                             locate(mid, path, mode, ret, carry)
                             pairs[mode, carry, ret] = action_return_pairs(
-                                actions, values, source_columns=PAIR_NAMES, target_columns=PAIR_NAMES)
+                                actions, values, source_columns=PAIR_NAMES, target_columns=PAIR_NAMES, return_type=ret)
                 for artifact in artifacts:
                     mode, carry, ret = artifact.mode, artifact.carries, artifact.return_type
                     locate(mid, artifact.path, mode, ret, carry)

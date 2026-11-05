@@ -679,6 +679,8 @@ def validate_return_type(return_type: str) -> str:
     value = str(return_type).strip()
     if not value:
         raise ValueError("return_type must be a non-empty string.")
+    if value == "extended_possession":
+        return value
 
     stop_at_set_pieces = value.endswith("_spstop")
     core_value = value[:-7] if stop_at_set_pieces else value
@@ -750,7 +752,7 @@ def validate_return_type(return_type: str) -> str:
     raise ValueError(
         f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
         "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
-        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, or in_<N>."
+        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, extended_possession, or in_<N>."
     )
 
 
@@ -769,8 +771,8 @@ def validate_return_type_for_target_family(
     kind, _, _ = parse_return_type(normalized)
     if kind == "next_plus" and family != "xt":
         raise ValueError("next_N+ is supported only for target_family=xt.")
-    if family == "progression" and kind not in {"next", "in"}:
-        raise ValueError("progression supports only next_N, next_N_skip1, and in_N returns.")
+    if family == "progression" and kind not in {"next", "in", "extended_possession"}:
+        raise ValueError("progression supports only next_N, next_N_skip1, extended_possession, and in_N returns.")
     if kind == "in" and family not in {"xt", "goal_distance", "epv", "progression"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
@@ -858,8 +860,10 @@ def infer_feature_run_intended_receiver_modes(feature_run_id: str) -> list[str]:
     return [mode for mode in INTENDED_RECEIVER_MODES if mode in modes]
 
 
-def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float, float], bool]:
+def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float, float] | None, bool]:
     value = validate_return_type(return_type)
+    if value == "extended_possession":
+        return "extended_possession", None, False
     core_value = value[:-7] if value.endswith("_spstop") else value
     skip_first = core_value.endswith("_skip1")
     core_value = core_value[:-6] if skip_first else core_value

@@ -290,7 +290,7 @@ parser.add_argument(
     default=None,
     help=(
         "way of defining return: disc_<gamma>, disc_<gamma>_skip1, disc_max_<gamma>, "
-        "disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, next_<N>, next_<N>_skip1, next_<N>+[_skip1], or in_<N> "
+        "disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, next_<N>, next_<N>_skip1, next_<N>+[_skip1], extended_possession, or in_<N> "
         "(disc_max/in: xt/goal_distance/epv only; disc_poly_max: xt/goal_distance only)"
     ),
 )

@@ -165,3 +165,4 @@ _vendor/defcon/saved
 
 !tests/test_turnover_stop_conditions.py
 !tests/test_carry_return_extension.py
+!tests/test_extended_possession.py

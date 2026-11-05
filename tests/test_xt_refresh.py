@@ -22,7 +22,8 @@ from project_config import get_action_label_dir, get_intent_train_label_dir, get
 from scripts.feature_extension_diagnostics import ExtensionAttempt
 
 RETURNS = ["next_3", "next_3_skip1", "in_1", "disc_0.9", "disc_0.9_skip1",
-           "disc_max_0.9", "disc_max_0.9_skip1", "disc_poly_max_0.1_1", "disc_poly_max_0.1_1_spstop"]
+           "disc_max_0.9", "disc_max_0.9_skip1", "disc_poly_max_0.1_1", "disc_poly_max_0.1_1_spstop",
+           "extended_possession"]
 
 
 @pytest.mark.parametrize("return_type", ["next_3", "next_3_skip1", "in_1"])
@@ -120,7 +121,7 @@ def test_refresh_matches_normal_label_construction(sample, return_type):
     match.action_type, match.fps, match.include_goals = "all", 25, False
     match.tracking = pd.DataFrame({"home_1_x": [1.0], "home_1_y": [2.0], "away_1_x": [3.0], "away_1_y": [4.0]})
     normal = match.construct_labels(resolved_actions=actions, relabel_intended_receivers=False, return_type=return_type)
-    pairs = action_return_pairs(actions, label_xt_for_return_type(events, return_type))
+    pairs = action_return_pairs(actions, label_xt_for_return_type(events, return_type), return_type=return_type)
     patched, _, _ = patch_labels(torch.zeros_like(normal).index_copy(1, torch.tensor([0]), normal[:, [0]]), pairs)
     torch.testing.assert_close(patched[:, TARGET_COLUMNS], normal[:, TARGET_COLUMNS], rtol=0, atol=0)
 

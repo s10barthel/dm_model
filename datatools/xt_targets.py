@@ -99,14 +99,14 @@ def target_cli(settings):
 
 def unavailable_xt_returns(surface_metadata, return_types):
     if (surface_metadata or {}).get("surface_type", (surface_metadata or {}).get("xt_model_type")) == "log_progression":
-        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "next_plus", "in"}]
+        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "next_plus", "in", "extended_possession"}]
     return []
 
 
 def validate_surface_returns(surface_metadata, return_types):
     unsupported = unavailable_xt_returns(surface_metadata, return_types)
     if unsupported:
-        raise ValueError(f"Log progression supports next_N[+][_skip1] and in_N returns only: {unsupported}.")
+        raise ValueError(f"Log progression supports next_N[+][_skip1], extended_possession, and in_N returns only: {unsupported}.")
 
 
 def transform_action_targets(actions, pairs, settings=None, surface=None, *, events=None, return_type=None, stop_condition=None):
@@ -115,7 +115,8 @@ def transform_action_targets(actions, pairs, settings=None, surface=None, *, eve
         raise ValueError("Version-2 xT gains require an explicit return type")
     conceding_baselines = None
     kind = parse_return_type(return_type)[0] if return_type else None
-    if kind == "next_plus" or (settings["version"] == 2 and settings["representation"] == "gain" and kind == "next"):
+    if kind == "next_plus" or (settings["version"] == 2 and settings["representation"] == "gain"
+                               and kind in {"next", "extended_possession"}):
         if events is None:
             raise ValueError("Turnover targets require event context")
         from datatools.return_windows import action_xt_windows

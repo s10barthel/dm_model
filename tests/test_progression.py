@@ -128,7 +128,7 @@ def prepare_progression_fixture(sample):
             for ret, labeled in returns.items():
                 pairs[mode, carry, ret] = action_return_pairs(actions, labeled,
                     source_columns=("scores_goal_distance", "concedes_goal_distance"),
-                    target_columns=("scores_goal_distance", "concedes_goal_distance"))
+                    target_columns=("scores_goal_distance", "concedes_goal_distance"), return_type=ret)
             actions[["scores_goal_distance", "concedes_goal_distance"]] = pairs[mode, carry, metadata["return_types"][0]]
             # Actual production carries have missing table returns, but valid tensor returns.
             if carry:

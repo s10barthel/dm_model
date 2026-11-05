@@ -7,11 +7,11 @@ from datatools.goal_distance import GOAL_DISTANCE_MAX_RAW, goal_distance_from_xy
 from project_config import parse_return_type
 
 DEFINITION = {"version": 1, "scoring": "relative_goal_distance_reduction",
-              "conceding": "concedes_goal_distance", "return_kinds": ["next", "in"]}
+              "conceding": "concedes_goal_distance", "return_kinds": ["next", "in", "extended_possession"]}
 
 
 def supported(return_type):
-    return parse_return_type(return_type)[0] in {"next", "in"}
+    return parse_return_type(return_type)[0] in DEFINITION["return_kinds"]
 
 
 def relative_progression(start_closeness, future_closeness):

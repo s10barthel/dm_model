@@ -6,6 +6,9 @@ from project_config import parse_return_type
 def label_xt_for_return_type(events, return_type):
     kind, value, skip_first = parse_return_type(return_type)
     eligible = tuple(config.XT_ACTION_TYPES)
+    if kind == "extended_possession":
+        from datatools.possession_returns import label_extended_possession_events
+        return label_extended_possession_events(events, {"xt"})
     if kind == "next_plus":
         from datatools.return_windows import action_xt_windows
         selected = events.copy()
