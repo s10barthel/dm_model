@@ -6,7 +6,8 @@ with its explicit run ID; uncommitted match artifacts are safely replaced.
 from __future__ import annotations
 
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from datatools.worker_runtime import map_shared_tasks, resolve_num_workers
 from dataclasses import asdict
 from datetime import datetime
 import hashlib
@@ -257,6 +258,7 @@ def marker_complete(output, match_id):
 
 
 def replace_carries(args):
+    resolve_num_workers(getattr(args, "num_workers", "1"))
     source = resolve_source(args.extend_feature_run_id)
     original = load_feature_run_metadata(source.name, required=True)
     from datatools.pass_trajectory import PASS_DURATION
@@ -291,7 +293,7 @@ def replace_carries(args):
             write_run_metadata(output, metadata)
         todo = [m for m in ids if not marker_complete(output, m)]
         tasks = [(str(source), str(output), metadata, m, asdict(policy), args.worker_thread_limit) for m in todo]
-        workers = int(args.num_workers)
+        workers = resolve_num_workers(getattr(args, "num_workers", "1"))
         if workers < 1:
             raise ValueError("Carry replacement requires a positive integer --num-workers")
         if workers == 1:
@@ -299,8 +301,9 @@ def replace_carries(args):
                 result = rebuild_match(task)
                 print(f"Rebuilt {result['match_id']}: {result['segments']} carry segments", flush=True)
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                for result in pool.map(rebuild_match, tasks):
+            with closing(map_shared_tasks(rebuild_match, tasks, workers, args.worker_thread_limit,
+                                          shared_indices=(2,))) as results:
+                for result in results:
                     print(f"Rebuilt {result['match_id']}: {result['segments']} carry segments", flush=True)
         if not all(marker_complete(output, m) for m in ids):
             raise ValueError("Carry replacement did not produce every required match")

@@ -1,7 +1,5 @@
 """Independent stop-condition label variants and staged target-only migration."""
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import ExitStack, closing
-import multiprocessing
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +14,7 @@ from datatools.artifact_storage import staged_path
 from datatools.return_windows import bounded_returns
 from datatools.xt_targets import target_settings, surface_from_metadata, transform_action_targets, unavailable_xt_returns
 from project_config import parse_return_type, get_resolved_action_dir, atomic_write_json
+from datatools.worker_runtime import map_shared_tasks
 
 VERSION = 1
 PAIR_SOURCES = {
@@ -77,6 +76,7 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
         from datatools.possession_returns import extended_possession_targets
         possession_targets = extended_possession_targets(actions, events, condition,
             {family for family, score in FAMILY_SCORES.items() if score in selected_scores}, max_actions=max_actions)
+    mapping = {}
     for score, source in PAIR_SOURCES.items():
         if score not in selected_scores:
             continue
@@ -89,7 +89,8 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
             continue
         if score == "scores_xg" and kind in {"disc", "disc_max"}:
             source = ("scores_xg_disc", "concedes_xg_disc")
-        pairs = action_return_pairs(actions, computed, source_columns=source, target_columns=(score, concede))
+        pairs = action_return_pairs(actions, computed, source_columns=source, target_columns=(score, concede),
+                                    _mapping=mapping)
         if possession_targets is not None:
             pairs = possession_targets[[score, concede]]
         if score == "scores_xt":
@@ -99,14 +100,6 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
     if "progression" in families:
         result["scores_progression"] = action_progression(result, return_type)
     return result
-
-
-def _initialize_refresh_worker(thread_limit):
-    from datatools.graph_feature import configure_worker_thread_limit
-    from threadpoolctl import threadpool_limits
-    configure_worker_thread_limit(thread_limit)
-    torch.set_num_threads(thread_limit)
-    threadpool_limits(limits=thread_limit)
 
 
 def _stage_match(root, mid, artifacts, options, temporary_paths):
@@ -231,7 +224,8 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
             destination = destination.parent.with_name(destination.parent.name.replace(old_ret, ret)) / destination.name
             if (xt_only or target_families is not None) and not destination.is_file():
                 raise FileNotFoundError(f"Missing advertised label variant: {destination}")
-            previous = torch.load(destination, weights_only=True, map_location="cpu") if destination.exists() else None
+            previous = (template if destination == artifact.path else
+                        torch.load(destination, weights_only=True, map_location="cpu") if destination.exists() else None)
             if previous is not None and (previous.shape != template.shape
                     or not torch.equal(previous[:, config.LABEL_INDEX["action_index"]], template[:, config.LABEL_INDEX["action_index"]])):
                 raise ValueError(f"Stop variants have different action identities: {destination}")
@@ -286,36 +280,20 @@ def _match_tasks(root, inventory, options, stack, attempt):
 
 
 def _stage_matches(tasks, workers, thread_limit):
-    if workers == 1:
+    match_ids = []
+    def tracked():
         for task in tasks:
-            yield _stage_match(*task)
-        return
-    # Spawn avoids inheriting initialized Torch/Arrow thread pools on Unix and
-    # matches Windows behavior. Keep at most one queued match per worker.
-    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
-                             initializer=_initialize_refresh_worker, initargs=(thread_limit,)) as pool:
-        pending = {}
-        try:
-            for _ in range(workers):
-                task = next(tasks, None)
-                if task is not None:
-                    pending[pool.submit(_stage_match, *task)] = task[1]
-            while pending:
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    mid = pending.pop(future)
-                    try:
-                        result = future.result()
-                    except BaseException as error:
-                        error.add_note(f"Stop-condition refresh match: {mid}")
-                        raise
-                    yield result
-                    task = next(tasks, None)
-                    if task is not None:
-                        pending[pool.submit(_stage_match, *task)] = task[1]
-        finally:
-            for future in pending:
-                future.cancel()
+            match_ids.append(task[1])
+            yield task
+    try:
+        with closing(map_shared_tasks(_stage_match, tracked(), workers, thread_limit,
+                                      shared_indices=(0, 3), unpack=True)) as results:
+            yield from results
+    except BaseException as error:
+        index = getattr(error, "feature_task_index", None)
+        if index is not None and index < len(match_ids):
+            error.add_note(f"Stop-condition refresh match: {match_ids[index]}")
+        raise
 
 
 def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, target_families=None,

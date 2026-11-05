@@ -1,6 +1,7 @@
 """Derived-only, resumable refresh of reception-dependent artifacts."""
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from datatools.worker_runtime import map_shared_tasks, resolve_num_workers
 from dataclasses import asdict
 from datetime import datetime
 import json
@@ -195,6 +196,7 @@ def resolve_source(value):
 
 
 def run_retirement(args):
+    resolve_num_workers(getattr(args, "num_workers", "1"))
     from scripts import replace_carries as rc
     source, original = resolve_source(args.extend_feature_run_id)
     replace = bool(args.replace_carries)
@@ -213,7 +215,7 @@ def run_retirement(args):
     settings = dict(source_sha256=rc.digest(source / "metadata.json"), policy=RETIRED,
                     replace_carries=replace, validation_parameters=values, matches=ids,
                     artifact_copy_mode=args.artifact_copy_mode)
-    workers = int(args.num_workers)
+    workers = resolve_num_workers(getattr(args, "num_workers", "1"))
     if workers < 1:
         raise ValueError("Reception refresh requires positive --num-workers")
     metadata = dict(original, graph_validation=graph_validation_enabled(getattr(args, "graph_validation", True)), run_id=output.name, base_feature_run_id=source.name,
@@ -247,8 +249,9 @@ def run_retirement(args):
                 report = refresh_match(task)
                 print(f"Retired receptions: {report['match_id']}", flush=True)
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                for report in pool.map(refresh_match, tasks):
+            with closing(map_shared_tasks(refresh_match, tasks, workers, args.worker_thread_limit,
+                                          shared_indices=(2, 5))) as results:
+                for report in results:
                     print(f"Retired receptions: {report['match_id']}", flush=True)
         if not all(complete(output, m) for m in ids):
             raise ValueError("Incomplete reception refresh")

@@ -5,7 +5,8 @@ import copy
 import json
 from datatools.graph_validation import (validate_graphs, graph_fingerprints, assert_preserved,
     graph_validation_enabled, validation_stats, merge_validation_stats)
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from datatools.worker_runtime import map_shared_tasks, resolve_num_workers
 from pathlib import Path
 from types import SimpleNamespace
 import pandas as pd
@@ -122,6 +123,7 @@ def refresh_match(task):
 
 
 def run_failed_pass_refresh(args):
+    resolve_num_workers(getattr(args, "num_workers", "1"))
     base_id = args.extend_feature_run_id
     base = get_feature_run_root(base_id)
     metadata = copy.deepcopy(load_feature_run_metadata(base_id, required=True))
@@ -165,13 +167,13 @@ def run_failed_pass_refresh(args):
         metadata["refresh_phase"] = "processing"
         write_run_metadata(root, metadata)
         tasks = [(str(root), p.stem, metadata, args.worker_thread_limit) for p in files]
-        from datatools.graph_feature import resolve_num_workers
         workers = resolve_num_workers(args.num_workers)
         if workers == 1:
             reports = [refresh_match(task) for task in tasks]
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                reports = list(pool.map(refresh_match, tasks))
+            with closing(map_shared_tasks(refresh_match, tasks, workers, args.worker_thread_limit,
+                                          shared_indices=(2,))) as results:
+                reports = list(results)
         metadata["failed_pass_refresh_reports"] = reports
         metadata["graph_validation_summary"] = merge_validation_stats(
             [r.get("graph_validation") for r in reports], metadata["graph_validation"])

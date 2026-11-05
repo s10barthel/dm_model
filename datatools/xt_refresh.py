@@ -1,7 +1,7 @@
 """Refresh xT targets from saved action identities, without loading graph/tracking data."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -12,7 +12,6 @@ import pandas as pd
 import torch
 
 from datatools import config, utils
-from datatools.artifact_storage import staged_path
 from datatools.xt_returns import label_xt_for_return_type
 from datatools.xt_targets import (target_settings, surface_from_metadata, transform_action_targets,
                                   unavailable_xt_returns)
@@ -20,6 +19,8 @@ from project_config import (XT_MATCH_DIR, atomic_write_json, get_action_label_di
                             get_intent_train_label_dir, get_augmented_label_dir,
                             get_resolved_action_dir, get_success_intent_label_dir, parse_return_type)
 from scripts.feature_extension_diagnostics import ExtensionAttempt
+from datatools.worker_runtime import map_tasks, resolve_num_workers
+from datatools.refresh_staging import target_refresh_tasks
 
 TARGET_COLUMNS = [config.LABEL_INDEX[name] for name in ("scores_xt", "concedes_xt")]
 
@@ -145,8 +146,7 @@ def read_annotated_events(event_path, sidecar_path):
     return events
 
 
-def action_return_pairs(actions, events, *, source_columns=("scores_xT", "concedes_xT"),
-                        target_columns=("scores_xt", "concedes_xt"), return_type=None):
+def _prepare_return_mapping(actions, events):
     if not actions.index.is_unique:
         raise ValueError("Resolved action indices are not unique.")
     indices = pd.to_numeric(pd.Series(actions.index, index=actions.index), errors="coerce")
@@ -177,11 +177,23 @@ def action_return_pairs(actions, events, *, source_columns=("scores_xT", "conced
                 or not synthetic.original_event_id.astype(str).str.startswith("carry:").all()):
             raise ValueError("Unknown synthetic action or missing carry anchor.")
     selected = events.loc[anchors.astype(int).to_numpy()]
+    return selected
+
+
+def action_return_pairs(actions, events, *, source_columns=("scores_xT", "concedes_xT"),
+                        target_columns=("scores_xt", "concedes_xt"), return_type=None, _mapping=None):
+    mapping = {} if _mapping is None else _mapping
+    if mapping.get("actions") is not actions or mapping.get("events") is not events:
+        mapping.clear()
+        mapping.update(actions=actions, events=events, selected=_prepare_return_mapping(actions, events))
+    selected = mapping["selected"]
     pairs = selected[list(source_columns)].to_numpy(copy=True)
-    teams = actions.object_id.astype(str).str[:4].to_numpy()
-    if not np.isin(teams, ["home", "away"]).all():
-        raise ValueError("Unknown action team perspective.")
-    swap = selected.object_id.astype(str).str[:4].to_numpy() != teams
+    if "swap" not in mapping:
+        teams = actions.object_id.astype(str).str[:4].to_numpy()
+        if not np.isin(teams, ["home", "away"]).all():
+            raise ValueError("Unknown action team perspective.")
+        mapping["swap"] = selected.object_id.astype(str).str[:4].to_numpy() != teams
+    swap = mapping["swap"]
     pairs[swap] = pairs[swap, ::-1]
     kind, max_actions, _ = parse_return_type(return_type) if return_type is not None else (None, None, False)
     if kind == "extended_possession":
@@ -210,9 +222,92 @@ def patch_labels(labels, pairs):
     return updated, int(changed.sum()), values
 
 
+def _stage_xt_match(task, options):
+    root, mid, artifacts, temporary_paths = task
+    xt_match_dir, event_dir = options["xt_match_dir"], options["event_dir"]
+    settings, surface_metadata = options["settings"], options["surface_metadata"]
+    returns, modes, carries = options["returns"], options["modes"], options["carries"]
+    unavailable = options["unavailable"]
+    surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" else None
+    report = dict(artifacts=[], changed_rows=0, rewritten_bytes=0, ball_coordinate_files_loaded=0)
+    staged, signatures, inputs = [], {}, {}
+
+    def stage(path, value, changed_rows, stats=None):
+        entry = dict(path=str(path.relative_to(root)), changed_rows=changed_rows)
+        if stats is not None:
+            entry.update(stats)
+        report["artifacts"].append(entry)
+        report["changed_rows"] += changed_rows
+        if not changed_rows:
+            return
+        temporary = temporary_paths[path]
+        if path.suffix == ".pt":
+            with temporary.open("wb") as stream:
+                torch.save(value, stream)
+        else:
+            value.to_parquet(temporary)
+        staged.append((path, temporary))
+        report["rewritten_bytes"] += temporary.stat().st_size
+
+    events = read_annotated_events(event_dir / f"{mid}.csv", xt_match_dir / f"{mid}.csv")
+    if settings["version"] == 2 and settings["representation"] == "gain":
+        from datatools.xt_acquisitions import acquisition_context
+        events, acquisition_cache, acquisition_inputs = acquisition_context(events, mid, root)
+        inputs.update({str(path): digest for path, digest in acquisition_inputs.get("inputs", {}).items()})
+        signatures.update(acquisition_inputs.get("signatures", {}))
+        report["ball_coordinate_files_loaded"] += acquisition_inputs.get("ball_files_loaded", 0)
+        if acquisition_cache is not None:
+            stage(acquisition_cache[0], acquisition_cache[1], 1, dict(kind="acquisition_context"))
+    event_returns = {ret: label_xt_for_return_type(events, ret)
+                     for ret in returns if ret not in unavailable}
+    pairs = {}
+    for carry in ([False, True] if carries else [False]):
+        for mode in modes:
+            path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
+            actions = pd.read_parquet(path)
+            raw_pairs = action_return_pairs(actions, events) if unavailable else None
+            for ret in returns:
+                if ret in unavailable:
+                    pairs[(mode, carry, ret)] = raw_pairs.copy()
+                    pairs[(mode, carry, ret)].loc[:, :] = np.nan
+                else:
+                    pairs[(mode, carry, ret)] = transform_action_targets(
+                        actions, action_return_pairs(actions, event_returns[ret], return_type=ret), settings, surface,
+                        events=events, return_type=ret)
+            updated = actions.copy()
+            updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]
+            # Refresh the saved raw annotation columns for canonical rows;
+            # synthetic carries have no independent xT event annotation.
+            canonical = actions.index.isin(events.index)
+            for column in ("xT", "scores_xT", "concedes_xT"):
+                if column in actions:
+                    updated.loc[canonical, column] = events.loc[actions.index[canonical], column].to_numpy()
+            target_names = [c for c in ("xT", "scores_xT", "concedes_xT", "scores_xt", "concedes_xt") if c in updated]
+            before = actions.reindex(columns=target_names)
+            after = updated[target_names]
+            equal = (before == after) | (before.isna() & after.isna())
+            stage(path, updated, int((~equal.all(axis=1)).sum()))
+    for artifact in artifacts:
+        labels = torch.load(artifact.path, map_location="cpu", weights_only=True)
+        updated, changed, values = patch_labels(labels, pairs[(artifact.mode, artifact.carries, artifact.return_type)])
+        available = torch.isfinite(values).all(dim=1)
+        stats = dict(rows=len(labels),
+                     target_mean=values[available].double().mean(dim=0).tolist()
+                     if available.any() else [None, None],
+                     nonzero_rows=int((available & (values != 0).any(dim=1)).sum()),
+                     unavailable_rows=int((~available).sum()))
+        stage(artifact.path, updated, changed, stats)
+
+    return dict(staged=staged, signatures=signatures, inputs=inputs, report=report)
+
+
 def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
-               event_dir="data/event_synced", attempt=None, xt_targets=None, surface_metadata=None):
+               event_dir="data/event_synced", attempt=None, xt_targets=None, surface_metadata=None,
+               num_workers=1, worker_thread_limit=1):
     """Validate and stage the entire refresh before replacing any data artifact."""
+    workers = resolve_num_workers(num_workers)
+    if int(worker_thread_limit) < 1:
+        raise ValueError("--worker-thread-limit must be a positive integer.")
     root, xt_match_dir, event_dir = Path(root), Path(xt_match_dir), Path(event_dir)
     attempt = attempt or ExtensionAttempt(root, "xt_refresh", "derived", {})
     started = time.perf_counter()
@@ -251,74 +346,23 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                 path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
                 signatures[path] = file_signature(path)
     with ExitStack() as stack:
-        def stage(path, value, changed_rows, stats=None):
-            entry = dict(path=str(path.relative_to(root)), changed_rows=changed_rows)
-            if stats is not None:
-                entry.update(stats)
-            report["artifacts"].append(entry)
-            report["changed_rows"] += changed_rows
-            if not changed_rows:
-                return
-            temporary = stack.enter_context(staged_path(path, attempt=attempt))
-            if path.suffix == ".pt":
-                with temporary.open("wb") as stream:
-                    torch.save(value, stream)
-            else:
-                value.to_parquet(temporary)
-            staged.append((path, temporary))
-            report["rewritten_bytes"] += temporary.stat().st_size
-
-        for mid, artifacts in inventory.items():
-            events = read_annotated_events(event_dir / f"{mid}.csv", xt_match_dir / f"{mid}.csv")
-            if settings["version"] == 2 and settings["representation"] == "gain":
-                from datatools.xt_acquisitions import acquisition_context
-                events, acquisition_cache, acquisition_inputs = acquisition_context(events, mid, root)
-                inputs.update({str(path): digest for path, digest in acquisition_inputs.get("inputs", {}).items()})
-                signatures.update(acquisition_inputs.get("signatures", {}))
-                report["ball_coordinate_files_loaded"] += acquisition_inputs.get("ball_files_loaded", 0)
-                if acquisition_cache is not None:
-                    stage(acquisition_cache[0], acquisition_cache[1], 1, dict(kind="acquisition_context"))
-            event_returns = {ret: label_xt_for_return_type(events, ret)
-                             for ret in returns if ret not in unavailable}
-            pairs = {}
-            for carry in ([False, True] if carries else [False]):
-                for mode in modes:
-                    path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
-                    attempt.data["current_file"] = str(path)
-                    actions = pd.read_parquet(path)
-                    raw_pairs = action_return_pairs(actions, events) if unavailable else None
-                    for ret in returns:
-                        if ret in unavailable:
-                            pairs[(mode, carry, ret)] = raw_pairs.copy()
-                            pairs[(mode, carry, ret)].loc[:, :] = np.nan
-                        else:
-                            pairs[(mode, carry, ret)] = transform_action_targets(
-                                actions, action_return_pairs(actions, event_returns[ret], return_type=ret), settings, surface,
-                                events=events, return_type=ret)
-                    updated = actions.copy()
-                    updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]
-                    # Refresh the saved raw annotation columns for canonical rows;
-                    # synthetic carries have no independent xT event annotation.
-                    canonical = actions.index.isin(events.index)
-                    for column in ("xT", "scores_xT", "concedes_xT"):
-                        if column in actions:
-                            updated.loc[canonical, column] = events.loc[actions.index[canonical], column].to_numpy()
-                    target_names = [c for c in ("xT", "scores_xT", "concedes_xT", "scores_xt", "concedes_xt") if c in updated]
-                    before = actions.reindex(columns=target_names)
-                    after = updated[target_names]
-                    equal = (before == after) | (before.isna() & after.isna())
-                    stage(path, updated, int((~equal.all(axis=1)).sum()))
-            for artifact in artifacts:
-                attempt.data["current_file"] = str(artifact.path)
-                labels = torch.load(artifact.path, map_location="cpu", weights_only=True)
-                updated, changed, values = patch_labels(labels, pairs[(artifact.mode, artifact.carries, artifact.return_type)])
-                available = torch.isfinite(values).all(dim=1)
-                stats = dict(rows=len(labels),
-                             target_mean=values[available].double().mean(dim=0).tolist()
-                             if available.any() else [None, None],
-                             nonzero_rows=int((available & (values != 0).any(dim=1)).sum()),
-                             unavailable_rows=int((~available).sum()))
-                stage(artifact.path, updated, changed, stats)
+        options = dict(xt_match_dir=xt_match_dir, event_dir=event_dir, settings=settings,
+                       surface_metadata=surface_metadata, returns=returns, modes=modes,
+                       carries=carries, unavailable=unavailable)
+        tasks = target_refresh_tasks(root, inventory, modes, carries, stack, attempt,
+                                     acquisitions=settings["version"] == 2 and settings["representation"] == "gain")
+        with closing(map_tasks(_stage_xt_match, tasks, workers, worker_thread_limit,
+                               shared_args=(options,))) as results:
+            for mid, result in zip(inventory, results):
+                attempt.data.update(current_match=mid)
+                staged.extend(result["staged"])
+                signatures.update(result["signatures"])
+                inputs.update(result["inputs"])
+                for key, value in result["report"].items():
+                    if isinstance(value, list):
+                        report[key].extend(value)
+                    else:
+                        report[key] += value
         # No destination artifact has been replaced yet. Validate all inputs again.
         for path, digest in inputs.items():
             if fingerprint(path) != digest:

@@ -4,7 +4,8 @@ from __future__ import annotations
 import copy
 import json
 import re
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from datatools.worker_runtime import map_shared_tasks, resolve_num_workers
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from datatools.graph_validation import (validate_graphs, graph_fingerprints, ass
 from datatools import config
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.graph_feature import (build_match_for_feature_generation, configure_worker_thread_limit,
-                                    infer_node_feature_dim, resolve_num_workers, summarize_ball_trajectory,
+                                    infer_node_feature_dim, summarize_ball_trajectory,
                                     construct_graph_for_action)
 from datatools.pass_trajectory import (PASS_DURATION, PASS_DURATION_KEY, ENDPOINT_COLUMNS, ensure_pass_endpoints,
                                       ANGLE_ONLY_KEY, ANGLE_ONLY, ORIGINAL_KEY, ORIGINAL, MAX_DURATION_KEY)
@@ -358,6 +359,7 @@ def refresh_directory_match(root, metadata, match_id, thread_limit=1, *, graph_v
 
 
 def run_trajectory_refresh(args):
+    resolve_num_workers(getattr(args, "num_workers", "1"))
     base_id = str(args.extend_feature_run_id)
     base_root = get_feature_run_root(base_id)
     metadata = load_feature_run_metadata(base_id, required=True)
@@ -481,8 +483,9 @@ def run_trajectory_refresh(args):
                 attempt.data["current_file"] = str(task[0])
                 reports.append(stage_refresh_match(task))
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                reports = list(pool.map(stage_refresh_match, tasks))
+            with closing(map_shared_tasks(stage_refresh_match, tasks, workers, args.worker_thread_limit,
+                                          shared_indices=(3,))) as results:
+                reports = list(results)
         replace_staged_graphs(temporary, attempt)
         from project_config import atomic_write_json
         for report in reports:

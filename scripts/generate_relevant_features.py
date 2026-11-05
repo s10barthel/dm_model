@@ -37,6 +37,7 @@ from datatools.ball_carries import CARRY_DEFINITION_VERSION
 from datatools.carry_policy import CarryPolicy
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
 from datatools.graph_feature import infer_node_feature_dim
+from datatools.worker_runtime import resolve_num_workers
 from project_config import (
     atomic_write_json,
     add_split_arguments,
@@ -287,7 +288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         default="1",
-        help="Number of match worker processes to use inside each graph_feature step, or 'auto'.",
+        help="Number of match/file worker processes for generation and refresh, or 'auto'.",
     )
     parser.add_argument(
         "--worker-thread-limit",
@@ -406,6 +407,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--relative-speed-edge-features requires --v-edge-features.")
     if args.worker_thread_limit < 1:
         parser.error("--worker-thread-limit must be a positive integer.")
+    try:
+        resolve_num_workers(args.num_workers)
+    except (TypeError, ValueError) as error:
+        parser.error(str(error))
     return args
 
 
@@ -1485,14 +1490,16 @@ def append_relative_speed_to_graph(graph: object) -> object:
 
 
 def extend_relative_speed_edge_features(feature_root: Path, intended_receiver_modes: list[str],
-                                        attempt: ExtensionAttempt | None = None, *, graph_validation=True) -> list[Path]:
+                                        attempt: ExtensionAttempt | None = None, *, graph_validation=True,
+                                        num_workers=1, worker_thread_limit=1) -> list[Path]:
     graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
                    for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
     attempt = attempt or ExtensionAttempt(feature_root, "relative_speed", EXTENSION_MODE_IN_PLACE, {})
     result = extend_graph_files(graph_files, append_relative_speed_to_graph, ".relative_speed.tmp", attempt,
-                                graph_validation=graph_validation)
+                                graph_validation=graph_validation, num_workers=num_workers,
+                                worker_thread_limit=worker_thread_limit)
     print(f"Extended relative-speed edge features in {len(result)} graph files.")
     return result
 
@@ -1521,14 +1528,16 @@ def append_interactions_to_graph(graph):
 
 
 def extend_interaction_edge_features(feature_root: Path, intended_receiver_modes: list[str],
-                                     attempt: ExtensionAttempt | None = None, *, graph_validation=True) -> list[Path]:
+                                     attempt: ExtensionAttempt | None = None, *, graph_validation=True,
+                                     num_workers=1, worker_thread_limit=1) -> list[Path]:
     graph_files = [path for directory in relative_speed_graph_dirs(feature_root, intended_receiver_modes)
                    for path in sorted(directory.glob("*.pt"))]
     if not graph_files:
         raise FileNotFoundError(f"No graph artifact files found under {feature_root}.")
     attempt = attempt or ExtensionAttempt(feature_root, "interaction", EXTENSION_MODE_IN_PLACE, {})
     result = extend_graph_files(graph_files, append_interactions_to_graph, ".interactions.tmp", attempt,
-                                graph_validation=graph_validation)
+                                graph_validation=graph_validation, num_workers=num_workers,
+                                worker_thread_limit=worker_thread_limit)
     print(f"Extended interaction edge features in {len(result)} graph files.")
     return result
 
@@ -1625,7 +1634,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                        xt_version=args.xt_version,
                        xt_targets=args.xt_targets,
                        surface_metadata=args.xt_surface_metadata,
-                       attempt=attempt)
+                       attempt=attempt, **refresh_workers)
         elif targeted_goal_distance(plan.refresh_target_families) and plan.base_metadata.get("stop_conditions"):
             from datatools.stop_conditions import refresh_labels
             from datatools.goal_distance_refresh import GOAL_DISTANCE_DEFINITION
@@ -1641,7 +1650,8 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             atomic_write_json(target_root / "goal_distance_refresh_report.json", refresh_result)
         elif targeted_goal_distance(plan.refresh_target_families):
             refresh_result = refresh_goal_distance(target_root, plan.base_metadata,
-                target_families=plan.refresh_target_families, preflight=goal_preflight, attempt=attempt)
+                target_families=plan.refresh_target_families, preflight=goal_preflight,
+                attempt=attempt, **refresh_workers)
         else:
             run_generation_steps(plan.command_steps, attempt=attempt)
             if plan.receiver_extension_attempt:
@@ -1667,10 +1677,10 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                                             set_piece_return_types=set_piece_returns)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
-                                                graph_validation=getattr(args, "graph_validation", True))
+                                                graph_validation=getattr(args, "graph_validation", True), **refresh_workers)
         if plan.extend_interaction_edge_features:
             extend_interaction_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
-                                                graph_validation=getattr(args, "graph_validation", True))
+                                                graph_validation=getattr(args, "graph_validation", True), **refresh_workers)
         attempt.finish()
     except BaseException as exc:
         attempt.fail(exc)
@@ -1840,6 +1850,8 @@ def carry_extension_steps(
 
 
 def run_carry_extension_generation(args: argparse.Namespace) -> None:
+    refresh_workers = dict(num_workers=getattr(args, "num_workers", "1"),
+                           worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
     base_run_id = resolve_feature_run_id(args.extend_feature_run_id, required=True, allow_latest=False)
     if base_run_id is None:
         raise FileNotFoundError("No base feature run id was provided.")
@@ -1919,7 +1931,7 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
         run_generation_steps(steps, attempt=attempt)
         if extend_interactions:
             extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata), attempt=attempt,
-                                              graph_validation=getattr(args, "graph_validation", True))
+                                              graph_validation=getattr(args, "graph_validation", True), **refresh_workers)
         attempt.finish()
     except BaseException as exc:
         attempt.fail(exc)

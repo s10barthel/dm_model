@@ -1,7 +1,8 @@
 """One derived-run transaction for pass refresh, reception retirement and carries."""
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
+from contextlib import closing
+from datatools.worker_runtime import map_shared_tasks, resolve_num_workers
 from dataclasses import asdict
 from datetime import datetime
 import copy
@@ -13,7 +14,7 @@ import sys
 from datatools.artifact_storage import clone_feature_artifacts
 from datatools.graph_validation import graph_validation_enabled, merge_validation_stats
 from datatools.carry_policy import CarryPolicy, DEFINITION
-from datatools.graph_feature import configure_worker_thread_limit, resolve_num_workers
+from datatools.graph_feature import configure_worker_thread_limit
 from datatools.pass_trajectory import (PASS_DURATION_KEY, PASS_DURATION, ANGLE_ONLY_KEY, ANGLE_ONLY,
                                       ORIGINAL_KEY, ORIGINAL, MAX_DURATION_KEY)
 from datatools.reception_policy import KEY, RETIRED
@@ -59,6 +60,7 @@ def _complete(output, match_id):
 
 
 def run_combined_refresh(args):
+    resolve_num_workers(getattr(args, "num_workers", "1"))
     from scripts import replace_carries as rc
     from datatools.reception_refresh import resolve_source
     source, original = resolve_source(args.extend_feature_run_id)
@@ -123,8 +125,9 @@ def run_combined_refresh(args):
                 report = _refresh_match(task)
                 print(f"Refreshed {report['match_id']}", flush=True)
         else:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
-                for report in pool.map(_refresh_match, tasks):
+            with closing(map_shared_tasks(_refresh_match, tasks, workers, args.worker_thread_limit,
+                                          shared_indices=(2, 4))) as results:
+                for report in results:
                     print(f"Refreshed {report['match_id']}", flush=True)
         if not all(_complete(output, mid) for mid in ids):
             raise ValueError('Incomplete combined feature refresh')

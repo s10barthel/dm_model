@@ -29,6 +29,8 @@ import datatools.preprocess as proc
 from datatools import config, utils
 from models.edge_schema import generation_edge_names, interaction_values, schema_for_names, add_interaction_arguments, INTERACTION_GROUPS
 from datatools.config import LABEL_INDEX
+from datatools.label_reuse import reuse_label_rows
+from datatools.worker_runtime import configure_worker_thread_limit, resolve_num_workers
 from models.pass_height import positive_height
 from datatools.ball_carries import augment_match_actions_with_carries, validate_carry_artifact_version
 from datatools.match import Match
@@ -103,26 +105,6 @@ class MatchGenerationResult:
     graph_validation: dict | None = None
 
 
-def resolve_num_workers(value: str | int) -> int:
-    if isinstance(value, int):
-        workers = value
-    else:
-        text = str(value).strip().lower()
-        if text == "auto":
-            cpu_count = os.cpu_count() or 1
-            workers = max(1, min(6, cpu_count - 2))
-        else:
-            workers = int(text)
-    if workers < 1:
-        raise ValueError("--num-workers must be a positive integer or 'auto'.")
-    return workers
-
-
-def configure_worker_thread_limit(limit: int) -> None:
-    value = str(int(limit))
-    os.environ["OMP_NUM_THREADS"] = value
-    os.environ["MKL_NUM_THREADS"] = value
-    os.environ["NUMEXPR_NUM_THREADS"] = value
 
 
 def calculate_offside_flags(
@@ -784,82 +766,83 @@ def build_labels_by_mode_and_return(
     stats_by_mode: dict[str, dict[str, int]] = {}
 
     for mode in intended_receiver_modes:
-        primary_return_type = return_types[0]
-        resolved_actions: pd.DataFrame | None = None
-        if prefer_existing_resolved_actions:
-            if feature_root is None or match_id is None:
-                raise ValueError("feature_root and match_id are required when prefer_existing_resolved_actions=True.")
-            resolved_action_path = get_resolved_action_path(
-                match_id,
-                intended_receiver_mode=mode,
-                root=feature_root,
-                use_carries=use_carries,
-            )
-            if resolved_action_path.exists():
-                resolved_actions = read_parquet(resolved_action_path)
+        with reuse_label_rows(match, enabled=len(return_types) > 1):
+            primary_return_type = return_types[0]
+            resolved_actions: pd.DataFrame | None = None
+            if prefer_existing_resolved_actions:
+                if feature_root is None or match_id is None:
+                    raise ValueError("feature_root and match_id are required when prefer_existing_resolved_actions=True.")
+                resolved_action_path = get_resolved_action_path(
+                    match_id,
+                    intended_receiver_mode=mode,
+                    root=feature_root,
+                    use_carries=use_carries,
+                )
+                if resolved_action_path.exists():
+                    resolved_actions = read_parquet(resolved_action_path)
 
-        loaded_existing = resolved_actions is not None
-        if loaded_existing:
-            labels = match.construct_labels(
-                intended_receiver_mode=mode,
-                intended_receiver_model_id=intended_receiver_model_id,
-                relabel_intended_receivers=False,
-                resolved_actions=resolved_actions,
-                return_type=primary_return_type,
-            )
-        else:
-            prediction_kwargs = {}
-            if mode == INTENDED_RECEIVER_MODE_MODEL and use_carries:
-                from datatools.receiver_reuse import prediction_provenance, reusable_predictions
-                source = get_resolved_action_path(match_id, intended_receiver_mode=mode, root=feature_root)
-                provenance = prediction_provenance(feature_root, match_id, intended_receiver_model_id,
-                                                   receiver_extension_attempt)
-                predictions = read_parquet(source) if source.exists() else None
-                prediction_kwargs["precomputed_receiver_predictions"] = reusable_predictions(match.actions, predictions, provenance)
-            labels = match.construct_labels(
-                intended_receiver_mode=mode,
-                intended_receiver_model_id=intended_receiver_model_id,
-                return_type=primary_return_type,
-                **prediction_kwargs,
-            )
-        if labels.numel() == 0:
-            raise ValueError(f"No usable labels were constructed for intended_receiver_mode={mode}.")
+            loaded_existing = resolved_actions is not None
+            if loaded_existing:
+                labels = match.construct_labels(
+                    intended_receiver_mode=mode,
+                    intended_receiver_model_id=intended_receiver_model_id,
+                    relabel_intended_receivers=False,
+                    resolved_actions=resolved_actions,
+                    return_type=primary_return_type,
+                )
+            else:
+                prediction_kwargs = {}
+                if mode == INTENDED_RECEIVER_MODE_MODEL and use_carries:
+                    from datatools.receiver_reuse import prediction_provenance, reusable_predictions
+                    source = get_resolved_action_path(match_id, intended_receiver_mode=mode, root=feature_root)
+                    provenance = prediction_provenance(feature_root, match_id, intended_receiver_model_id,
+                                                       receiver_extension_attempt)
+                    predictions = read_parquet(source) if source.exists() else None
+                    prediction_kwargs["precomputed_receiver_predictions"] = reusable_predictions(match.actions, predictions, provenance)
+                labels = match.construct_labels(
+                    intended_receiver_mode=mode,
+                    intended_receiver_model_id=intended_receiver_model_id,
+                    return_type=primary_return_type,
+                    **prediction_kwargs,
+                )
+            if labels.numel() == 0:
+                raise ValueError(f"No usable labels were constructed for intended_receiver_mode={mode}.")
 
-        if resolved_actions is None:
-            resolved_actions = match.actions.copy()
-            resolved_actions.attrs["intended_receiver_stats"] = dict(match.intended_receiver_stats)
-            if mode == INTENDED_RECEIVER_MODE_MODEL and receiver_extension_attempt:
-                from datatools.receiver_reuse import PROVENANCE, prediction_provenance
-                resolved_actions.attrs[PROVENANCE] = prediction_provenance(
-                    feature_root, match_id, intended_receiver_model_id, receiver_extension_attempt)
-        resolved_actions_by_mode[mode] = resolved_actions
-        stats_by_mode[mode] = {
-            key: int(match.intended_receiver_stats.get(key, 0) or 0)
-            for key in [
-                "failed_passes_total",
-                "failed_passes_labeled",
-                "failed_passes_missing_endpoint",
-                "model_failed_passes_total",
-                "model_failed_passes_scored",
-                "model_angle_only_fallbacks",
-                "model_unavailable_predictions",
-                "model_predictions_reused",
-                "model_predictions_inferred",
-            ]
-        }
-        if loaded_existing and mode == INTENDED_RECEIVER_MODE_MODEL:
-            stats_by_mode[mode]["model_predictions_inferred"] = 0
-            stats_by_mode[mode]["model_predictions_reused"] = stats_by_mode[mode]["model_failed_passes_total"]
-        labels_by_key[(mode, primary_return_type)] = labels.clone()
+            if resolved_actions is None:
+                resolved_actions = match.actions.copy()
+                resolved_actions.attrs["intended_receiver_stats"] = dict(match.intended_receiver_stats)
+                if mode == INTENDED_RECEIVER_MODE_MODEL and receiver_extension_attempt:
+                    from datatools.receiver_reuse import PROVENANCE, prediction_provenance
+                    resolved_actions.attrs[PROVENANCE] = prediction_provenance(
+                        feature_root, match_id, intended_receiver_model_id, receiver_extension_attempt)
+            resolved_actions_by_mode[mode] = resolved_actions
+            stats_by_mode[mode] = {
+                key: int(match.intended_receiver_stats.get(key, 0) or 0)
+                for key in [
+                    "failed_passes_total",
+                    "failed_passes_labeled",
+                    "failed_passes_missing_endpoint",
+                    "model_failed_passes_total",
+                    "model_failed_passes_scored",
+                    "model_angle_only_fallbacks",
+                    "model_unavailable_predictions",
+                    "model_predictions_reused",
+                    "model_predictions_inferred",
+                ]
+            }
+            if loaded_existing and mode == INTENDED_RECEIVER_MODE_MODEL:
+                stats_by_mode[mode]["model_predictions_inferred"] = 0
+                stats_by_mode[mode]["model_predictions_reused"] = stats_by_mode[mode]["model_failed_passes_total"]
+            labels_by_key[(mode, primary_return_type)] = labels.clone()
 
-        for return_type in return_types[1:]:
-            labels_by_key[(mode, return_type)] = match.construct_labels(
-                intended_receiver_mode=mode,
-                intended_receiver_model_id=intended_receiver_model_id,
-                relabel_intended_receivers=False,
-                resolved_actions=resolved_actions,
-                return_type=return_type,
-            ).clone()
+            for return_type in return_types[1:]:
+                labels_by_key[(mode, return_type)] = match.construct_labels(
+                    intended_receiver_mode=mode,
+                    intended_receiver_model_id=intended_receiver_model_id,
+                    relabel_intended_receivers=False,
+                    resolved_actions=resolved_actions,
+                    return_type=return_type,
+                ).clone()
 
     return resolved_actions_by_mode, labels_by_key, stats_by_mode
 
@@ -867,6 +850,7 @@ def build_labels_by_mode_and_return(
 def build_success_intent_labels_by_return(
     match: Match,
     return_types: list[str],
+    *, primary_only: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, torch.Tensor]]:
     if not return_types:
         raise ValueError("At least one return_type must be requested.")
@@ -874,21 +858,27 @@ def build_success_intent_labels_by_return(
     resolved_actions = build_success_intent_resolved_actions(match.actions)
     labels_by_return: dict[str, torch.Tensor] = {}
     primary_return_type = return_types[0]
-    labels = match.construct_labels(
-        relabel_intended_receivers=False,
-        resolved_actions=resolved_actions,
-        return_type=primary_return_type,
-    )
-    if labels.numel() == 0:
-        raise ValueError("No usable labels were constructed for success_intent.")
-    labels_by_return[primary_return_type] = labels.clone()
-
-    for return_type in return_types[1:]:
-        labels_by_return[return_type] = match.construct_labels(
+    with reuse_label_rows(match, enabled=len(return_types) > 1) as cache:
+        labels = match.construct_labels(
             relabel_intended_receivers=False,
             resolved_actions=resolved_actions,
-            return_type=return_type,
-        ).clone()
+            return_type=primary_return_type,
+        )
+        if labels.numel() == 0:
+            raise ValueError("No usable labels were constructed for success_intent.")
+        labels_by_return[primary_return_type] = labels.clone()
+
+        for return_type in return_types[1:]:
+            cache["validate_only"] = primary_only
+            secondary = match.construct_labels(
+                relabel_intended_receivers=False,
+                resolved_actions=resolved_actions,
+                return_type=return_type,
+            )
+            if primary_only:
+                extract_sorted_action_indices(secondary, context="Action labels")
+            else:
+                labels_by_return[return_type] = secondary.clone()
 
     return resolved_actions, labels_by_return
 
@@ -1426,7 +1416,7 @@ def _save_success_intent_match(
     add_relative_velocity_edge_features: bool = True,
     add_separation_rate_edge_features: bool = True,
 ) -> MatchGenerationResult:
-    resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, return_types)
+    resolved_actions, success_intent_labels = build_success_intent_labels_by_return(match, return_types, primary_only=True)
     for labels in success_intent_labels.values():
         extract_sorted_action_indices(labels, context="Action labels")
 

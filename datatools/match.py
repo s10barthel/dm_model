@@ -769,7 +769,12 @@ class Match(ABC):
         from datatools.progression import action_progression
         self.actions["scores_progression"] = action_progression(self.actions, return_type)
 
+        from datatools.label_reuse import reused_labels, remember_label_rows
+        reused = reused_labels(self)
+        if reused is not None:
+            return reused
         labels_list = []
+        label_indices = []
 
         for i in self.actions.index:
             frame = self.actions.at[i, "frame_id"]
@@ -878,6 +883,7 @@ class Match(ABC):
                     is_real = 1
                     receiver_index = -1
 
+            label_indices.append(i)
             labels_list.append(
                 [
                     i,
@@ -915,7 +921,9 @@ class Match(ABC):
                 ]
             )
 
-        return torch.tensor(labels_list, dtype=torch.float32)
+        labels = torch.tensor(labels_list, dtype=torch.float32)
+        remember_label_rows(self, labels, label_indices)
+        return labels
 
     def plot_snapshot(
         self,

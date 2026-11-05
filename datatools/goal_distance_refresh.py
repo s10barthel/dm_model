@@ -1,5 +1,5 @@
 """Targeted goal-distance/progression refresh using saved identities and labels."""
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 import time
 
@@ -8,7 +8,8 @@ import pandas as pd
 import torch
 
 from datatools import config, utils
-from datatools.artifact_storage import staged_path
+from datatools.worker_runtime import map_tasks, resolve_num_workers
+from datatools.refresh_staging import target_refresh_tasks
 from datatools.goal_distance import GOAL_DISTANCE_MAX_RAW
 from datatools.goal_distance_returns import label_goal_distance_for_return_type
 from datatools.progression import DEFINITION, action_start_closeness, supported
@@ -102,10 +103,123 @@ def changed_tensor_rows(before, after):
     return changed, bool(changed)
 
 
+def _stage_goal_distance_match(task, options):
+    root, mid, artifacts, temporary_paths = task
+    returns, modes, carries = options["returns"], options["modes"], options["carries"]
+    repair, add_progression = options["repair"], options["add_progression"]
+    inputs = options["inputs"]
+    report = dict(artifacts=[], changed_rows=0, rewritten_bytes=0,
+                  progression_present=add_progression, progression_return_types=[])
+    staged, context = [], {}
+
+    def locate(mid, path, mode=None, ret=None, carry=None):
+        context.update(match_id=mid, path=str(path), receiver_mode=mode, return_type=ret, carries=carry)
+
+    def stage(path, value, changed_rows, changed, stats=None):
+        entry = dict(path=str(path.relative_to(root)), changed_rows=changed_rows,
+                     rewritten=changed, **(stats or {}))
+        report["artifacts"].append(entry)
+        report["changed_rows"] += changed_rows
+        if not changed:
+            return
+        temporary = temporary_paths[path]
+        if path.suffix == ".pt":
+            with temporary.open("wb") as stream:
+                torch.save(value, stream)
+        else:
+            value.to_parquet(temporary)
+        staged.append((path, temporary, dict(context)))
+        report["rewritten_bytes"] += temporary.stat().st_size
+
+    try:
+        event_path, annotation_path = inputs["paths"][mid]
+        locate(mid, annotation_path)
+        events = read_goal_distance_events(event_path, annotation_path)
+        event_returns = {ret: label_goal_distance_for_return_type(events, ret) for ret in returns}
+        actions_by_variant, pairs, primary_progression = {}, {}, {}
+        for carry in ([False, True] if carries else [False]):
+            for mode in modes:
+                path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
+                locate(mid, path, mode, returns[0], carry)
+                actions = pd.read_parquet(path)
+                actions_by_variant[mode, carry] = actions
+                for ret, values in event_returns.items():
+                    locate(mid, path, mode, ret, carry)
+                    pairs[mode, carry, ret] = action_return_pairs(
+                        actions, values, source_columns=PAIR_NAMES, target_columns=PAIR_NAMES, return_type=ret)
+        for artifact in artifacts:
+            mode, carry, ret = artifact.mode, artifact.carries, artifact.return_type
+            locate(mid, artifact.path, mode, ret, carry)
+            actions = actions_by_variant[mode, carry]
+            labels = torch.load(artifact.path, map_location="cpu", weights_only=True)
+            ids = label_action_ids(labels, actions)
+            expected = torch.as_tensor(pairs[mode, carry, ret].loc[ids].to_numpy(), dtype=labels.dtype)
+            old_pairs = labels[:, PAIR_COLUMNS]
+            if not repair and not torch.equal(old_pairs, expected):
+                bad = (~(old_pairs == expected).all(dim=1)).numpy()
+                raise ValueError(
+                    f"Saved goal-distance labels are stale or invalid; action IDs={ids[bad][:8].tolist()}. "
+                    "Use --refresh-target-family goal_distance --refresh-target-family progression together.")
+            updated = labels.clone()
+            if repair:
+                updated[:, PAIR_COLUMNS] = expected
+            primary_path = get_action_label_dir(ret, mode, root=root, use_carries=carry) / f"{mid}.pt"
+            primary = ret == returns[0] and artifact.path == primary_path
+            needs_progression = add_progression or labels.shape[1] > PROGRESSION_COLUMN
+            table_progression = primary and (add_progression or "scores_progression" in actions)
+            if needs_progression or table_progression:
+                starts = (action_start_closeness(actions.loc[np.unique(ids)]) if supported(ret)
+                          else pd.Series(np.zeros(len(actions)), index=actions.index))
+                derived, _ = patch_progression(updated, starts, ret)
+                if needs_progression:
+                    updated = derived
+                report["progression_present"] = True
+                if supported(ret) and ret not in report["progression_return_types"]:
+                    report["progression_return_types"].append(ret)
+                if primary:
+                    if len(np.unique(ids)) != len(ids):
+                        raise ValueError("Duplicate primary label action IDs.")
+                    primary_progression[mode, carry] = pd.Series(
+                        derived[:, PROGRESSION_COLUMN].numpy(), index=ids)
+            changed_rows, changed = changed_tensor_rows(labels, updated)
+            stats = dict(rows=len(labels), goal_distance_mean=updated[:, PAIR_COLUMNS].double().mean(dim=0).tolist()
+                         if len(labels) else [0, 0])
+            if needs_progression:
+                values = updated[:, PROGRESSION_COLUMN]
+                stats.update(progression_available=int(torch.isfinite(values).sum()),
+                             progression_nonzero=int((torch.isfinite(values) & (values > 0)).sum()))
+            stage(artifact.path, updated, changed_rows, changed, stats)
+        for (mode, carry), actions in actions_by_variant.items():
+            path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
+            locate(mid, path, mode, returns[0], carry)
+            updated = actions.copy()
+            if repair:
+                updated[list(PAIR_NAMES)] = pairs[mode, carry, returns[0]]
+                if "goal_distance" in actions:
+                    canonical = actions.index.isin(events.index)
+                    updated.loc[canonical, "goal_distance"] = events.loc[
+                        actions.index[canonical], "goal_distance"].to_numpy()
+            if (mode, carry) in primary_progression:
+                values = primary_progression[mode, carry]
+                updated["scores_progression"] = values.reindex(actions.index)
+            before = actions.reindex(columns=updated.columns)
+            equal = (before == updated) | (before.isna() & updated.isna())
+            changed_rows = int((~equal.all(axis=1)).sum())
+            changed = changed_rows > 0 or not actions.columns.equals(updated.columns)
+            stage(path, updated, changed_rows, changed)
+    except Exception as error:
+        error.add_note(f"Target refresh context: {context}")
+        raise
+    return dict(staged=staged, report=report)
+
+
 def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",), attempt,
                           preflight=None, goal_distance_match_dir=GOAL_DISTANCE_MATCH_DIR,
-                          event_dir="data/event_synced"):
+                          event_dir="data/event_synced", num_workers=1, worker_thread_limit=1):
     """Validate and stage every artifact before replacing any target file."""
+    workers = resolve_num_workers(num_workers)
+    if int(worker_thread_limit) < 1:
+        raise ValueError("--worker-thread-limit must be a positive integer.")
     root = Path(root)
     families = set(target_families)
     if not targeted_goal_distance(families):
@@ -141,102 +255,23 @@ def refresh_goal_distance(root, metadata, *, target_families=("goal_distance",),
     context = {}
     try:
         with ExitStack() as stack:
-            def locate(mid, path, mode=None, ret=None, carry=None):
-                context.update(match_id=mid, path=str(path), receiver_mode=mode, return_type=ret, carries=carry)
-                attempt.data.update(current_match=mid, current_file=str(path), target_context=dict(context))
-
-            def stage(path, value, changed_rows, changed, stats=None):
-                entry = dict(path=str(path.relative_to(root)), changed_rows=changed_rows,
-                             rewritten=changed, **(stats or {}))
-                report["artifacts"].append(entry)
-                report["changed_rows"] += changed_rows
-                if not changed:
-                    return
-                temporary = stack.enter_context(staged_path(path, attempt=attempt))
-                if path.suffix == ".pt":
-                    with temporary.open("wb") as stream:
-                        torch.save(value, stream)
-                else:
-                    value.to_parquet(temporary)
-                staged.append((path, temporary, dict(context)))
-                report["rewritten_bytes"] += temporary.stat().st_size
-
-            for mid, artifacts in inventory.items():
-                event_path, annotation_path = inputs["paths"][mid]
-                locate(mid, annotation_path)
-                events = read_goal_distance_events(event_path, annotation_path)
-                event_returns = {ret: label_goal_distance_for_return_type(events, ret) for ret in returns}
-                actions_by_variant, pairs, primary_progression = {}, {}, {}
-                for carry in ([False, True] if carries else [False]):
-                    for mode in modes:
-                        path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
-                        locate(mid, path, mode, returns[0], carry)
-                        actions = pd.read_parquet(path)
-                        actions_by_variant[mode, carry] = actions
-                        for ret, values in event_returns.items():
-                            locate(mid, path, mode, ret, carry)
-                            pairs[mode, carry, ret] = action_return_pairs(
-                                actions, values, source_columns=PAIR_NAMES, target_columns=PAIR_NAMES, return_type=ret)
-                for artifact in artifacts:
-                    mode, carry, ret = artifact.mode, artifact.carries, artifact.return_type
-                    locate(mid, artifact.path, mode, ret, carry)
-                    actions = actions_by_variant[mode, carry]
-                    labels = torch.load(artifact.path, map_location="cpu", weights_only=True)
-                    ids = label_action_ids(labels, actions)
-                    expected = torch.as_tensor(pairs[mode, carry, ret].loc[ids].to_numpy(), dtype=labels.dtype)
-                    old_pairs = labels[:, PAIR_COLUMNS]
-                    if not repair and not torch.equal(old_pairs, expected):
-                        bad = (~(old_pairs == expected).all(dim=1)).numpy()
-                        raise ValueError(
-                            f"Saved goal-distance labels are stale or invalid; action IDs={ids[bad][:8].tolist()}. "
-                            "Use --refresh-target-family goal_distance --refresh-target-family progression together.")
-                    updated = labels.clone()
-                    if repair:
-                        updated[:, PAIR_COLUMNS] = expected
-                    primary_path = get_action_label_dir(ret, mode, root=root, use_carries=carry) / f"{mid}.pt"
-                    primary = ret == returns[0] and artifact.path == primary_path
-                    needs_progression = add_progression or labels.shape[1] > PROGRESSION_COLUMN
-                    table_progression = primary and (add_progression or "scores_progression" in actions)
-                    if needs_progression or table_progression:
-                        starts = (action_start_closeness(actions.loc[np.unique(ids)]) if supported(ret)
-                                  else pd.Series(np.zeros(len(actions)), index=actions.index))
-                        derived, _ = patch_progression(updated, starts, ret)
-                        if needs_progression:
-                            updated = derived
-                        report["progression_present"] = True
-                        if supported(ret) and ret not in report["progression_return_types"]:
-                            report["progression_return_types"].append(ret)
-                        if primary:
-                            if len(np.unique(ids)) != len(ids):
-                                raise ValueError("Duplicate primary label action IDs.")
-                            primary_progression[mode, carry] = pd.Series(
-                                derived[:, PROGRESSION_COLUMN].numpy(), index=ids)
-                    changed_rows, changed = changed_tensor_rows(labels, updated)
-                    stats = dict(rows=len(labels), goal_distance_mean=updated[:, PAIR_COLUMNS].double().mean(dim=0).tolist()
-                                 if len(labels) else [0, 0])
-                    if needs_progression:
-                        values = updated[:, PROGRESSION_COLUMN]
-                        stats.update(progression_available=int(torch.isfinite(values).sum()),
-                                     progression_nonzero=int((torch.isfinite(values) & (values > 0)).sum()))
-                    stage(artifact.path, updated, changed_rows, changed, stats)
-                for (mode, carry), actions in actions_by_variant.items():
-                    path = get_resolved_action_dir(mode, root=root, use_carries=carry) / f"{mid}.parquet"
-                    locate(mid, path, mode, returns[0], carry)
-                    updated = actions.copy()
-                    if repair:
-                        updated[list(PAIR_NAMES)] = pairs[mode, carry, returns[0]]
-                        if "goal_distance" in actions:
-                            canonical = actions.index.isin(events.index)
-                            updated.loc[canonical, "goal_distance"] = events.loc[
-                                actions.index[canonical], "goal_distance"].to_numpy()
-                    if (mode, carry) in primary_progression:
-                        values = primary_progression[mode, carry]
-                        updated["scores_progression"] = values.reindex(actions.index)
-                    before = actions.reindex(columns=updated.columns)
-                    equal = (before == updated) | (before.isna() & updated.isna())
-                    changed_rows = int((~equal.all(axis=1)).sum())
-                    changed = changed_rows > 0 or not actions.columns.equals(updated.columns)
-                    stage(path, updated, changed_rows, changed)
+            options = dict(returns=returns, modes=modes, carries=carries, repair=repair,
+                           add_progression=add_progression, inputs=inputs)
+            tasks = target_refresh_tasks(root, inventory, modes, carries, stack, attempt)
+            with closing(map_tasks(_stage_goal_distance_match, tasks, workers, worker_thread_limit,
+                                   shared_args=(options,))) as results:
+                for mid, result in zip(inventory, results):
+                    attempt.data.update(current_match=mid)
+                    staged.extend(result["staged"])
+                    for key, value in result["report"].items():
+                        if key == "progression_present":
+                            report[key] |= value
+                        elif key == "progression_return_types":
+                            report[key] = list(dict.fromkeys([*report[key], *value]))
+                        elif isinstance(value, list):
+                            report[key].extend(value)
+                        else:
+                            report[key] += value
             # A staging error above leaves every destination data file untouched.
             for path, digest in inputs["input_sha256"].items():
                 if fingerprint(path) != digest:
