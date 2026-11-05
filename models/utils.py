@@ -335,6 +335,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
         "split_manifest_id": metadata.get("split_manifest_id", args.get("split_manifest_id")),
         "intended_receiver_mode": intended_receiver_mode,
         "target_family": target_family,
+        "stop_condition_definition": metadata.get("stop_condition_definition", args.get("stop_condition_definition")),
         "xt_target_definition": metadata.get("xt_target_definition", args.get("xt_target_definition")),
         "return_type": return_type,
         "use_carries": bool(metadata.get("use_carries", args.get("use_carries", False))),
@@ -776,6 +777,13 @@ def validate_model_record_consistency(
 
     shared: dict[str, Any] = {}
 
+    stop_definitions = [record.get("stop_condition_definition") or {"version": 0, "mode": "legacy"}
+                        for task, record in model_records.items() if task in outcome_tasks]
+    if stop_definitions:
+        if any(item != stop_definitions[0] for item in stop_definitions):
+            raise ValueError("Selected outcome checkpoints disagree on stop conditions")
+        shared["stop_condition_definition"] = stop_definitions[0]
+
     carry_sensitive_tasks = {"action_intent", "pass_success", "outcome_scoring", "outcome_conceding"}
     carry_records = {
         task: record for task, record in model_records.items() if task in carry_sensitive_tasks
@@ -1181,6 +1189,17 @@ def resolve_runtime_feature_run_context(
     candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
 
     def validate_xt_context(resolved):
+        expected_stops = shared_context.get("stop_condition_definition")
+        if expected_stops is not None:
+            from datatools.stop_conditions import definition
+            selected_returns = {shared_context.get("return_type")}
+            selected_returns.update(ret for task, ret in (shared_context.get("source_return_types") or {}).items()
+                                    if task in {"outcome_scoring", "outcome_conceding"})
+            for selected_return in selected_returns - {None}:
+                actual_stops = definition(resolved.get("metadata", {}), selected_return,
+                    expected_stops["mode"], legacy=expected_stops["version"] == 0)
+                if actual_stops != expected_stops:
+                    raise ValueError("Runtime feature labels use different stop conditions")
         unavailable = (resolved.get("metadata") or {}).get("xt_unavailable_return_types") or []
         source_families = shared_context.get("source_target_families") or {}
         source_returns = shared_context.get("source_return_types") or {}

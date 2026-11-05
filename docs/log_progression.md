@@ -59,10 +59,14 @@ For an existing compatible feature run:
 ```
 
 This creates a derived feature run sharing unchanged graph artifacts. The xT
-refresh stages target replacements and does not load graphs, tracking, or
-receiver models. It covers canonical, carry, intent-training, augmented and
+refresh stages target replacements and does not load graphs or receiver
+models. Acquisition locations are cached; initial preparation reads only
+ball-coordinate tracking columns. It covers canonical, carry, intent-training, augmented and
 success-intent labels. Carries use their own starting coordinates and retain
 their saved future-return anchors and team perspective.
+
+For version-2 `next_N` variants, let `Bc` be the opponent acquisition-start
+surface value (see [turnover returns](turnover_returns.md)).
 
 Let `Ys`, `Yc` denote the selected future teammate/opponent returns, and `B` the
 surface value at the labeled action's start:
@@ -70,13 +74,14 @@ surface value at the labeled action's start:
 | Settings | Scoring | Conceding |
 | --- | --- | --- |
 | `absolute` | `Ys` | `Yc` |
-| `gain` | `Ys - B` | `Yc` |
-| `gain` with clipping | `max(0, Ys - B)` | `Yc` |
+| `gain` | `Ys - B` | `Yc - Bc` |
+| `gain` with clipping | `max(0, Ys - B)` | `max(0, Yc - Bc)` |
 
-The opponent's baseline is zero because it initially has no possession. Starting
-baselines use the positional surface directly, including for shots. No future
-candidate means a zero future value. The return is computed before subtracting
-the baseline. Negative scoring gains are then optionally clipped.
+No opponent candidate means zero conceding. Baselines use the positional
+surface directly, including for shots. The return is computed before subtracting
+the baseline. Clipping applies to both next-window gains. Historical version-1
+gains and non-next returns retain a zero conceding baseline until their applicable
+definition changes; xT refresh upgrades next-window gains to version 2.
 
 The default representation is `absolute`, with clipping disabled. Extensions
 inherit settings unless explicitly changed. Changing settings requires an xT
@@ -87,8 +92,8 @@ These target options also work with learned xT versions. Gain targets require a
 pinned version with an evaluable surface; unversioned historical sidecars alone
 do not define a baseline.
 
-Logarithmic progression supplies xT targets for `next_N`, `next_N_skip1`, and
-`in_N`. Discounted returns remain in the run for other target families; their
+Logarithmic progression supplies xT targets for `next_N`, `next_N_skip1`,
+`next_N+`, `next_N+_skip1`, and `in_N`. Discounted returns remain in the run for other target families; their
 `scores_xt` and `concedes_xt` labels are `NaN`. Feature metadata and the refresh
 report list them in `xt_unavailable_return_types`. A mixed-return refresh must
 create a derived run, preserving the source run's discounted xT labels. A later
@@ -129,3 +134,7 @@ It checks source signatures and non-xT labels, graph hard-link preservation, and
 zero replacements on a repeated refresh. Its report includes pitch-region target
 means and zero-target fractions. It never registers a production version or
 updates latest pointers. The output must be on the source volume for hard links.
+
+Fresh generation stores base-stop labels by default. Set-piece variants are
+opt-in via `--stop-condition set-pieces`; extensions must list their return types.
+See [turnover returns](turnover_returns.md) for migration and training commands.

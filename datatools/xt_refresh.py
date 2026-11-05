@@ -18,7 +18,7 @@ from datatools.xt_targets import (target_settings, surface_from_metadata, transf
                                   unavailable_xt_returns)
 from project_config import (XT_MATCH_DIR, atomic_write_json, get_action_label_dir,
                             get_intent_train_label_dir, get_augmented_label_dir,
-                            get_resolved_action_dir)
+                            get_resolved_action_dir, get_success_intent_label_dir)
 from scripts.feature_extension_diagnostics import ExtensionAttempt
 
 TARGET_COLUMNS = [config.LABEL_INDEX[name] for name in ("scores_xt", "concedes_xt")]
@@ -109,10 +109,11 @@ def refresh_inventory(root, metadata):
             if not augmented_ids <= match_ids:
                 raise ValueError(f"Unexpected augmented match IDs in {graph_dir}")
             labels(directory, augmented_ids, mode, returns[0])
-    if success_ids or (root / "success_intent_labels").exists():
+    if success_ids or get_success_intent_label_dir(root).exists():
         # Successful observed passes retain the canonical action team/identity.
-        labels(root / "success_intent_labels", success_ids, modes[0], returns[0])
-    for directory in root.iterdir():
+        labels(get_success_intent_label_dir(root), success_ids, modes[0], returns[0])
+    scan_root = root / "labels" / "base" if metadata.get("label_layout_version") == 1 else root
+    for directory in scan_root.iterdir():
         if directory.is_dir() and directory.name.startswith(
                 ("action_labels", "augmented_labels", "success_intent_labels", "resolved_actions")):
             if directory.name not in known:
@@ -121,7 +122,9 @@ def refresh_inventory(root, metadata):
 
 
 def read_annotated_events(event_path, sidecar_path):
-    events = utils.sanitize_expected_goal(pd.read_csv(event_path))
+    event_path = Path(event_path)
+    events = utils.sanitize_expected_goal(pd.read_parquet(event_path) if event_path.suffix == ".parquet"
+                                         else pd.read_csv(event_path))
     sidecar = pd.read_csv(sidecar_path)
     required = {"action_id", "xT", "scores_xT", "concedes_xT"}
     if not required <= set(sidecar):
@@ -226,6 +229,7 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                 raise FileNotFoundError(f"Required refresh input is missing: {path}")
             inputs[str(path.resolve())] = fingerprint(path)
     report = dict(source_run_id=metadata.get("run_id"), xt_version=xt_version,
+                  ball_coordinate_files_loaded=0,
                   xt_targets=settings, xt_unavailable_return_types=unavailable,
                   matches=len(inventory), return_types=returns,
                   carries=carries, input_sha256=inputs, artifacts=[], changed_rows=0,
@@ -259,6 +263,14 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
 
         for mid, artifacts in inventory.items():
             events = read_annotated_events(event_dir / f"{mid}.csv", xt_match_dir / f"{mid}.csv")
+            if settings["version"] == 2 and settings["representation"] == "gain":
+                from datatools.xt_acquisitions import acquisition_context
+                events, acquisition_cache, acquisition_inputs = acquisition_context(events, mid, root)
+                inputs.update({str(path): digest for path, digest in acquisition_inputs.get("inputs", {}).items()})
+                signatures.update(acquisition_inputs.get("signatures", {}))
+                report["ball_coordinate_files_loaded"] += acquisition_inputs.get("ball_files_loaded", 0)
+                if acquisition_cache is not None:
+                    stage(acquisition_cache[0], acquisition_cache[1], 1, dict(kind="acquisition_context"))
             event_returns = {ret: label_xt_for_return_type(events, ret)
                              for ret in returns if ret not in unavailable}
             pairs = {}
@@ -274,7 +286,8 @@ def refresh_xt(root, metadata, *, xt_match_dir=XT_MATCH_DIR, xt_version=None,
                             pairs[(mode, carry, ret)].loc[:, :] = np.nan
                         else:
                             pairs[(mode, carry, ret)] = transform_action_targets(
-                                actions, action_return_pairs(actions, event_returns[ret]), settings, surface)
+                                actions, action_return_pairs(actions, event_returns[ret]), settings, surface,
+                                events=events, return_type=ret)
                     updated = actions.copy()
                     updated[["scores_xt", "concedes_xt"]] = pairs[(mode, carry, returns[0])]
                     # Refresh the saved raw annotation columns for canonical rows;

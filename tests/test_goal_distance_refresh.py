@@ -192,6 +192,7 @@ def test_extension_preflight_before_clone_and_completed_metadata(sample, tmp_pat
     root, metadata = prepare_progression_fixture(sample)
     base = extension_tests.make_metadata(return_types=metadata["return_types"],
         modes=metadata["intended_receiver_modes"], model_id="success_intent/01")
+    base.pop("stop_conditions")  # This fixture deliberately exercises the legacy layout.
     plan = extension_tests.FeatureRunExtensionPlanTests().build_plan(
         extension_tests.make_args(refresh_target_families=["progression", "goal_distance"]), base)
     plan = replace(plan, base_metadata={**metadata, **base})

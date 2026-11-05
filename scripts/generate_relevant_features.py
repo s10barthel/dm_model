@@ -38,6 +38,7 @@ from datatools.carry_policy import CarryPolicy
 from datatools.endpoint_policy import ENDPOINT_POLICY_VERSION
 from datatools.graph_feature import infer_node_feature_dim
 from project_config import (
+    atomic_write_json,
     add_split_arguments,
     split_selector,
     split_metadata,
@@ -130,8 +131,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Resolved return type for generated action labels. Repeat the flag to include multiple return types, "
-            "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>[_spstop], "
-            "and next_<N>_skip1, plus in_<N> for xt/goal_distance/epv training."
+            "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>, "
+            "and next_<N>_skip1, next_<N>+[_skip1] (xT only), plus in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument(
@@ -293,7 +294,28 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Thread limit passed to each graph_feature worker process.",
     )
+    parser.add_argument("--stop-condition", choices=("base", "set-pieces"), default="base")
+    parser.add_argument("--return-type", action="append", dest="return_type", help="Alias for --return_type")
+    parser.add_argument("--refresh-stop-conditions", action="store_true")
     args = parser.parse_args()
+    if args.refresh_target_family and args.stop_condition == "set-pieces":
+        parser.error("Set-piece additions must run separately from target refresh")
+    if args.refresh_stop_conditions:
+        supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
+        allowed = {"--refresh-stop-conditions", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
+                   "--in-place", "--overwrite-feature-run", "--train-count", "--train-split", "--graph-validation", "--no-graph-validation",
+                   "--num-workers", "--worker-thread-limit"}
+        if supplied - allowed:
+            parser.error("Stop-condition migration is dedicated; unsupported options: " + ", ".join(sorted(supplied - allowed)))
+        if not args.extend_feature_run_id:
+            parser.error("--refresh-stop-conditions requires --extend-feature-run-id")
+        if args.return_type or args.stop_condition != "base" or args.refresh_target_family:
+            parser.error("Stop-condition migration is separate from return additions, set-pieces, and target refresh")
+    explicit_stop = any(token.split("=", 1)[0] == "--stop-condition" for token in sys.argv[1:])
+    if args.extend_feature_run_id and explicit_stop and not args.return_type:
+        parser.error("--stop-condition requires at least one --return-type for extensions")
+    if any(r.endswith("_spstop") for r in (args.return_type or [])):
+        parser.error("Use --stop-condition set-pieces instead of _spstop")
     args.explicit_carry_parameters = {key for key in asdict(CarryPolicy())
         if any(token.split("=", 1)[0] == "--carry-" + key.replace("_", "-") for token in sys.argv[1:])}
     vars(args).update(split_selector(args))
@@ -355,6 +377,7 @@ def parse_args() -> argparse.Namespace:
     if "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
         if args.use_carries or ("xt" in args.refresh_target_families and len(args.refresh_target_families) != 1):
             parser.error("Target-only refresh must run separately from carry generation and other target refreshes.")
+    if args.refresh_stop_conditions or "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
         # A target-only operation inherits the source split/selection settings unless
         # the caller explicitly supplies them (build_extension_plan checks equality).
         if args.extend_feature_run_id:
@@ -971,6 +994,12 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             f"requested={args.next_action_conditions_enabled!r}."
         )
     final_return_types, added_return_types = union_preserving_order(base_return_types, args.requested_return_types)
+    if added_return_types and not base_metadata.get("stop_conditions"):
+        raise ValueError("Run --refresh-stop-conditions before adding return types to a legacy run")
+    if getattr(args, "stop_condition", "base") == "set-pieces" and not base_metadata.get("stop_conditions"):
+        raise ValueError("Run --refresh-stop-conditions before adding set-piece variants")
+    if getattr(args, "refresh_stop_conditions", False) and (args_refresh_target_families(args) or getattr(args, "use_carries", False)):
+        raise ValueError("Stop-condition refresh must run separately")
     args.xt_unavailable_return_types = unavailable_xt_returns(
         getattr(args, "xt_surface_metadata", None), final_return_types)
     if refreshes_xt and args.xt_unavailable_return_types and getattr(args, "in_place", False):
@@ -1039,7 +1068,9 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
                              "receiver replacement/addition, graph extensions, and carry generation.")
 
     if (
-        not added_return_types
+        not getattr(args, "refresh_stop_conditions", False)
+        and getattr(args, "stop_condition", "base") != "set-pieces"
+        and not added_return_types
         and not added_modes
         and not regenerate_model_mode
         and not refresh_target_families
@@ -1087,6 +1118,26 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
         num_workers=getattr(args, "num_workers", "1"),
         worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)),
     )
+    receiver_attempt = uuid4().hex if "model" in added_modes or regenerate_model_mode else None
+    if (base_metadata.get("carry_variant") or {}).get("available"):
+        carry_jobs = []
+        if added_return_types:
+            retained_modes = [mode for mode in base_modes if not (mode == "model" and receiver_attempt)]
+            if retained_modes:
+                carry_jobs.append((added_return_types, retained_modes, "return types"))
+        if receiver_attempt:
+            carry_jobs.append((final_return_types, ["model"], "model mode"))
+        for returns, modes, description in carry_jobs:
+            for split in ("train", "test"):
+                command = extension_graph_feature_command(
+                    python, target_run_id, split=split, return_types=returns,
+                    intended_receiver_modes=modes, intended_receiver_model_id=final_model_id,
+                    next_action_conditions_enabled=base_next_action_conditions_enabled,
+                    num_workers=getattr(args, "num_workers", "1"),
+                    worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
+                command.extend(["--use-carries", "--pass-height-threshold",
+                                str(extension_pass_height_threshold_from_base(args, base_metadata))])
+                command_steps.append(FeatureGenerationStep(f"{split} split carry {description} (labels-only)", command))
     command_steps = [
         FeatureGenerationStep(step.description, with_edge_schema_flags(step.command, graph_schema))
         for step in command_steps
@@ -1105,20 +1156,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
             FeatureGenerationStep(step.description, [*step.command, "--pass-height-threshold", threshold])
             for step in command_steps
         ]
-    receiver_attempt = uuid4().hex if "model" in added_modes or regenerate_model_mode else None
     if receiver_attempt:
-        if (base_metadata.get("carry_variant") or {}).get("available"):
-            for split in ("train", "test"):
-                command = extension_graph_feature_command(python, target_run_id, split=split,
-                    return_types=final_return_types, intended_receiver_modes=["model"],
-                    intended_receiver_model_id=final_model_id,
-                    next_action_conditions_enabled=base_next_action_conditions_enabled,
-                    num_workers=getattr(args, "num_workers", "1"),
-                    worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
-                command = [*with_edge_schema_flags(command, graph_schema), "--use-carries",
-                           *split_cli_args(args), *graph_validation_flags(args),
-                           "--pass-height-threshold", str(extension_pass_height_threshold_from_base(args, base_metadata))]
-                command_steps.append(FeatureGenerationStep(f"{split} split carry model mode (labels-only)", command))
         command_steps = [FeatureGenerationStep(step.description,
             [*step.command, "--receiver-extension-attempt", receiver_attempt,
              *([] if "--pass-height-threshold" in step.command else
@@ -1251,6 +1289,9 @@ def extension_history_entry(
         "added_return_types": plan.added_return_types,
         "added_intended_receiver_modes": plan.added_intended_receiver_modes,
         "refresh_target_families": plan.refresh_target_families,
+        "refresh_stop_conditions": bool(getattr(args, "refresh_stop_conditions", False)),
+        "set_piece_return_types": (args.requested_return_types
+                                  if getattr(args, "stop_condition", "base") == "set-pieces" else []),
         "refresh_pass_height_labels": plan.refresh_pass_height_labels,
         "relative_speed_edge_features": plan.extend_relative_speed_edge_features,
         "interaction_edge_features": plan.extend_interaction_edge_features,
@@ -1498,10 +1539,16 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     target_root = get_feature_run_root(plan.target_run_id)
     goal_preflight = None
     refresh_result = None
+    stop_metadata = None
     if targeted_goal_distance(plan.refresh_target_families):
         goal_preflight = preflight_goal_distance(get_feature_run_root(plan.base_run_id), plan.base_metadata)
 
     def publish_target_metadata(payload, final):
+        if final and stop_metadata is not None:
+            for key in ("stop_conditions", "label_layout_version", "return_types", "return_type",
+                        "xt_unavailable_return_types"):
+                if key in stop_metadata:
+                    payload[key] = stop_metadata[key]
         if final and refresh_result is not None:
             if "goal_distance" in plan.refresh_target_families:
                 payload["goal_distance_targets"] = dict(refresh_result["goal_distance_definition"], return_types=plan.final_return_types,
@@ -1534,6 +1581,9 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                   relative_speed_edge_features=plan.extend_relative_speed_edge_features,
                   interaction_edge_features=plan.extend_interaction_edge_features,
                   refresh_target_families=plan.refresh_target_families,
+                  refresh_stop_conditions=bool(getattr(args, "refresh_stop_conditions", False)),
+                  set_piece_return_types=(args.requested_return_types
+                      if getattr(args, "stop_condition", "base") == "set-pieces" else []),
                   pass_height_threshold_meters=extension_pass_height_threshold(args, plan),
                   next_action_conditions_enabled=plan.next_action_conditions_enabled)
     attempt = ExtensionAttempt(target_root, "feature_extension", plan.extension_mode, target,
@@ -1552,13 +1602,38 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             attempt.begin_mutation("removing_artifacts", current_file=target_root)
             remove_model_mode_artifacts(target_root, plan.final_return_types)
             attempt.mutation_finished()
-        if plan.refresh_target_families == ["xt"]:
+        if getattr(args, "refresh_stop_conditions", False):
+            from datatools.stop_conditions import refresh_labels
+            stop_metadata = copy.deepcopy(plan.base_metadata)
+            refresh_labels(target_root, stop_metadata,
+                {r.removesuffix("_spstop"): ["base"] for r in plan.base_return_types}, attempt=attempt)
+        elif plan.refresh_target_families == ["xt"] and plan.base_metadata.get("stop_conditions"):
+            from datatools.stop_conditions import refresh_labels
+            stop_metadata = copy.deepcopy(plan.base_metadata)
+            stop_metadata.update(xt_targets=args.xt_targets, xt_version=args.xt_version,
+                                 xt_fit_metadata_sha256=args.xt_metadata_sha256,
+                                 xt_unavailable_return_types=args.xt_unavailable_return_types)
+            refresh_labels(target_root, stop_metadata, stop_metadata["stop_conditions"]["available"],
+                           attempt=attempt, xt_only=True)
+        elif plan.refresh_target_families == ["xt"]:
             refresh_xt(target_root, plan.base_metadata,
                        xt_match_dir=(resolve_xt_version(args.xt_version).match_dir),
                        xt_version=args.xt_version,
                        xt_targets=args.xt_targets,
                        surface_metadata=args.xt_surface_metadata,
                        attempt=attempt)
+        elif targeted_goal_distance(plan.refresh_target_families) and plan.base_metadata.get("stop_conditions"):
+            from datatools.stop_conditions import refresh_labels
+            from datatools.goal_distance_refresh import GOAL_DISTANCE_DEFINITION
+            stop_metadata = copy.deepcopy(plan.base_metadata)
+            families = set(plan.refresh_target_families)
+            if "goal_distance" in families:
+                families.add("progression")
+            refresh_result = refresh_labels(target_root, stop_metadata,
+                stop_metadata["stop_conditions"]["available"], target_families=families, attempt=attempt)
+            refresh_result.update(goal_distance_definition=GOAL_DISTANCE_DEFINITION, progression_present=True,
+                progression_return_types=[ret for ret in plan.final_return_types if progression_supported(ret)])
+            atomic_write_json(target_root / "goal_distance_refresh_report.json", refresh_result)
         elif targeted_goal_distance(plan.refresh_target_families):
             refresh_result = refresh_goal_distance(target_root, plan.base_metadata,
                 target_families=plan.refresh_target_families, preflight=goal_preflight, attempt=attempt)
@@ -1566,6 +1641,25 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             run_generation_steps(plan.command_steps, attempt=attempt)
             if plan.receiver_extension_attempt:
                 audit_receiver_extension(plan)
+            if plan.base_metadata.get("stop_conditions") and (plan.command_steps or getattr(args, "stop_condition", "base") == "set-pieces"):
+                from datatools.stop_conditions import refresh_labels
+                stop_metadata = copy.deepcopy(plan.base_metadata)
+                stop_metadata.update(return_types=plan.final_return_types,
+                                     intended_receiver_modes=plan.final_intended_receiver_modes)
+                requests = (copy.deepcopy(plan.base_metadata["stop_conditions"]["available"])
+                            if plan.command_steps and (not plan.added_return_types
+                                or plan.added_intended_receiver_modes or plan.regenerate_model_mode) else {})
+                requests.update({r: ["base"] for r in plan.added_return_types})
+                if getattr(args, "stop_condition", "base") == "set-pieces":
+                    for ret in args.requested_return_types:
+                        requests.setdefault(ret, []).append("set-pieces")
+                refresh_labels(target_root, stop_metadata, requests, attempt=attempt)
+            set_piece_returns = (args.requested_return_types
+                if getattr(args, "stop_condition", "base") == "set-pieces" else [])
+            if plan.added_return_types or set_piece_returns:
+                attempt.enter("validating_return_type_labels")
+                audit_return_type_extension(plan, stop_metadata or plan.base_metadata,
+                                            set_piece_return_types=set_piece_returns)
         if plan.extend_relative_speed_edge_features:
             extend_relative_speed_edge_features(target_root, plan.final_intended_receiver_modes, attempt=attempt,
                                                 graph_validation=getattr(args, "graph_validation", True))
@@ -1583,6 +1677,67 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     else:
         print(f"Updated feature run id: {plan.target_run_id}")
         print(f"Extension mode: {plan.extension_mode}")
+
+
+def audit_return_type_extension(plan, metadata, *, set_piece_return_types=()):
+    """Check split coverage and pinned row identities before publishing added labels."""
+    import numpy as np
+    from datatools.xt_refresh import refresh_inventory
+    from datatools.stop_conditions import label_path
+    from project_config import get_resolved_action_path
+
+    root = get_feature_run_root(plan.target_run_id)
+    metadata = copy.deepcopy(metadata)
+    metadata.update(return_types=plan.final_return_types,
+                    intended_receiver_modes=plan.final_intended_receiver_modes)
+    inventory, _, modes, carries = refresh_inventory(root, metadata)
+    manifest = resolve_split_manifest(**split_selector(plan.base_metadata))
+    train_ids, test_ids = ({str(value) for value in manifest[split]} for split in ("train", "test"))
+    if train_ids & test_ids or set(inventory) != train_ids | test_ids:
+        raise ValueError("Return-type extension label coverage disagrees with the saved train/test split")
+    intent_ids = {path.stem for path in get_action_graph_intent_train_dir(root).glob("*.pt")}
+    if intent_ids != train_ids:
+        raise ValueError("Return-type extension intent-training coverage disagrees with the saved train split")
+    selected_returns = list(dict.fromkeys([*plan.added_return_types, *set_piece_return_types]))
+    available = (metadata.get("stop_conditions") or {}).get("available", {})
+    for carry in ([False, True] if carries else [False]):
+        variants = [(get_action_label_dir, set(inventory))]
+        if not carry:
+            variants.append((get_intent_train_label_dir, train_ids))
+        for builder, match_ids in variants:
+            for mode in modes:
+                kwargs = dict(use_carries=carry) if builder == get_action_label_dir else {}
+                for mid in sorted(match_ids):
+                    reference_path = builder(plan.base_return_types[0], intended_receiver_mode=mode,
+                                             root=root, **kwargs) / f"{mid}.pt"
+                    reference = torch.load(reference_path, weights_only=False, map_location="cpu")
+                    if (not isinstance(reference, torch.Tensor) or reference.ndim != 2
+                            or reference.shape[1] < 1):
+                        raise ValueError(f"Malformed reference labels: {reference_path}")
+                    reference_ids = reference[:, config.LABEL_INDEX["action_index"]]
+                    ids = reference_ids.numpy()
+                    if not np.isfinite(ids).all() or not np.equal(ids, np.floor(ids)).all():
+                        raise ValueError(f"Invalid reference label action IDs: {reference_path}")
+                    actions_path = get_resolved_action_path(mid, intended_receiver_mode=mode, root=root,
+                                                           use_carries=carry)
+                    actions = read_parquet(actions_path)
+                    if not actions.index.is_unique or not np.isin(ids, actions.index).all():
+                        raise ValueError(f"Label action IDs disagree with saved actions: {reference_path}")
+                    if builder == get_action_label_dir and len(np.unique(ids)) != len(ids):
+                        raise ValueError(f"Duplicate reference label action IDs: {reference_path}")
+                    for ret in selected_returns:
+                        conditions = list(dict.fromkeys(["base", *available.get(ret, []),
+                            *(["set-pieces"] if ret in set_piece_return_types else [])]))
+                        for condition in conditions:
+                            path = builder(ret, intended_receiver_mode=mode, root=root, **kwargs) / f"{mid}.pt"
+                            if condition != "base":
+                                path = label_path(path, root, condition)
+                            labels = torch.load(path, weights_only=False, map_location="cpu")
+                            if (not isinstance(labels, torch.Tensor) or labels.ndim != 2
+                                    or not labels.is_floating_point()
+                                    or labels.shape[1] <= max(config.LABEL_INDEX.values())
+                                    or not torch.equal(labels[:, config.LABEL_INDEX["action_index"]], reference_ids)):
+                                raise ValueError(f"Return-type extension label alignment failed: {path}")
 
 
 def audit_receiver_extension(plan):
@@ -1836,6 +1991,12 @@ def run_full_generation(args: argparse.Namespace) -> None:
     metadata[KEY] = RETIRED
     from datatools.pass_eligibility import policy_metadata
     metadata.update(policy_metadata())
+    from datatools.stop_conditions import refresh_labels
+    metadata["status"] = "building"
+    write_run_metadata(run_root, metadata)
+    modes = ["base", "set-pieces"] if getattr(args, "stop_condition", "base") == "set-pieces" else ["base"]
+    refresh_labels(run_root, metadata, {r: modes for r in args.return_types})
+    metadata["status"] = "completed"
     write_run_metadata(run_root, metadata)
     write_latest_run("feature", args.run_id)
     print(f"Feature run id: {args.run_id}")

@@ -6,6 +6,12 @@ from project_config import parse_return_type
 def label_xt_for_return_type(events, return_type):
     kind, value, skip_first = parse_return_type(return_type)
     eligible = tuple(config.XT_ACTION_TYPES)
+    if kind == "next_plus":
+        from datatools.return_windows import action_xt_windows
+        selected = events.copy()
+        pairs, _ = action_xt_windows(events, events, return_type)
+        selected[["scores_xT", "concedes_xT"]] = pairs
+        return selected
     if kind == "next":
         return utils.label_xt_returns(events, lookahead_len=int(value), eligible_types=eligible, skip_first=skip_first)
     if kind == "in":

@@ -252,12 +252,23 @@ def generate_run_id(prefix: str) -> str:
     return f"{prefix}_{timestamp}_{uuid4().hex[:8]}"
 
 
+def _label_root(root):
+    root = Path(root) if root is not None else FEATURE_DIR
+    base = root / "labels" / "base"
+    metadata_path = root / "metadata.json"
+    if metadata_path.is_file():
+        metadata = read_json(metadata_path)
+        if metadata.get("label_layout_version") == 1:
+            return base
+    return root
+
+
 def get_intent_train_label_dir(
     return_type: str = "disc_0.9",
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,
 ) -> Path:
-    root = Path(root) if root is not None else FEATURE_DIR
+    root = _label_root(root)
     return root / f"action_labels_intent_train_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
 
 
@@ -271,7 +282,7 @@ def get_action_label_dir(
     root: Path | None = None,
     use_carries: bool = False,
 ) -> Path:
-    root = Path(root) if root is not None else FEATURE_DIR
+    root = _label_root(root)
     return root / (
         f"action_labels_{return_type}{intended_receiver_suffix(intended_receiver_mode)}"
         f"{carry_artifact_suffix(use_carries)}"
@@ -279,7 +290,7 @@ def get_action_label_dir(
 
 
 def get_success_intent_label_dir(root: Path | None = None) -> Path:
-    root = Path(root) if root is not None else FEATURE_DIR
+    root = _label_root(root)
     return root / "success_intent_labels"
 
 
@@ -320,7 +331,7 @@ def get_augmented_label_dir(
     intended_receiver_mode: str = DEFAULT_INTENDED_RECEIVER_MODE,
     root: Path | None = None,
 ) -> Path:
-    root = Path(root) if root is not None else FEATURE_DIR
+    root = _label_root(root)
     return root / f"augmented_labels{intended_receiver_suffix(intended_receiver_mode)}"
 
 
@@ -718,7 +729,7 @@ def validate_return_type(return_type: str) -> str:
 
     if core_value.startswith("next_"):
         try:
-            lookahead_len = int(core_value.split("_", 1)[1])
+            lookahead_len = int(core_value.split("_", 1)[1].removesuffix("+"))
         except (IndexError, ValueError) as exc:
             raise ValueError(f"Invalid lookahead return type: {return_type!r}.") from exc
         if lookahead_len < 1:
@@ -756,6 +767,8 @@ def validate_return_type_for_target_family(
         raise ValueError(f"Unsupported target family for return_type validation: {family!r}.")
 
     kind, _, _ = parse_return_type(normalized)
+    if kind == "next_plus" and family != "xt":
+        raise ValueError("next_N+ is supported only for target_family=xt.")
     if family == "progression" and kind not in {"next", "in"}:
         raise ValueError("progression supports only next_N, next_N_skip1, and in_N returns.")
     if kind == "in" and family not in {"xt", "goal_distance", "epv", "progression"}:
@@ -856,6 +869,8 @@ def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float,
     if core_value.startswith("disc_max_"):
         return "disc_max", float(core_value.split("_", 2)[2]), skip_first
     kind, raw = core_value.split("_", 1)
+    if kind == "next" and raw.endswith("+"):
+        return "next_plus", int(raw[:-1]), skip_first
     return kind, float(raw) if kind == "disc" else int(raw), skip_first
 
 

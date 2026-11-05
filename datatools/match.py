@@ -55,11 +55,13 @@ class Match(ABC):
         xt_targets=None,
         xt_surface=None,
         xt_surface_metadata=None,
+        stop_condition=None,
     ):
         from datatools.reception_policy import apply_policy
         self.reception_policy = reception_policy
         self.max_pass_duration = max_pass_duration
         self.xt_targets = xt_targets
+        self.stop_condition = stop_condition
         self.xt_surface = xt_surface
         self.xt_surface_metadata = xt_surface_metadata
         self.events = apply_policy(events, reception_policy)
@@ -230,7 +232,15 @@ class Match(ABC):
             return cached
 
         events = self._base_events.copy()
-        if return_kind == "next":
+        if getattr(self, "stop_condition", None) is not None:
+            from datatools.stop_conditions import event_returns
+            events = event_returns(events, return_type, self.stop_condition, getattr(self, "xt_surface_metadata", None))
+            self._cached_events_by_return_type[return_type] = events
+            return events
+        if return_kind == "next_plus":
+            for column in ("scores", "concedes", "scores_xg", "concedes_xg", "scores_epv", "concedes_epv"):
+                events[column] = np.nan
+        elif return_kind == "next":
             lookahead_len = int(return_value)
             events = utils.label_returns(events, lookahead_len, skip_first=skip_first)
             events = utils.label_epv_returns(
@@ -743,7 +753,8 @@ class Match(ABC):
         else:
             self.actions[["scores_xt", "concedes_xt"]] = transform_action_targets(
                 self.actions, self.actions[["scores_xt", "concedes_xt"]],
-                getattr(self, "xt_targets", None), getattr(self, "xt_surface", None))
+                getattr(self, "xt_targets", None), getattr(self, "xt_surface", None),
+                events=self.events, return_type=return_type, stop_condition=getattr(self, "stop_condition", None))
         assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
         assign_return_pair("scores_goal_next10", "concedes_goal_next10", "scores", "concedes", diagnostic_events)
 

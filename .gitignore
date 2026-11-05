@@ -162,3 +162,6 @@ _vendor/defcon/saved
 !tests/test_pass_observation_policy.py
 !tests/test_goal_distance_refresh.py
 /analysis_xt_lateral/
+
+!tests/test_turnover_stop_conditions.py
+!tests/test_carry_return_extension.py

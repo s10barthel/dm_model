@@ -824,6 +824,11 @@ class WrapperValidationTests(unittest.TestCase):
     def setUp(self):
         from split_fixture import install_wrapper_split
         install_wrapper_split(self)
+        metadata = {"stop_conditions": {"version": 1, "available": {
+            ret: ["base", "set-pieces"] for ret in ("disc_poly_max_0.05_2", "disc_max_0.5", "in_3")}}}
+        patcher = patch.object(train_wrapper, "load_feature_run_metadata", return_value=metadata)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_train_wrapper_accepts_xt_polynomial_max_return_type(self) -> None:
         with (
@@ -850,8 +855,8 @@ class WrapperValidationTests(unittest.TestCase):
 
         self.assertEqual(args.return_type, "disc_poly_max_0.05_2")
 
-    def test_train_wrapper_accepts_goal_distance_polynomial_spstop_return_type(self) -> None:
-        return_type = "disc_poly_max_0.05_2_spstop"
+    def test_train_wrapper_accepts_goal_distance_polynomial_set_piece_variant(self) -> None:
+        return_type = "disc_poly_max_0.05_2"
         with (
             patch.object(train_wrapper, "resolve_feature_run_id", return_value="feature_run"),
             patch.object(train_wrapper, "infer_feature_run_intended_receiver_modes", return_value=["original"]),
@@ -861,6 +866,7 @@ class WrapperValidationTests(unittest.TestCase):
                 [
                     "--feature-run-id",
                     "feature_run",
+                    "--stop-condition", "set-pieces",
                     "--target-family",
                     "goal_distance",
                     "--return_type",

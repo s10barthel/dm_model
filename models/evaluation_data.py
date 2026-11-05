@@ -192,6 +192,17 @@ def resolve_evaluation_data(cli_args, model_args):
             if not getattr(model, "return_type", None):
                 raise ValueError(f"{task} checkpoint does not record return_type for evaluation-label resolution.")
             label_dir = get_action_label_dir(model.return_type, intended_receiver_mode=mode, root=root, use_carries=carries)
+    if task.startswith("outcome_"):
+        import json
+        from datatools.stop_conditions import definition, label_path
+        metadata_path = root / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8-sig")) if metadata_path.is_file() else {}
+        expected = getattr(model, "stop_condition_definition", None) or {"version": 0, "mode": "legacy"}
+        actual = definition(metadata, model.return_type, expected["mode"], legacy=expected["version"] == 0)
+        if actual != expected:
+            raise ValueError("Evaluation cannot change the model's stop-condition definition")
+        if expected["version"]:
+            label_dir = label_path(label_dir, root, expected["mode"])
     goal_id, goal_dir = resolve_goal_next10_diagnostic_context(cli, model, root)
     height_required = bool(
         task == "pass_height" and (cli.feature_run_id or cli.diagnostic_feature_run_id)
@@ -214,6 +225,8 @@ def resolve_evaluation_data(cli_args, model_args):
         "observed_pass_height_threshold_meters": threshold, "pass_height_diagnostic_lineage": lineage,
         "label_definitions": {"task": task, "return_type": getattr(model, "return_type", None),
                               "intended_receiver_mode": mode, "use_carries": carries,
+                              "stop_condition_definition": (getattr(model, "stop_condition_definition", None)
+                                  or {"version": 0, "mode": "legacy"}) if task.startswith("outcome_") else None,
                               "diagnostic_return_type": cli.diagnostic_return_type or "next_10"},
     }
 

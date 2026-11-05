@@ -58,16 +58,19 @@ def target_settings(metadata=None):
         raise ValueError(f"Unknown xT target representation: {representation!r}.")
     if clipping and representation != "gain":
         raise ValueError("--xt-clip-negative-gains requires --xt-target-representation gain.")
-    return dict(version=1, representation=representation, clip_negative_gains=clipping,
+    version = int(saved.get("version", 1))
+    if version not in (1, 2):
+        raise ValueError("Unsupported xT target definition version")
+    return dict(version=version, representation=representation, clip_negative_gains=clipping,
                 scoring_baseline="action_start_surface" if representation == "gain" else "zero",
-                conceding_baseline="zero")
+                conceding_baseline=("turnover_start_surface_next" if version == 2 and representation == "gain" else "zero"))
 
 
 def add_target_arguments(parser):
     parser.add_argument("--xt-target-representation", choices=("absolute", "gain"), default=None,
                         help="Saved xT target representation; extensions inherit the source setting.")
     parser.add_argument("--xt-clip-negative-gains", action=argparse.BooleanOptionalAction, default=None,
-                        help="Clip scoring gains below zero; requires gain representation.")
+                        help="Clip scoring and next-window conceding gains below zero; requires gain representation.")
 
 
 def configure_targets(args, metadata=None, *, allow_change=False):
@@ -76,6 +79,7 @@ def configure_targets(args, metadata=None, *, allow_change=False):
     representation = getattr(args, "xt_target_representation", None)
     clipping = getattr(args, "xt_clip_negative_gains", None)
     settings = target_settings({"xt_targets": dict(
+        version=2 if metadata is None or allow_change else previous["version"],
         representation=representation if representation is not None else previous["representation"],
         clip_negative_gains=(clipping if clipping is not None else
                              previous["clip_negative_gains"] if representation in (None, previous["representation"]) else False))})
@@ -95,18 +99,28 @@ def target_cli(settings):
 
 def unavailable_xt_returns(surface_metadata, return_types):
     if (surface_metadata or {}).get("surface_type", (surface_metadata or {}).get("xt_model_type")) == "log_progression":
-        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "in"}]
+        return [r for r in return_types if parse_return_type(r)[0] not in {"next", "next_plus", "in"}]
     return []
 
 
 def validate_surface_returns(surface_metadata, return_types):
     unsupported = unavailable_xt_returns(surface_metadata, return_types)
     if unsupported:
-        raise ValueError(f"Log progression supports next_N[_skip1] and in_N returns only: {unsupported}.")
+        raise ValueError(f"Log progression supports next_N[+][_skip1] and in_N returns only: {unsupported}.")
 
 
-def transform_action_targets(actions, pairs, settings=None, surface=None):
+def transform_action_targets(actions, pairs, settings=None, surface=None, *, events=None, return_type=None, stop_condition=None):
     settings = target_settings({"xt_targets": settings or {}})
+    if settings["version"] == 2 and settings["representation"] == "gain" and return_type is None:
+        raise ValueError("Version-2 xT gains require an explicit return type")
+    conceding_baselines = None
+    kind = parse_return_type(return_type)[0] if return_type else None
+    if kind == "next_plus" or (settings["version"] == 2 and settings["representation"] == "gain" and kind == "next"):
+        if events is None:
+            raise ValueError("Turnover targets require event context")
+        from datatools.return_windows import action_xt_windows
+        raw, conceding_baselines = action_xt_windows(actions, events, return_type, surface, stop_condition)
+        pairs = pd.DataFrame(raw, index=actions.index, columns=pairs.columns)
     if settings["representation"] == "absolute":
         return pairs
     if surface is None:
@@ -125,6 +139,9 @@ def transform_action_targets(actions, pairs, settings=None, surface=None):
     updated = pairs.copy()
     gains = updated.iloc[:, 0].to_numpy(dtype=float) - baseline
     updated.iloc[:, 0] = np.maximum(gains, 0) if settings["clip_negative_gains"] else gains
+    if conceding_baselines is not None and settings["version"] == 2:
+        gains = updated.iloc[:, 1].to_numpy(dtype=float) - conceding_baselines
+        updated.iloc[:, 1] = np.maximum(gains, 0) if settings["clip_negative_gains"] else gains
     if not np.isfinite(updated.to_numpy()).all():
         raise ValueError("Non-finite xT gain targets.")
     return updated

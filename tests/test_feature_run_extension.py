@@ -29,6 +29,7 @@ def make_metadata(
 ) -> dict[str, object]:
     metadata = {
         "status": status,
+        "stop_conditions": {"version": 1, "available": {r: ["base"] for r in (return_types or ["disc_0.9"])}},
         "graph_schema": graph_schema or generator.EXPECTED_GRAPH_SCHEMA.copy(),
         "return_types": return_types or ["disc_0.9"],
         "intended_receiver_modes": modes or ["original", "angle_only"],
@@ -782,6 +783,21 @@ class FeatureRunExtensionPlanTests(unittest.TestCase):
 
 
 class FeatureRunExtensionExecutionTests(unittest.TestCase):
+    def setUp(self):
+        def record_variants(root, metadata, requests, **kwargs):
+            metadata.setdefault("stop_conditions", {"version": 1, "available": {}})
+            metadata["label_layout_version"] = 1
+            metadata["return_type"] = metadata["return_types"][0] if len(metadata["return_types"]) == 1 else None
+            for ret, modes in requests.items():
+                metadata["stop_conditions"]["available"][ret] = modes
+            return {}
+        patcher = patch("datatools.stop_conditions.refresh_labels", side_effect=record_variants)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        audit = patch.object(generator, "audit_return_type_extension")
+        audit.start()
+        self.addCleanup(audit.stop)
+
     def test_successful_extension_copies_base_artifacts_and_updates_latest_after_commands(self) -> None:
         args = make_args(["next_5"], run_id="derived")
         metadata = make_metadata()

@@ -6,6 +6,10 @@ from project_config import parse_return_type
 def label_goal_distance_for_return_type(events, return_type):
     kind, value, skip_first = parse_return_type(return_type)
     eligible = tuple(config.XT_ACTION_TYPES)
+    if kind == "next_plus":
+        result = events.copy()
+        result[["scores_goal_distance", "concedes_goal_distance"]] = float("nan")
+        return result
     if kind == "next":
         return utils.label_goal_distance_returns(events, lookahead_len=int(value),
                                                 eligible_types=eligible, skip_first=skip_first)

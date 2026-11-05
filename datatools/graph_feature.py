@@ -689,8 +689,9 @@ def build_match_for_feature_generation(
         xt_surface=(surface_from_metadata(args.xt_surface_metadata)
                     if (getattr(args, "xt_targets", None) or {}).get("representation") == "gain" else None),
         xt_surface_metadata=getattr(args, "xt_surface_metadata", None)))
+    xt_options["stop_condition"] = getattr(args, "stop_condition", None)
     xt_options = {name: value for name, value in xt_options.items() if value is not None}
-    return Match(
+    match = Match(
         events,
         tracking,
         match_lineup,
@@ -701,6 +702,13 @@ def build_match_for_feature_generation(
         **xt_options,
         **({"reception_policy": args.reception_policy} if hasattr(args, "reception_policy") else {}),
     )
+    if isinstance(getattr(match, "match_id", None), str):
+        from datatools.xt_acquisitions import acquisition_context
+        feature_root = get_feature_run_root(args.run_id) if getattr(args, "run_id", None) else FEATURE_DIR
+        match.events, cache, _ = acquisition_context(match.events, match.match_id, feature_root, tracking=tracking)
+        if cache is not None:
+            atomic_parquet_save(cache[1], cache[0])
+    return match
 
 
 def summarize_exception(exc: Exception) -> str:
@@ -1831,7 +1839,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Way of defining future returns. Repeat the flag to generate multiple return types in one run, "
             "including disc_<gamma>_skip1, disc_max_<gamma>[_skip1], disc_poly_max_<b>_<z>, "
-            "next_<N>_skip1, and in_<N> for xt/goal_distance/epv training."
+            "next_<N>_skip1, next_<N>+[_skip1] (xT only), and in_<N> for xt/goal_distance/epv training."
         ),
     )
     parser.add_argument("--post_action", action="store_true", default=False, help="construct post-action features")
@@ -1972,6 +1980,9 @@ def validate_args(args: argparse.Namespace) -> None:
     feature_root = get_feature_run_root(args.run_id) if args.run_id else None
     saved = read_json(feature_root / "metadata.json") if feature_root and (feature_root / "metadata.json").is_file() else None
     configure_targets(args, saved)
+    args.stop_condition = "base" if saved is None or saved.get("stop_conditions") else None
+    if saved is None and any(ret.endswith("_spstop") for ret in args.return_types):
+        raise ValueError("Use generate_relevant_features.py --stop-condition set-pieces instead of _spstop")
     if getattr(args, "xt_version", None):
         selected = resolve_xt_version(args.xt_version)
         args.xt_version = selected.version

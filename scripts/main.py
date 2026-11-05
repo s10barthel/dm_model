@@ -127,13 +127,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Outcome target family for retained outcome models.",
     )
+    parser.add_argument("--stop-condition", choices=("base", "set-pieces"), default="base")
     parser.add_argument(
         "--return_type",
         default=None,
         help=(
             "Resolved return type to generate and train against: disc_<gamma>, disc_<gamma>_skip1, "
-            "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>[_spstop], "
-            "next_<N>, next_<N>_skip1, or in_<N> "
+            "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
+            "next_<N>, next_<N>_skip1, next_<N>+[_skip1] (xT only), or in_<N> "
             "(progression: next_N[_skip1]/in_N only; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
         ),
     )
@@ -538,6 +539,8 @@ def append_return_type_flag(command: list[str], args: argparse.Namespace) -> lis
     command = list(command)
     if args.return_type:
         command.extend(["--return_type", args.return_type])
+    if getattr(args, "stop_condition", "base") == "set-pieces":
+        command.extend(["--stop-condition", "set-pieces"])
     return command
 
 

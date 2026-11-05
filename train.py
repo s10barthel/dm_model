@@ -280,6 +280,7 @@ parser.add_argument(
     default=False,
     help="use goal-distance labels instead of xG, xT, EPV, or actual goal labels",
 )
+parser.add_argument("--stop-condition", choices=("base", "set-pieces"), default="base")
 parser.add_argument("--use_progression", action="store_true", default=False, help="use relative goal-distance progression scoring labels")
 parser.add_argument("--use_epv", action="store_true", default=False, help="use EPV labels instead of xG, xT, goal-distance, or actual goal labels")
 parser.add_argument(
@@ -289,7 +290,7 @@ parser.add_argument(
     default=None,
     help=(
         "way of defining return: disc_<gamma>, disc_<gamma>_skip1, disc_max_<gamma>, "
-        "disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>[_spstop], next_<N>, next_<N>_skip1, or in_<N> "
+        "disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, next_<N>, next_<N>_skip1, next_<N>+[_skip1], or in_<N> "
         "(disc_max/in: xt/goal_distance/epv only; disc_poly_max: xt/goal_distance only)"
     ),
 )
@@ -856,6 +857,19 @@ def main(cache_session):
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
+    if args.task.startswith("outcome_"):
+        from datatools.stop_conditions import definition
+        args.stop_condition = getattr(args, "stop_condition", "base")
+        saved_stops = ((resume_record.get("stop_condition_definition") or {"version": 0, "mode": "legacy"})
+                       if resume_record is not None else None)
+        if saved_stops and "--stop-condition" not in {a.split("=", 1)[0] for a in sys.argv[1:]}:
+            args.stop_condition = saved_stops["mode"]
+        if args.return_type.endswith("_spstop") and resume_record is None:
+            raise ValueError("Use --stop-condition set-pieces instead of _spstop")
+        args.stop_condition_definition = definition(feature_metadata, args.return_type, args.stop_condition,
+                                                   legacy=resume_record is not None)
+        if saved_stops and saved_stops != args.stop_condition_definition:
+            raise ValueError("Resume cannot change stop conditions")
     if args.use_xt:
         from datatools.xt_targets import validate_training_targets, training_target_definition
         validate_training_targets(feature_metadata, args.return_type)
@@ -942,6 +956,13 @@ def main(cache_session):
     args.train_label_dir = getattr(args, "train_label_dir", None) or label_dir
     args.valid_feature_dir = getattr(args, "valid_feature_dir", None) or feature_dir
     args.valid_label_dir = getattr(args, "valid_label_dir", None) or label_dir
+    if args.task.startswith("outcome_") and feature_metadata.get("stop_conditions"):
+        from datatools.stop_conditions import label_path
+        for key in ("label_dir", "train_label_dir", "valid_label_dir"):
+            selected = label_path(getattr(args, key), feature_root, args.stop_condition)
+            if not selected.is_dir():
+                raise FileNotFoundError(f"Missing selected stop-condition labels: {selected}")
+            setattr(args, key, str(selected))
     from datatools.trajectory import resolve_training_speed
     resolve_training_speed(args, checkpoint=goal_source)
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir

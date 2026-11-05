@@ -816,6 +816,7 @@ def derive_bundle_shared_context(
             "intended_receiver_mode": getattr(cli_args, "intended_receiver_mode", None),
             "return_type": cli_args.return_type,
             "target_family": cli_args.target_family,
+            "stop_condition_definition": shared.get("stop_condition_definition"),
             "xt_target_definition": shared.get("xt_target_definition"),
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
@@ -898,13 +899,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Outcome target family for the retained outcome models.",
     )
+    parser.add_argument("--stop-condition", choices=("base", "set-pieces"), default="base")
     parser.add_argument(
         "--return_type",
         default=None,
         help=(
             "Resolved outcome return type to use for label generation: disc_<gamma>, disc_<gamma>_skip1, "
-            "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>[_spstop], "
-            "next_<N>, next_<N>_skip1, or in_<N> "
+            "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
+            "next_<N>, next_<N>_skip1, next_<N>+[_skip1] (xT only), or in_<N> "
             "(progression: next_N[_skip1]/in_N only; disc_max: xt/goal_distance/epv; disc_poly_max: xt/goal_distance)."
         ),
     )
@@ -1470,6 +1472,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("--return_type is required when outcome models are enabled.")
         try:
             args.return_type = validate_return_type_for_target_family(args.return_type, target_family=args.target_family)
+            from datatools.stop_conditions import definition
+            if args.return_type.endswith("_spstop"):
+                raise ValueError("Use --stop-condition set-pieces instead of _spstop")
+            args.stop_condition_definition = definition(feature_metadata, args.return_type, args.stop_condition)
             if args.target_family == "xt":
                 from datatools.xt_targets import validate_training_targets
                 validate_training_targets(feature_metadata, args.return_type)
@@ -2049,6 +2055,9 @@ def build_training_commands(
         if getattr(args, "pass_height_threshold", None) is not None:
             command = _replace_cli_value(command, "--pass-height-threshold", args.pass_height_threshold)
         commands[index] = command
+    for command in commands:
+        if "--task" in command and command[command.index("--task") + 1].startswith("outcome_"):
+            command.extend(["--stop-condition", getattr(args, "stop_condition", "base")])
     return (
         commands,
         trained_model_ids,
@@ -2455,6 +2464,7 @@ def _main(cli_args) -> None:
         "pin_memory": bool(getattr(cli_args, "pin_memory", False)),
         **training_control_settings,
         "target_family": bundle_shared.get("target_family"),
+        "stop_condition_definition": bundle_shared.get("stop_condition_definition"),
         "xt_target_definition": bundle_shared.get("xt_target_definition"),
         "return_type": bundle_shared.get("return_type"),
         "source_input_settings": bundle_shared.get("source_input_settings", {}),
