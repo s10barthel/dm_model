@@ -157,16 +157,12 @@ def merge_epv_annotations(
     if match_id is None:
         return events
 
-    sidecar_path = Path(epv_match_dir) / f"{match_id}.csv"
-    if not sidecar_path.exists():
-        return events
-
-    sidecar = pd.read_csv(sidecar_path, usecols=lambda c: c in EPV_COLUMNS)
-    if sidecar.empty:
-        return events
-
-    events = events.drop(columns=[c for c in ["epv", "scores_epv", "concedes_epv"] if c in events.columns])
-    return events.merge(sidecar, on="action_id", how="left")
+    from datatools.epv_coverage import ATTRIBUTE, load_annotations
+    values, coverage = load_annotations(events, match_id, epv_match_dir)
+    events = events.drop(columns=[c for c in EPV_COLUMNS[1:] if c in events.columns])
+    events["epv"] = values
+    events.attrs[ATTRIBUTE] = coverage
+    return events
 
 
 def save_epv_outputs(

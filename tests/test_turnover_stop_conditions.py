@@ -303,6 +303,11 @@ def test_staged_migration_optional_variants_and_xt_only_refresh(sample, tmp_path
         torch.testing.assert_close(torch.load(path, weights_only=True)[:, keep], tensor[:, keep], equal_nan=True)
     assert all(fingerprint(p) == digest for p, digest in graphs.items())
 
+    # An xT-only refresh must not invalidate verified EPV targets.
+    from datatools.epv_coverage import validate_labels
+    from project_config import get_action_label_dir
+    validate_labels(root, metadata, ["m"], get_action_label_dir("next_3", root=root), "next_3")
+
 
 def test_cli_set_piece_requires_explicit_returns_and_migration_is_separate(monkeypatch):
     import sys

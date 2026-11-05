@@ -1751,6 +1751,10 @@ def get_outcome_targets(batch_labels: torch.Tensor, args) -> tuple[torch.Tensor,
             raise ValueError("xT labels are missing or invalid for this return type. Choose an available xT return.")
         return scores, concedes
     if getattr(args, "use_epv", False):
+        columns = [LABEL_INDEX[name] for name in ("scores_epv", "concedes_epv")]
+        if (batch_labels.ndim != 2 or batch_labels.shape[1] <= max(columns)
+                or not torch.isfinite(batch_labels[:, columns]).all()):
+            raise ValueError("EPV targets are missing or nonfinite. Refresh EPV coverage and use fully annotated matches.")
         return get_label_slice(batch_labels, "scores_epv"), get_label_slice(batch_labels, "concedes_epv")
     if getattr(args, "use_xg", False):
         return get_label_slice(batch_labels, "scores_xg"), get_label_slice(batch_labels, "concedes_xg")

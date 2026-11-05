@@ -167,5 +167,7 @@ _vendor/defcon/saved
 !tests/test_carry_return_extension.py
 !tests/test_extended_possession.py
 !tests/test_goal_return_dtypes.py
+!tests/test_epv_coverage.py
+!tests/test_epv_target_family.py
 
 !tests/test_feature_worker_runtime.py

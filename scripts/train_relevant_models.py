@@ -1502,6 +1502,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"Available: {', '.join(available_return_types) or 'none'}."
         )
     validate_diagnostic_feature_run(args, parser, requires_outcome_config=requires_outcome_config)
+    if requires_outcome_config and args.target_family == "epv":
+        from datatools.epv_coverage import validate_labels
+        from datatools.stop_conditions import label_path
+        selected = {str(mid) for stage in args.validation_stages
+                    for key in ("train_match_ids", "validation_match_ids") for mid in stage[key]}
+        if args.final_refit:
+            selected.update(map(str, args.split_manifest["train"]))
+        root = resolve_feature_root(args.feature_run_id)
+        directory = get_action_label_dir(args.return_type, args.intended_receiver_mode, root=root,
+                                         use_carries=args.use_carries)
+        try:
+            validate_labels(root, feature_metadata, sorted(selected), label_path(directory, root, args.stop_condition),
+                            args.return_type, args.stop_condition, context="requested training/validation stages")
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
 
     args.available_return_types = available_return_types
     args.available_intended_receiver_modes = available_modes

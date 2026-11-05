@@ -244,6 +244,7 @@ def preflight_evaluation_data(requests):
             settings = request.get("model_args")
             if settings is None:
                 settings = get_model_record(identifier)["args"]
+            settings = _settings(settings)
             context = resolve_evaluation_data(request["cli_args"], settings)
         except (OSError, ValueError) as exc:
             errors.append(f"{identifier}: {exc}")
@@ -261,6 +262,15 @@ def preflight_evaluation_data(requests):
             elif not directory.is_dir():
                 errors.append(f"{identifier}: missing {key} directory {directory}")
         try:
+            if str(settings.get("task", "")).startswith("outcome_") and (
+                    settings.get("use_epv") or settings.get("target_family") == "epv"):
+                import json
+                from datatools.epv_coverage import validate_labels
+                root = Path(context["feature_root"])
+                metadata = json.loads((root / "metadata.json").read_text(encoding="utf-8-sig"))
+                stop = context["label_definitions"]["stop_condition_definition"] or {"mode": "base"}
+                validate_labels(root, metadata, matches, context["label_dir"], settings.get("return_type"),
+                                stop["mode"], context="evaluation")
             graph_dir = context["feature_dir"]
             if graph_dir not in schemas:
                 schemas[graph_dir] = infer_feature_graph_schema(graph_dir)

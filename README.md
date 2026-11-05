@@ -414,6 +414,8 @@ The selected xT version and feature run must use the same split manifest. For th
 
 EPV computes `sum(pass_intent * pass_score)` across players, where `pass_score` combines pass success with the scoring and conceding outcome models. Shot actions use `max(epv, xG)`, matching the xT shot-value convention.
 
+Feature generation retains matches with incomplete EPV annotations for other target families and stores their EPV targets as `NaN`. EPV training and evaluation require verified, complete annotations for their selected matches. See [EPV availability and stop-condition migration](docs/turnover_returns.md) for the coverage policy and migration instructions.
+
 ### 3. Generate graph features and labels
 
 ```powershell

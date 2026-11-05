@@ -1,5 +1,6 @@
 """Independent stop-condition label variants and staged target-only migration."""
 from contextlib import ExitStack, closing
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,8 @@ from datatools.return_windows import bounded_returns
 from datatools.xt_targets import target_settings, surface_from_metadata, transform_action_targets, unavailable_xt_returns
 from project_config import parse_return_type, get_resolved_action_dir, atomic_write_json
 from datatools.worker_runtime import map_shared_tasks
+from datatools.epv_coverage import (ATTRIBUTE, DIRECTORY, load_annotations, unavailable, mask_targets,
+                                   verified_report, label_fingerprint)
 
 VERSION = 1
 PAIR_SOURCES = {
@@ -52,7 +55,10 @@ def event_returns(events, return_type, condition, surface_metadata=None):
     def calculate(part):
         match = SimpleNamespace(events=part, xt_surface_metadata=surface_metadata)
         return Match._get_events_for_return_type(match, return_type, kind, value, skip)
-    return bounded_returns(events, condition, calculate)
+    result = bounded_returns(events, condition, calculate)
+    if ATTRIBUTE in events.attrs:
+        result.attrs[ATTRIBUTE] = events.attrs[ATTRIBUTE]
+    return mask_targets(result, events)
 
 
 def action_targets(actions, events, return_type, condition, settings, surface, surface_metadata,
@@ -84,6 +90,9 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
         if kind == "next_plus" and score != "scores_xt":
             result[[score, concede]] = np.nan
             continue
+        if score == "scores_epv" and unavailable(events):
+            result[[score, concede]] = np.nan
+            continue
         if score == "scores_xt" and unavailable_xt_returns(surface_metadata, [return_type]):
             result[[score, concede]] = np.nan
             continue
@@ -112,13 +121,16 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
     surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" else None
     event_dir, xt_dir = options["event_dir"], options["xt_dir"]
     report = dict(changed_rows=0, ball_coordinate_files_loaded=0,
-                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[])
+                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[], epv_coverage=[])
     staged, signatures, inputs = [], {}, {}
+    epv_label_hashes = {}
 
     def stage(path, value, previous=None):
         path = Path(path)
         if path.exists():
             signatures[path] = file_signature(path)
+        if isinstance(value, dict) and path.exists() and value == json.loads(path.read_text(encoding="utf-8")):
+            return
         if isinstance(value, pd.DataFrame) and path.exists() and value.equals(pd.read_parquet(path)):
             return
         if isinstance(value, torch.Tensor) and previous is not None:
@@ -135,6 +147,8 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
         temporary = temporary_paths[path]
         if isinstance(value, torch.Tensor):
             torch.save(value, temporary)
+        elif isinstance(value, dict):
+            temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
         else:
             value.to_parquet(temporary)
         staged.append((path, temporary))
@@ -157,13 +171,16 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
     if not xt_only:
         folders = ([("goal_distance", options["goal_distance_dir"])] if {"goal_distance", "progression"} & families else [])
         if "epv" in families:
-            folders.append(("epv", options["epv_dir"]))
+            events["epv"], coverage = load_annotations(events, mid, options["epv_dir"])
+            events.attrs[ATTRIBUTE] = coverage
+            if coverage["annotation_sha256"] is not None:
+                inputs[Path(coverage["annotation"])] = coverage["annotation_sha256"]
+            if "missing_file" in coverage["reasons"]:
+                report["absent_optional_epv_matches"].append(mid)
+            report["epv_coverage"].append(coverage)
         for name, folder in folders:
             annotation = Path(folder) / f"{mid}.csv"
             if not annotation.is_file():
-                if name == "epv":
-                    report["absent_optional_epv_matches"].append(mid)
-                    continue
                 raise FileNotFoundError(f"Missing stop-refresh annotation: {annotation}")
             inputs[annotation] = fingerprint(annotation)
             side = pd.read_csv(annotation)
@@ -190,20 +207,11 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
             signatures[action_path] = file_signature(action_path)
             cache[action_path] = pd.read_parquet(action_path)
         actions = cache[action_path]
-        if mid in report["absent_optional_epv_matches"]:
-            for column in ("scores_epv", "concedes_epv"):
-                if column in actions and actions[column].fillna(0).ne(0).any():
-                    raise FileNotFoundError("EPV annotations are missing but saved EPV targets are nonzero")
         signatures[artifact.path] = file_signature(artifact.path)
         template = torch.load(artifact.path, weights_only=True, map_location="cpu")
         if (not isinstance(template, torch.Tensor) or template.ndim != 2
                 or not template.is_floating_point() or template.shape[1] <= config.LABEL_INDEX["action_index"]):
             raise ValueError("Invalid stop-condition label tensor")
-        if mid in report["absent_optional_epv_matches"]:
-            for name in ("scores_epv", "concedes_epv"):
-                column = config.LABEL_INDEX[name]
-                if column < template.shape[1] and torch.nan_to_num(template[:, column]).ne(0).any():
-                    raise FileNotFoundError("EPV annotations are missing but saved EPV labels are nonzero")
         ids = template[:, config.LABEL_INDEX["action_index"]].numpy()
         if not np.isfinite(ids).all() or (ids % 1).any() or not np.isin(ids, actions.index).all():
             raise ValueError("Invalid action identities in stop-condition labels")
@@ -243,6 +251,8 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
                 col = config.LABEL_INDEX[name]
                 updated[:, col] = torch.as_tensor(targets.loc[ids.astype(int), name].to_numpy(), dtype=updated.dtype)
             stage(destination, updated, previous)
+            if "epv" in families:
+                epv_label_hashes[destination.relative_to(root).as_posix()] = label_fingerprint(updated)
             if condition == "base" and old_ret == returns[0] and (action_path, "staged") not in cache:
                 saved = actions.copy()
                 for name in names:
@@ -256,6 +266,8 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
                         saved.loc[canonical, name] = events.loc[actions.index[canonical], name].to_numpy()
                 stage(action_path, saved)
                 cache[(action_path, "staged")] = True
+    if "epv" in families:
+        stage(root / DIRECTORY / f"{mid}.json", verified_report(root, coverage, requests, epv_label_hashes))
     return dict(match_id=mid, staged=staged, signatures=signatures, inputs=inputs,
                 report=report, worker_pid=os.getpid())
 
@@ -264,6 +276,8 @@ def _match_tasks(root, inventory, options, stack, attempt):
     """Register every possible temporary in the parent, including failed workers' files."""
     for mid, artifacts in inventory.items():
         destinations = {root / "acquisition_locations" / f"{mid}.parquet"}
+        if "epv" in options["families"]:
+            destinations.add(root / DIRECTORY / f"{mid}.json")
         for artifact in artifacts:
             old_ret = artifact.return_type
             ret = old_ret.removesuffix("_spstop")
@@ -340,7 +354,7 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
                   intended_receiver_modes=modes, carries=carries,
                   xt_unavailable_return_types=unavailable_xt_returns(surface_metadata,
                       list(dict.fromkeys(ret.removesuffix("_spstop") for ret in returns))),
-                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[])
+                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[], epv_coverage=[])
     workers = min(workers, len(inventory))
     report.update(workers=workers, total_matches=len(inventory), completed_matches=0)
     options = dict(requests=requests, returns=returns, xt_only=xt_only, families=families,
@@ -374,6 +388,7 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
                       f"({workers} workers; {result['match_id']})", flush=True)
         for name in ("canonical_only_acquisition_matches", "absent_optional_epv_matches"):
             report[name].sort()
+        report["epv_coverage"].sort(key=lambda item: item["match_id"])
         for path, signature in signatures.items():
             if file_signature(path) != signature:
                 raise RuntimeError(f"Artifact changed during stop refresh: {path}")
@@ -397,6 +412,13 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
     for ret, modes in requests.items():
         updated["available"][ret] = sorted(set(updated["available"].get(ret, [])) | set(modes))
     metadata["stop_conditions"] = updated
+    if "epv" in families:
+        from datatools.epv_coverage import VERSION as EPV_VERSION, POLICY
+        complete = sum(item["complete"] for item in report["epv_coverage"])
+        metadata[ATTRIBUTE] = dict(version=EPV_VERSION, policy=POLICY, directory=DIRECTORY,
+                                   complete_matches=complete, unavailable_matches=len(inventory) - complete)
+        print(f"EPV coverage: {complete}/{len(inventory)} complete matches; "
+              f"{len(inventory) - complete} unavailable (other targets retained).", flush=True)
     metadata["label_layout_version"] = 1
     metadata["return_types"] = list(dict.fromkeys(r.removesuffix("_spstop") for r in returns))
     metadata["xt_unavailable_return_types"] = list(dict.fromkeys(r.removesuffix("_spstop") for r in metadata.get("xt_unavailable_return_types", [])))

@@ -964,6 +964,19 @@ def main(cache_session):
             if not selected.is_dir():
                 raise FileNotFoundError(f"Missing selected stop-condition labels: {selected}")
             setattr(args, key, str(selected))
+    if args.use_epv:
+        from datatools.epv_coverage import validate_labels
+        epv_train_ids, epv_valid_ids, _ = load_splits(
+            feature_dir=None, manifest=args.split_manifest, validation_mode=args.validation_mode,
+            validation_fold=args.validation_fold, final_refit=args.final_refit,
+            validation_protocol=args.validation_protocol, training_count=args.training_count,
+            validation_count=args.validation_count, validation_fraction=args.validation_fraction)
+        args.epv_coverage_definition = validate_labels(
+            feature_root, feature_metadata, epv_train_ids, args.train_label_dir, args.return_type,
+            args.stop_condition, context="training")
+        if not args.final_refit:
+            validate_labels(feature_root, feature_metadata, epv_valid_ids, args.valid_label_dir,
+                            args.return_type, args.stop_condition, context="validation")
     from datatools.trajectory import resolve_training_speed
     resolve_training_speed(args, checkpoint=goal_source)
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
@@ -1157,6 +1170,7 @@ def main(cache_session):
         "feature_signature": extract_model_feature_signature(args_dict),
         "training_args": args_dict,
         "xt_target_definition": getattr(args, "xt_target_definition", None),
+        "epv_coverage_definition": getattr(args, "epv_coverage_definition", None),
         "pass_height_definition": getattr(args, "pass_height_definition", None),
         "early_stopping": bool(args.early_stopping),
         "early_stopping_patience": int(args.early_stopping_patience),

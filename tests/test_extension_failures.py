@@ -447,6 +447,8 @@ def test_successful_carry_extension_records_complete_attempt(environment, monkey
                                      "--use-carries", *flags])
     commands = []
     monkeypatch.setattr(generator, "run_command", commands.append)
+    # This metadata-publication test stubs all artifact generation.
+    monkeypatch.setattr("datatools.stop_conditions.refresh_labels", lambda *a, **kw: None)
     monkeypatch.setattr(generator, "copy_base_feature_run", lambda *a, **kw: pytest.fail("In-place clone"))
     monkeypatch.setattr(generator, "write_latest_run", lambda *a: pytest.fail("In-place latest update"))
     args = generator.parse_args()

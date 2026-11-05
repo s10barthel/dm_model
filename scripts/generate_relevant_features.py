@@ -1558,7 +1558,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     def publish_target_metadata(payload, final):
         if final and stop_metadata is not None:
             for key in ("stop_conditions", "label_layout_version", "return_types", "return_type",
-                        "xt_unavailable_return_types"):
+                        "xt_unavailable_return_types", "epv_coverage"):
                 if key in stop_metadata:
                     payload[key] = stop_metadata[key]
         if final and refresh_result is not None:
@@ -1850,6 +1850,7 @@ def carry_extension_steps(
 
 
 def run_carry_extension_generation(args: argparse.Namespace) -> None:
+    refreshed_targets = None
     refresh_workers = dict(num_workers=getattr(args, "num_workers", "1"),
                            worker_thread_limit=int(getattr(args, "worker_thread_limit", 1)))
     base_run_id = resolve_feature_run_id(args.extend_feature_run_id, required=True, allow_latest=False)
@@ -1913,6 +1914,10 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
                                             validation_parameters=asdict(CarryPolicy()),
                                             sidecar_root="carry_sidecars",
                                             generated_at=datetime.now().isoformat(timespec="seconds"))
+            if refreshed_targets is not None:
+                for key in ("stop_conditions", "label_layout_version", "epv_coverage"):
+                    if key in refreshed_targets:
+                        updated[key] = refreshed_targets[key]
         return updated
 
     attempt = ExtensionAttempt(output_root, "carry_extension", mode,
@@ -1929,6 +1934,12 @@ def run_carry_extension_generation(args: argparse.Namespace) -> None:
         else:
             attempt.enter("staging")
         run_generation_steps(steps, attempt=attempt)
+        if metadata.get("stop_conditions"):
+            from datatools.stop_conditions import refresh_labels
+            refreshed_targets = copy.deepcopy(metadata)
+            refreshed_targets["carry_variant"] = dict(available=True, definition=CARRY_DEFINITION_VERSION)
+            refresh_labels(output_root, refreshed_targets, metadata["stop_conditions"]["available"],
+                           attempt=attempt, **refresh_workers)
         if extend_interactions:
             extend_interaction_edge_features(output_root, metadata_intended_receiver_modes(metadata), attempt=attempt,
                                               graph_validation=getattr(args, "graph_validation", True), **refresh_workers)

@@ -287,6 +287,10 @@ class Match(ABC):
             events["concedes_xT"] = np.nan
         else:
             events = label_xt_for_return_type(events, return_type)
+        from datatools.epv_coverage import ATTRIBUTE, mask_targets
+        if ATTRIBUTE in self._base_events.attrs:
+            events.attrs[ATTRIBUTE] = self._base_events.attrs[ATTRIBUTE]
+        mask_targets(events, self._base_events)
         self._cached_events_by_return_type[return_type] = events
         return events
 
@@ -756,6 +760,8 @@ class Match(ABC):
             targets = extended_possession_targets(self.actions, self.events, getattr(self, "stop_condition", None),
                                                   max_actions=return_value)
             self.actions[targets.columns] = targets
+        from datatools.epv_coverage import mask_targets
+        mask_targets(self.actions, self.events)
         from datatools.xt_targets import transform_action_targets, unavailable_xt_returns
         if unavailable_xt_returns(getattr(self, "xt_surface_metadata", None), [return_type]):
             self.actions[["scores_xt", "concedes_xt"]] = np.nan

@@ -182,10 +182,25 @@ action target columns describe the primary base return. Cache signatures see
 the selected label files and updated metadata.
 
 Refreshes stage replacements and check input/artifact stability before
-publishing. Missing required annotations fail explicitly. EPV sidecars were
-optional in historical generation: absent EPV annotations are reported, and
-the existing zero-return convention is retained only when saved EPV targets
-are zero; missing annotations with nonzero saved EPV targets fail.
+publishing. Missing required xT/goal-distance annotations fail explicitly.
+EPV is optional: missing files, incomplete candidate coverage, nonfinite
+candidate values, or ambiguous annotation IDs make EPV unavailable for that
+entire match. Graphs and other target families are retained. Both EPV target
+columns are `NaN` across receiver modes, carries, returns, and stop variants;
+zero remains a valid annotated value. Missing non-candidate event rows are
+allowed. EPV candidates are passes, crosses, and shots with a known team.
+
+Feature metadata summarizes EPV availability. Per-match records under
+`epv_coverage/` record the annotation fingerprint, coverage failures, verified
+return/stop variants, and fingerprints of EPV targets and action identities.
+Other target refreshes preserve these certificates. Changing EPV annotations
+requires refreshing the affected variants before using them.
+
+EPV training checks only the matches selected for its training/validation
+stages, before loading memory or prepared datasets. Evaluation checks its own
+selected matches. Missing coverage records, unavailable matches, or invalid EPV
+labels fail explicitly. Finite legacy zero labels do not establish complete
+coverage: run `--refresh-stop-conditions` to verify and refresh legacy runs.
 
 An isolated pilot is available in `scripts/diagnostics/pilot_turnover_stops.py`.
 It accepts `--source`, `--output`, optional `--match-id`, and `--copy` when
@@ -197,3 +212,7 @@ label generator on one saved train match and one saved test match. It adds
 `next_5` and `next_5+`, checks both stop modes, and verifies that source files and
 retained graphs remain unchanged. The source must not already contain these
 two returns.
+
+`scripts/diagnostics/pilot_epv_coverage.py` accepts `--source`, `--output`, and
+`--match-id`. It validates migration and EPV training rejection for an incomplete
+real match in a private copy, without updating production runs or latest pointers.
