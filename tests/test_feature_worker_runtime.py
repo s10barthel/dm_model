@@ -262,11 +262,17 @@ def test_carry_extension_forwards_edge_worker_settings(tmp_path, monkeypatch):
     monkeypatch.setattr(generator, "get_feature_run_root", lambda *a: root)
     monkeypatch.setattr(generator, "carry_extension_steps", lambda *a: [])
     monkeypatch.setattr(generator, "run_generation_steps", lambda *a, **kw: None)
+    # The fixture advertises stop variants; isolate the worker-option routing
+    # from label inventory validation, just as graph generation is isolated above.
+    refresh = Mock()
+    monkeypatch.setattr("datatools.stop_conditions.refresh_labels", refresh)
     extend = Mock()
     monkeypatch.setattr(generator, "extend_interaction_edge_features", extend)
     generator.run_carry_extension_generation(args)
     assert extend.call_args.kwargs["num_workers"] == "4"
     assert extend.call_args.kwargs["worker_thread_limit"] == 2
+    assert refresh.call_args.kwargs["num_workers"] == "4"
+    assert refresh.call_args.kwargs["worker_thread_limit"] == 2
 
 
 def test_family_mapping_reuse_keeps_each_family_value_validation(sample, monkeypatch):

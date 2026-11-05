@@ -784,6 +784,11 @@ class Match(ABC):
 
         from datatools.progression import action_progression
         self.actions["scores_progression"] = action_progression(self.actions, return_type)
+        self.actions["empty_window_reason"] = 0
+        if getattr(self, "exclude_empty_windows", False):
+            from datatools.empty_windows import mask_targets as mask_empty_windows
+            mask_empty_windows(self.actions, self.actions, self.events, return_type,
+                               getattr(self, "stop_condition", None))
 
         from datatools.label_reuse import reused_labels, remember_label_rows
         reused = reused_labels(self)
@@ -934,6 +939,7 @@ class Match(ABC):
                     pass_max_ball_z,
                     pass_high,
                     self.actions.at[i, "scores_progression"],
+                    self.actions.at[i, "empty_window_reason"],
                 ]
             )
 

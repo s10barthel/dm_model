@@ -46,7 +46,11 @@ def definition(metadata, return_type, condition="base", *, legacy=False):
         raise ValueError("Feature run requires --refresh-stop-conditions before new outcome training.")
     if saved.get("version") != VERSION or condition not in saved.get("available", {}).get(return_type, []):
         raise ValueError(f"No {condition} labels for {return_type}; extend with --stop-condition {condition} --return_type {return_type}.")
-    return {"version": VERSION, "mode": condition}
+    result = {"version": VERSION, "mode": condition}
+    from datatools.empty_windows import enabled, KEY
+    if enabled(metadata):
+        result[KEY] = metadata[KEY]
+    return result
 
 
 def event_returns(events, return_type, condition, surface_metadata=None):
@@ -62,7 +66,8 @@ def event_returns(events, return_type, condition, surface_metadata=None):
 
 
 def action_targets(actions, events, return_type, condition, settings, surface, surface_metadata,
-                   xt_only=False, computed=None, target_families=None):
+                   xt_only=False, computed=None, target_families=None, exclude_empty_windows=False,
+                   availability=None):
     from datatools.xt_refresh import action_return_pairs
     from datatools.progression import action_progression
     if computed is None:
@@ -120,6 +125,10 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
     if kind == "time":
         from datatools.time_returns import timing_report
         result.attrs["time_return_coverage"] = timing_report(actions, possession_targets)
+    if exclude_empty_windows:
+        from datatools.empty_windows import mask_targets
+        result.attrs["empty_window_coverage"] = mask_targets(result, actions, events, return_type, condition,
+                                                            availability=availability)
     return result
 
 
@@ -133,7 +142,8 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
     surface = surface_from_metadata(surface_metadata) if settings["representation"] == "gain" else None
     event_dir, xt_dir = options["event_dir"], options["xt_dir"]
     report = dict(changed_rows=0, ball_coordinate_files_loaded=0,
-                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[])
+                  canonical_only_acquisition_matches=[], absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[],
+                  empty_window_coverage=[])
     staged, signatures, inputs = [], {}, {}
     epv_label_hashes = {}
 
@@ -237,8 +247,20 @@ def _stage_match(root, mid, artifacts, options, temporary_paths):
                 else:
                     cache[event_key] = event_returns(events, ret, condition, surface_metadata)
             if key not in cache:
+                availability = None
+                if options["exclude_empty_windows"]:
+                    from datatools.empty_windows import WindowAvailability
+                    availability_key = ("availability", condition)
+                    if availability_key not in cache:
+                        cache[availability_key] = WindowAvailability(events, condition)
+                    availability = cache[availability_key]
                 cache[key] = action_targets(actions, events, ret, condition, settings, surface, surface_metadata,
-                                            xt_only=xt_only, computed=cache[event_key], target_families=families)
+                                            xt_only=xt_only, computed=cache[event_key], target_families=families,
+                                            exclude_empty_windows=options["exclude_empty_windows"], availability=availability)
+                if "empty_window_coverage" in cache[key].attrs:
+                    report["empty_window_coverage"].append(dict(match_id=mid, return_type=ret,
+                        condition=condition, mode=artifact.mode, carries=artifact.carries,
+                        **cache[key].attrs["empty_window_coverage"]))
                 if "time_return_coverage" in cache[key].attrs:
                     report["time_return_coverage"].append(dict(match_id=mid, return_type=ret,
                         condition=condition, mode=artifact.mode, carries=artifact.carries,
@@ -362,6 +384,10 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
              for name in (score, score.replace("scores", "concedes", 1))]
     if "progression" in families:
         names.append("scores_progression")
+    from datatools.empty_windows import enabled, REASON_COLUMN
+    exclude_empty_windows = enabled(metadata)
+    if exclude_empty_windows:
+        names.append(REASON_COLUMN)
     report = dict(version=VERSION, requests=requests, xt_only=xt_only, rewritten_files=0, changed_rows=0,
                   ball_coordinate_files_loaded=0, canonical_only_acquisition_matches=[],
                   target_families=sorted(families),
@@ -370,13 +396,15 @@ def refresh_labels(root, metadata, requests, *, attempt=None, xt_only=False, tar
                   intended_receiver_modes=modes, carries=carries,
                   xt_unavailable_return_types=unavailable_xt_returns(surface_metadata,
                       list(dict.fromkeys(ret.removesuffix("_spstop") for ret in returns))),
-                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[])
+                  graph_files_loaded=0, graph_files_written=0, absent_optional_epv_matches=[], epv_coverage=[], time_return_coverage=[],
+                  empty_window_coverage=[])
     workers = min(workers, len(inventory))
     report.update(workers=workers, total_matches=len(inventory), completed_matches=0)
     options = dict(requests=requests, returns=returns, xt_only=xt_only, families=families,
                    target_families=target_families, names=names, settings=settings,
                    surface_metadata=surface_metadata, event_dir=Path(event_dir), xt_dir=xt_dir,
-                   goal_distance_dir=GOAL_DISTANCE_MATCH_DIR, epv_dir=EPV_MATCH_DIR)
+                   goal_distance_dir=GOAL_DISTANCE_MATCH_DIR, epv_dir=EPV_MATCH_DIR,
+                   exclude_empty_windows=exclude_empty_windows)
     staged, signatures, inputs = [], {}, {}
     worker_pids = set()
     attempt.data.update(total_matches=len(inventory), completed_matches=0, workers=workers)

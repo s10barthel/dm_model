@@ -299,7 +299,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-condition", choices=("base", "set-pieces"), default="base")
     parser.add_argument("--return-type", action="append", dest="return_type", help="Alias for --return_type")
     parser.add_argument("--refresh-stop-conditions", action="store_true")
+    parser.add_argument("--refresh-empty-window-policy", action="store_true",
+                        help="Create a derived run excluding empty future-window spatial targets; reuse saved labels and graphs.")
     args = parser.parse_args()
+    if args.refresh_empty_window_policy:
+        supplied = {token.split("=", 1)[0] for token in sys.argv[1:] if token.startswith("--")}
+        allowed = {"--refresh-empty-window-policy", "--extend-feature-run-id", "--run-id", "--artifact-copy-mode",
+                   "--train-count", "--train-split", "--num-workers", "--worker-thread-limit",
+                   "--graph-validation", "--no-graph-validation"}
+        if not args.extend_feature_run_id:
+            parser.error("--refresh-empty-window-policy requires --extend-feature-run-id")
+        if supplied - allowed:
+            parser.error("Empty-window migration requires a derived run and runs separately; unsupported options: "
+                         + ", ".join(sorted(supplied - allowed)))
     if args.refresh_target_family and args.stop_condition == "set-pieces":
         parser.error("Set-piece additions must run separately from target refresh")
     if args.refresh_stop_conditions:
@@ -379,7 +391,7 @@ def parse_args() -> argparse.Namespace:
     if "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
         if args.use_carries or ("xt" in args.refresh_target_families and len(args.refresh_target_families) != 1):
             parser.error("Target-only refresh must run separately from carry generation and other target refreshes.")
-    if args.refresh_stop_conditions or "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
+    if args.refresh_empty_window_policy or args.refresh_stop_conditions or "xt" in args.refresh_target_families or targeted_goal_distance(args.refresh_target_families):
         # A target-only operation inherits the source split/selection settings unless
         # the caller explicitly supplies them (build_extension_plan checks equality).
         if args.extend_feature_run_id:
@@ -947,6 +959,11 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     base_metadata = load_feature_run_metadata(base_run_id, required=True)
     if base_metadata is None:
         raise FileNotFoundError(f"Feature run {base_run_id} does not have metadata.json.")
+    if getattr(args, "refresh_empty_window_policy", False):
+        if getattr(args, "in_place", False):
+            raise ValueError("Empty-window migration requires a derived run")
+        if not base_metadata.get("stop_conditions") or base_metadata.get("label_layout_version") != 1:
+            raise ValueError("Run --refresh-stop-conditions before --refresh-empty-window-policy")
     refreshes_xt = "xt" in args_refresh_target_families(args)
     configure_targets(args, base_metadata, allow_change=refreshes_xt)
     requested_xt = getattr(args, "xt_version", None)
@@ -1075,6 +1092,7 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
 
     if (
         not getattr(args, "refresh_stop_conditions", False)
+        and not getattr(args, "refresh_empty_window_policy", False)
         and getattr(args, "stop_condition", "base") != "set-pieces"
         and not added_return_types
         and not added_modes
@@ -1175,7 +1193,8 @@ def build_extension_plan(args: argparse.Namespace, python: str | None = None) ->
     command_steps = [FeatureGenerationStep(step.description,
         [*step.command[:2], *target_cli(args.xt_targets), *step.command[2:]]) for step in command_steps]
     commands = [step.command for step in command_steps]
-    if refresh_target_families == ["xt"] or targeted_goal_distance(refresh_target_families):
+    if (getattr(args, "refresh_empty_window_policy", False) or refresh_target_families == ["xt"]
+            or targeted_goal_distance(refresh_target_families)):
         command_steps, commands = [], []
     final_graph_schema = copy.deepcopy(graph_schema)
     if extend_relative_speed_edge_features:
@@ -1296,6 +1315,7 @@ def extension_history_entry(
         "added_intended_receiver_modes": plan.added_intended_receiver_modes,
         "refresh_target_families": plan.refresh_target_families,
         "refresh_stop_conditions": bool(getattr(args, "refresh_stop_conditions", False)),
+        "refresh_empty_window_policy": bool(getattr(args, "refresh_empty_window_policy", False)),
         "set_piece_return_types": (args.requested_return_types
                                   if getattr(args, "stop_condition", "base") == "set-pieces" else []),
         "refresh_pass_height_labels": plan.refresh_pass_height_labels,
@@ -1558,7 +1578,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
     def publish_target_metadata(payload, final):
         if final and stop_metadata is not None:
             for key in ("stop_conditions", "label_layout_version", "return_types", "return_type",
-                        "xt_unavailable_return_types", "epv_coverage", "time_returns"):
+                        "xt_unavailable_return_types", "epv_coverage", "time_returns", "empty_window_policy"):
                 if key in stop_metadata:
                     payload[key] = stop_metadata[key]
         if final and refresh_result is not None:
@@ -1594,6 +1614,7 @@ def run_extension_generation(args: argparse.Namespace) -> None:
                   interaction_edge_features=plan.extend_interaction_edge_features,
                   refresh_target_families=plan.refresh_target_families,
                   refresh_stop_conditions=bool(getattr(args, "refresh_stop_conditions", False)),
+                  refresh_empty_window_policy=bool(getattr(args, "refresh_empty_window_policy", False)),
                   set_piece_return_types=(args.requested_return_types
                       if getattr(args, "stop_condition", "base") == "set-pieces" else []),
                   pass_height_threshold_meters=extension_pass_height_threshold(args, plan),
@@ -1614,7 +1635,11 @@ def run_extension_generation(args: argparse.Namespace) -> None:
             attempt.begin_mutation("removing_artifacts", current_file=target_root)
             remove_model_mode_artifacts(target_root, plan.final_return_types)
             attempt.mutation_finished()
-        if getattr(args, "refresh_stop_conditions", False):
+        if getattr(args, "refresh_empty_window_policy", False):
+            from datatools.empty_window_refresh import refresh_empty_windows
+            stop_metadata = copy.deepcopy(plan.base_metadata)
+            refresh_empty_windows(target_root, stop_metadata, attempt=attempt, **refresh_workers)
+        elif getattr(args, "refresh_stop_conditions", False):
             from datatools.stop_conditions import refresh_labels
             stop_metadata = copy.deepcopy(plan.base_metadata)
             refresh_labels(target_root, stop_metadata,
@@ -2017,6 +2042,8 @@ def run_full_generation(args: argparse.Namespace) -> None:
         }
     from datatools.reception_policy import KEY, RETIRED
     metadata[KEY] = RETIRED
+    from datatools.empty_windows import KEY as EMPTY_WINDOW_KEY, DEFINITION as EMPTY_WINDOW_DEFINITION
+    metadata[EMPTY_WINDOW_KEY] = copy.deepcopy(EMPTY_WINDOW_DEFINITION)
     from datatools.pass_eligibility import policy_metadata
     metadata.update(policy_metadata())
     from datatools.stop_conditions import refresh_labels

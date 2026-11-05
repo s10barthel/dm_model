@@ -46,7 +46,7 @@ def test_existing_selection_and_conceding_preserved(ret):
         selected = utils.label_goal_distance_in_state_returns(events, action_offset=3)
     else:
         selected = utils.label_goal_distance_returns(events, lookahead_len=3, skip_first=ret.endswith("skip1"))
-    labels = torch.zeros(1, len(config.LABEL_COLUMNS) - 1)
+    labels = torch.zeros(1, config.LABEL_INDEX["scores_progression"])
     labels[0, config.LABEL_INDEX["scores_goal_distance"]] = selected.scores_goal_distance.iloc[0]
     labels[0, config.LABEL_INDEX["concedes_goal_distance"]] = selected.concedes_goal_distance.iloc[0]
     updated, changed = patch_progression(labels, pd.Series([closeness(80)]), ret)
@@ -68,7 +68,7 @@ def test_orientation_and_carry_own_baseline():
 
 
 def test_old_runs_do_not_acquire_fake_zero_progression():
-    old = torch.zeros(2, len(config.LABEL_COLUMNS) - 1)
+    old = torch.zeros(2, config.LABEL_INDEX["scores_progression"])
     normalized = _normalize_label_width(old)
     with pytest.raises(ValueError, match="--refresh-target-family progression"):
         get_outcome_targets(normalized, SimpleNamespace(use_progression=True))
@@ -87,8 +87,9 @@ def test_fresh_generation_matches_extension_including_carry(sample, return_type)
                                    "away_1_x": [3.0], "away_1_y": [4.0]})
     normal = match.construct_labels(resolved_actions=actions, relabel_intended_receivers=False,
                                     return_type=return_type)
-    patched, _ = patch_progression(normal[:, :-1], action_start_closeness(match.actions), return_type)
-    torch.testing.assert_close(patched, normal, rtol=1e-6, atol=1e-7, equal_nan=True)
+    column = config.LABEL_INDEX["scores_progression"]
+    patched, _ = patch_progression(normal[:, :column], action_start_closeness(match.actions), return_type)
+    torch.testing.assert_close(patched, normal[:, :column + 1], rtol=1e-6, atol=1e-7, equal_nan=True)
 
 
 def test_wrapper_routes_progression_flag():
@@ -135,7 +136,7 @@ def prepare_progression_fixture(sample):
                 actions.loc[9, ["scores_goal_distance", "concedes_goal_distance"]] = np.nan
             actions.to_parquet(path)
     for artifact in inventory["m"]:
-        labels = torch.load(artifact.path, weights_only=True)[:, :-1]
+        labels = torch.load(artifact.path, weights_only=True)[:, :config.LABEL_INDEX["scores_progression"]]
         ids = labels[:, 0].numpy().astype(int)
         labels[:, [config.LABEL_INDEX[c] for c in ["scores_goal_distance", "concedes_goal_distance"]]] = torch.tensor(
             pairs[artifact.mode, artifact.carries, artifact.return_type].loc[ids].to_numpy(), dtype=labels.dtype)

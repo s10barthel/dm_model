@@ -10,7 +10,7 @@ from datatools.progression import relative_progression, supported
 def patch_progression(labels, starts, return_type):
     column = config.LABEL_INDEX["scores_progression"]
     if (not isinstance(labels, torch.Tensor) or labels.ndim != 2
-            or not labels.is_floating_point() or labels.shape[1] not in {column, column + 1}):
+            or not labels.is_floating_point() or not column <= labels.shape[1] <= len(config.LABEL_COLUMNS)):
         raise ValueError("Progression extension requires the current pre-progression label schema.")
     ids = labels[:, config.LABEL_INDEX["action_index"]].cpu().numpy()
     if not np.isfinite(ids).all() or (ids % 1 != 0).any() or not np.isin(ids, starts.index).all():

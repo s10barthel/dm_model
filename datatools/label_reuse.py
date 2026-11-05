@@ -7,7 +7,7 @@ from datatools import config
 
 
 TARGET_NAMES = tuple(name for name in config.LABEL_COLUMNS
-                     if name.startswith(("scores", "concedes"))
+                     if (name.startswith(("scores", "concedes")) or name == "empty_window_reason")
                      and name not in {"scores_goal_next10", "concedes_goal_next10"})
 TARGET_COLUMNS = tuple(config.LABEL_INDEX[name] for name in TARGET_NAMES)
 

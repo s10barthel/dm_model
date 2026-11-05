@@ -162,6 +162,7 @@ LABEL_COLUMNS = [
     "pass_max_ball_z",
     "pass_high",
     "scores_progression",
+    "empty_window_reason",
 ]
 
 LABEL_INDEX = {name: index for index, name in enumerate(LABEL_COLUMNS)}

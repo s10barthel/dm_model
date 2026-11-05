@@ -93,7 +93,7 @@ def carry_labels_in_source_schema(base_labels, carry_labels, *, context):
 
     current_width = len(config.LABEL_COLUMNS)
     supported_widths = {config.LABEL_INDEX["pass_max_ball_z"],
-                        config.LABEL_INDEX["scores_progression"], current_width}
+                        config.LABEL_INDEX["scores_progression"], config.LABEL_INDEX["empty_window_reason"], current_width}
     if (base_labels.ndim != 2 or carry_labels.ndim != 2
             or base_labels.shape[1] not in supported_widths
             or carry_labels.shape[1] != current_width):

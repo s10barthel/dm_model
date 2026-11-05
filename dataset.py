@@ -166,7 +166,8 @@ def _normalize_label_width(labels: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"label tensor has {labels.shape[1]} columns, expected at most {expected_width}.")
     padding = torch.zeros((labels.shape[0], expected_width - labels.shape[1]), dtype=labels.dtype, device=labels.device)
     normalized = torch.cat([labels, padding], dim=1)
-    normalized[:, LABEL_INDEX["scores_progression"]] = float("nan")
+    if labels.shape[1] <= LABEL_INDEX["scores_progression"]:
+        normalized[:, LABEL_INDEX["scores_progression"]] = float("nan")
     return normalized
 
 
@@ -308,6 +309,7 @@ class ActionDataset(Dataset):
         feature_selections=None,
         graph_validation=True,
         finite_outcome_target_family=None,
+        empty_window_target_family=None,
     ):
         from models.feature_masks import mask_node_inputs
         mask_settings = dict(locals())
@@ -340,6 +342,10 @@ class ActionDataset(Dataset):
                 break
         from datatools.pass_eligibility import independent_policy, failed_pass_reasons
         independent_passes = independent_policy(feature_metadata)
+        from datatools.empty_windows import enabled as empty_policy_enabled, DEFINITION as EMPTY_WINDOW_DEFINITION
+        exclude_empty_windows = (empty_policy_enabled(feature_metadata)
+                                 and empty_window_target_family in EMPTY_WINDOW_DEFINITION["families"]
+                                 and task.startswith("outcome_"))
         if independent_passes and min_pass_dur > 0:
             raise ValueError("--min_pass_dur must be 0 for independent receipt/observation inputs; failed passes use the three-clean-interval quality gate.")
         label_root = Path(label_dir)
@@ -485,6 +491,9 @@ class ActionDataset(Dataset):
                     _validate_diagnostic_labels(match_id, match_labels, diagnostic_labels)
                     match_labels = _copy_goal_next10_diagnostics(match_labels, diagnostic_labels)
 
+            if exclude_empty_windows:
+                from datatools.empty_windows import validate_labels as validate_empty_window_labels
+                validate_empty_window_labels(match_labels)
             match_labels = _normalize_label_width(match_labels)
             if pass_height_threshold is not None:
                 match_labels = relabel_height(match_labels, pass_height_threshold)
@@ -582,6 +591,17 @@ class ActionDataset(Dataset):
             condition &= labels[:, 6] != -1
 
         self.selection_counts["task_eligible_samples"] = int(condition.sum())
+        if exclude_empty_windows:
+            from datatools.empty_windows import validate_labels as validate_empty_window_labels, REASONS, REASON_COLUMN
+            empty = validate_empty_window_labels(labels)
+            count = int((condition & empty).sum())
+            self.selection_counts["excluded_by_empty_window"] = count
+            self.skipped_rows["empty_future_window"] = count
+            for code, reason in REASONS.items():
+                if code:
+                    self.selection_counts["excluded_by_empty_window:" + reason] = int(
+                        (condition & (labels[:, LABEL_INDEX[REASON_COLUMN]] == code)).sum())
+            condition &= ~empty
         if finite_outcome_target_family is not None and task.startswith("outcome_"):
             family = finite_outcome_target_family
             scoring = "scores" if family == "goal" else "scores_" + family
@@ -592,6 +612,13 @@ class ActionDataset(Dataset):
             self.selection_counts["excluded_by_missing_time_return"] = count
             self.skipped_rows["missing_time_return"] = count
             condition &= available
+        if exclude_empty_windows:
+            family = empty_window_target_family
+            names = ("scores_" + family,
+                     "concedes_goal_distance" if family == "progression" else "concedes_" + family)
+            columns = [LABEL_INDEX[name] for name in names]
+            if not torch.isfinite(labels[condition][:, columns]).all():
+                raise ValueError("Nonfinite outcome targets outside recorded empty windows; refresh the selected target family")
         if evaluation_filter == "pass":
             pass_rows = labels[:, LABEL_INDEX["is_pass"]] == 1
             self.selection_counts["excluded_by_filter"] = int((condition & ~pass_rows).sum())

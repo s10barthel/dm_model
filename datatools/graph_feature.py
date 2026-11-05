@@ -684,6 +684,9 @@ def build_match_for_feature_generation(
         **xt_options,
         **({"reception_policy": args.reception_policy} if hasattr(args, "reception_policy") else {}),
     )
+    if hasattr(args, "xt_feature_metadata"):
+        from datatools.empty_windows import enabled as empty_windows_enabled
+        match.exclude_empty_windows = empty_windows_enabled(args.xt_feature_metadata)
     if isinstance(getattr(match, "match_id", None), str):
         from datatools.xt_acquisitions import acquisition_context
         feature_root = get_feature_run_root(args.run_id) if getattr(args, "run_id", None) else FEATURE_DIR
@@ -1740,6 +1743,9 @@ def _process_match_generation_task(task: MatchGenerationTask) -> MatchGeneration
         events = prepare_pass_events(events, tracking, task.match_id, getattr(args, "max_pass_duration", None))
         atomic_parquet_save(events, endpoint_path)
     match = build_match_for_feature_generation(events, tracking, task.match_lineup, args)
+    from datatools.empty_windows import enabled as empty_windows_enabled
+    metadata_path = feature_root / "metadata.json"
+    match.exclude_empty_windows = (empty_windows_enabled(read_json(metadata_path)) if metadata_path.exists() else True)
     match.graph_validation = graph_validation_enabled(getattr(args, "graph_validation", True))
     match.graph_validation_stats = args._graph_validation_stats
     match.runtime_feature_root = feature_root

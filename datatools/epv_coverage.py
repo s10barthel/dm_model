@@ -154,8 +154,15 @@ def validate_labels(root, metadata, match_ids, label_dir, return_type, condition
             failures.append(f"{mid}: missing EPV labels at {label_path}")
             continue
         labels = torch.load(label_path, map_location="cpu", weights_only=True)
-        if (not isinstance(labels, torch.Tensor) or labels.ndim != 2
-                or labels.shape[1] <= max(columns) or not torch.isfinite(labels[:, columns]).all()):
+        if not isinstance(labels, torch.Tensor) or labels.ndim != 2 or labels.shape[1] <= max(columns):
+            failures.append(f"{mid}: EPV label columns are missing or nonfinite at {label_path}")
+            continue
+        from datatools.empty_windows import enabled, validate_labels as validate_empty_labels
+        empty = torch.zeros(len(labels), dtype=torch.bool)
+        if enabled(metadata):
+            empty = validate_empty_labels(labels)
+        if (not torch.isfinite(labels[~empty][:, columns]).all()
+                or (empty.any() and not labels[empty][:, columns].isnan().all())):
             failures.append(f"{mid}: EPV label columns are missing or nonfinite at {label_path}")
             continue
         try:
