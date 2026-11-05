@@ -132,6 +132,21 @@ For `A A A A A A B A`, action 0's window ends at action 6, inclusive. For
 `A B B B B A`, it ends at action 4, inclusive. Starting midway through an A
 sequence uses only its remainder and the next B sequence.
 
+`extended_possession_N` additionally limits the window to at most N future
+eligible actions strictly after the saved return anchor. N must be a positive
+integer. The initial action establishes the first possession and consumes no
+slot. Goal/xG returns retain its existing contribution in addition to the N
+future slots. Passes, crosses, and shots with missing target values still
+consume slots; other event types, including acquisition events, do not.
+
+The cap can end within either possession, including before any opponent action.
+The earliest of the cap, the possession endpoint, and the stop boundary wins.
+In `A A A A A A B A`, action 0 with `extended_possession_3` ends at action 3,
+while `extended_possession_6` and `extended_possession_20` both end at action 6.
+In `A B B B B A`, `extended_possession_3` ends at action 3. Plain
+`extended_possession` has no numerical action cap and retains its existing
+behavior. Capped and unlimited returns can coexist in the same feature run.
+
 The target aggregations match `next_N`: goal and combined xG returns include
 the initial eligible action, while xT, EPV, and goal-distance maxima use only
 eligible actions strictly after the saved return anchor. All supported target
@@ -146,7 +161,8 @@ There is no `_skip1` or `_spstop` name modifier for this return.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/generate_relevant_features.py `
-  --extend-feature-run-id <run> --return-type extended_possession
+  --extend-feature-run-id <run> --return-type extended_possession `
+  --return-type extended_possession_10
 ```
 
 ## Training and artifacts

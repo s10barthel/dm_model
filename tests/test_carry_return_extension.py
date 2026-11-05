@@ -20,7 +20,7 @@ def values(command, flag):
     return [command[i + 1] for i, value in enumerate(command) if value == flag]
 
 
-@pytest.mark.parametrize("return_type", ["next_5", "next_5+", "next_5+_skip1", "extended_possession"])
+@pytest.mark.parametrize("return_type", ["next_5", "next_5+", "next_5+_skip1", "extended_possession", "extended_possession_3"])
 @pytest.mark.parametrize("model", [False, True])
 def test_return_addition_schedules_every_carry_mode(return_type, model):
     modes = ["original", "angle_only", *(["model"] if model else [])]

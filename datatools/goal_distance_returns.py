@@ -8,7 +8,7 @@ def label_goal_distance_for_return_type(events, return_type):
     eligible = tuple(config.XT_ACTION_TYPES)
     if kind == "extended_possession":
         from datatools.possession_returns import label_extended_possession_events
-        return label_extended_possession_events(events, {"goal_distance"})
+        return label_extended_possession_events(events, {"goal_distance"}, max_actions=value)
     if kind == "next_plus":
         result = events.copy()
         result[["scores_goal_distance", "concedes_goal_distance"]] = float("nan")

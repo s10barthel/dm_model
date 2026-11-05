@@ -18,7 +18,7 @@ from datatools.xt_targets import (target_settings, surface_from_metadata, transf
                                   unavailable_xt_returns)
 from project_config import (XT_MATCH_DIR, atomic_write_json, get_action_label_dir,
                             get_intent_train_label_dir, get_augmented_label_dir,
-                            get_resolved_action_dir, get_success_intent_label_dir)
+                            get_resolved_action_dir, get_success_intent_label_dir, parse_return_type)
 from scripts.feature_extension_diagnostics import ExtensionAttempt
 
 TARGET_COLUMNS = [config.LABEL_INDEX[name] for name in ("scores_xt", "concedes_xt")]
@@ -183,12 +183,13 @@ def action_return_pairs(actions, events, *, source_columns=("scores_xT", "conced
         raise ValueError("Unknown action team perspective.")
     swap = selected.object_id.astype(str).str[:4].to_numpy() != teams
     pairs[swap] = pairs[swap, ::-1]
-    if return_type == "extended_possession":
+    kind, max_actions, _ = parse_return_type(return_type) if return_type is not None else (None, None, False)
+    if kind == "extended_possession":
         from datatools.possession_returns import extended_possession_targets
         family = {"scores": "goal", "scores_xg": "xg", "scores_xT": "xt",
                   "scores_goal_distance": "goal_distance", "scores_epv": "epv"}[source_columns[0]]
         names = ("scores", "concedes") if family == "goal" else ("scores_" + family, "concedes_" + family)
-        pairs = extended_possession_targets(actions, events, families={family})[list(names)].to_numpy()
+        pairs = extended_possession_targets(actions, events, families={family}, max_actions=max_actions)[list(names)].to_numpy()
     if not np.isfinite(pairs).all():
         raise ValueError(f"Non-finite computed returns: {source_columns}.")
     return pd.DataFrame(pairs, index=actions.index, columns=list(target_columns))

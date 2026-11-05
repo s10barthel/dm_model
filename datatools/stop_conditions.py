@@ -67,7 +67,7 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
         else:
             computed = event_returns(events, return_type, condition, surface_metadata)
     result = actions.copy()
-    kind = parse_return_type(return_type)[0]
+    kind, max_actions, _ = parse_return_type(return_type)
     families = {"xt"} if xt_only else set(target_families or [*FAMILY_SCORES, "progression"])
     selected_scores = {score for family, score in FAMILY_SCORES.items() if family in families}
     if "progression" in families:
@@ -76,7 +76,7 @@ def action_targets(actions, events, return_type, condition, settings, surface, s
     if kind == "extended_possession":
         from datatools.possession_returns import extended_possession_targets
         possession_targets = extended_possession_targets(actions, events, condition,
-            {family for family, score in FAMILY_SCORES.items() if score in selected_scores})
+            {family for family, score in FAMILY_SCORES.items() if score in selected_scores}, max_actions=max_actions)
     for score, source in PAIR_SOURCES.items():
         if score not in selected_scores:
             continue

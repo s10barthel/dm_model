@@ -106,7 +106,7 @@ def unavailable_xt_returns(surface_metadata, return_types):
 def validate_surface_returns(surface_metadata, return_types):
     unsupported = unavailable_xt_returns(surface_metadata, return_types)
     if unsupported:
-        raise ValueError(f"Log progression supports next_N[+][_skip1], extended_possession, and in_N returns only: {unsupported}.")
+        raise ValueError(f"Log progression supports next_N[+][_skip1], extended_possession[_N], and in_N returns only: {unsupported}.")
 
 
 def transform_action_targets(actions, pairs, settings=None, surface=None, *, events=None, return_type=None, stop_condition=None):

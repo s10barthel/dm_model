@@ -681,6 +681,13 @@ def validate_return_type(return_type: str) -> str:
         raise ValueError("return_type must be a non-empty string.")
     if value == "extended_possession":
         return value
+    if value.startswith("extended_possession_"):
+        raw_limit = value[len("extended_possession_"):]
+        if not raw_limit.isascii() or not raw_limit.isdecimal() or int(raw_limit) < 1:
+            raise ValueError(
+                f"Invalid possession return type: {return_type!r}. Expected extended_possession_<N> with N >= 1."
+            )
+        return value
 
     stop_at_set_pieces = value.endswith("_spstop")
     core_value = value[:-7] if stop_at_set_pieces else value
@@ -752,7 +759,7 @@ def validate_return_type(return_type: str) -> str:
     raise ValueError(
         f"Unsupported return_type {return_type!r}. Expected disc_<gamma>, disc_<gamma>_skip1, "
         "disc_max_<gamma>, disc_max_<gamma>_skip1, disc_poly_max_<b>_<z>, "
-        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, extended_possession, or in_<N>."
+        "disc_poly_max_<b>_<z>_spstop, next_<N>, next_<N>_skip1, extended_possession[_<N>], or in_<N>."
     )
 
 
@@ -772,7 +779,7 @@ def validate_return_type_for_target_family(
     if kind == "next_plus" and family != "xt":
         raise ValueError("next_N+ is supported only for target_family=xt.")
     if family == "progression" and kind not in {"next", "in", "extended_possession"}:
-        raise ValueError("progression supports only next_N, next_N_skip1, extended_possession, and in_N returns.")
+        raise ValueError("progression supports only next_N, next_N_skip1, extended_possession[_N], and in_N returns.")
     if kind == "in" and family not in {"xt", "goal_distance", "epv", "progression"}:
         raise ValueError(
             f"return_type={normalized!r} is only supported for target_family='xt', 'goal_distance', or 'epv', got {family!r}."
@@ -864,6 +871,8 @@ def parse_return_type(return_type: str) -> tuple[str, float | int | tuple[float,
     value = validate_return_type(return_type)
     if value == "extended_possession":
         return "extended_possession", None, False
+    if value.startswith("extended_possession_"):
+        return "extended_possession", int(value[len("extended_possession_"):]), False
     core_value = value[:-7] if value.endswith("_spstop") else value
     skip_first = core_value.endswith("_skip1")
     core_value = core_value[:-6] if skip_first else core_value

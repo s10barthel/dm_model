@@ -5,10 +5,10 @@ import pandas as pd
 from datatools.return_windows import PossessionWindows
 
 
-def extended_possession_targets(actions, events, condition=None, families=None):
+def extended_possession_targets(actions, events, condition=None, families=None, *, max_actions=None):
     """Raw action-perspective returns; the anchor establishes time, the action its team."""
     families = set(families if families is not None else ("goal", "xg", "xt", "goal_distance", "epv"))
-    windows = PossessionWindows(events, condition)
+    windows = PossessionWindows(events, condition, max_actions)
     indices = pd.Series(actions.index, index=actions.index)
     anchors = actions.get("return_event_index", indices).fillna(indices)
     positions = events.index.get_indexer(anchors)
@@ -31,10 +31,10 @@ def extended_possession_targets(actions, events, condition=None, families=None):
     return result
 
 
-def label_extended_possession_events(events, families=None):
+def label_extended_possession_events(events, families=None, *, max_actions=None):
     result = events.copy()
     known_team = events.object_id.astype(str).str[:4].isin(["home", "away"])
-    targets = extended_possession_targets(events.loc[known_team], events, families=families)
+    targets = extended_possession_targets(events.loc[known_team], events, families=families, max_actions=max_actions)
     targets = targets.reindex(events.index, fill_value=0.)
     targets = targets.rename(columns={"scores_xt": "scores_xT", "concedes_xt": "concedes_xT"})
     result[targets.columns] = targets

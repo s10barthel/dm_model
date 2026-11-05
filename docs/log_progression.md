@@ -93,7 +93,7 @@ pinned version with an evaluable surface; unversioned historical sidecars alone
 do not define a baseline.
 
 Logarithmic progression supplies xT targets for `next_N`, `next_N_skip1`,
-`next_N+`, `next_N+_skip1`, `extended_possession`, and `in_N`. Discounted returns remain in the run for other target families; their
+`next_N+`, `next_N+_skip1`, `extended_possession[_N]`, and `in_N`. Discounted returns remain in the run for other target families; their
 `scores_xt` and `concedes_xt` labels are `NaN`. Feature metadata and the refresh
 report list them in `xt_unavailable_return_types`. A mixed-return refresh must
 create a derived run, preserving the source run's discounted xT labels. A later

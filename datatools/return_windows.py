@@ -36,15 +36,46 @@ def bounded_returns(events, condition, labeler):
     return pd.concat(parts).reindex(events.index) if parts else labeler(events)
 
 
+def _range_aggregates(values, starts, ends, aggregation):
+    """Reduce half-open ranges with a segment tree, including partial possessions."""
+    identity = -np.inf if aggregation == "max" else 0.
+    values = np.where(np.isfinite(values), values, identity)
+
+    def combine(left, right):
+        return np.maximum(left, right) if aggregation == "max" else 1 - (1 - left) * (1 - right)
+
+    size = 1 << (len(values) - 1).bit_length()
+    tree = np.full(2 * size, identity)
+    tree[size:size + len(values)] = values
+    width = size // 2
+    while width:
+        tree[width:2 * width] = combine(tree[2 * width:4 * width:2], tree[2 * width + 1:4 * width:2])
+        width //= 2
+    left, right = starts + size, ends + size
+    reduced = np.full(len(starts), identity)
+    while (left < right).any():
+        take_left = (left < right) & (left % 2 == 1)
+        reduced[take_left] = combine(reduced[take_left], tree[left[take_left]])
+        left[take_left] += 1
+        take_right = (left < right) & (right % 2 == 1)
+        right[take_right] -= 1
+        reduced[take_right] = combine(reduced[take_right], tree[right[take_right]])
+        left //= 2
+        right //= 2
+    return np.where(np.isfinite(reduced), reduced, 0.)
+
+
 class PossessionWindows:
     """Current team sequence plus the next opponent sequence, within stop boundaries.
 
     Eligibility depends only on action type and team, never on target availability.
     Bounds index the eligible timeline. Per-run suffix aggregates keep long
-    possession windows linear to prepare and constant-time to reduce.
+    possession windows linear to prepare and constant-time to reduce. Capped
+    windows use range queries only when the cap cuts a possession short.
     """
 
-    def __init__(self, events, condition=None):
+    def __init__(self, events, condition=None, max_actions=None):
+        self.max_actions = max_actions
         self.teams = events.object_id.astype(str).str[:4].to_numpy()
         self.eligible = np.flatnonzero(events.spadl_type.isin(config.XT_ACTION_TYPES).to_numpy()
                                       & np.isin(self.teams, ["home", "away"]))
@@ -75,7 +106,10 @@ class PossessionWindows:
         same[valid] = self.teams[self.eligible[starts[valid]]] == teams[valid]
         second = same & (ends < limits)
         ends[second] = self.run_ends[ends[second]]
-        return starts, np.minimum(ends, limits)
+        ends = np.minimum(ends, limits)
+        if self.max_actions is not None:
+            ends = np.minimum(ends, starts + min(self.max_actions, len(self.eligible)))
+        return starts, ends
 
     def select(self, anchor, team):
         starts, ends = self.bounds([anchor], [team])
@@ -99,12 +133,20 @@ class PossessionWindows:
             suffix[i] = value
         pairs = np.zeros((len(anchors), 2))
         rows = np.flatnonzero(starts < ends)
+        truncated_ranges = []
         for _ in range(2):
             sides = (self.teams[self.eligible[starts[rows]]] != teams[rows]).astype(int)
             reduced = suffix[starts[rows]]
             pairs[rows, sides] = np.where(np.isfinite(reduced), reduced, 0.)
+            truncated = ends[rows] < self.run_ends[starts[rows]]
+            if truncated.any():
+                selected_rows = rows[truncated]
+                truncated_ranges.append((selected_rows, sides[truncated], starts[selected_rows].copy(), ends[selected_rows]))
             starts[rows] = self.run_ends[starts[rows]]
             rows = rows[starts[rows] < ends[rows]]
+        if truncated_ranges:
+            rows, sides, range_starts, range_ends = (np.concatenate(parts) for parts in zip(*truncated_ranges))
+            pairs[rows, sides] = _range_aggregates(selected, range_starts, range_ends, aggregation)
         if include_anchor:
             eligible_anchor = np.isin(anchors, self.eligible)
             rows = np.flatnonzero(eligible_anchor & np.isfinite(values[anchors]))
@@ -175,8 +217,8 @@ def _acquisition_baseline(windows, acquisition, surface):
     return float(surface.predict_xy(x, y))
 
 
-def _possession_xt_windows(actions, windows, surface, condition):
-    possessions = PossessionWindows(windows.events, condition)
+def _possession_xt_windows(actions, windows, surface, condition, max_actions=None):
+    possessions = PossessionWindows(windows.events, condition, max_actions)
     indices = pd.Series(actions.index, index=actions.index)
     anchors = windows.events.index.get_indexer(actions.get("return_event_index", indices).fillna(indices))
     if (anchors < 0).any():
@@ -208,7 +250,7 @@ def action_xt_windows(actions, events, return_type, surface=None, condition=None
     possession = kind == "extended_possession"
     windows = TurnoverWindows(events, (condition or "base") if possession else condition)
     if possession:
-        return _possession_xt_windows(actions, windows, surface, condition)
+        return _possession_xt_windows(actions, windows, surface, condition, n)
     values = pd.to_numeric(windows.events.xT, errors="coerce").to_numpy()
     pairs = np.zeros((len(actions), 2))
     baselines = np.zeros(len(actions))

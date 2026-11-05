@@ -239,7 +239,7 @@ class Match(ABC):
             return events
         if return_kind == "extended_possession":
             from datatools.possession_returns import label_extended_possession_events
-            events = label_extended_possession_events(events, {"goal", "xg", "epv"})
+            events = label_extended_possession_events(events, {"goal", "xg", "epv"}, max_actions=return_value)
         elif return_kind == "next_plus":
             for column in ("scores", "concedes", "scores_xg", "concedes_xg", "scores_epv", "concedes_epv"):
                 events[column] = np.nan
@@ -753,7 +753,8 @@ class Match(ABC):
         assign_return_pair("scores_epv", "concedes_epv", "scores_epv", "concedes_epv", self.events)
         if return_kind == "extended_possession":
             from datatools.possession_returns import extended_possession_targets
-            targets = extended_possession_targets(self.actions, self.events, getattr(self, "stop_condition", None))
+            targets = extended_possession_targets(self.actions, self.events, getattr(self, "stop_condition", None),
+                                                  max_actions=return_value)
             self.actions[targets.columns] = targets
         from datatools.xt_targets import transform_action_targets, unavailable_xt_returns
         if unavailable_xt_returns(getattr(self, "xt_surface_metadata", None), [return_type]):

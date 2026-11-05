@@ -23,7 +23,7 @@ from scripts.feature_extension_diagnostics import ExtensionAttempt
 
 RETURNS = ["next_3", "next_3_skip1", "in_1", "disc_0.9", "disc_0.9_skip1",
            "disc_max_0.9", "disc_max_0.9_skip1", "disc_poly_max_0.1_1", "disc_poly_max_0.1_1_spstop",
-           "extended_possession"]
+           "extended_possession", "extended_possession_1", "extended_possession_3"]
 
 
 @pytest.mark.parametrize("return_type", ["next_3", "next_3_skip1", "in_1"])
