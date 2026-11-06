@@ -19,7 +19,9 @@ from test_goal_context import source
 def test_fresh_cli_all_tasks_default_to_disk(tmp_path, monkeypatch, task, architecture, ipw_model_id=None, keep_cache=False):
     import project_config as pc
     features, labels = tmp_path / "features", tmp_path / "labels"
-    features.mkdir(exist_ok=True); labels.mkdir(exist_ok=True)
+    if task.startswith("outcome_"):
+        labels = tmp_path / "labels" / "base" / "labels"
+    features.mkdir(exist_ok=True); labels.mkdir(parents=True, exist_ok=True)
     ids = [f"m{i}" for i in range(5)]
     for match in ids:
         graph, label = source(task=task)
@@ -31,6 +33,10 @@ def test_fresh_cli_all_tasks_default_to_disk(tmp_path, monkeypatch, task, archit
         torch.save(torch.stack([label, label.clone()]), labels / (match + ".pt"))
     manifest = dict(manifest_id="fixture", train=ids, test=[], metadata={"train_size": 5})
     monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: None)
+    if task.startswith("outcome_"):
+        monkeypatch.setattr(pc, "resolve_feature_run_id", lambda *a, **kw: "fixture")
+        monkeypatch.setattr(pc, "load_feature_run_metadata", lambda *a, **kw: {
+            "stop_conditions": {"version": 1, "available": {"next_10": ["base"]}}})
     monkeypatch.setattr(pc, "resolve_feature_root", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(pc, "resolve_artifact_split", lambda *a, **kw: (manifest, "fixture"))
     monkeypatch.setattr(pc, "get_model_run_root", lambda task, run_id: tmp_path / "saved" / task / run_id)

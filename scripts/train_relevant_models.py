@@ -1350,11 +1350,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.resume_id:
         supplied = sys.argv[1:] if argv is None else argv
-        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--graph-validation", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
+        invalid = [token for token in supplied if token.startswith("--") and token.split("=", 1)[0] not in ("--resume-id", "--dataset-preparation-workers", "--dataset-worker-threads", "--interim-metrics", "--graph-validation", "--keep-cache", "--monitoring", "--batch-loader", "--crash-dump", "--procdump-path", "--pass-height-threshold", "--goal-nodes", "--goal-nodes-aware", "--no-goal-nodes", "--action-intent-include-goals", "--no-action-intent-include-goals")]
         if invalid:
             parser.error("--resume-id restores saved settings; only runtime options and matching pass-height or goal settings may accompany it. Conflicts: " + ", ".join(invalid))
         if not any(token.split("=", 1)[0] == "--batch-loader" for token in supplied):
             args.batch_loader = None
+        for name in ("dataset_preparation_workers", "dataset_worker_threads", "interim_metrics"):
+            if not any(token.split("=", 1)[0] == "--" + name.replace("_", "-") for token in supplied):
+                setattr(args, name, None)
         return args
     try:
         validate_learning_rates(args.start_lr, args.min_lr)
@@ -2068,6 +2071,7 @@ def build_training_commands(
         command = _replace_cli_value(command, "--accumulation-steps", getattr(args, "accumulation_steps", 1))
         command = _replace_cli_value(command, "--monitoring", getattr(args, "monitoring", "off"))
         command = _replace_cli_value(command, "--batch-loader", getattr(args, "batch_loader", None) or "auto")
+        command = _replace_cli_value(command, "--interim-metrics", getattr(args, "interim_metrics", "loss"))
         if getattr(args, "pass_height_threshold", None) is not None:
             command = _replace_cli_value(command, "--pass-height-threshold", args.pass_height_threshold)
         commands[index] = command
@@ -2270,6 +2274,10 @@ def _main(cli_args) -> None:
         command.extend(graph_validation_flags(cli_args))
         if cli_args.batch_loader is not None:
             command.extend(["--batch-loader", cli_args.batch_loader])
+        for name in ("dataset_preparation_workers", "dataset_worker_threads", "interim_metrics"):
+            value = getattr(cli_args, name, None)
+            if value is not None:
+                command.extend(["--" + name.replace("_", "-"), str(value)])
         if getattr(cli_args, "keep_cache", False):
             command.append("--keep-cache")
         print("Resuming:", subprocess.list2cmdline(command))

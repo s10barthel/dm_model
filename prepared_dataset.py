@@ -125,6 +125,45 @@ def loaded_preprocessing_fingerprint(options=None):
     return _fingerprint_from_digests(paths, LOADED_PREPARATION_FILE_DIGESTS)
 
 
+def _preparation_stats(graph_validation):
+    from datatools.graph_validation import validation_stats
+    return {"built": 0, "reused": 0, "bytes": 0, "packing_seconds": 0.0,
+            "transform_seconds": 0.0, "save_and_hash_seconds": 0.0,
+            "graph_validation": validation_stats(graph_validation)}
+
+
+def _prepare_match(task, settings):
+    """Only paths/options enter a worker; only compact metadata leaves it."""
+    match_id, signatures, path, _ = task
+    builder = PreparedActionDataset.__new__(PreparedActionDataset)
+    for name in ("feature_dir", "label_dir", "options", "cache_root", "cache_id"):
+        setattr(builder, name, settings[name])
+    builder.preparation = _preparation_stats(builder.options["graph_validation"])
+    builder.skipped_matches = {}
+    workflow = None
+    try:
+        builder.cache_session = settings.get("session_object")
+        if builder.cache_session is None:
+            workflow = CacheWorkflow.attached(settings["session"])
+            builder.cache_session = workflow.session_for(settings["cache_dir"])
+        with builder.cache_session.entry(path):
+            entry = builder._read_entry(path, match_id, signatures)
+            built = entry is None
+            if built:
+                rng = capture_rng()
+                try:
+                    entry = builder._build_entry(match_id, signatures, path)
+                finally:
+                    restore_rng(rng)
+            if entry is not None:
+                builder.cache_session.recorded(path, built=built, size=entry["bytes"])
+                builder.preparation["built" if built else "reused"] += 1
+        return match_id, entry, builder.preparation, builder.skipped_matches
+    finally:
+        if workflow is not None:
+            workflow.release()
+
+
 # Compatibility export for provenance that records the standard preparation
 # code. Dataset cache identities use the option-sensitive value below.
 LOADED_PREPROCESSING_FINGERPRINT = loaded_preprocessing_fingerprint()
@@ -134,7 +173,8 @@ class PreparedActionDataset(IterableDataset):
     """Only metadata survives preparation; at most one group is loaded per iterator."""
 
     def __init__(self, match_ids, *, feature_dir, label_dir, cache_dir=DEFAULT_CACHE_DIR,
-                 buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None, **options):
+                 buffer_matches=4, shuffle=False, seed=100, progress=True, cache_session=None,
+                 preparation_workers=1, worker_threads=1, **options):
         super().__init__()
         assert_feature_paths_usable(feature_dir, label_dir, options.get("diagnostic_label_dir"),
                                     options.get("pass_height_diagnostic_label_dir"))
@@ -142,6 +182,8 @@ class PreparedActionDataset(IterableDataset):
             raise ValueError(f"Prepared datasets do not support task {options.get('task')!r}.")
         if int(buffer_matches) < 1:
             raise ValueError("buffer_matches must be positive")
+        if int(preparation_workers) < 1 or int(worker_threads) < 1:
+            raise ValueError("preparation_workers and worker_threads must be positive")
         self.buffer_matches = int(buffer_matches) if shuffle else 1
         self.shuffle, self.seed, self.epoch = bool(shuffle), int(seed), 0
         self.requested_match_ids = [str(m) for m in match_ids]
@@ -174,9 +216,16 @@ class PreparedActionDataset(IterableDataset):
         loaded_code = loaded_preprocessing_fingerprint(self.options)
         if preprocessing_fingerprint(self.options) != loaded_code:
             raise RuntimeError("Preprocessing code changed since import; restart cache preparation with stable code.")
+        cache_options = dict(self.options)
+        self.preparation_profile = self.options["task"]
+        if self.options["task"] in {"outcome_scoring", "outcome_conceding"}:
+            # Both views retain the complete label tensor and have the same
+            # eligibility/graph transformations. Target selection happens later.
+            cache_options["task"] = "outcome_scoring"
+            self.preparation_profile = "outcome_pair_v1"
         self.identity = {"version": CACHE_VERSION, "code": loaded_code,
                          "feature_dir": str(self.feature_dir), "label_dir": str(self.label_dir),
-                         "options": self.options}
+                         "options": cache_options}
         self.cache_id = _digest(self.identity)
         # Library callers retain their caches; CLI training supplies workflow ownership.
         self.cache_session = cache_session or CacheWorkflow(cache_dir, keep=True, kind="library").session_for(cache_dir)
@@ -185,9 +234,8 @@ class PreparedActionDataset(IterableDataset):
         self.loaded_match_ids, self.contributing_match_ids = [], []
         self.skipped_matches, self.skipped_rows = {}, {}
         self.entries = []
-        self.preparation = {"built": 0, "reused": 0, "bytes": 0, "packing_seconds": 0.0,
-                            "transform_seconds": 0.0, "save_and_hash_seconds": 0.0,
-                            "graph_validation": validation_stats(self.options["graph_validation"])}
+        self.preparation = _preparation_stats(self.options["graph_validation"])
+        self.preparation.update(workers=int(preparation_workers), worker_threads=int(worker_threads))
         self.last_iteration_seconds = 0.0
         self.last_load_seconds = 0.0
         self._reconstruction_timing = {"seconds": 0.0}
@@ -204,30 +252,24 @@ class PreparedActionDataset(IterableDataset):
                   f"{sum(not exists for _, _, _, exists in pending)} to build; "
                   f"estimated additional disk {missing_bytes * 1.15 / 1024**3:.2f} GiB.", flush=True)
         self._check_space(math.ceil(missing_bytes * 1.15))
-        for match_id, signatures, path, _ in tqdm(pending, desc="Preparing match cache", disable=not progress):
-            with self.cache_session.entry(path):
-                entry = self._read_entry(path, match_id, signatures)
-                built = entry is None
-                if built:
-                    rng = capture_rng()
-                    try:
-                        entry = self._build_entry(match_id, signatures, path)
-                    finally:
-                        restore_rng(rng)
-                    self.preparation["built"] += int(entry is not None)
-                else:
-                    self.preparation["reused"] += 1
-                if entry is not None:
-                    self.cache_session.recorded(path, built=built, size=entry["bytes"])
-            if entry is None:
-                continue
-            self.loaded_match_ids.append(match_id)
-            for reason, count in entry["skipped_rows"].items():
-                self.skipped_rows[reason] = self.skipped_rows.get(reason, 0) + count
-            self.preparation["bytes"] += entry["bytes"]
-            if entry["count"]:
-                self.contributing_match_ids.append(match_id)
-                self.entries.append(entry)
+        from datatools.worker_runtime import map_tasks
+        from datatools.graph_validation import merge_validation_stats
+        settings = {name: getattr(self, name) for name in
+                    ("feature_dir", "label_dir", "options", "cache_root", "cache_id")}
+        settings.update(session=self.cache_session.descriptor, cache_dir=str(Path(cache_dir).resolve()))
+        if int(preparation_workers) == 1 or len(pending) < 2:
+            settings["session_object"] = self.cache_session
+        with contextlib.closing(map_tasks(_prepare_match, pending, int(preparation_workers),
+                                         int(worker_threads), shared_args=(settings,))) as results:
+            for match_id, entry, stats, skipped in tqdm(results, total=len(pending),
+                    desc="Preparing match cache", disable=not progress):
+                self.skipped_matches.update(skipped)
+                for key in ("built", "reused", "packing_seconds", "transform_seconds", "save_and_hash_seconds"):
+                    self.preparation[key] += stats[key]
+                self.preparation["graph_validation"] = merge_validation_stats(
+                    [self.preparation["graph_validation"], stats["graph_validation"]],
+                    self.options["graph_validation"])
+                self._accept_entry(match_id, entry)
         self.sample_count = 0
         for entry in self.entries:
             entry["offset"] = self.sample_count
@@ -237,6 +279,17 @@ class PreparedActionDataset(IterableDataset):
         if progress:
             print(f"Prepared {self.sample_count:,} samples; cache {self.preparation['bytes'] / 1024**3:.2f} GiB; "
                   f"preparation {self.preparation['seconds']:.1f}s.", flush=True)
+
+    def _accept_entry(self, match_id, entry):
+        if entry is None:
+            return
+        self.loaded_match_ids.append(match_id)
+        for reason, count in entry["skipped_rows"].items():
+            self.skipped_rows[reason] = self.skipped_rows.get(reason, 0) + count
+        self.preparation["bytes"] += entry["bytes"]
+        if entry["count"]:
+            self.contributing_match_ids.append(match_id)
+            self.entries.append(entry)
 
     def _source_signatures(self, match_id):
         paths = [self.feature_dir / f"{match_id}.pt", self.label_dir / f"{match_id}.pt"]
@@ -411,7 +464,8 @@ class PreparedActionDataset(IterableDataset):
         return {"mode": "disk", "format": FORMAT, "version": CACHE_VERSION, "cache_id": self.cache_id, "cache_root": str(self.cache_root),
                 "pass_height_threshold_meters": self.pass_height_threshold,
                 "buffer_matches": self.buffer_matches, "shuffle": "match_groups" if self.shuffle else "sequential",
-                "sample_count": len(self), "preparation": dict(self.preparation),
+                "sample_count": len(self), "preparation_profile": self.preparation_profile,
+                "preparation": dict(self.preparation),
                 "last_load_seconds": self.last_load_seconds,
                 "last_reconstruct_seconds": self.last_reconstruct_seconds,
                 "last_load_and_reconstruct_seconds": self.last_load_seconds + self.last_reconstruct_seconds}

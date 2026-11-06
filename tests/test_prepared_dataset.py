@@ -86,6 +86,82 @@ def test_equivalence_and_reuse(tmp_path, artifacts, task):
     assert reused.preparation["reused"] == 2
 
 
+def test_spawn_preparation_preserves_samples_rng_order_and_cleanup(tmp_path, artifacts):
+    from cache_lifetime import CacheWorkflow
+    from training_state import capture_rng
+    ids = ["m3", "missing", "m1", "m0"]
+    serial = make_disk(tmp_path, artifacts, ids, shuffle=True, seed=7)
+    root = tmp_path / "parallel"
+    workflow = CacheWorkflow(root)
+    before = capture_rng()
+    parallel = prepared.PreparedActionDataset(ids, cache_dir=root, progress=False,
+        preparation_workers=2, worker_threads=1, cache_session=workflow.session_for(root),
+        shuffle=True, seed=7, **artifacts)
+    after = capture_rng()
+    assert torch.equal(before["torch"], after["torch"])
+    assert before["python"] == after["python"]
+    assert parallel.loaded_match_ids == serial.loaded_match_ids
+    assert parallel.skipped_matches == serial.skipped_matches
+    assert parallel.skipped_rows == serial.skipped_rows
+    assert [e["offset"] for e in parallel.entries] == [e["offset"] for e in serial.entries]
+    assert parallel.preparation["built"] == serial.preparation["built"] == 3
+    for left, right in zip(serial, parallel):
+        assert_sample_equal(left, right)
+    reused = prepared.PreparedActionDataset(ids, cache_dir=root, progress=False,
+        preparation_workers=2, cache_session=workflow.session_for(root), **artifacts)
+    assert reused.preparation["reused"] == 3 and reused.preparation["built"] == 0
+    report = workflow.finish(True)
+    assert report["roots"][0]["created_entries"] == 3
+    assert report["roots"][0]["deleted_entries"] == len(ids)  # includes the absent match's claim
+    assert not list(root.rglob("*.pt"))
+
+
+@pytest.mark.parametrize("goals", [False, True])
+def test_outcome_pair_shares_only_equivalent_preparation(tmp_path, goals):
+    from test_goal_context import source, settings
+    from models.dataset_config import build_action_dataset_kwargs
+    features, labels = tmp_path / "features", tmp_path / "labels"
+    features.mkdir(); labels.mkdir()
+    graph, label = source(task="outcome_scoring")
+    torch.save([graph], features / "m.pt")
+    torch.save(label[None], labels / "m.pt")
+    datasets = []
+    for task in ("outcome_scoring", "outcome_conceding"):
+        options = build_action_dataset_kwargs(settings(task, goals), train=True,
+                     diagnostic_label_dir=None, require_goal_next10_diagnostics=False)
+        eager = ActionDataset(["m"], feature_dir=features, label_dir=labels, **options)
+        disk = prepared.PreparedActionDataset(["m"], feature_dir=features, label_dir=labels,
+                   cache_dir=tmp_path / "cache", progress=False, **options)
+        assert len(eager) == len(disk) > 0
+        for i, sample in enumerate(disk):
+            assert_sample_equal(sample, eager[i])
+        datasets.append(disk)
+    assert datasets[0].cache_id == datasets[1].cache_id
+    assert datasets[1].preparation["reused"] == 1
+    changed = prepared.PreparedActionDataset(["m"], feature_dir=features, label_dir=labels,
+                 cache_dir=tmp_path / "cache", progress=False, **dict(options, min_pass_dur=2))
+    assert changed.cache_id != datasets[0].cache_id
+
+
+def test_parallel_failure_retains_completed_entries_for_retry(tmp_path, artifacts):
+    from cache_lifetime import CacheWorkflow
+    graphs = torch.load(artifacts["feature_dir"] / "m0.pt", weights_only=False)
+    graphs[0].edge_index[0, 0] = 9999
+    torch.save(graphs, artifacts["feature_dir"] / "bad.pt")
+    torch.save(torch.load(artifacts["label_dir"] / "m0.pt", weights_only=False),
+               artifacts["label_dir"] / "bad.pt")
+    root = tmp_path / "workers"
+    workflow = CacheWorkflow(root)
+    with pytest.raises((ValueError, RuntimeError)):
+        prepared.PreparedActionDataset(["m0", "m1", "bad"], cache_dir=root, progress=False,
+            preparation_workers=2, cache_session=workflow.session_for(root), **artifacts)
+    report = workflow.finish(False)
+    assert report["status"] == "failed" and list(root.rglob("*.pt"))
+    assert not list(root.rglob("*.tmp"))
+    retry = prepared.PreparedActionDataset(["m0", "m1"], cache_dir=root, progress=False, **artifacts)
+    assert retry.preparation["reused"] >= 1
+
+
 def test_speed_mask_equivalence_and_cache_identity(tmp_path, artifacts):
     source = artifacts["feature_dir"] / "m0.pt"
     graphs = torch.load(source, weights_only=False)
@@ -202,6 +278,7 @@ def test_cli_and_unsupported_modes():
     assert resolve_dataset_loading(args.dataset_loading, "pass_intent") == "disk"
     assert all(resolve_dataset_loading(args.dataset_loading, task) == "disk" for task in PREPARED_TASKS)
     assert not args.keep_cache
+    assert args.dataset_preparation_workers == args.dataset_worker_threads == 1
     assert "--keep-cache" in dataset_loading_flags(parser.parse_args(["--keep-cache"]))
     assert dataset_loading_flags(args)[3] == "4"
     assert resolve_dataset_loading("disk", "pass_success", "some/model") == "disk"
@@ -210,6 +287,8 @@ def test_cli_and_unsupported_modes():
             resolve_dataset_loading("disk", task, ipw)
     with pytest.raises(SystemExit):
         parser.parse_args(["--dataset-buffer-matches", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dataset-preparation-workers", "0"])
 
 
 def test_empty_skipped_and_worker_guard(tmp_path, artifacts):
@@ -451,10 +530,15 @@ def test_wrapper_forwards_keep_cache_to_every_task():
     from scripts import train_relevant_models as wrapper
     from test_success_intent_mode_independent import make_training_args
     args = make_training_args("feature_run", pass_success_ipw=False, keep_cache=True)
+    args.dataset_preparation_workers, args.dataset_worker_threads = 2, 1
+    args.interim_metrics = "full"
     with patch.object(wrapper, "resolve_feature_run_id", return_value="feature_run"), \
          patch.object(wrapper, "resolve_feature_root", return_value=Path("fixture_features")):
         commands = wrapper.build_training_commands(args)[0]
     assert commands and all("--keep-cache" in command for command in commands)
+    assert all(wrapper.get_cli_value(c, "--dataset-preparation-workers") == "2" for c in commands)
+    assert all(wrapper.get_cli_value(c, "--dataset-worker-threads") == "1" for c in commands)
+    assert all(wrapper.get_cli_value(c, "--interim-metrics") == "full" for c in commands)
 
 
 def test_full_split_verifier_resumes_owned_entries_and_cleans_up(tmp_path, artifacts, monkeypatch):

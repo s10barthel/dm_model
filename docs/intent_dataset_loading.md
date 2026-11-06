@@ -82,6 +82,8 @@ These options work in `train.py`, `scripts/train_relevant_models.py`, and
 | --- | --- | --- |
 | `--dataset-loading` | `auto` | `auto` selects disk for all eight supported tasks in fresh runs; `memory` explicitly selects the full in-memory loader; `disk` requires a supported task. |
 | `--dataset-buffer-matches` | `4` | Number of prepared matches mixed during training. Must be positive. Validation always reads one match at a time. |
+| `--dataset-preparation-workers` | `1` | CPU processes preparing independent matches before training. See the worker-count benchmark for timing and memory guidance. |
+| `--dataset-worker-threads` | `1` | Native tensor/BLAS threads per spawned preparation worker; the single-process training thread setting is preserved. |
 | `--dataset-cache-dir` | `data/cache/intent_datasets` under the repository | Shared cache location; the historical directory name remains for compatibility. A different drive can be used. |
 | `--keep-cache` | Disabled | Keep prepared graph/label caches after the complete workflow succeeds. |
 
@@ -255,3 +257,33 @@ entries, freeing 38.66 GiB, with zero retained graph bytes or cleanup errors.
 Reports, resource telemetry and the verification log are retained locally under
 `tmp/outcome_scoring_cache_verification_20261014/`. The source model run and its
 feature/label artifacts were not modified.
+
+
+## Parallel preparation and shared outcome caches
+
+Append `--dataset-preparation-workers 8 --dataset-worker-threads 1` to a new
+training command to prepare matches in a bounded Windows-spawn process pool.
+Eight workers were fastest on this 32 GiB workstation when otherwise idle; see
+[the extended worker-count sweep](training_optimizations_20261106.md).
+Workers load and write their own match files and return metadata in source
+order. Epoch iteration still uses zero DataLoader workers. Each worker can hold
+source graphs, transformed graphs, and a packed payload; memory grows with worker
+count. One process remains the default. Preparation timers for transformation,
+packing, and saving sum work across workers; `seconds` is elapsed wall time.
+
+Different entries build under independent OS locks. Short root locks protect
+ownership bookkeeping, and workflow/worker reader claims protect entries from
+cleanup. Concurrent requests for the same entry serialize validation and
+publication. Failed preparation retains completed entries for retry. Small lock
+and ownership files remain after graph-cache cleanup.
+
+Scoring and conceding share the `outcome_pair_v1` preparation profile when every
+other resolved dataset option and source path matches. Both views retain all
+label columns; the training loop selects the scoring or conceding target. Other
+tasks remain distinct. Requested task metadata is preserved.
+
+This update changes preparation code fingerprints and requires one rebuild of
+older prepared caches. Existing unfinished checkpoints remain subject to code
+compatibility checks; completed model artifacts remain readable. IPW inference
+fingerprints now also cover candidate grouping code, so old probability entries
+can require recomputation.

@@ -67,6 +67,30 @@ def test_overlapping_workflows_defer_cleanup(tmp_path):
     assert not path.exists()
 
 
+def test_distinct_entries_can_build_while_another_entry_is_locked(tmp_path):
+    workflow = CacheWorkflow(tmp_path)
+    session = workflow.session_for(tmp_path)
+    path = tmp_path / ("a" * 32) / ("a" * 32 + ".pt")
+    code = '''import sys
+from pathlib import Path
+from cache_lifetime import CacheWorkflow
+root = Path(sys.argv[1])
+w = CacheWorkflow(root)
+s = w.session_for(root)
+p = root / ('a' * 32) / ('b' * 32 + '.pt')
+with s.entry(p):
+ p.parent.mkdir(exist_ok=True)
+ p.write_bytes(b'graphs')
+ s.recorded(p, built=True, size=6)
+w.finish(True)
+'''
+    with session.entry(path):
+        result = subprocess.run([sys.executable, "-c", code, str(tmp_path)],
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+    workflow.finish(True)
+
+
 def test_multiple_roots_and_path_checks(tmp_path):
     root, other = tmp_path / "first", tmp_path / "other"
     workflow = CacheWorkflow(root)

@@ -137,6 +137,21 @@ def test_split_normalization_alignment_and_pass_height(setup):
     assert len(height_weights) == len(height) > 0
 
 
+def test_cached_ipw_reads_packed_identities_without_graph_reconstruction(setup, tmp_path, monkeypatch):
+    from prepared_dataset import PreparedActionDataset
+    from packed_graphs import PackedGraphs
+    create, _, features, labels, options, _ = setup
+    disk = PreparedActionDataset(["m0", "m1"], feature_dir=features, label_dir=labels,
+               cache_dir=tmp_path / "graphs", progress=False, **options)
+    expected, _ = create().prepare(disk, ["m0", "m1"])
+    def no_graph(*_):
+        raise AssertionError("Reconstructed a graph for an IPW cache hit")
+    monkeypatch.setattr(PackedGraphs, "__getitem__", no_graph)
+    actual, stats = create().prepare(disk, ["m0", "m1"])
+    assert stats["hits"] == 2 and stats["misses"] == 0
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("dependency_speed", [False, True])
 def test_speed_uses_dependency_inputs_and_distinct_cache(setup, monkeypatch, dependency_speed):
     create, _, features, labels, options, _ = setup

@@ -66,6 +66,7 @@ the existing model/feature selection options:
 | `--accumulation-steps INT` | `1` | Physical batches per optimizer update, for every selected model |
 | `--monitoring {off,light,on}` | `off` | Sampled telemetry (`light`) or full telemetry and collation diagnostics (`on`) |
 | `--batch-loader {auto,pyg}` | `auto` | Direct packed batching with PyG fallback, or the existing loader |
+| `--interim-metrics {loss,full}` | `loss` | Print running losses/counters during training, or additionally recalculate cumulative probability metrics |
 | `--keep-cache` | Disabled | Retain prepared graph caches after successful workflow completion |
 | `--ipw-batch-size INT` | `256` | IPW inference batch size, independent of training |
 | `--ipw-probability-cache {on,off}` | `on` | Reuse per-match propensity probabilities |
@@ -342,3 +343,20 @@ unfinished checkpoint from older training code may still be rejected.
 
 The runtime reader changes neither the model nor transfer, pinning, precision,
 thread, metric or batch-size defaults. CPU prefetch remains deferred.
+
+
+## Runtime optimizations, November 2026
+
+Console progress defaults to `--interim-metrics loss`. Every epoch still computes
+and saves its complete metrics. `--interim-metrics full` restores cumulative
+probability metrics at each progress update. This operational option, preparation
+worker count, and worker thread count can be explicitly overridden on resume or
+source refit. Resume otherwise retains saved settings.
+
+Packed batching gathers equal-size tensor samples in bulk and keeps the existing
+path for variable-size fields and unsupported schemas. Candidate layouts group
+eligible nodes once per batch, preserving candidate order and ranking ties. IPW
+extracts grouped probabilities with a CPU transfer per batch, and probability
+cache hits read packed identity fields without constructing graph objects.
+Weighted-BCE class counts use label tensors instead of iterating graph objects.
+See [measurements and reproduction](training_optimizations_20261106.md).

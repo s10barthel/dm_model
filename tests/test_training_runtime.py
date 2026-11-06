@@ -137,6 +137,10 @@ def test_runtime_options_and_resume_conflicts():
     from scripts.train_relevant_models import parse_args
     parsed = parse_args(["--resume-id", "pass_intent/a", "--monitoring", "on"])
     assert parsed.monitoring == "on" and parsed.accumulation_steps == 1
+    parsed = parse_args(["--resume-id", "pass_intent/a", "--dataset-preparation-workers", "2",
+                         "--dataset-worker-threads", "1", "--interim-metrics", "full"])
+    assert parsed.dataset_preparation_workers == 2 and parsed.dataset_worker_threads == 1
+    assert parsed.interim_metrics == "full"
     for flag, value in (("--batch-size", "128"), ("--start_lr", ".001"), ("--accumulation-steps", "2")):
         with pytest.raises(SystemExit):
             parse_args(["--resume-id", "pass_intent/a", flag, value])
@@ -149,6 +153,13 @@ def test_runtime_options_and_resume_conflicts():
     for start, minimum in ((0, .1), (.01, .1), (float("nan"), .01)):
         with pytest.raises(ValueError):
             validate_learning_rates(start, minimum)
+
+
+def test_spawn_import_does_not_parse_or_load_training_checkpoint():
+    import subprocess
+    code = "import sys; sys.argv=['train.py', '--resume-checkpoint', 'missing.pt']; import train; assert not hasattr(train, 'args')"
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
 
 
 def test_wrapper_lr_overrides_preserve_model_defaults():

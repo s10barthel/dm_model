@@ -527,6 +527,10 @@ resume_probe.add_argument("--keep-cache", action="store_true")
 add_pass_height_argument(resume_probe)
 resume_probe.add_argument("--monitoring", choices=("on", "light", "off"), default="off")
 resume_probe.add_argument("--batch-loader", choices=("auto", "pyg"))
+from dataset_loading import positive_int as positive_dataset_int
+resume_probe.add_argument("--dataset-preparation-workers", type=positive_dataset_int)
+resume_probe.add_argument("--dataset-worker-threads", type=positive_dataset_int)
+resume_probe.add_argument("--interim-metrics", choices=("loss", "full"))
 from datatools.graph_validation import add_graph_validation_argument
 add_graph_validation_argument(resume_probe)
 resume_nodes = resume_probe.add_mutually_exclusive_group()
@@ -537,73 +541,81 @@ resume_candidates = resume_probe.add_mutually_exclusive_group()
 resume_candidates.add_argument("--include-goals", dest="include_goals", nargs="?", const=True, type=parse_boolean)
 resume_candidates.add_argument("--no-include-goals", dest="include_goals", action="store_false")
 resume_probe.set_defaults(goal_nodes_aware=None, include_goals=None)
-resume_options, resume_extra = resume_probe.parse_known_args()
-resume_checkpoint = None
-if resume_options.resume_checkpoint:
-    if resume_extra:
-        parser.error("Resume restores saved settings; only --graph-validation, --batch-loader, --monitoring, --keep-cache and matching pass-height or goal settings may accompany --resume-checkpoint.")
-    resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
-    from models.goal_context import resolve_training_goal_settings
-    resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
-    if resume_options.pass_height_threshold is not None:
-        saved_height = resume_checkpoint["args"].get("pass_height_definition")
-        if not saved_height or saved_height["threshold_meters"] != resume_options.pass_height_threshold:
-            parser.error("Resume pass-height cutoff conflicts with the checkpoint target definition.")
-    if resume_checkpoint["finished"]:
-        publish_checkpoint_artifacts(resume_checkpoint, Path(resume_options.resume_checkpoint).parent)
-        print("Model is already completed; no retraining needed.")
-        sys.exit(0)
-    args = argparse.Namespace(**resume_checkpoint["args"])
-    restore_training_control_defaults(args)
-    args.resume_run_id = args.run_id
-    args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
-    args.monitoring = resume_options.monitoring
-    args.graph_validation = resume_options.graph_validation
-    args.batch_loader = restored_batch_loader(resume_checkpoint["args"], resume_options.batch_loader)
-    args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
-elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
-    refit_probe = argparse.ArgumentParser(add_help=False)
-    refit_probe.add_argument("--refit-config", required=True)
-    add_graph_validation_argument(refit_probe)
-    refit_options = refit_probe.parse_args()
-    args = argparse.Namespace(**load_refit_config(refit_options.refit_config))
-    args.graph_validation = refit_options.graph_validation
-else:
-    args, _ = parser.parse_known_args()
-    if args.resume_run_id:
-        parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
-if not hasattr(args, "batch_loader"):
-    args.batch_loader = "auto"
-normalize_feature_settings(vars(args))
-try:
-    normalize_architecture(vars(args), fresh=resume_checkpoint is None and "--refit-config" not in sys.argv and not args.cont)
-except ValueError as exc:
-    parser.error(str(exc))
-# Fresh parses explicitly default to False; saved configurations retain legacy True.
-args.goal_poss_dist = resolve_goal_poss_dist(args)
-args.speed_aware = resolve_speed_aware(args)
-restore_ipw_defaults(args)
-if not hasattr(args, "validation_protocol"):
-    args.validation_protocol = "legacy"
-for name in ("training_count", "validation_count", "validation_fraction", "refit_recipe"):
-    if not hasattr(args, name):
-        setattr(args, name, None)
-if args.artifact_stage:
-    import re
-    if not re.fullmatch(r"holdout|final_refit|fold_[1-9][0-9]*", args.artifact_stage):
-        parser.error("Invalid artifact stage; expected holdout, final_refit, or fold_N.")
-try:
-    args.pos_node_features_aware = resolve_pos_node_features(args)
-except ValueError as exc:
-    parser.error(str(exc))
-validate_learning_rates(args.start_lr, args.min_lr)
-if args.batch_size < 1 or args.n_epochs < 1:
-    parser.error("--batch_size and --n_epochs must be positive.")
-pc_versions.check_selectors(args)
-vars(args).update(split_selector(args, default=None))
-normalize_v_edge_feature_args(vars(args))
-args.learn_physical_scale = not bool(args.freeze_beta1)
-args.lane_survival = args.lane_survival_mode is not None
+
+
+def parse_training_args():
+    resume_options, resume_extra = resume_probe.parse_known_args()
+    resume_checkpoint = None
+    if resume_options.resume_checkpoint:
+        if resume_extra:
+            parser.error("Resume restores saved settings; only runtime options and matching pass-height or goal settings may accompany --resume-checkpoint.")
+        resume_checkpoint = load_checkpoint(resume_options.resume_checkpoint)
+        from models.goal_context import resolve_training_goal_settings
+        resolve_training_goal_settings(resume_options, resume_checkpoint["args"])
+        if resume_options.pass_height_threshold is not None:
+            saved_height = resume_checkpoint["args"].get("pass_height_definition")
+            if not saved_height or saved_height["threshold_meters"] != resume_options.pass_height_threshold:
+                parser.error("Resume pass-height cutoff conflicts with the checkpoint target definition.")
+        if resume_checkpoint["finished"]:
+            publish_checkpoint_artifacts(resume_checkpoint, Path(resume_options.resume_checkpoint).parent)
+            print("Model is already completed; no retraining needed.")
+            sys.exit(0)
+        args = argparse.Namespace(**resume_checkpoint["args"])
+        restore_training_control_defaults(args)
+        args.resume_run_id = args.run_id
+        args.resume_checkpoint = str(Path(resume_options.resume_checkpoint).resolve())
+        args.monitoring = resume_options.monitoring
+        args.graph_validation = resume_options.graph_validation
+        args.batch_loader = restored_batch_loader(resume_checkpoint["args"], resume_options.batch_loader)
+        args.keep_cache = resume_options.keep_cache or getattr(args, "keep_cache", False)
+        for name in ("dataset_preparation_workers", "dataset_worker_threads", "interim_metrics"):
+            override = getattr(resume_options, name)
+            if override is not None:
+                setattr(args, name, override)
+    elif any(token.split("=", 1)[0] == "--refit-config" for token in sys.argv[1:]):
+        refit_probe = argparse.ArgumentParser(add_help=False)
+        refit_probe.add_argument("--refit-config", required=True)
+        add_graph_validation_argument(refit_probe)
+        refit_options = refit_probe.parse_args()
+        args = argparse.Namespace(**load_refit_config(refit_options.refit_config))
+        args.graph_validation = refit_options.graph_validation
+    else:
+        args, _ = parser.parse_known_args()
+        if args.resume_run_id:
+            parser.error("Use scripts/train_relevant_models.py --resume-id task/run_id to restore complete saved settings.")
+    if not hasattr(args, "batch_loader"):
+        args.batch_loader = "auto"
+    normalize_feature_settings(vars(args))
+    try:
+        normalize_architecture(vars(args), fresh=resume_checkpoint is None and "--refit-config" not in sys.argv and not args.cont)
+    except ValueError as exc:
+        parser.error(str(exc))
+    # Fresh parses explicitly default to False; saved configurations retain legacy True.
+    args.goal_poss_dist = resolve_goal_poss_dist(args)
+    args.speed_aware = resolve_speed_aware(args)
+    restore_ipw_defaults(args)
+    if not hasattr(args, "validation_protocol"):
+        args.validation_protocol = "legacy"
+    for name in ("training_count", "validation_count", "validation_fraction", "refit_recipe"):
+        if not hasattr(args, name):
+            setattr(args, name, None)
+    if args.artifact_stage:
+        import re
+        if not re.fullmatch(r"holdout|final_refit|fold_[1-9][0-9]*", args.artifact_stage):
+            parser.error("Invalid artifact stage; expected holdout, final_refit, or fold_N.")
+    try:
+        args.pos_node_features_aware = resolve_pos_node_features(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    validate_learning_rates(args.start_lr, args.min_lr)
+    if args.batch_size < 1 or args.n_epochs < 1:
+        parser.error("--batch_size and --n_epochs must be positive.")
+    pc_versions.check_selectors(args)
+    vars(args).update(split_selector(args, default=None))
+    normalize_v_edge_feature_args(vars(args))
+    args.learn_physical_scale = not bool(args.freeze_beta1)
+    args.lane_survival = args.lane_survival_mode is not None
+    return args, resume_checkpoint
 
 
 def infer_node_in_dim(feature_dir: str, task: str, lane_survival: bool = False) -> int:
@@ -1243,7 +1255,9 @@ def main(cache_session):
     )
     dataset_class = PreparedActionDataset if args.resolved_dataset_loading == "disk" else ActionDataset
     disk_args = ({"cache_dir": args.dataset_cache_dir, "buffer_matches": args.dataset_buffer_matches,
-                  "seed": args.seed, "cache_session": cache_session} if args.resolved_dataset_loading == "disk" else {})
+                  "seed": args.seed, "cache_session": cache_session,
+                  "preparation_workers": getattr(args, "dataset_preparation_workers", 1),
+                  "worker_threads": getattr(args, "dataset_worker_threads", 1)} if args.resolved_dataset_loading == "disk" else {})
     monitor.event("preparation_start", device, split="training")
     train_dataset = dataset_class(
         train_match_ids,
@@ -1294,7 +1308,8 @@ def main(cache_session):
     if args.task in {"pass_success", "pass_height"} and args.weight_bce:
         target_column = "pass_high" if args.task == "pass_height" else "success"
         if disk_args:
-            n_positives = sum(int(label[LABEL_INDEX[target_column]] == 1) for _, label, _ in train_dataset)
+            n_positives = sum(int((payload["labels"][:, LABEL_INDEX[target_column]] == 1).sum())
+                              for _, _, payload in train_dataset.iter_matches())
             n_negatives = len(train_dataset) - n_positives
         else:
             n_positives = train_dataset.labels[train_dataset.labels[:, LABEL_INDEX[target_column]] == 1].shape[0]
@@ -1570,5 +1585,6 @@ def main(cache_session):
 
 
 if __name__ == "__main__":
+    args, resume_checkpoint = parse_training_args()
     with training_context(args) as cache_session:
         main(cache_session)

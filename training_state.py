@@ -114,6 +114,8 @@ def lr_reduction_grace_complete(epoch, reduction_start_epoch, grace):
 
 
 def add_training_runtime_arguments(parser):
+    parser.add_argument("--interim-metrics", choices=("loss", "full"), default="loss",
+                        help="Console progress: running losses/counters, or cumulative probability metrics (default: loss).")
     parser.add_argument("--accumulation-steps", type=positive_int, default=1,
                         help="Physical batches per optimizer update (default: 1).")
     parser.add_argument("--monitoring", choices=("on", "light", "off"), default="off",

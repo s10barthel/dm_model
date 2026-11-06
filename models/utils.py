@@ -2367,7 +2367,7 @@ def run_epoch(
                 if key == "count":
                     continue
                 interim_metrics[key] = value / metrics["count"]
-            if binary_predictions:
+            if binary_predictions and getattr(args, "interim_metrics", "loss") == "full":
                 interim_metrics.update(
                 calc_binary_metrics(
                     np.concatenate(binary_targets),

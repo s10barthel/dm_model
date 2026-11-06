@@ -8,6 +8,18 @@ from models.goal_context import goal_policy, candidate_mask as goal_candidate_ma
 TEAMMATE_TASKS = {"pass_intent", "success_intent", "pass_intent_oppo_agn", "action_intent", "success_receiver"}
 
 
+def candidate_groups(batch, mask, graph_count):
+    """Split eligible indices once, retaining node order within each graph."""
+    indices = torch.where(mask)[0]
+    owners = batch[indices]
+    counts = torch.bincount(owners, minlength=graph_count)
+    # Appended ball-out outputs follow the ordinary nodes rather than their
+    # graphs. A stable grouping preserves their last-candidate position.
+    if owners.numel() > 1 and bool((owners[1:] < owners[:-1]).any()):
+        indices = indices[torch.argsort(owners, stable=True)]
+    return indices.split(counts.tolist())
+
+
 def batch_identifiers(graphs):
     return {"match_ids": list(getattr(graphs, "evaluation_match_id", [])),
             "source_rows": getattr(graphs, "evaluation_source_row", torch.empty(0)).tolist()}
@@ -74,8 +86,7 @@ def selection_layout(graphs, labels, task, include_out, model_args=None):
         batch = torch.cat((batch, torch.arange(graph_count)))
         candidate_mask = torch.cat((candidate_mask, torch.ones(graph_count, dtype=torch.bool)))
     groups = {}
-    for gi in range(graph_count):
-        indices = torch.where((batch == gi) & candidate_mask)[0]
+    for gi, indices in enumerate(candidate_groups(batch, candidate_mask, graph_count)):
         count = indices.numel()
         if policy.version == 2:
             if task == "failure_receiver" and labels[gi, 6] == -1:

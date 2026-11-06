@@ -45,6 +45,32 @@ def equal_batch(left, right):
         equal(a.to_dict(), b.to_dict())
 
 
+@pytest.mark.parametrize('empty_edges', [False, True])
+@pytest.mark.parametrize('mixed_label_dtype', [False, True])
+def test_uniform_bulk_gather_interleaving_duplicates_and_owned_storage(empty_edges, mixed_label_dtype):
+    packed, originals = [], []
+    for match in range(2):
+        graphs = []
+        for row in range(3):
+            edges = torch.empty((2, 0), dtype=torch.long) if empty_edges else torch.tensor([[0, 1], [1, 0]])
+            graphs.append(Data(x=torch.full((4, 3), float(10 * match + row)), edge_index=edges,
+                edge_attr=torch.ones(edges.shape[1], 2), scalar=torch.tensor(float(row)),
+                evaluation_match_id=str(match), evaluation_source_row=row))
+        raw = pack_graphs(graphs, torch.arange(6).reshape(3, 2).float())
+        packed.append(dict(graphs=PackedGraphs(raw), labels=raw['labels']))
+        originals.append(graphs)
+    if mixed_label_dtype:
+        packed[1]['labels'] = packed[1]['labels'].double()
+    rows = [(1, 2), (0, 1), (1, 2), (0, 0)]
+    samples = [(originals[m][r], packed[m]['labels'][r], torch.tensor(1.)) for m, r in rows]
+    expected = tuple(next(iter(DataLoader(samples, batch_size=len(rows)))))
+    actual = direct_packed_batch(packed, rows)
+    equal_batch(actual, expected)
+    before = packed[0]['graphs'][0].x.clone()
+    actual[0].x.add_(100)
+    equal(packed[0]['graphs'][0].x, before)
+
+
 def packed_samples(extra=None):
     graphs = []
     for i, n in enumerate((2, 5, 3)):

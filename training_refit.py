@@ -18,7 +18,10 @@ OPERATIONAL_OPTIONS = {
     "--device": "device", "--monitoring": "monitoring", "--pin-memory": "pin_memory",
     "--no-pin-memory": "pin_memory", "--dataset-loading": "dataset_loading",
     "--dataset-buffer-matches": "dataset_buffer_matches", "--dataset-cache-dir": "dataset_cache_dir",
+    "--dataset-preparation-workers": "dataset_preparation_workers",
+    "--dataset-worker-threads": "dataset_worker_threads",
     "--keep-cache": "keep_cache", "--batch-loader": "batch_loader",
+    "--interim-metrics": "interim_metrics",
     "--crash-dump": "crash_dump", "--procdump-path": "procdump_path",
 }
 

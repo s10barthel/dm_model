@@ -33,6 +33,34 @@ def _plain_category(value):
     return "object"
 
 
+def _uniform_lengths(graphs):
+    lengths = getattr(graphs, "_batch_uniform_lengths", None)
+    if lengths is None:
+        lengths = {}
+        for key, kind, _, mapping, _, offsets, _ in graphs.fields:
+            if kind == "tensor" and mapping is None and len(offsets) > 1:
+                size = offsets[1] - offsets[0]
+                lengths[key] = size if all(b - a == size for a, b in zip(offsets, offsets[1:])) else None
+        graphs._batch_uniform_lengths = lengths
+    return lengths
+
+
+def _gather_uniform(packed, descriptors, selections, key, dim, size, count):
+    """Gather equal-size samples in bulk, owning all returned tensor storage."""
+    result = None
+    for match, (positions, indices) in selections.items():
+        value = descriptors[match][key][2]
+        source = value.movedim(dim, 0).reshape(len(packed[match]["graphs"]), size, *value.movedim(dim, 0).shape[1:])
+        selected = source.index_select(0, indices)
+        if len(selections) == 1:
+            result = selected
+        else:
+            if result is None:
+                result = selected.new_empty((count, *selected.shape[1:]))
+            result.index_copy_(0, positions, selected)
+    return result.flatten(0, 1).movedim(0, dim).contiguous()
+
+
 def direct_packed_batch(packed, rows, weights=None):
     """Collate (payload index, row) selections; raise only for unsupported rules.
 
@@ -67,11 +95,28 @@ def direct_packed_batch(packed, rows, weights=None):
                 raise UnsupportedPackedSchema(f"mixed attribute types: {key}")
 
     node_counts = [descriptors[m]["x"][5][r+1] - descriptors[m]["x"][5][r] for m, r in rows]
+    grouped_rows = {}
+    for position, (match, row) in enumerate(rows):
+        positions, indices = grouped_rows.setdefault(match, ([], []))
+        positions.append(position)
+        indices.append(row)
+    selections = {match: (torch.tensor(positions), torch.tensor(indices))
+                  for match, (positions, indices) in grouped_rows.items()}
+    uniform = {m: _uniform_lengths(packed[m]["graphs"]) for m in descriptors}
     ptr = torch.tensor([0, *accumulate(node_counts)], dtype=torch.long)
     batch = Batch()
     slices, increments = {}, {}
     for key, (_, kind, _, _, dim, _, _) in fields.items():
         values, lengths = [], []
+        sizes = {uniform[m].get(key) for m in descriptors}
+        if kind == "tensor" and len(sizes) == 1 and None not in sizes:
+            size = next(iter(sizes))
+            batch[key] = _gather_uniform(packed, descriptors, selections, key, dim, size, len(rows))
+            if key == "edge_index":
+                batch[key] += torch.repeat_interleave(ptr[:-1], size).unsqueeze(0)
+            slices[key] = torch.arange(len(rows) + 1) * size
+            increments[key] = ptr[:-1] if key == "edge_index" else torch.zeros(len(rows), dtype=torch.long)
+            continue
         for m, r in rows:
             _, row_kind, value, _, row_dim, offsets, _ = descriptors[m][key]
             if row_kind == "tensor":
@@ -98,7 +143,14 @@ def direct_packed_batch(packed, rows, weights=None):
     batch.batch = torch.repeat_interleave(torch.arange(len(rows)), torch.tensor(node_counts))
     batch._num_graphs = len(rows)
     batch._slice_dict, batch._inc_dict = slices, increments
-    labels = torch.stack([packed[m]["labels"][r] for m, r in rows])
+    first_labels = packed[rows[0][0]]["labels"]
+    if len({packed[m]["labels"].dtype for m in selections}) > 1:
+        # torch.stack's dtype promotion is part of the existing loader contract.
+        labels = torch.stack([packed[m]["labels"][r] for m, r in rows])
+    else:
+        labels = first_labels.new_empty((len(rows), *first_labels.shape[1:]))
+        for match, (positions, indices) in selections.items():
+            labels.index_copy_(0, positions, packed[match]["labels"].index_select(0, indices))
     return batch, labels, torch.ones(len(rows)) if weights is None else torch.stack(weights)
 
 
@@ -156,6 +208,7 @@ class PackedBatchLoader:
         self.last_batching_seconds = 0.0
         started = time.perf_counter()
         group, pending, weights = [], [], []
+        unit_weight = torch.tensor(1.0)
         try:
             for offset in range(0, len(entries), dataset.buffer_matches):
                 base = len(group)  # an owned partial batch may precede this buffer
@@ -166,7 +219,7 @@ class PackedBatchLoader:
                     rng.shuffle(rows)
                 for m, r in rows:
                     pending.append((m, r))
-                    weights.append(torch.tensor(1.0) if dataset.ip_weights is None else
+                    weights.append(unit_weight if dataset.ip_weights is None else
                                    dataset.ip_weights[selected[m-base]["offset"] + r])
                     if len(pending) == self.batch_size:
                         yield self._finish(group, pending, weights)

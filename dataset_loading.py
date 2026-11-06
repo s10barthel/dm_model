@@ -21,6 +21,10 @@ def add_dataset_loading_arguments(parser):
     add_graph_validation_argument(parser)
     parser.add_argument("--dataset-loading", choices=("auto", "memory", "disk"), default="auto")
     parser.add_argument("--dataset-buffer-matches", type=positive_int, default=4)
+    parser.add_argument("--dataset-preparation-workers", type=positive_int, default=1,
+                        help="CPU processes for per-match preparation (default: 1).")
+    parser.add_argument("--dataset-worker-threads", type=positive_int, default=1,
+                        help="Native tensor threads per preparation worker (default: 1).")
     parser.add_argument("--dataset-cache-dir", default=DEFAULT_CACHE_DIR)
     parser.add_argument("--keep-cache", action="store_true", default=False,
                         help="Retain prepared dataset caches after successful training.")
@@ -30,7 +34,9 @@ def dataset_loading_flags(args):
     from datatools.graph_validation import graph_validation_flags
     return ["--dataset-loading", getattr(args, "dataset_loading", "auto"),
             "--dataset-buffer-matches", str(getattr(args, "dataset_buffer_matches", 4)),
-            "--dataset-cache-dir", str(getattr(args, "dataset_cache_dir", DEFAULT_CACHE_DIR))] + (
+            "--dataset-cache-dir", str(getattr(args, "dataset_cache_dir", DEFAULT_CACHE_DIR)),
+            "--dataset-preparation-workers", str(getattr(args, "dataset_preparation_workers", 1)),
+            "--dataset-worker-threads", str(getattr(args, "dataset_worker_threads", 1))] + (
                 ["--keep-cache"] if getattr(args, "keep_cache", False) else []) + graph_validation_flags(args)
 
 

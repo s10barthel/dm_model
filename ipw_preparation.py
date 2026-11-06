@@ -23,6 +23,7 @@ from ipw_options import DEFAULT_IPW_CACHE_DIR
 from models.utils import adapt_batch_graphs_for_model, get_model_path, load_model
 from prepared_dataset import (_digest, _file_digest, _signature, PreparedActionDataset,
                               loaded_preprocessing_fingerprint, preprocessing_fingerprint)
+from packed_graphs import PackedGraphs
 from training_state import capture_rng, restore_rng
 
 CACHE_VERSION = 1
@@ -45,7 +46,8 @@ def inference_fingerprint():
         pending.extend(n.id for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in definitions)
     return _digest({"helpers": selected, "files": {
         name: _file_digest(_ROOT / name) for name in ("ipw_preparation.py", "models/gnn.py", "models/goal_context.py",
-            "models/architecture.py", "models/relationship.py", "models/self_loops.py", "models/inference_masks.py")}})
+            "models/architecture.py", "models/relationship.py", "models/self_loops.py", "models/inference_masks.py",
+            "models/node_selection.py")}})
 
 
 LOADED_INFERENCE_FINGERPRINT = inference_fingerprint()
@@ -58,13 +60,23 @@ def sample_records(dataset, indices=None):
     if len(dataset.features) != len(dataset.labels):
         raise ValueError("IPW dataset graph/label counts differ.")
     for index in range(len(dataset.features)) if indices is None else indices:
-        graph, label = dataset.features[index], dataset.labels[index]
-        identity = (str(graph.evaluation_match_id), int(graph.evaluation_source_row))
+        label = dataset.labels[index]
+        if isinstance(dataset.features, PackedGraphs):
+            field = lambda name, default=None: dataset.features.attribute(index, name, default)
+            match, row = field("evaluation_match_id"), field("evaluation_source_row")
+            positions = field("source_node_positions")
+            node_count = field("x").shape[0]
+        else:
+            graph = dataset.features[index]
+            match, row = graph.evaluation_match_id, graph.evaluation_source_row
+            positions = getattr(graph, "source_node_positions", None)
+            node_count = graph.num_nodes
+        identity = (str(match), int(row))
         occurrence = occurrences[identity]
         occurrences[identity] += 1
         target = float(label[config.LABEL_INDEX["intent_index"]])
-        if target.is_integer() and 0 <= target < graph.num_nodes and hasattr(graph, "source_node_positions"):
-            target = float(graph.source_node_positions[int(target)])
+        if target.is_integer() and 0 <= target < node_count and positions is not None:
+            target = float(positions[int(target)])
         records.append([*identity, occurrence, target,
                         float(label[config.LABEL_INDEX["is_dribble"]])])
     return records
@@ -73,6 +85,7 @@ def sample_records(dataset, indices=None):
 def predict_probabilities(dataset, model, *, device, batch_size, pin_memory):
     """Raw probabilities with the historical IPW teammate/target semantics."""
     from models.goal_context import goal_policy, candidate_mask, target_candidate_position
+    from models.node_selection import candidate_groups
     probabilities = torch.empty(len(dataset), dtype=torch.float32)
     offset = 0
     model.eval()
@@ -80,22 +93,27 @@ def predict_probabilities(dataset, model, *, device, batch_size, pin_memory):
                         pin_memory=pin_memory, generator=torch.Generator().manual_seed(0))
     with torch.inference_mode():
         for graphs, labels, _ in loader:
-            graphs = adapt_batch_graphs_for_model(graphs.to(device), model.args, context="IPW model")
-            out = model(graphs)
-            for i in range(graphs.num_graphs):
-                if bool(labels[i, config.LABEL_INDEX["is_dribble"]]):
-                    probability = 1.0
-                else:
-                    indices = torch.where((graphs.batch == i) & candidate_mask(graphs, model.args))[0]
-                    logits = out[indices]
+            graphs = adapt_batch_graphs_for_model(graphs, model.args, context="IPW model")
+            groups = {}
+            for i, indices in enumerate(candidate_groups(graphs.batch, candidate_mask(graphs, model.args), graphs.num_graphs)):
+                if not bool(labels[i, config.LABEL_INDEX["is_dribble"]]):
                     target = int(labels[i, config.LABEL_INDEX["intent_index"]])
                     if goal_policy(model.args).version == 2:
                         target = target_candidate_position(indices, int(graphs.ptr[i]) + target)
-                    if target < 0 or target >= len(logits):
+                    if target < 0 or target >= len(indices):
                         raise ValueError("IPW target is outside the teammate candidates.")
-                    probability = torch.softmax(logits, dim=0)[target].item()
-                probabilities[offset] = probability
-                offset += 1
+                    groups.setdefault(len(indices), []).append((i, indices, target))
+            graphs = graphs.to(device)
+            out = model(graphs)
+            selected = torch.ones(graphs.num_graphs, device=device)
+            for rows in groups.values():
+                ids = torch.tensor([r[0] for r in rows], device=device)
+                indices = torch.stack([r[1] for r in rows]).to(device)
+                targets = torch.tensor([r[2] for r in rows], device=device)
+                logits = out.reshape(-1)[indices]
+                selected[ids] = logits.softmax(dim=1).gather(1, targets[:, None]).squeeze(1)
+            probabilities[offset:offset + graphs.num_graphs] = selected.cpu()
+            offset += graphs.num_graphs
             del graphs, labels, out
     return probabilities
 

@@ -35,8 +35,16 @@ def process_alive(pid, created):
 @contextmanager
 def cache_lock(root):
     root = Path(root).resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / '.ownership.lock').open('a+b') as stream:
+    with file_lock(root / '.ownership.lock'):
+        yield
+
+
+@contextmanager
+def file_lock(path):
+    """An OS-owned lock, released even if a cache builder dies."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a+b') as stream:
         stream.seek(0, 2)
         if not stream.tell():
             stream.write(b'0')
@@ -208,8 +216,10 @@ class CacheSession:
     def entry(self, path):
         """Serialize validation/build/publication and durably claim before any use."""
         path, key = self.checked_path(path)
-        with cache_lock(self.root):
-            with database(self.root) as db:
+        # Different entries may build concurrently. Register the durable claim
+        # under the root lock before releasing it; cleanup sees this live reader.
+        with file_lock(self.root / '.entry_locks' / (path.parent.name + path.stem + '.lock')):
+            with cache_lock(self.root), database(self.root) as db:
                 existed = path.exists() or path.with_suffix('.json').exists()
                 db.execute('INSERT OR IGNORE INTO entries VALUES (?,?,?,0)',
                            (key, int(not existed), int(existed)))
@@ -219,9 +229,9 @@ class CacheSession:
             yield
 
     def recorded(self, path, *, built, size):
-        # Caller already holds entry()'s root lock.
+        # Caller holds the per-entry lock, not the root bookkeeping lock.
         _, key = self.checked_path(path)
-        with database(self.root) as db:
+        with cache_lock(self.root), database(self.root) as db:
             db.execute('UPDATE entries SET bytes=? WHERE path=?', (size, key))
             db.execute('UPDATE uses SET built=MAX(built,?), reused=MAX(reused,?) WHERE session=? AND path=?',
                        (int(built), int(not built), self.id, key))

@@ -156,6 +156,21 @@ class PackedGraphs(Sequence):
     def __len__(self):
         return self.count
 
+    def attribute(self, row, key, default=None):
+        """Read one packed field without reconstructing a graph object."""
+        for name, kind, value, mapping, dim, offsets, stacked in self.fields:
+            if name != key:
+                continue
+            index = row if mapping is None else mapping.get(row)
+            if index is None:
+                return default
+            if kind == "tensor":
+                start, end = offsets[index:index + 2]
+                view = value.narrow(dim, start, end - start)
+                return view.squeeze(0) if stacked else view
+            return value if kind == "constant" else value[index]
+        return default
+
     def __getitem__(self, row):
         row = operator.index(row)
         if row < 0:

@@ -102,6 +102,8 @@ def test_run_epoch_metrics_rows_and_updates(task, monkeypatch):
                          torch.optim.SGD(model.parameters(), lr=.01), device='cpu', train=True,
                          return_learning_curve_rows=True)
     actual = evaluate(first)
+    # Expensive console metrics must not change final metrics or optimizer work.
+    args.interim_metrics = 'full'
     # Scalar indexing reference builds the separate selection autograd operations.
     def scalar(out, positions, branches=None):
         return torch.stack([out[p] if branches is None else out[p, branches[i]]
