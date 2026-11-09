@@ -15,6 +15,7 @@ from datatools import config
 from models.node_feature_config import mask_goal_poss_features, resolve_pos_node_features
 from models.inference_masks import RuntimeInferenceMasks
 from models.feature_masks import mask_node_inputs
+from models.outcome_learning import is_distributional, normalize_learning_settings, validate_definition
 from physical_pass_model import (
     PHYSICAL_XPASS_LOGIT_ATTR,
     PHYSICAL_XPASS_VARIANTS,
@@ -179,6 +180,13 @@ class Decoder(nn.Module):
         graph_in_dim = args["graph_emb_dim"]
         mlp_dims = [args.get("mlp_h1_dim", 32), args.get("mlp_h2_dim", 8)]
         out_dim = args["out_dim"]
+        self.distribution_atoms = 0
+        if is_distributional(args):
+            normalize_learning_settings(args)
+            definition = validate_definition(args.get("outcome_distribution_definition"))
+            self.distribution_atoms = definition["effective_atoms"]
+            self.register_buffer("outcome_atoms", torch.tensor(definition["atoms"], dtype=torch.float32))
+            out_dim = 2 * self.distribution_atoms
 
         dest_dim = 2
         if args.get("polar_dest", False):
@@ -362,6 +370,8 @@ class Decoder(nn.Module):
                     node_inputs = torch.cat([node_inputs, physical_xpass_logit.unsqueeze(-1)], -1)
 
             node_outputs = self.nodewise_mlp(node_inputs)  # [N, 1] or [N, 2]
+            if self.distribution_atoms:
+                node_outputs = node_outputs.reshape(-1, 2, self.distribution_atoms)
             if node_outputs.shape[-1] == 1:
                 node_outputs = node_outputs.squeeze(-1)  # [N]
 

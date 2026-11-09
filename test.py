@@ -431,6 +431,11 @@ def write_outcome_evaluation_artifacts(
     output_dir = Path(output_root)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    distribution_rows = outcome_evaluation.get("distribution_rows")
+    if distribution_rows:
+        pd.DataFrame(distribution_rows).to_parquet(output_dir / "outcome_distributions.parquet", index=False)
+        (output_dir / "outcome_distribution_definition.json").write_text(
+            json.dumps(outcome_evaluation["outcome_distribution_definition"], indent=2), encoding="utf-8")
     ci, bootstrap_metadata = outcome_bootstrap(
         outcome_evaluation, model_id=model_id, task=task,
         resamples=outcome_bootstrap_resamples, seed=outcome_bootstrap_seed,
@@ -457,7 +462,15 @@ def write_outcome_evaluation_artifacts(
         "xt_training_target": targets,
         diagnostic_target: diagnostics,
     }
-    for stratum, mask in _outcome_strata(branches):
+    strata = _outcome_strata(branches)
+    if "candidate_x" in outcome_evaluation:
+        candidate_x = np.asarray(outcome_evaluation["candidate_x"])
+        for name, region in (("build_up", candidate_x < 35), ("advanced", candidate_x >= 70),
+                             ("low_target", targets <= .01)):
+            strata.append((name, region))
+            strata.append((name + "_success", region & (branches == 1)))
+            strata.append((name + "_failure", region & (branches == 0)))
+    for stratum, mask in strata:
         stratum_predictions = predictions[mask]
         for evaluation_target, observed in targets_by_name.items():
             stratum_observed = observed[mask]
@@ -829,6 +842,14 @@ def main():
     device = args.device if torch.cuda.is_available() else "cpu"
     model = utils.load_model(args.model_id, device)
     model_args = argparse.Namespace(**model.args)
+    model_args.export_outcome_distributions = args.export_outcome_distributions
+    if args.export_outcome_distributions:
+        from models.outcome_learning import is_distributional
+        if model_args.task not in {"outcome_scoring", "outcome_conceding"} or not args.evaluation_output_dir:
+            parser.error("--export-outcome-distributions requires an outcome checkpoint and --evaluation-output-dir")
+        model_args.export_outcome_distributions = is_distributional(model_args)
+        if args.learning_curve_rows and not args.comparison_rows:
+            parser.error("Distribution exports with --learning-curve-rows also require --comparison-rows")
     model_args.graph_validation = args.graph_validation
     training_evaluation_settings = {key: getattr(model_args, key, None) for key in
                                     ("intended_receiver_mode", "min_pass_dur", "return_type")}
@@ -961,7 +982,7 @@ def main():
                          f"(filter={args.evaluation_filter!r}, min_pass_duration={model_args.min_pass_dur}): "
                          f"{test_dataset.selection_counts}.")
     validate_test_dataset_dimensions(test_dataset, model_args)
-    if args.comparison_rows and model_args.gnn_task in {"node_selection", "node_binary"}:
+    if (args.comparison_rows or args.export_outcome_distributions) and model_args.gnn_task in {"node_selection", "node_binary"}:
         ensure_dataset_node_identities(test_dataset, feature_root, model_args)
     
     #On Windows, num_workers > 0 can cause issues with PyTorch DataLoader, so we set it to 0 for better compatibility. 
@@ -1143,6 +1164,8 @@ def main():
     if args.evaluation_output_dir:
         metadata_path = Path(args.evaluation_output_dir) / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        from models.outcome_learning import distribution_identity
+        metadata.update(distribution_identity(model_args))
         metadata["evaluation_context"] = {"training_settings": training_evaluation_settings,
             "filter": args.evaluation_filter,
             "requested_min_pass_duration": args.min_pass_duration,

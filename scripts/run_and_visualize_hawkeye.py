@@ -101,6 +101,7 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome distributions alongside visualization outputs.")
     add_compare_argument(parser)
     add_inference_mask_arguments(parser, numbered=True, argv=argv)
     parser.epilog = ("Use --compare with repeated --pc-xpass-id, --xpass-version/--top-pass, or --xpass-weight "
@@ -651,6 +652,8 @@ def main() -> None:
         if name in component_selection.required_component_groups
     }
     model_specs = {name: load_model(model_id, device) for name, model_id in selected_model_ids.items()}
+    from models.outcome_learning import configure_distribution_exports
+    configure_distribution_exports(model_specs, getattr(args, "export_outcome_distributions", False))
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
@@ -857,6 +860,8 @@ def main() -> None:
     attach_membership_report(metadata, "hawkeye", records=shared_context.get("model_records", {}))
     metadata.update(finalize_pc_xpass_attempt())
     metadata.update(selection_metadata(args))
+    from models.outcome_learning import write_distribution_exports
+    metadata["outcome_distribution_exports"] = write_distribution_exports(output_root, model_specs)
     metadata_path = write_run_metadata(output_root, metadata)
     physical_xpass_required = pass_success_model is not None and (
         model_uses_physical_xpass(pass_success_model.args) or inference_uses_physical_xpass(pass_success_model.args)

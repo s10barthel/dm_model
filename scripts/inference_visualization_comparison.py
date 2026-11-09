@@ -141,6 +141,8 @@ def resolve_variants(args, mod, sportec):
                 if model.args.get("task") != task:
                     raise ValueError(f"Loaded checkpoint {model_id!r} has an incompatible model task.")
                 model.eval()
+                from models.outcome_learning import configure_distribution_exports
+                configure_distribution_exports({task: model}, getattr(args, "export_outcome_distributions", False))
                 models[model_id] = model
             pipeline_records[task] = records[model_id]
             pipeline_models[task] = models[model_id]
@@ -534,6 +536,9 @@ def run_comparison(args, mod):
         if args.visualization_comparison != "pc_xpass":
             for variant in variants:
                 configure_inference_masks(variant.models, [])
+    from models.outcome_learning import write_distribution_exports
+    distribution_models = {str(id(model)): model for variant in variants for model in variant.models.values() if model is not None}
+    write_distribution_exports(root / "distribution_exports", distribution_models)
     print(f"Saved {dataset} comparison visualizations and prediction tables to {root}")
 
 

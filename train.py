@@ -100,8 +100,11 @@ from project_config import (
 )
 
 from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity
+from models.outcome_learning import (add_learning_arguments, normalize_learning_settings,
+    is_distributional, fit_definition, distribution_identity)
 
 parser = argparse.ArgumentParser()
+add_learning_arguments(parser)
 from models.pass_height import add_pass_height_argument, resolve_training_height
 add_pass_height_argument(parser)
 add_dataset_loading_arguments(parser)
@@ -867,6 +870,7 @@ def main(cache_session):
         args.model = source_architecture["model"]
         vars(args).update(architecture_identity(source_architecture))
     resolve_training_goal_settings(args, goal_source)
+    normalize_learning_settings(args, goal_source)
     args.feature_run_id = resolve_feature_run_id(args.feature_run_id, required=False)
     feature_root = resolve_feature_root(args.feature_run_id)
     feature_metadata = (load_feature_run_metadata(args.feature_run_id, required=False) or {}) if args.feature_run_id else {}
@@ -993,7 +997,13 @@ def main(cache_session):
     resolve_training_speed(args, checkpoint=goal_source)
     args.ipw_feature_dir = getattr(args, "ipw_feature_dir", None) or feature_dir
     args.require_goal_next10_diagnostics = requires_goal_next10_diagnostics(args.task)
-    args.diagnostic_feature_run_id, args.diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, feature_root)
+    if resume_record is not None and "diagnostic_label_dir" in resume_record:
+        # Embedded diagnostics are a recorded choice too: do not require a new
+        # canonical sidecar on resume when the original fit did not use one.
+        args.diagnostic_feature_run_id = resume_record.get("diagnostic_feature_run_id")
+        args.diagnostic_label_dir = resume_record["diagnostic_label_dir"]
+    else:
+        args.diagnostic_feature_run_id, args.diagnostic_label_dir = resolve_goal_next10_diagnostic_context(args, feature_root)
     args.diagnostic_target = config.GOAL_NEXT10_DIAGNOSTIC_TARGET if args.require_goal_next10_diagnostics else None
     args.diagnostic_return_type = (
         config.GOAL_NEXT10_DIAGNOSTIC_RETURN_TYPE if args.require_goal_next10_diagnostics else None
@@ -1047,10 +1057,11 @@ def main(cache_session):
 
     # Load model
     args_dict = dict(vars(args))
-    model = GNN(args_dict).to(device)
-    if str(device).startswith("cuda") and torch.cuda.device_count() > 1:
+    deferred_distribution = is_distributional(args) and not getattr(args, "outcome_distribution_definition", None)
+    model = None if deferred_distribution else GNN(args_dict).to(device)
+    if model is not None and str(device).startswith("cuda") and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
-    args.total_params = num_trainable_params(model)
+    args.total_params = None if model is None else num_trainable_params(model)
     args_dict["total_params"] = args.total_params
     args_dict["run_id"] = args.run_id
     args_dict["model_id"] = args.model_id
@@ -1071,6 +1082,7 @@ def main(cache_session):
         json.dump(args_dict, f, indent=4)
 
     metadata = {
+        **distribution_identity(args),
         **architecture_identity(vars(args)),
         "goal_context_version": args.goal_context_version,
         "goal_nodes_aware": args.goal_nodes_aware,
@@ -1304,6 +1316,27 @@ def main(cache_session):
         raise ValueError("No usable training samples remained after loading graph and label artifacts.")
     if valid_dataset is not None and len(valid_dataset) == 0:
         raise ValueError("No usable validation samples remained after loading graph and label artifacts.")
+
+    if deferred_distribution:
+        batches = (train_dataset.iter_label_batches() if disk_args else [train_dataset.labels])
+        args.outcome_distribution_definition = fit_definition(batches, args, {
+            "training_match_ids": list(map(str, train_match_ids)),
+            "source_identity": source_identity, "target_family": args.target_family,
+            "return_type": args.return_type,
+            "xt_target_definition": getattr(args, "xt_target_definition", None),
+            "stop_condition_definition": getattr(args, "stop_condition_definition", None),
+        })
+        args_dict.update(distribution_identity(args))
+        model = GNN(args_dict).to(device)
+        if str(device).startswith("cuda") and torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+        args.total_params = num_trainable_params(model)
+        args_dict["total_params"] = args.total_params
+        metadata.update(distribution_identity(args))
+        metadata["training_args"] = args_dict
+        with open(Path(trial_path) / "args.json", "w", encoding="utf-8") as f:
+            json.dump(args_dict, f, indent=4)
+        write_run_metadata(Path(trial_path), metadata)
 
     if args.task in {"pass_success", "pass_height"} and args.weight_bce:
         target_column = "pass_high" if args.task == "pass_height" else "success"

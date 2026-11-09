@@ -80,6 +80,7 @@ from xt_versions import xt_options_for_feature_root
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome probabilities alongside component means.")
     add_inference_mask_arguments(parser)
     add_frame_selection_arguments(parser)
     add_season_argument(parser)
@@ -740,6 +741,8 @@ def main() -> None:
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")
+    from models.outcome_learning import configure_distribution_exports
+    configure_distribution_exports(model_specs, args.export_outcome_distributions)
     configure_auxiliary_models(args, model_specs, device)
     graph_schema = validate_model_graph_schemas(model_specs)
     no_physical_cache = bool(getattr(args, "no_physical_cache", False))
@@ -950,7 +953,13 @@ def main() -> None:
                 **generation_kwargs(graph_schema),
             ):
                 try:
+                    for model in model_specs.values():
+                        if hasattr(model, "outcome_distribution_rows"):
+                            model.outcome_distribution_rows.clear()
                     components = infer_skillcorner_components(state, model_specs, device=device)
+                    records = [row for model in model_specs.values() for row in getattr(model, "outcome_distribution_rows", [])]
+                    if records:
+                        tables.setdefault("outcome_distributions", []).append(pd.DataFrame(records))
                     for name, prediction in components.items():
                         if prediction is not None and (not prediction.empty or name == "model_pass_success"):
                             tables.setdefault(name, []).append(sportec_component_table(prediction, state))

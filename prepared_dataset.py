@@ -422,6 +422,18 @@ class PreparedActionDataset(IterableDataset):
             finally:
                 del payload
 
+    def iter_label_batches(self):
+        """Retained labels in source order, without reconstructing PyG graphs."""
+        for entry in self.entries:
+            path = Path(entry["path"])
+            if (self._source_signatures(entry["match_id"]) != entry["sources"]
+                    or _signature(path) != entry["cache_signature"]
+                    or _signature(path.with_suffix(".json")) != entry["manifest_signature"]):
+                raise RuntimeError(f"Source or prepared cache changed for {entry['match_id']}")
+            packed = torch.load(path, weights_only=False, map_location="cpu")
+            validate_payload(packed, expected_count=entry["count"])
+            yield packed["labels"]
+
     def set_inverse_propensity_weights(self, weights):
         if weights.ndim != 1 or len(weights) != len(self):
             raise ValueError("IPW weight count differs from the prepared dataset.")

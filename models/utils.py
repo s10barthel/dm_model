@@ -280,6 +280,8 @@ def get_model_record(model_id: str) -> dict[str, Any]:
 
     args = _read_json_if_exists(args_path) or {}
     metadata = _read_json_if_exists(metadata_path) or {}
+    from models.outcome_learning import validate_learning_metadata, distribution_identity
+    validate_learning_metadata(args, metadata)
     task, run_id = parse_model_id(model_id)
 
     args.setdefault("edge_in_dim", 2)
@@ -322,6 +324,7 @@ def get_model_record(model_id: str) -> dict[str, Any]:
     is_complete = bool(has_weights and status == "completed")
 
     return {
+        **distribution_identity(args),
         "model_id": model_id,
         "task": str(metadata.get("task") or args.get("task") or task),
         "run_id": str(metadata.get("run_id") or run_id),
@@ -375,6 +378,9 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "pass_height_definition",
             "intended_receiver_mode",
             "target_family",
+            "learning_mode",
+            "outcome_distribution_definition",
+            "checkpoint_monitor",
             "return_type",
             "use_carries",
             "model_name",
@@ -560,6 +566,8 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
         from models.feature_masks import normalize_feature_settings
         normalize_feature_settings(args)
         metadata = _read_json_if_exists(model_path / "metadata.json") or {}
+        from models.outcome_learning import validate_learning_metadata
+        validate_learning_metadata(args, metadata)
         args.setdefault("edge_in_dim", 2)
         args.setdefault("add_v_edge_features", "velocity_angle_cos" in edge_names(args))
         args.setdefault("add_relative_speed_edge_features", "relative_speed" in edge_names(args))
@@ -590,6 +598,8 @@ def load_model(model_id="pass_intent/01", device="cuda") -> GNN:
                         new_key = key
                     remapped_state[new_key] = value
                 state_dict = remapped_state
+            from models.outcome_learning import validate_state_support
+            validate_state_support(state_dict, args)
             model.load_state_dict(state_dict)
 
         elif args["model"] in ["xgboost", "catboost"]:  # Gradient boosting models
@@ -1897,6 +1907,8 @@ def run_epoch(
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
     from models.observed_selection import observed_layout, select_observed
+    from models.outcome_learning import is_distributional, distribution_loss, expected_values, mean_bce, crps, categorical_probabilities
+    distributional = is_distributional(args)
     from models.graph_diagnostics import DiagnosticCollater, validate_with_snapshot
     if isinstance(loader.collate_fn, DiagnosticCollater):
         loader.collate_fn.start_epoch(getattr(args, "_epoch", None), "train" if train else "validation")
@@ -1914,6 +1926,8 @@ def run_epoch(
     elif args.gnn_task in ["node_regression", "graph_regression"]:
         metrics = {"count": 0, "mse_loss": 0, "l1_loss": 0}
 
+    if distributional:
+        metrics.update(distributional_ce=0., mean_soft_bce=0., distribution_crps=0.)
     weighted_pass_success_eval = bool(getattr(args, "weighted_pass_success_metrics", False))
     if weighted_pass_success_eval and args.task != "pass_success":
         raise ValueError("weighted_pass_success_metrics is only supported for task='pass_success'.")
@@ -1950,6 +1964,8 @@ def run_epoch(
     outcome_diagnostics: list[np.ndarray] = []
     outcome_execution_branches: list[np.ndarray] = []
     outcome_match_ids: list[np.ndarray] = []
+    distribution_rows = []
+    outcome_candidate_x = []
     learning_curve_rows: list[dict] = []
 
     for batch_index, (batch_graphs, batch_labels, batch_ipw) in enumerate(loader):
@@ -2236,9 +2252,33 @@ def run_epoch(
                 pred = select_observed(out, observed_positions, observed_branches)
 
                 target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
-                pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
-
-                y_hat = torch.sigmoid(pred).cpu().detach().numpy()
+                if distributional:
+                    pred_loss = distribution_loss(pred, target, args, batch_ipw)
+                    expected_bce = mean_bce(pred, target, args, batch_ipw)
+                    size = batch_graphs.num_graphs
+                    metrics["distributional_ce"] += pred_loss.detach().item() * size
+                    metrics["mean_soft_bce"] += expected_bce.detach().item() * size
+                    metrics["distribution_crps"] += crps(pred.detach(), target, args).sum().item()
+                    y_hat = expected_values(pred, args).detach().cpu().numpy()
+                    if return_outcome_evaluation and getattr(args, "export_outcome_distributions", False):
+                        from models.prediction_identity import observed_receiver_identities
+                        ids = observed_receiver_identities(batch_graphs, batch_labels)
+                        probabilities = categorical_probabilities(pred).detach().cpu().tolist()
+                        for gi, probs in enumerate(probabilities):
+                            distribution_rows.append({
+                                "match_id": str(batch_graphs.evaluation_match_id[gi]),
+                                "action_index": int(batch_labels[gi, LABEL_INDEX["action_index"]]),
+                                "source_index": int(batch_graphs.evaluation_source_row[gi]),
+                                "candidate_id": ids[gi], "execution_branch": int(outcome[gi]),
+                                "target": float(target[gi]), "prediction": float(y_hat[gi]),
+                                "probabilities": probs,
+                                "support_definition_id": args.outcome_distribution_definition["definition_sha256"],
+                            })
+                else:
+                    pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
+                    y_hat = torch.sigmoid(pred).cpu().detach().numpy()
+                if return_outcome_evaluation:
+                    outcome_candidate_x.append(batch_graphs.x[observed_positions, config.NODE_FEATURE_X].detach().cpu().numpy())
                 y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
                 binary_predictions.append(np.asarray(y_hat, dtype=float))
@@ -2349,7 +2389,7 @@ def run_epoch(
             metrics["mse_loss"] += pred_loss.item() * batch_graphs.num_graphs
 
         if "ce_loss" in metrics:
-            metrics["ce_loss"] += pred_loss.item() * batch_graphs.num_graphs
+            metrics["ce_loss"] += (expected_bce.detach().item() if distributional else pred_loss.item()) * batch_graphs.num_graphs
 
         l1_loss = l1_regularizer(model, lambda_l1=args.lambda_l1)
         metrics["l1_loss"] += l1_loss.item() * batch_graphs.num_graphs
@@ -2407,6 +2447,11 @@ def run_epoch(
             "execution_branch": np.concatenate(outcome_execution_branches),
             "diagnostic_return_type": getattr(args, "diagnostic_return_type", None) or "next_10",
         }
+        if outcome_candidate_x:
+            outcome_evaluation["candidate_x"] = np.concatenate(outcome_candidate_x)
+        if distributional:
+            outcome_evaluation["outcome_distribution_definition"] = args.outcome_distribution_definition
+            outcome_evaluation["distribution_rows"] = distribution_rows
         if outcome_match_ids:
             outcome_evaluation["match_id"] = np.concatenate(outcome_match_ids)
         target_metrics = calc_continuous_target_metrics(

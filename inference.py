@@ -1359,7 +1359,8 @@ def inference_gnn(
         if gnn_task == "node_selection":
             probs_i = torch.softmax(out[batch == i], dim=0).cpu().detach().numpy()
         elif gnn_task in ["node_binary", "graph_binary"]:
-            probs_i = torch.sigmoid(out[batch == i]).cpu().detach().numpy()
+            from models.outcome_learning import expected_values
+            probs_i = expected_values(out[batch == i], model.args).cpu().detach().numpy()
         elif gnn_task == "node_regression":
             probs_i = torch.sigmoid(out[batch == i]).cpu().detach().numpy() * 2 - 1
         offside_i = offside_out_mask[batch == i].cpu().detach().numpy().astype(bool)
@@ -1381,6 +1382,23 @@ def inference_gnn(
             if model.args["include_out"]:
                 player_indices_i.append("out")
 
+        collector = getattr(model, "outcome_distribution_rows", None)
+        if collector is not None:
+            from models.outcome_learning import is_distributional, categorical_probabilities
+            if is_distributional(model.args):
+                categorical = categorical_probabilities(out[batch == i]).detach().cpu().tolist()
+                definition_id = model.args["outcome_distribution_definition"]["definition_sha256"]
+                from models.inference_masks import inference_mask_metadata
+                mask_id = inference_mask_metadata(model)["configuration_id"]
+                for candidate, candidate_means, candidate_probs in zip(player_indices_i, probs_i, categorical):
+                    for branch in (0, 1):
+                        collector.append({"match_id": str(getattr(match, "match_id", "")),
+                            "scene_id": str(getattr(match, "situation_id", getattr(match, "match_id", ""))),
+                            "action_index": event_index, "frame_id": frame, "candidate_id": candidate,
+                            "task": model.args["task"], "model_id": model.args.get("model_id"),
+                            "inference_mask_id": mask_id,
+                            "execution_branch": branch, "prediction": float(candidate_means[branch]),
+                            "probabilities": candidate_probs[branch], "support_definition_id": definition_id})
         players = players | set(player_indices_i)
 
         with blending_guard(model, "blending", match, state=event_index, frame=frame):

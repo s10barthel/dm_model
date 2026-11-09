@@ -265,6 +265,8 @@ def add_task_evaluation_options(command: list[str], args: argparse.Namespace, ta
     if getattr(args, "pass_height_threshold", None) is not None:
         command.extend(["--pass-height-threshold", str(args.pass_height_threshold)])
     if task in {"outcome_scoring", "outcome_conceding"}:
+        if getattr(args, "export_outcome_distributions", False):
+            command.append("--export-outcome-distributions")
         command.extend(["--outcome-bootstrap-resamples", str(getattr(args, "outcome_bootstrap_resamples", 2000)),
                         "--outcome-bootstrap-seed", str(getattr(args, "outcome_bootstrap_seed", 42))])
     if task == "pass_success" and not args.no_observed_pass_height_stratification:

@@ -178,6 +178,8 @@ def prepare_refit(model_id, run_id, *, operational=None, saved_root=None):
     normalize_feature_settings(args)
     from models.architecture import normalize_architecture
     normalize_architecture(args)
+    from models.outcome_learning import validate_learning_metadata
+    validate_learning_metadata(args, metadata)
     from models.edge_schema import normalize_input_settings
     normalize_input_settings(args)
     args["goal_poss_dist"] = resolve_goal_poss_dist(settings)

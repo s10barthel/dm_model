@@ -81,6 +81,7 @@ from scripts.visualization_comparison import RepeatableSelection, add_compare_ar
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical distributions when comparing checkpoints; saved-component mode has no model logits.")
     add_compare_argument(parser)
     parser.add_argument("--mode", choices=["standard", "loc", "freeze"], default="standard")
     row_selection = parser.add_mutually_exclusive_group()

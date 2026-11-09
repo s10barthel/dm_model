@@ -17,6 +17,7 @@ from models.edge_schema import (add_interaction_arguments, input_setting_flags, 
                                 selected_edge_names, schema_for_names, edge_names, INTERACTION_GROUPS)
 from datatools import config
 from models.architecture import add_architecture_arguments, normalize_architecture, architecture_identity, resolve_architecture
+from models.outcome_learning import add_learning_arguments
 from models.node_feature_config import resolve_pos_node_features
 from models.feature_masks import add_feature_selection_arguments, feature_selection_flags, normalize_feature_settings
 from models.goal_context import goal_policy, resolve_training_goal_settings
@@ -871,6 +872,7 @@ def resolve_training_split(args: argparse.Namespace, metadata: dict) -> tuple[di
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from models.pass_height import add_pass_height_argument
     parser = argparse.ArgumentParser()
+    add_learning_arguments(parser)
     add_architecture_arguments(parser)
     add_dataset_loading_arguments(parser)
     add_ipw_arguments(parser)
@@ -2078,6 +2080,13 @@ def build_training_commands(
     for command in commands:
         if "--task" in command and command[command.index("--task") + 1].startswith("outcome_"):
             command.extend(["--stop-condition", getattr(args, "stop_condition", "base")])
+            command.extend(["--learning-mode", getattr(args, "learning_mode", None) or "scalar"])
+            if getattr(args, "distribution_atoms", None) is not None:
+                command.extend(["--distribution-atoms", str(args.distribution_atoms)])
+    if getattr(args, "learning_mode", None) == "distributional":
+        eligible = {"outcome_scoring", "outcome_conceding"}
+        if not any(args.enabled_tasks.get(task, False) for task in eligible):
+            raise ValueError("--learning-mode distributional requires an outcome scoring/conceding task.")
     return (
         commands,
         trained_model_ids,

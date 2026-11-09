@@ -208,6 +208,10 @@ def load_checkpoint(path):
     required = {"version", "model", "optimizer", "args", "metadata", "rng", "dataset_identity", "best", "best_acc_weights", "finished"}
     if not isinstance(checkpoint, dict) or not required.issubset(checkpoint) or checkpoint["version"] != CHECKPOINT_VERSION:
         raise ValueError(f"Unsupported training checkpoint format: {path}")
+    from models.outcome_learning import validate_learning_metadata
+    validate_learning_metadata(checkpoint["args"], checkpoint["metadata"])
+    from models.outcome_learning import validate_state_support
+    validate_state_support(checkpoint["model"], checkpoint["args"])
     return checkpoint
 
 
