@@ -48,6 +48,10 @@ class DEFCON:
         self.shot_xg_model = load_model(shot_xg_model_id, device)
         self.score_model = load_model(score_model_id, device)
         self.concede_model = load_model(concede_model_id, device)
+        from models.outcome_learning import is_signed
+        if any(model is not None and is_signed(model.args) for model in (self.score_model, self.concede_model)):
+            raise ValueError("Legacy DEFCON goal-probability overrides do not support signed gains. "
+                             "Use outcome component inference and pass-score exports for these models.")
         self.posterior_model = load_model(posterior_model_id, device)
 
         self.select_probs_0: pd.DataFrame = None

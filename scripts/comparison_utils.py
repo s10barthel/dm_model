@@ -40,6 +40,20 @@ def metrics(task: str, frame: pd.DataFrame, indices: np.ndarray | None = None,
     target = data["target"].to_numpy(dtype=float)
     if not np.isfinite(prediction).all() or not np.isfinite(target).all():
         raise ValueError("Comparison predictions and targets must be finite.")
+    if task in OUTCOME_TASKS and "outcome_domain" in data:
+        domains = set(data["outcome_domain"])
+        if domains != {"signed_gain"}:
+            raise ValueError("Comparison rows have inconsistent outcome domains.")
+        from models.outcome_learning import goal_ranking_metrics
+        soft = data["soft_target"].to_numpy(dtype=float)
+        if not np.isfinite(soft).all():
+            raise ValueError("Native outcome targets must be finite.")
+        return {**goal_ranking_metrics(target, prediction),
+                "xt_mae": float(np.mean(np.abs(soft - prediction))),
+                "xt_rmse": float(np.sqrt(np.mean((soft - prediction) ** 2))),
+                "xt_spearman": float(pd.Series(soft).corr(pd.Series(prediction), method="spearman")),
+                "xt_mean_bias": float(np.mean(prediction - soft)),
+                "prediction_out_of_bounds_fraction": float(np.mean(np.abs(prediction) > 1))}
     if not np.isin(target, [0, 1]).all() or np.any((prediction < 0) | (prediction > 1)):
         raise ValueError("Binary comparison requires binary targets and predictions in [0, 1].")
     result = {
@@ -95,22 +109,22 @@ def paired_bootstrap(task: str, frames: list[pd.DataFrame], *, resamples: int, s
     if resamples and len(match_ids) < 2:
         raise ValueError("Paired bootstrap requires at least two contributing test matches.")
     points = [metrics(task, frame, threshold=threshold, strict_threshold=strict_threshold) for frame in frames]
-    names = list(points[0])
-    draws = {(index, name): [] for index in range(len(frames)) for name in names}
+    # Signed and probability models share ranking/native fidelity metrics, but
+    # probability-only diagnostics are not valid paired comparisons for gains.
+    draws = {(index, name): [] for index, point in enumerate(points) for name in point}
     differences = {(a, b, name): [] for a in range(len(frames))
-                   for b in range(a + 1, len(frames)) for name in names}
+                   for b in range(a + 1, len(frames)) for name in points[a] if name in points[b]}
     rng = np.random.default_rng(seed)
     last_report = time.perf_counter()
     for repeat in range(resamples):
         sampled = rng.integers(0, len(match_ids), size=len(match_ids))
         indices = np.concatenate([groups[match_ids[index]] for index in sampled])
         batch = [metrics(task, frame, indices, threshold=threshold, strict_threshold=strict_threshold) for frame in frames]
-        for name in names:
-            for index, item in enumerate(batch):
-                draws[index, name].append(item[name])
-            for a, b, metric in differences:
-                if metric == name:
-                    differences[a, b, name].append(batch[b][name] - batch[a][name])
+        for index, item in enumerate(batch):
+            for name, value in item.items():
+                draws[index, name].append(value)
+        for a, b, name in differences:
+            differences[a, b, name].append(batch[b][name] - batch[a][name])
         now = time.perf_counter()
         if now - last_report >= 30 or repeat + 1 == resamples:
             print(f"{task} paired bootstrap: {repeat + 1}/{resamples}", flush=True)

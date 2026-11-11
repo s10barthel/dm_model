@@ -31,6 +31,7 @@ tests/*.py
 !tests/test_crash_capture.py
 !tests/test_observed_selection.py
 !tests/test_outcome_learning.py
+!tests/test_signed_outcomes.py
 !tests/test_graph_diagnostics.py
 !tests/test_training_runtime.py
 !tests/test_packed_batch_loader.py

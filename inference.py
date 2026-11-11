@@ -1386,7 +1386,7 @@ def inference_gnn(
         if collector is not None:
             from models.outcome_learning import is_distributional, categorical_probabilities
             if is_distributional(model.args):
-                categorical = categorical_probabilities(out[batch == i]).detach().cpu().tolist()
+                categorical = categorical_probabilities(out[batch == i], model.args).detach().cpu().tolist()
                 definition_id = model.args["outcome_distribution_definition"]["definition_sha256"]
                 from models.inference_masks import inference_mask_metadata
                 mask_id = inference_mask_metadata(model)["configuration_id"]

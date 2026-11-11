@@ -819,6 +819,7 @@ def derive_bundle_shared_context(
             "target_family": cli_args.target_family,
             "stop_condition_definition": shared.get("stop_condition_definition"),
             "xt_target_definition": shared.get("xt_target_definition"),
+            "outcome_learning_contract": shared.get("outcome_learning_contract"),
             "graph_schema": graph_schema,
             "use_v_edge_features": bool(graph_schema.get("add_v_edge_features", False)),
             "v_edge_feature_mode": v_edge_feature_mode,
@@ -1483,8 +1484,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                 raise ValueError("Use --stop-condition set-pieces instead of _spstop")
             args.stop_condition_definition = definition(feature_metadata, args.return_type, args.stop_condition)
             if args.target_family == "xt":
-                from datatools.xt_targets import validate_training_targets
-                validate_training_targets(feature_metadata, args.return_type)
+                from models.outcome_learning import configure_outcome_learning
+                for task in OUTCOME_TASKS:
+                    if args.enabled_tasks.get(task, False):
+                        configure_outcome_learning({**vars(args), "task": task, "use_xt": True}, feature_metadata)
         except ValueError as exc:
             parser.error(str(exc))
     else:
@@ -2499,6 +2502,7 @@ def _main(cli_args) -> None:
         "target_family": bundle_shared.get("target_family"),
         "stop_condition_definition": bundle_shared.get("stop_condition_definition"),
         "xt_target_definition": bundle_shared.get("xt_target_definition"),
+        "outcome_learning_contract": bundle_shared.get("outcome_learning_contract"),
         "return_type": bundle_shared.get("return_type"),
         "source_input_settings": bundle_shared.get("source_input_settings", {}),
         "source_feature_run_ids": bundle_shared.get("source_feature_run_ids", {}),

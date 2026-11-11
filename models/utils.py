@@ -380,6 +380,7 @@ def get_model_provenance(model_id: str) -> dict[str, Any]:
             "target_family",
             "learning_mode",
             "outcome_distribution_definition",
+            "outcome_learning_contract",
             "checkpoint_monitor",
             "return_type",
             "use_carries",
@@ -854,6 +855,10 @@ def validate_model_record_consistency(
     if len(xt_definitions) > 1:
         raise ValueError("Selected xT outcome checkpoints do not agree on surface and target definition.")
     shared["xt_target_definition"] = next(iter(xt_records.values())).get("xt_target_definition") if xt_records else None
+    contracts = {json.dumps(record.get("outcome_learning_contract"), sort_keys=True) for record in xt_records.values()}
+    if len(contracts) > 1:
+        raise ValueError("Selected xT outcome checkpoints do not agree on outcome learning contract.")
+    shared["outcome_learning_contract"] = next(iter(xt_records.values())).get("outcome_learning_contract") if xt_records else None
     return_type_records = outcome_records if outcome_records else model_records
     return_types = {record.get("return_type") for record in return_type_records.values()}
     return_types.discard(None)
@@ -1632,7 +1637,7 @@ def equal_frequency_slice_masks(values, prefix: str, n_slices: int = 5) -> list[
 
 
 def calc_continuous_target_metrics(y, y_hat, *, include_soft_bce: bool = True) -> dict[str, float]:
-    """Summarize fidelity and linear calibration for a continuous [0, 1] target."""
+    """Summarize continuous fidelity; probability targets may also request BCE."""
     y_true = np.asarray(y, dtype=float).reshape(-1)
     y_score = np.asarray(y_hat, dtype=float).reshape(-1)
     if len(y_true) != len(y_score) or len(y_true) == 0:
@@ -1907,8 +1912,9 @@ def run_epoch(
     from training_state import GradientAccumulator
     from models.node_selection import batch_identifiers, selection_layout, selection_loss_metrics
     from models.observed_selection import observed_layout, select_observed
-    from models.outcome_learning import is_distributional, distribution_loss, expected_values, mean_bce, crps, categorical_probabilities
+    from models.outcome_learning import is_distributional, is_signed, distribution_loss, expected_values, mean_bce, mean_mse, crps, categorical_probabilities
     distributional = is_distributional(args)
+    signed = is_signed(args)
     from models.graph_diagnostics import DiagnosticCollater, validate_with_snapshot
     if isinstance(loader.collate_fn, DiagnosticCollater):
         loader.collate_fn.start_epoch(getattr(args, "_epoch", None), "train" if train else "validation")
@@ -1926,8 +1932,13 @@ def run_epoch(
     elif args.gnn_task in ["node_regression", "graph_regression"]:
         metrics = {"count": 0, "mse_loss": 0, "l1_loss": 0}
 
+    if signed:
+        metrics.pop("ce_loss", None)
+        metrics["mse_loss"] = 0.
     if distributional:
-        metrics.update(distributional_ce=0., mean_soft_bce=0., distribution_crps=0.)
+        metrics.update(distributional_ce=0., distribution_crps=0.)
+        if not signed:
+            metrics["mean_soft_bce"] = 0.
     weighted_pass_success_eval = bool(getattr(args, "weighted_pass_success_metrics", False))
     if weighted_pass_success_eval and args.task != "pass_success":
         raise ValueError("weighted_pass_success_metrics is only supported for task='pass_success'.")
@@ -2254,16 +2265,20 @@ def run_epoch(
                 target = outcome_scoring if args.task.endswith("scoring") else outcome_conceding
                 if distributional:
                     pred_loss = distribution_loss(pred, target, args, batch_ipw)
-                    expected_bce = mean_bce(pred, target, args, batch_ipw)
+                    mean_loss = mean_mse(pred, target, args, batch_ipw) if signed else mean_bce(pred, target, args, batch_ipw)
                     size = batch_graphs.num_graphs
                     metrics["distributional_ce"] += pred_loss.detach().item() * size
-                    metrics["mean_soft_bce"] += expected_bce.detach().item() * size
+                    if signed:
+                        metrics["mse_loss"] += mean_loss.detach().item() * size
+                    else:
+                        expected_bce = mean_loss
+                        metrics["mean_soft_bce"] += expected_bce.detach().item() * size
                     metrics["distribution_crps"] += crps(pred.detach(), target, args).sum().item()
                     y_hat = expected_values(pred, args).detach().cpu().numpy()
                     if return_outcome_evaluation and getattr(args, "export_outcome_distributions", False):
                         from models.prediction_identity import observed_receiver_identities
                         ids = observed_receiver_identities(batch_graphs, batch_labels)
-                        probabilities = categorical_probabilities(pred).detach().cpu().tolist()
+                        probabilities = categorical_probabilities(pred, args).detach().cpu().tolist()
                         for gi, probs in enumerate(probabilities):
                             distribution_rows.append({
                                 "match_id": str(batch_graphs.evaluation_match_id[gi]),
@@ -2274,6 +2289,10 @@ def run_epoch(
                                 "probabilities": probs,
                                 "support_definition_id": args.outcome_distribution_definition["definition_sha256"],
                             })
+                elif signed:
+                    pred_loss = mean_mse(pred, target, args, batch_ipw)
+                    metrics["mse_loss"] += pred_loss.detach().item() * batch_graphs.num_graphs
+                    y_hat = expected_values(pred, args).detach().cpu().numpy()
                 else:
                     pred_loss = nn.BCEWithLogitsLoss(weight=batch_ipw, pos_weight=pos_weight)(pred, target)
                     y_hat = torch.sigmoid(pred).cpu().detach().numpy()
@@ -2281,9 +2300,10 @@ def run_epoch(
                     outcome_candidate_x.append(batch_graphs.x[observed_positions, config.NODE_FEATURE_X].detach().cpu().numpy())
                 y = diagnostic_scoring if args.task.endswith("scoring") else diagnostic_conceding
                 y = y.cpu().detach().numpy()
-                binary_predictions.append(np.asarray(y_hat, dtype=float))
-                binary_targets.append(np.asarray(y, dtype=float))
-                binary_threshold = getattr(args, "f1_outcome_threshold", None)
+                if not signed:
+                    binary_predictions.append(np.asarray(y_hat, dtype=float))
+                    binary_targets.append(np.asarray(y, dtype=float))
+                    binary_threshold = getattr(args, "f1_outcome_threshold", None)
                 outcome_predictions.append(np.asarray(y_hat, dtype=float))
                 outcome_targets.append(target.cpu().detach().numpy().astype(float))
                 outcome_diagnostics.append(np.asarray(y, dtype=float))
@@ -2298,6 +2318,7 @@ def run_epoch(
                             "action_index": int(batch_labels[gi, config.LABEL_INDEX["action_index"]].item()),
                             "target": float(observed), "prediction": float(prediction),
                             "soft_target": float(soft_target), "execution_branch": int(branch),
+                            **({"outcome_domain": "signed_gain"} if signed else {}),
                             **({"receiver_id": receiver_ids[gi]} if receiver_ids is not None else {}),
                         })
                 if return_outcome_evaluation:
@@ -2441,6 +2462,7 @@ def run_epoch(
     outcome_evaluation = None
     if outcome_predictions:
         outcome_evaluation = {
+            "outcome_learning_contract": getattr(args, "outcome_learning_contract", None),
             "prediction": np.concatenate(outcome_predictions),
             "target": np.concatenate(outcome_targets),
             "diagnostic": np.concatenate(outcome_diagnostics),
@@ -2455,8 +2477,11 @@ def run_epoch(
         if outcome_match_ids:
             outcome_evaluation["match_id"] = np.concatenate(outcome_match_ids)
         target_metrics = calc_continuous_target_metrics(
-            outcome_evaluation["target"], outcome_evaluation["prediction"]
+            outcome_evaluation["target"], outcome_evaluation["prediction"], include_soft_bce=not signed
         )
+        if signed:
+            target_metrics.pop("soft_bce", None)
+            target_metrics["prediction_out_of_bounds_fraction"] = float(np.mean(np.abs(outcome_evaluation["prediction"]) > 1))
         metrics.update({f"xt_target_{key}": value for key, value in target_metrics.items()})
 
     if weighted_pass_success_eval:

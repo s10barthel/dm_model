@@ -35,8 +35,12 @@ def add_outcome_bootstrap_arguments(parser):
     parser.add_argument("--outcome-bootstrap-seed", type=nonnegative_integer, default=42)
 
 
-def selected_metrics(prediction, target, diagnostic, diagnostic_target="goal_next10_diagnostic"):
+def selected_metrics(prediction, target, diagnostic, diagnostic_target="goal_next10_diagnostic", *, signed=False):
     continuous = calc_continuous_target_metrics(target, prediction, include_soft_bce=False)
+    if signed:
+        from models.outcome_learning import goal_ranking_metrics
+        return {"xt_training_target": {key: continuous[key] for key in CONTINUOUS},
+                diagnostic_target: goal_ranking_metrics(diagnostic, prediction)}
     if not np.isfinite(diagnostic).all() or not np.isin(diagnostic, [0, 1]).all():
         raise ValueError("Common goal diagnostic targets must be finite binary values.")
     binary_y = diagnostic.astype(int)
@@ -84,7 +88,10 @@ def outcome_bootstrap(evaluation, *, model_id, task, resamples=2000, seed=42):
     prediction, target, diagnostic = (arrays[key].astype(float) for key in ("prediction", "target", "diagnostic"))
     diagnostic_target = diagnostic_name(evaluation.get("diagnostic_return_type", "next_10"))
     metadata["diagnostic_target"] = diagnostic_target
-    point = selected_metrics(prediction, target, diagnostic, diagnostic_target)
+    from models.outcome_learning import is_signed
+    signed = is_signed(evaluation)
+    metadata["outcome_learning_contract"] = evaluation.get("outcome_learning_contract")
+    point = selected_metrics(prediction, target, diagnostic, diagnostic_target, signed=signed)
     values = {(target_name, metric): [] for target_name, metrics in point.items() for metric in metrics}
     rng = np.random.default_rng(seed)
     started = time.perf_counter()
@@ -93,7 +100,7 @@ def outcome_bootstrap(evaluation, *, model_id, task, resamples=2000, seed=42):
         for repeat in range(resamples):
             chosen = rng.integers(0, len(groups), size=len(groups))
             indices = np.concatenate([groups[index] for index in chosen])
-            metrics = selected_metrics(prediction[indices], target[indices], diagnostic[indices], diagnostic_target)
+            metrics = selected_metrics(prediction[indices], target[indices], diagnostic[indices], diagnostic_target, signed=signed)
             for key, estimates in values.items():
                 value = metrics[key[0]][key[1]]
                 if np.isfinite(value):

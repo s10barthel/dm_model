@@ -62,6 +62,7 @@ def checkpoint(model_id: str) -> dict:
                 "feature_run_id", "use_carries", "min_pass_dur", "target_family",
                 "intended_receiver_mode", "training_filter", "label_source", "feature_signature",
                 "pass_height_definition",
+                "xt_target_definition", "outcome_learning_contract",
             )
         },
         "weights_sha256": hashlib.sha256(weights_path.read_bytes()).hexdigest(),

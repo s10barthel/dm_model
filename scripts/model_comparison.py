@@ -22,7 +22,7 @@ from models.evaluation_membership import (combine_evaluation_membership, collect
 
 
 TARGET_DEFINITION_KEYS = ("target_family", "return_type", "intended_receiver_mode", "label_source",
-                          "pass_height_definition")
+                          "pass_height_definition", "xt_target_definition", "outcome_learning_contract")
 IDENTITY_COLUMNS = ("soft_target", "execution_branch",
                     "evaluation_pass_height_threshold_meters", "pass_height_label_mode")
 SOFT_TARGET_RTOL = 1e-6
@@ -80,12 +80,12 @@ def validate_target_definitions(records: list[dict]) -> list[str]:
         raise ValueError("Checkpoint comparisons require models of the same task.")
     definitions = [{**(record.get("target_definitions") or {}), "model_id": record["model_id"]} for record in records]
     task = records[0]["task"]
-    keys = ("target_family", "return_type", "intended_receiver_mode", "label_source") if task.startswith("outcome_") else (
+    keys = ("target_family", "return_type", "intended_receiver_mode", "label_source", "xt_target_definition") if task.startswith("outcome_") else (
         "intended_receiver_mode", "label_source", "pass_height_definition")
     messages = metadata_differences(definitions, keys, prefix="Evaluation reference ")
     if task.startswith("outcome_"):
-        messages = [message + " Native-target metrics use different references; binary goal metrics retain the common diagnostic definition."
-                    if any(f"{key} differs" in message for key in ("target_family", "return_type", "label_source")) else message
+        messages = [message + " Native-target metrics use different references; goal ranking metrics retain the common diagnostic definition."
+                    if any(f"{key} differs" in message for key in ("target_family", "return_type", "label_source", "xt_target_definition")) else message
                     for message in messages]
     return messages
 

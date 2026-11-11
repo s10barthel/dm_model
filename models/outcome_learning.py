@@ -1,4 +1,4 @@
-"""Versioned categorical outcome learning in the original target units."""
+"""Versioned scalar and categorical outcome learning in original target units."""
 from __future__ import annotations
 
 import hashlib
@@ -20,11 +20,67 @@ def is_distributional(args):
     return settings(args).get("learning_mode", "scalar") == "distributional"
 
 
+def is_signed(args):
+    return (settings(args).get("outcome_learning_contract") or {}).get("domain") == "signed_gain"
+
+
+def signed_contract(args):
+    distributional = is_distributional(args)
+    return dict(version=1, domain="signed_gain", target_bounds=[-1., 1.],
+                output="categorical_mean" if distributional else "identity",
+                loss="categorical_ce" if distributional else "weighted_mse",
+                checkpoint_monitor="mse_loss")
+
+
+def configure_outcome_learning(args, metadata, source=None):
+    """Resolve from feature metadata, never from the observed label range."""
+    from datatools.xt_targets import target_settings, training_target_definition, validate_training_targets
+    args = settings(args)
+    target = target_settings(metadata if args.get("use_xt") else None)
+    signed = bool(args.get("use_xt") and target["representation"] == "gain"
+                  and not target["clip_negative_gains"])
+    if args.get("use_xt"):
+        validate_training_targets(metadata, args.get("return_type"), args=args)
+        args["xt_target_definition"] = training_target_definition(metadata)
+    contract = signed_contract(args) if signed else None
+    if source is not None:
+        source = settings(source)
+        saved = source.get("outcome_learning_contract", (source.get("args") or {}).get("outcome_learning_contract"))
+        if saved != contract:
+            raise ValueError("Resume/refit cannot change the saved outcome learning contract.")
+        saved_target = source.get("xt_target_definition") or (source.get("args") or {}).get("xt_target_definition")
+        if args.get("use_xt") and saved_target is not None and saved_target != args["xt_target_definition"]:
+            raise ValueError("Resume/refit cannot change the saved xT surface or target definition.")
+    if contract is not None:
+        args["outcome_learning_contract"] = contract
+        args["checkpoint_monitor"] = "mse_loss"
+    elif args.get("outcome_learning_contract") is not None:
+        raise ValueError("Outcome learning contract conflicts with feature targets.")
+    normalize_learning_settings(args)
+    return contract
+
+
+def mean_mse(logits, targets, args, weight=None):
+    validate_targets(targets, -1.)
+    losses = (expected_values(logits, args) - targets).square()
+    return (losses if weight is None else losses * weight).mean()
+
+
+def goal_ranking_metrics(target, prediction):
+    """Association with binary goals; signed gains are not probabilities."""
+    from sklearn.metrics import roc_auc_score, average_precision_score
+    target, prediction = np.asarray(target), np.asarray(prediction)
+    if not np.isfinite(target).all() or not np.isin(target, [0, 1]).all() or not np.isfinite(prediction).all():
+        raise ValueError("Goal ranking requires finite scores and binary diagnostic targets.")
+    return dict(roc_auc=float(roc_auc_score(target, prediction)) if np.unique(target).size == 2 else np.nan,
+                pr_auc=float(average_precision_score(target, prediction)) if np.any(target > 0) else np.nan)
+
+
 def add_learning_arguments(parser):
     parser.add_argument("--learning-mode", choices=("scalar", "distributional"), default=None,
                         help="Outcome learning mode; fresh training defaults to scalar.")
     parser.add_argument("--distribution-atoms", type=int, default=None,
-                        help="Maximum categorical atom count, including 0 and 1 (default: 65).")
+                        help="Maximum categorical atom count, including domain endpoints and zero (default: 65).")
 
 
 def normalize_learning_settings(args, source=None):
@@ -39,6 +95,11 @@ def normalize_learning_settings(args, source=None):
     if type(count) is not int or count < 2:
         raise ValueError("--distribution-atoms must be an integer >= 2.")
     if source is not None:
+        saved_contract = source.get("outcome_learning_contract", (source.get("args") or {}).get("outcome_learning_contract"))
+        if saved_contract is not None:
+            if args.get("outcome_learning_contract") not in (None, saved_contract):
+                raise ValueError("Resume/refit outcome learning contract conflicts with its source.")
+            args["outcome_learning_contract"] = saved_contract
         if mode != source.get("learning_mode", "scalar"):
             raise ValueError("Resume/refit cannot change the saved learning mode.")
         saved = source.get("outcome_distribution_definition")
@@ -60,9 +121,20 @@ def normalize_learning_settings(args, source=None):
         if args.get("weight_bce", False):
             raise ValueError("Distributional learning does not support outcome-dependent class balancing.")
         args["distribution_atoms"] = count
-        args["checkpoint_monitor"] = "mean_soft_bce"
+        args["checkpoint_monitor"] = "mse_loss" if is_signed(args) else "mean_soft_bce"
+        if is_signed(args) and count < 3:
+            raise ValueError("Signed distributions require at least 3 atoms (-1, 0, 1).")
         if args.get("outcome_distribution_definition") is not None:
             validate_definition(args["outcome_distribution_definition"])
+    if is_signed(args):
+        if args["outcome_learning_contract"] != signed_contract(args):
+            raise ValueError("Invalid outcome learning contract.")
+        args["checkpoint_monitor"] = "mse_loss"
+        definition = args.get("outcome_distribution_definition")
+        if mode == "distributional" and definition is not None and definition["version"] != 2:
+            raise ValueError("Signed outcome learning requires a signed distribution definition.")
+    elif mode == "distributional" and (args.get("outcome_distribution_definition") or {}).get("version") == 2:
+        raise ValueError("Signed distribution requires an explicit outcome learning contract.")
     return args
 
 
@@ -75,22 +147,40 @@ def validate_definition(definition):
     if not isinstance(definition, dict):
         raise ValueError("Distributional checkpoint is missing its distribution definition.")
     payload = {k: v for k, v in definition.items() if k != "definition_sha256"}
-    if (payload.get("version") != 1 or payload.get("encoding") != "linear_two_hot_original_units"
+    if (payload.get("version") not in (1, 2) or payload.get("encoding") != "linear_two_hot_original_units"
             or payload.get("representation") != "categorical"
             or definition.get("definition_sha256") != _digest(payload)):
         raise ValueError("Invalid or inconsistent outcome distribution definition.")
     atoms = np.asarray(payload.get("atoms", []), dtype=float)
+    lower = -1 if payload["version"] == 2 else 0
     if (atoms.ndim != 1 or len(atoms) < 2 or not np.isfinite(atoms).all()
-            or atoms[0] != 0 or atoms[-1] != 1 or not (np.diff(atoms) > 0).all()
+            or atoms[0] != lower or atoms[-1] != 1 or 0 not in atoms or not (np.diff(atoms) > 0).all()
             or payload.get("effective_atoms") != len(atoms)
             or type(payload.get("requested_atoms")) is not int
             or len(atoms) > payload["requested_atoms"]):
-        raise ValueError("Distribution atoms must be strictly increasing from 0 to 1.")
+        raise ValueError(f"Distribution atoms must be strictly increasing from {lower} to 1 and include zero.")
     return definition
 
 
 def validate_learning_metadata(args, metadata):
+    contract = args.get("outcome_learning_contract")
+    if contract is not None and (not args.get("use_xt") or contract != signed_contract(args)):
+        raise ValueError("Invalid outcome learning contract or target family.")
+    if is_signed(args) and args.get("checkpoint_monitor") not in (None, "mse_loss"):
+        raise ValueError("Signed outcome checkpoint must monitor mse_loss.")
     normalize_learning_settings(args)
+    if metadata.get("outcome_learning_contract", contract) != contract:
+        raise ValueError("Checkpoint args and metadata disagree on outcome learning contract.")
+    if is_signed(args) and metadata.get("checkpoint_monitor", "mse_loss") != "mse_loss":
+        raise ValueError("Checkpoint metadata has an incompatible outcome monitor.")
+    definition = args.get("xt_target_definition") or metadata.get("xt_target_definition") or {}
+    target = definition.get("xt_targets") or {}
+    signed = target.get("representation") == "gain" and target.get("clip_negative_gains") is False
+    if signed != is_signed(args):
+        raise ValueError("Checkpoint target definition and outcome learning contract disagree.")
+    if signed:
+        from datatools.xt_targets import validate_training_targets
+        validate_training_targets(definition, args.get("return_type"), args=args)
     if "learning_mode" in metadata and metadata["learning_mode"] != args["learning_mode"]:
         raise ValueError("Checkpoint args and metadata disagree on learning mode.")
     if is_distributional(args):
@@ -111,14 +201,16 @@ def target_column(args):
     return LABEL_INDEX[name]
 
 
-def validate_targets(values):
-    if not bool((torch.isfinite(values) & (values >= 0) & (values <= 1)).all()):
-        raise ValueError("Distributional outcome targets must be finite and in [0, 1]; values are not clipped.")
+def validate_targets(values, lower=0.):
+    if not bool((torch.isfinite(values) & (values >= lower) & (values <= 1)).all()):
+        raise ValueError(f"Outcome targets must be finite and in [{lower:g}, 1]; values are not clipped.")
 
 
 def fit_definition(label_batches, args, provenance):
     """Read retained training labels only, without consuming RNG state."""
     args = settings(args)
+    if is_signed(args):
+        return fit_signed_definition(label_batches, args, provenance)
     column = target_column(args)
     rows, chunks, digest = 0, [], hashlib.sha256()
     zeros = ones = 0
@@ -156,13 +248,48 @@ def fit_definition(label_batches, args, provenance):
     return validate_definition(definition)
 
 
+def fit_signed_definition(label_batches, args, provenance):
+    column = target_column(args)
+    chunks, digest = [], hashlib.sha256()
+    for labels in label_batches:
+        values = labels[:, column].detach().cpu().to(torch.float64)
+        validate_targets(values, -1.)
+        digest.update(values.numpy().tobytes())
+        chunks.append(values)
+    values = torch.cat(chunks) if chunks else torch.empty(0, dtype=torch.float64)
+    if not len(values):
+        raise ValueError("Cannot fit a distribution without retained training labels.")
+    count = args.get("distribution_atoms", DEFAULT_ATOMS)
+    if count < 3:
+        raise ValueError("Signed distributions require at least 3 atoms (-1, 0, 1).")
+    interior = values[(values > -1) & (values < 1) & (values != 0)]
+    atoms = torch.tensor([-1., 0., 1.], dtype=torch.float64)
+    if len(interior) and count > 3:
+        quantiles = torch.tensor([.5], dtype=torch.float64) if count == 4 else torch.linspace(0, 1, count - 3, dtype=torch.float64)
+        atoms = torch.cat([atoms, torch.quantile(interior, quantiles)])
+    atoms = torch.unique(atoms.float(), sorted=True).double()
+    occupancy = torch.zeros(len(atoms), dtype=torch.float64)
+    for chunk in values.split(16384):
+        occupancy += encode_targets(chunk, atoms).sum(0)
+    definition = dict(version=2, representation="categorical", encoding="linear_two_hot_original_units",
+                      support_policy="signed_training_interior_quantiles_v1", atoms=atoms.tolist(),
+                      requested_atoms=count, effective_atoms=len(atoms), training_label_count=len(values),
+                      training_labels_sha256=digest.hexdigest(), provenance=provenance,
+                      atom_gaps=torch.diff(atoms).tolist(), interior_label_count=len(interior),
+                      encoded_training_occupancy=(occupancy / len(values)).tolist(),
+                      zero_label_count=int((values == 0).sum()), positive_label_count=int((values > 0).sum()),
+                      negative_label_count=int((values < 0).sum()))
+    definition["definition_sha256"] = _digest(definition)
+    return validate_definition(definition)
+
+
 def atom_tensor(args, like):
     return torch.as_tensor(settings(args)["outcome_distribution_definition"]["atoms"],
                            dtype=like.dtype, device=like.device)
 
 
 def encode_targets(values, atoms):
-    validate_targets(values)
+    validate_targets(values, atoms[0])
     upper = torch.searchsorted(atoms, values.contiguous()).clamp(1, len(atoms) - 1)
     lower = upper - 1
     fraction = (values - atoms[lower]) / (atoms[upper] - atoms[lower])
@@ -172,22 +299,25 @@ def encode_targets(values, atoms):
     return encoded
 
 
-def categorical_probabilities(logits):
+def categorical_probabilities(logits, args=None):
     # Inference can force an entire candidate/branch to zero or mark it missing.
     zero = torch.isneginf(logits).all(-1)
     missing = torch.isnan(logits).all(-1)
     safe = torch.where((zero | missing).unsqueeze(-1), torch.zeros_like(logits), logits)
     probabilities = safe.softmax(-1)
     point_zero = torch.zeros_like(probabilities)
-    point_zero[..., 0] = 1
+    zero_index = settings(args)["outcome_distribution_definition"]["atoms"].index(0.) if args is not None else 0
+    point_zero[..., zero_index] = 1
     probabilities = torch.where(zero.unsqueeze(-1), point_zero, probabilities)
     return torch.where(missing.unsqueeze(-1), torch.full_like(probabilities, float("nan")), probabilities)
 
 
 def expected_values(logits, args):
     if not is_distributional(args):
+        if is_signed(args):
+            return torch.where(torch.isneginf(logits), torch.zeros_like(logits), logits)
         return torch.sigmoid(logits)
-    return (categorical_probabilities(logits) * atom_tensor(args, logits)).sum(-1)
+    return (categorical_probabilities(logits, args) * atom_tensor(args, logits)).sum(-1)
 
 
 def distribution_loss(logits, targets, args, weight=None):
@@ -199,6 +329,8 @@ def distribution_loss(logits, targets, args, weight=None):
 
 def mean_bce(logits, targets, args, weight=None):
     """Stable BCE of a categorical expectation, even for extreme logits."""
+    if is_signed(args):
+        raise ValueError("BCE is undefined for signed gains.")
     validate_targets(targets)
     atoms = atom_tensor(args, logits)
     logp = logits.log_softmax(-1)
@@ -212,7 +344,7 @@ def mean_bce(logits, targets, args, weight=None):
 
 def crps(logits, targets, args):
     atoms = atom_tensor(args, logits)
-    probabilities = categorical_probabilities(logits)
+    probabilities = categorical_probabilities(logits, args)
     first = (probabilities * (atoms - targets.unsqueeze(-1)).abs()).sum(-1)
     # E|X-X'| / 2 from prefix sums; no K-by-K tensor per sample.
     before = probabilities.cumsum(-1) - probabilities
@@ -223,6 +355,7 @@ def crps(logits, targets, args):
 def distribution_identity(args):
     args = settings(args)
     return {"learning_mode": args.get("learning_mode", "scalar"),
+            "outcome_learning_contract": args.get("outcome_learning_contract"),
             "outcome_distribution_definition": args.get("outcome_distribution_definition"),
             "checkpoint_monitor": args.get("checkpoint_monitor", "ce_loss")}
 

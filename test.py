@@ -363,11 +363,15 @@ def binned_relationship_axis_limits(
     if not len(finite_prediction) and not len(finite_observed):
         return (0.0, 1.0), (0.0, 1.0)
     if show_identity:
-        upper = _rounded_axis_upper(float(np.max(np.concatenate([finite_prediction, finite_observed]))))
-        return (0.0, upper), (0.0, upper)
+        combined = np.concatenate([finite_prediction, finite_observed])
+        upper = _rounded_axis_upper(float(np.max(combined)))
+        lower = -_rounded_axis_upper(float(-np.min(combined))) if np.min(combined) < 0 else 0.
+        return (lower, upper), (lower, upper)
     x_upper = _rounded_axis_upper(float(np.max(finite_prediction))) if len(finite_prediction) else 1.0
     y_upper = _rounded_axis_upper(float(np.max(finite_observed))) if len(finite_observed) else 1.0
-    return (0.0, x_upper), (0.0, y_upper)
+    x_lower = -_rounded_axis_upper(float(-np.min(finite_prediction))) if len(finite_prediction) and np.min(finite_prediction) < 0 else 0.
+    y_lower = -_rounded_axis_upper(float(-np.min(finite_observed))) if len(finite_observed) and np.min(finite_observed) < 0 else 0.
+    return (x_lower, x_upper), (y_lower, y_upper)
 
 
 def _save_binned_relationship_plot(
@@ -432,6 +436,11 @@ def write_outcome_evaluation_artifacts(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     distribution_rows = outcome_evaluation.get("distribution_rows")
+    from models.outcome_learning import is_signed, goal_ranking_metrics
+    signed = is_signed(outcome_evaluation)
+    if signed:
+        (output_dir / "outcome_learning_contract.json").write_text(
+            json.dumps(outcome_evaluation["outcome_learning_contract"], indent=2), encoding="utf-8")
     if distribution_rows:
         pd.DataFrame(distribution_rows).to_parquet(output_dir / "outcome_distributions.parquet", index=False)
         (output_dir / "outcome_distribution_definition.json").write_text(
@@ -484,7 +493,13 @@ def write_outcome_evaluation_artifacts(
             }
             if len(stratum_predictions):
                 if evaluation_target == "xt_training_target":
-                    row.update(calc_continuous_target_metrics(stratum_observed, stratum_predictions))
+                    native = calc_continuous_target_metrics(stratum_observed, stratum_predictions, include_soft_bce=not signed)
+                    if signed:
+                        native.pop("soft_bce", None)
+                        native["prediction_out_of_bounds_fraction"] = float(np.mean(np.abs(stratum_predictions) > 1))
+                    row.update(native)
+                elif signed:
+                    row.update(goal_ranking_metrics(stratum_observed, stratum_predictions))
                 else:
                     row.update(
                         calc_binary_metrics(

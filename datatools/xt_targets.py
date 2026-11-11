@@ -155,11 +155,23 @@ def training_target_definition(metadata):
                 xt_targets=target_settings(metadata))
 
 
-def validate_training_targets(metadata, return_type=None):
+def validate_training_targets(metadata, return_type=None, *, args=None):
     settings = target_settings(metadata)
     unavailable = (metadata or {}).get("xt_unavailable_return_types") or []
     if return_type is not None and return_type in unavailable:
         raise ValueError(f"xT targets for return_type={return_type!r} are unavailable in this feature run.")
     if settings["representation"] == "gain" and not settings["clip_negative_gains"]:
-        raise ValueError("Existing xT outcome training requires --xt-clip-negative-gains; "
-                         "refresh the feature targets with clipping before training.")
+        options = args if isinstance(args, dict) else vars(args) if args is not None else {}
+        if options.get("task") not in {"outcome_scoring", "outcome_conceding"}:
+            raise ValueError("Unclipped xT gains support outcome_scoring and outcome_conceding only; "
+                             "other tasks require --xt-clip-negative-gains.")
+        if options.get("model", "gat") in {"xgboost", "catboost"}:
+            raise ValueError("Unclipped xT gain training requires a GNN.")
+        if options.get("weight_bce", False):
+            raise ValueError("Unclipped xT gains do not support --weight_bce.")
+        # These returns aggregate bounded surface values by max, probability union,
+        # or select one state. Subtracting a bounded baseline gives [-1, 1].
+        if return_type is not None and parse_return_type(return_type)[0] not in {
+            "next", "next_plus", "in", "time", "extended_possession", "disc", "disc_max", "disc_poly_max"
+        }:
+            raise ValueError("Unclipped xT gain bounds are undefined for this return type.")

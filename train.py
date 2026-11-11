@@ -887,15 +887,8 @@ def main(cache_session):
                                                    legacy=resume_record is not None)
         if saved_stops and saved_stops != args.stop_condition_definition:
             raise ValueError("Resume cannot change stop conditions")
-    if args.use_xt:
-        from datatools.xt_targets import validate_training_targets, training_target_definition
-        validate_training_targets(feature_metadata, args.return_type)
-        definition = training_target_definition(feature_metadata)
-        if resume_record is not None:
-            saved_definition = resume_record.get("xt_target_definition") or resume_record.get("args", {}).get("xt_target_definition")
-            if saved_definition is not None and saved_definition != definition:
-                raise ValueError("Resume cannot change the saved xT surface or target definition.")
-        args.xt_target_definition = definition
+    from models.outcome_learning import configure_outcome_learning
+    configure_outcome_learning(args, feature_metadata, goal_source)
     from datatools.pass_eligibility import resolve_training_policy
     resolve_training_policy(args, feature_metadata,
                             vars(args).copy() if args.refit_recipe is not None else resume_record)
