@@ -53,6 +53,7 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from models.membership import attach_membership_report
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import (add_top_pass_selector, resolve_top_pass_selector,
                                XPassVersionSelection, validate_xpass_weight_options)
 from physical_pass_model import (
@@ -1036,6 +1037,7 @@ def merge_success_intent_context(shared_context: dict[str, object], model_id: st
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     if getattr(args, "visualization_comparison", None):
         from scripts.inference_visualization_comparison import run_comparison
         run_comparison(args, sys.modules[__name__])
@@ -1076,6 +1078,7 @@ def main() -> None:
     ]
     if required_model_tasks:
         resolved_model_ids, shared_context, bundle = resolve_model_selection(
+            warning_collector=outcome_warnings,
             required_tasks=required_model_tasks,
             bundle_id=args.bundle_id,
             explicit_model_ids=explicit_model_ids,
@@ -1135,7 +1138,9 @@ def main() -> None:
         args.intended_receiver_mode,
         graph_schema,
         context="Selected visualization feature artifacts",
+        warning_collector=outcome_warnings,
     )
+    confirm_outcome_warnings(outcome_warnings, output_root, shared_context)
     if not args.feature_run_id and feature_run_id:
         runtime_feature_context["selection"] = "physical_xpass_cache"
     feature_run_id = str(runtime_feature_context["feature_run_id"])
@@ -1258,6 +1263,7 @@ def main() -> None:
         print(f"Saved component plots to {output_dir}")
 
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(loaded_models),
         "run_id": visualization_run_id,
         "created_at": datetime.now().isoformat(timespec="seconds"),

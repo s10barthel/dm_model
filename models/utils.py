@@ -777,11 +777,14 @@ def validate_model_record_consistency(
     require_target_family: bool = True,
     outcome_tasks: tuple[str, ...] = ("outcome_scoring", "outcome_conceding"),
     allow_pass_only_success: bool = False,
+    warning_collector=None,
 ) -> dict[str, Any]:
     """Validate checkpoints and select the runtime carry artifact family.
 
     Callers opting into allow_pass_only_success must mask unsupported carry
     success predictions before displaying or deriving values from them.
+    An optional warning_collector.add(message, key=...) records cross-model
+    xT limitations for CLI confirmation; without it those checks stay strict.
     """
     if not model_records:
         raise ValueError("No model records were provided for consistency validation.")
@@ -851,14 +854,8 @@ def validate_model_record_consistency(
 
     outcome_records = {task: model_records[task] for task in outcome_tasks if task in model_records}
     xt_records = {task: record for task, record in outcome_records.items() if record.get("target_family") == "xt"}
-    xt_definitions = {json.dumps(record.get("xt_target_definition"), sort_keys=True) for record in xt_records.values()}
-    if len(xt_definitions) > 1:
-        raise ValueError("Selected xT outcome checkpoints do not agree on surface and target definition.")
-    shared["xt_target_definition"] = next(iter(xt_records.values())).get("xt_target_definition") if xt_records else None
-    contracts = {json.dumps(record.get("outcome_learning_contract"), sort_keys=True) for record in xt_records.values()}
-    if len(contracts) > 1:
-        raise ValueError("Selected xT outcome checkpoints do not agree on outcome learning contract.")
-    shared["outcome_learning_contract"] = next(iter(xt_records.values())).get("outcome_learning_contract") if xt_records else None
+    from models.outcome_compatibility import xt_consistency
+    shared.update(xt_consistency(xt_records, warning_collector))
     return_type_records = outcome_records if outcome_records else model_records
     return_types = {record.get("return_type") for record in return_type_records.values()}
     return_types.discard(None)
@@ -907,6 +904,7 @@ def resolve_model_selection(
     require_target_family: bool = True,
     allow_pass_only_success: bool = False,
     require_shared_split: bool = True,
+    warning_collector=None,
 ) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
     """Resolve checkpoints; require a shared split when it selects runtime data."""
     explicit_model_ids = explicit_model_ids or {}
@@ -929,6 +927,7 @@ def resolve_model_selection(
         require_return_type=require_return_type,
         require_target_family=require_target_family,
         allow_pass_only_success=allow_pass_only_success,
+        warning_collector=warning_collector,
     )
     shared["model_records"] = model_records
     from models.membership import explicit_split_provenance
@@ -1200,8 +1199,13 @@ def resolve_runtime_feature_run_context(
     required_graph_schema: dict[str, int | bool],
     *,
     context: str = "Selected feature artifacts",
+    warning_collector=None,
 ) -> dict[str, Any]:
+    from models.outcome_compatibility import runtime_reference, record_runtime_reference
     candidate_ids = runtime_feature_run_candidate_ids(shared_context, bundle)
+
+    def selected(resolved):
+        return record_runtime_reference(shared_context, resolved, warning_collector)
 
     def validate_xt_context(resolved):
         expected_stops = shared_context.get("stop_condition_definition")
@@ -1225,10 +1229,10 @@ def resolve_runtime_feature_run_context(
         for return_type in xt_returns:
             if return_type in unavailable:
                 raise ValueError(f"Runtime xT targets for return_type={return_type!r} are unavailable in this feature run.")
-        expected = shared_context.get("xt_target_definition")
-        if expected is not None:
-            from datatools.xt_targets import training_target_definition
-            if training_target_definition(resolved.get("metadata", {})) != expected:
+        reference = runtime_reference(shared_context, resolved.get("metadata", {}))
+        if reference is not None:
+            resolved["xt_target_reference"] = reference
+            if warning_collector is None and reference["mismatching_tasks"]:
                 raise ValueError("Runtime feature run uses a different xT surface or target definition than the outcome checkpoints.")
 
     if explicit_feature_run_id:
@@ -1241,7 +1245,7 @@ def resolve_runtime_feature_run_context(
         validate_xt_context(resolved)
         resolved["selection"] = "explicit"
         resolved["candidate_feature_run_ids"] = candidate_ids
-        return resolved
+        return selected(resolved)
 
     def select_compatible(feature_run_ids: list[str], selection: str) -> tuple[dict[str, Any] | None, list[str]]:
         compatible: list[dict[str, Any]] = []
@@ -1261,15 +1265,19 @@ def resolve_runtime_feature_run_context(
             compatible.append(resolved)
         if not compatible:
             return None, rejected
-        compatible.sort(key=lambda item: _feature_run_sort_key(str(item["feature_run_id"]), item.get("metadata")))
+        compatible.sort(key=lambda item: (
+            bool((item.get("xt_target_reference") or {}).get("matching_tasks")),
+            _feature_run_sort_key(str(item["feature_run_id"]), item.get("metadata"))))
         selected = compatible[-1]
         selected["selection"] = selection
         selected["candidate_feature_run_ids"] = candidate_ids
         return selected, rejected
 
     candidate_selection, rejected_candidates = select_compatible(candidate_ids, "newest_compatible")
-    if candidate_selection is not None:
-        return candidate_selection
+    if candidate_selection is not None and (
+            warning_collector is None or "xt_target_reference" not in candidate_selection
+            or candidate_selection["xt_target_reference"]["matching_tasks"]):
+        return selected(candidate_selection)
 
     all_candidate_ids = [
         feature_run_id
@@ -1280,8 +1288,13 @@ def resolve_runtime_feature_run_context(
         all_candidate_ids,
         "newest_compatible_all_feature_runs",
     )
+    if fallback_selection is not None and (candidate_selection is None or
+            (fallback_selection.get("xt_target_reference") or {}).get("matching_tasks")):
+        return selected(fallback_selection)
+    if candidate_selection is not None:
+        return selected(candidate_selection)
     if fallback_selection is not None:
-        return fallback_selection
+        return selected(fallback_selection)
 
     rejected = rejected_candidates + rejected_fallbacks
     if not rejected:

@@ -35,6 +35,8 @@ from datatools.skillcorner import (
 from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -70,6 +72,7 @@ from validation.skillcorner.code.skillcorner_postprocessing import run_skillcorn
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_warning_argument(parser)
     add_inference_mask_arguments(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "skillcorner_data"))
     parser.add_argument("--match-id", action="append", help="Restrict inference to one or more SkillCorner match ids.")
@@ -247,8 +250,10 @@ def format_match_completion(match_id: str, match_stats: dict[str, int]) -> str:
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        warning_collector=outcome_warnings,
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -278,6 +283,7 @@ def main() -> None:
     output_parent = Path(args.output_dir) if args.output_dir else SKILLCORNER_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
     start_inference_attempt(output_dir, args)
+    confirm_outcome_warnings(outcome_warnings, output_dir, shared_context)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_match_ids, skipped_matches = discover_skillcorner_matches(
@@ -534,6 +540,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),

@@ -32,6 +32,8 @@ from datatools.hawkeye import (
     resolve_situation_ids,
     summarize_hawkeye_stats,
 )
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.visualize_hawkeye import (
     requested_time_norm_range,
     resolve_ballreceipt,
@@ -74,6 +76,7 @@ from project_config import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_warning_argument(parser)
     add_inference_mask_arguments(parser)
     parser.add_argument(
         "--tracking-csv",
@@ -298,8 +301,10 @@ def filter_hawkeye_situation_by_time_norm(
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        warning_collector=outcome_warnings,
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -329,6 +334,7 @@ def main() -> None:
     output_parent = Path(args.output_dir) if args.output_dir else HAWKEYE_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
     start_inference_attempt(output_dir, args)
+    confirm_outcome_warnings(outcome_warnings, output_dir, shared_context)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
@@ -456,6 +462,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),

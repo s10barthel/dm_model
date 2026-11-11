@@ -32,6 +32,8 @@ from datatools.benchmark import (
 from models.edge_schema import generation_kwargs
 from models.utils import get_model_provenance, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -78,6 +80,7 @@ BENCHMARK_RUNS_LEDGER_COLUMNS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_warning_argument(parser)
     add_inference_mask_arguments(parser)
     parser.add_argument("--input-dir", default=str(PROJECT_ROOT / "benchmark"))
     parser.add_argument("--modification", action="append", type=int, help="Restrict inference to one or more benchmark modifications.")
@@ -273,8 +276,10 @@ def update_benchmark_runs_ledger(
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        warning_collector=outcome_warnings,
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -303,6 +308,7 @@ def main() -> None:
     output_parent = Path(args.output_dir) if args.output_dir else BENCHMARK_COMPONENT_RUNS_DIR
     output_dir = output_parent / component_run_id
     start_inference_attempt(output_dir, args)
+    confirm_outcome_warnings(outcome_warnings, output_dir, shared_context)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     selected_modifications, skipped_modifications = discover_benchmark_modifications(
@@ -491,6 +497,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),

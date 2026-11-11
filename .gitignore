@@ -175,3 +175,5 @@ _vendor/defcon/saved
 !tests/test_feature_worker_runtime.py
 !tests/test_time_returns.py
 !tests/test_empty_windows.py
+
+!tests/test_mixed_outcome_inference.py

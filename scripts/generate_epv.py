@@ -35,6 +35,8 @@ from models.utils import (
     resolve_runtime_feature_run_context,
     validate_model_graph_schemas,
 )
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     format_physical_xpass_cache_summary,
@@ -70,6 +72,7 @@ REQUIRED_EPV_MODEL_TASKS = [
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_warning_argument(parser)
     add_inference_mask_arguments(parser)
     parser.add_argument("--bundle-id")
     parser.add_argument("--pass-intent-model-id")
@@ -143,8 +146,9 @@ def resolve_match_ids(requested_match_ids: list[str] | None, limit: int | None) 
     return match_ids
 
 
-def resolve_epv_model_selection(args: argparse.Namespace) -> tuple[dict[str, str], dict[str, object], dict[str, object] | None]:
+def resolve_epv_model_selection(args: argparse.Namespace, warning_collector=None) -> tuple[dict[str, str], dict[str, object], dict[str, object] | None]:
     return resolve_model_selection(
+        warning_collector=warning_collector,
         required_tasks=REQUIRED_EPV_MODEL_TASKS,
         bundle_id=args.bundle_id,
         explicit_model_ids={
@@ -367,6 +371,7 @@ def save_export_outputs(
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     ensure_project_dirs()
 
     output_csv = EPV_DIR / "epv.csv"
@@ -380,7 +385,7 @@ def main() -> None:
     attempt_root = EPV_DIR / "inference_runs" / generate_run_id("epv_inference")
     start_inference_attempt(attempt_root, args)
     device = args.device if torch.cuda.is_available() else "cpu"
-    resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args)
+    resolved_model_ids, shared_context, bundle = resolve_epv_model_selection(args, warning_collector=outcome_warnings)
     model_specs = load_epv_models(resolved_model_ids, device)
     configure_auxiliary_models(args, model_specs, device)
     inference_mask_config = configure_inference_masks(model_specs, getattr(args, "inference_mask", None))
@@ -397,7 +402,9 @@ def main() -> None:
         args.intended_receiver_mode,
         graph_schema,
         context="Selected EPV feature artifacts",
+        warning_collector=outcome_warnings,
     )
+    confirm_outcome_warnings(outcome_warnings, attempt_root, shared_context)
     runtime_return_type = resolve_runtime_return_type(shared_context, args.return_type,
                                                      runtime_feature_context.get("metadata"))
     shared_context = dict(shared_context)
@@ -436,6 +443,7 @@ def main() -> None:
     )
 
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),

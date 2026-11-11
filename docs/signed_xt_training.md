@@ -54,6 +54,38 @@ interpretation or loss. Old checkpoints retain their saved probability behavior;
 signed checkpoints require the explicit contract. Scoring/conceding bundle
 members must agree on the xT target definition and learning contract.
 
+Inference commands can combine checkpoints with different xT surfaces, target
+definitions, or learning contracts after explicit confirmation. They print the
+differences and ask `Proceed despite these warnings? [yes/no]`. Answer `yes` to
+continue or `no` to cancel. Empty answers do not accept the warning. For scripted
+execution, the existing `--accept-comparison-warnings` flag explicitly accepts
+these limitations; noninteractive runs without that flag cancel.
+
+For example, to inspect signed scoring gain together with absolute conceding:
+
+```powershell
+.venv/Scripts/python.exe scripts/run_and_visualize_hawkeye.py `
+  --outcome-scoring-model-id outcome_scoring/outcome_scoring_20261111T100349_602072_96195465 `
+  --outcome-conceding-model-id outcome_conceding/outcome_conceding_20261110T080157_625632_b30a6a77 `
+  --situation-id 41558c01-d87a-4efd-b0e9-ddfcf8470a77 `
+  --only-outcome-success --time-norm 1 --device cpu
+```
+
+The confirmation applies to ordinary inference, live visualization, comparisons,
+and EPV generation. Training/bundle creation and library validation remain strict
+unless their caller explicitly supplies a warning collector. Each checkpoint
+keeps its own decoder and original units; acceptance does not convert gain to
+absolute value or calibrate their combination.
+
+Ordinary inference metadata records definitions and acceptance under
+`outcome_compatibility`. Comparisons use their existing `warnings` and
+`warning_acceptances` fields with per-variant source context. Sportec runtime
+feature selection records which checkpoints' target definitions the runtime
+labels match. A new runtime definition requires an additional warning; labels
+that differ from a model's target are not its native evaluation reference.
+Graph/schema, required-artifact, stop-condition, and physical-cache checks keep
+their existing errors.
+
 ## Scope
 
 Supported: scalar and distributional `outcome_scoring`/`outcome_conceding` GNNs,

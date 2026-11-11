@@ -38,6 +38,8 @@ from models.utils import (
     validate_feature_graph_schema,
     validate_model_graph_schemas,
 )
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 from physical_pass_model import (
     PHYSICAL_XPASS_INFERENCE_HASH_POLICY,
@@ -80,6 +82,7 @@ from xt_versions import xt_options_for_feature_root
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    add_warning_argument(parser)
     parser.add_argument("--export-outcome-distributions", action="store_true", help="Export categorical outcome probabilities alongside component means.")
     add_inference_mask_arguments(parser)
     add_frame_selection_arguments(parser)
@@ -191,6 +194,7 @@ def resolve_component_feature_run_context(
     graph_schema: dict,
     physical_cache_dir: str,
     pass_success_args: dict,
+    warning_collector=None,
 ) -> dict:
     """Select the cache's required feature run without changing shared resolver defaults."""
     feature_run_id = getattr(args, "feature_run_id", None)
@@ -217,6 +221,7 @@ def resolve_component_feature_run_context(
             getattr(args, "intended_receiver_mode", None),
             graph_schema,
             context="Selected component feature artifacts",
+            warning_collector=warning_collector,
         )
     except (OSError, ValueError, TypeError) as exc:
         if not use_cache_feature_run:
@@ -696,8 +701,10 @@ def resolve_match_ids(
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     device = args.device if torch.cuda.is_available() else "cpu"
     resolved_model_ids, shared_context, bundle = resolve_model_selection(
+        warning_collector=outcome_warnings,
         required_tasks=[
             "action_intent",
             "pass_intent",
@@ -758,7 +765,9 @@ def main() -> None:
         graph_schema,
         physical_cache_dir,
         pass_success_args if pass_success_has_args else {},
+        warning_collector=outcome_warnings,
     )
+    confirm_outcome_warnings(outcome_warnings, output_dir, shared_context)
     feature_run_id = str(runtime_feature_context["feature_run_id"])
     print(f"Runtime feature run: {feature_run_id} (selection: {runtime_feature_context.get('selection')})")
     intended_receiver_mode = str(
@@ -848,6 +857,7 @@ def main() -> None:
         else {}
     )
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "inference_masks": inference_mask_config,
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),

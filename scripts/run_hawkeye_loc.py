@@ -46,6 +46,8 @@ from models.utils import (
     validate_model_graph_schemas,
 )
 from models.membership import attach_membership_report
+from scripts.comparison_warnings import add_warning_argument
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import add_top_pass_selector, resolve_top_pass_selector
 import pc_xpass_versions as pc_versions
 import pc_xpass_high_pass as high_pass
@@ -213,6 +215,7 @@ def build_invocation_metadata(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run single-frame location-adjusted Hawkeye inference.")
+    add_warning_argument(parser)
     parser.add_argument("--mode", choices=["loc", "freeze"], default="loc")
     parser.add_argument("--input-file", default=str(DEFAULT_INPUT_FILE))
     parser.add_argument("--tracking-csv", default=str(PROJECT_ROOT / "hawkeye_data" / "centroid_data_team.csv"))
@@ -594,8 +597,9 @@ def _geometry_warning_record(row: pd.Series, frame: dict[str, float | int], geom
     }
 
 
-def _configure_models(args: argparse.Namespace):
+def _configure_models(args: argparse.Namespace, warning_collector=None, warning_root=None):
     resolved_ids, shared_context, bundle = resolve_model_selection(
+        warning_collector=warning_collector,
         required_tasks=["action_intent", "pass_intent", "pass_success", "outcome_scoring", "outcome_conceding"],
         bundle_id=args.bundle_id,
         explicit_model_ids={
@@ -611,6 +615,8 @@ def _configure_models(args: argparse.Namespace):
         require_target_family=False,
         require_shared_split=False,
     )
+    if warning_collector is not None and warning_root is not None:
+        confirm_outcome_warnings(warning_collector, warning_root, shared_context)
     pass_height_id = resolve_optional_model_id("pass_height", args.pass_height_model_id, bundle)
     if pass_height_id:
         resolved_ids["pass_height"] = pass_height_id
@@ -801,6 +807,7 @@ def main() -> None:
 
 
 def _run_location(args: argparse.Namespace) -> None:
+    outcome_warnings = outcome_warning_policy(args)
     invocation_metadata = build_invocation_metadata(args)
     input_path = Path(args.input_file)
     if not input_path.exists():
@@ -828,7 +835,8 @@ def _run_location(args: argparse.Namespace) -> None:
 
     tracking = clean_hawkeye_tracking(load_hawkeye_tracking(args.tracking_csv))
     ball = clean_hawkeye_ball(load_hawkeye_ball(args.ball_csv))
-    resolved_ids, shared_context, model_specs, graph_schema, device = _configure_models(args)
+    resolved_ids, shared_context, model_specs, graph_schema, device = _configure_models(
+        args, warning_collector=outcome_warnings, warning_root=output_dir)
     model_warning_records = compatibility_warnings(resolved_ids, model_specs)
 
     exports: list[pd.DataFrame] = []
@@ -1018,6 +1026,7 @@ def _run_location(args: argparse.Namespace) -> None:
 
     model_records = {task: get_model_provenance(model_id) for task, model_id in resolved_ids.items()}
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "run_id": run_id,
         "run_type": "hawkeye_loc_component",

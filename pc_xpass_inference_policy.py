@@ -268,7 +268,8 @@ def inference_attempt(function):
                 try:
                     outputs = [str(path.relative_to(state["root"])) for path in state["root"].rglob("*")
                                if path.is_file() and path.suffix in {".parquet", ".csv", ".png", ".mp4"}]
-                    _write_attempt(state, status="failed", failure=failure, available_outputs=outputs)
+                    _write_attempt(state, status="cancelled" if getattr(exc, "cancelled", False) else "failed",
+                                   failure=failure, available_outputs=outputs)
                 except Exception as reporting_error:
                     exc.add_note(f"Failed to record inference failure: {reporting_error}")
             raise

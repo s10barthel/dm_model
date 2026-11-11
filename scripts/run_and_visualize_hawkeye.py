@@ -36,6 +36,7 @@ from models.inference_masks import add_inference_mask_arguments, configure_infer
 from models.edge_schema import generation_kwargs
 from models.utils import load_bundle_record, load_model, resolve_model_selection, validate_model_graph_schemas
 from models.membership import attach_membership_report
+from scripts.outcome_warnings import outcome_warning_policy, outcome_warning_metadata, confirm_outcome_warnings
 from scripts.xpass_cli import (add_top_pass_selector, resolve_top_pass_selector,
                                XPassVersionSelection, validate_xpass_weight_options)
 from physical_pass_model import (
@@ -551,6 +552,7 @@ def render_situation(
 @inference_attempt
 def main() -> None:
     args = parse_args()
+    outcome_warnings = outcome_warning_policy(args)
     if getattr(args, "visualization_comparison", None):
         from scripts.inference_visualization_comparison import run_comparison
         run_comparison(args, sys.modules[__name__])
@@ -631,6 +633,7 @@ def main() -> None:
     ]
     if required_model_tasks:
         model_ids, shared_context, _ = resolve_model_selection(
+            warning_collector=outcome_warnings,
             required_tasks=required_model_tasks,
             bundle_id=args.bundle_id,
             explicit_model_ids=explicit_model_ids,
@@ -646,6 +649,7 @@ def main() -> None:
     carry_warnings = carry_visualization_warnings(shared_context.get("source_use_carries", {}))
     for message in carry_warnings:
         warnings.warn(message, UserWarning, stacklevel=2)
+    confirm_outcome_warnings(outcome_warnings, output_root, shared_context)
     selected_model_ids = {
         name: model_id
         for name, model_id in model_ids.items()
@@ -747,6 +751,7 @@ def main() -> None:
         print(f"Saved Hawkeye {selected_output_mode} visualizations to {output_dir}")
 
     metadata = {
+        **outcome_warning_metadata(outcome_warnings, shared_context),
         "xpass_auxiliaries": auxiliary_metadata(model_specs),
         "pc_xpass_id": getattr(args, "pc_xpass_id", None),
         "pc_xpass_namespace": getattr(args, "pc_xpass_namespace", None),

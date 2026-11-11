@@ -5,7 +5,7 @@ import sys
 
 
 class ComparisonCancelled(RuntimeError):
-    pass
+    cancelled = True
 
 
 def add_warning_argument(parser):

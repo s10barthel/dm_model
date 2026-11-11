@@ -28,7 +28,7 @@ from scripts.visualization_comparison import (
     validate_metadata_definitions,
     render_comparison_groups,
 )
-from scripts.comparison_warnings import metadata_differences
+from scripts.comparison_warnings import ComparisonWarnings, metadata_differences
 from scripts.visualization_carries import carry_visualization_warnings
 from scripts.visualization_availability import select_inference_components, finish_inference_selection
 from scripts.visualization_selection import selection_metadata
@@ -59,7 +59,7 @@ def variant_context(variant, scene=None):
             f"version {settings.get('x_pass_version')!r}, weight {settings.get('xpass_weight')!r}")
 
 
-def resolve_variants(args, mod, sportec):
+def resolve_variants(args, mod, sportec, warning_collector=None):
     bundle = load_bundle_record(args.bundle_id) if args.bundle_id else None
     bundle_ids = dict((bundle or {}).get("model_ids") or {})
     explicit = {task: selection_list(getattr(args, f"{task}_model_id", None)) for task in MODEL_TASKS}
@@ -148,7 +148,7 @@ def resolve_variants(args, mod, sportec):
             pipeline_models[task] = models[model_id]
         context = (validate_model_record_consistency(pipeline_records, require_feature_run_id=False,
             require_intended_receiver_mode=False, require_return_type=False, require_target_family=False,
-            allow_pass_only_success=True) if pipeline_records else {})
+            allow_pass_only_success=True, warning_collector=warning_collector) if pipeline_records else {})
         contexts.append(context)
         if args.visualization_comparison == "pc_xpass":
             if shared_auxiliaries is None:
@@ -396,13 +396,16 @@ def hawkeye_groups(args, mod, variants, selection, schema, device, *, deferred=F
             yield from group.load()
 
 
-def sportec_groups(args, mod, variants, selection, shared, bundle, schema, device, *, deferred=False):
+def sportec_groups(args, mod, variants, selection, shared, bundle, schema, device, *, deferred=False, warning_collector=None):
     feature_run_id = args.feature_run_id
     if not feature_run_id and not selection.required_component_groups and variants[0].provenance.get("physical_cache_dir"):
         info = mod.pc_versions.read_metadata(variants[0].provenance["physical_cache_dir"])
         feature_run_id = (info.get("source_inputs") or {}).get("feature_run_id")
     runtime = mod.resolve_runtime_feature_run_context(feature_run_id, shared, bundle, args.intended_receiver_mode,
-                                                     schema, context="Selected comparison visualization feature artifacts")
+                                                     schema, context="Selected comparison visualization feature artifacts",
+                                                     warning_collector=warning_collector)
+    if warning_collector is not None:
+        warning_collector.confirm()
     feature_root = Path(runtime["feature_root"])
     return_type = mod.resolve_runtime_return_type(shared, args.return_type, runtime.get("metadata"))
     subject = mod.load_match(args.match_id, intended_receiver_mode=runtime["intended_receiver_mode"],
@@ -472,7 +475,8 @@ def run_comparison(args, mod):
     sportec = Path(mod.__file__).stem == "visualize_action_components"
     dataset = "sportec" if sportec else "hawkeye"
     device = args.device if torch.cuda.is_available() else "cpu"
-    variants, selection, shared, bundle, schema = resolve_variants(args, mod, sportec)
+    policy = ComparisonWarnings(getattr(args, "accept_comparison_warnings", False))
+    variants, selection, shared, bundle, schema = resolve_variants(args, mod, sportec, warning_collector=policy)
     with cli_blending_guard(args):
         configure_physical(args, mod, variants, dataset)
     if args.visualization_comparison != "pc_xpass":
@@ -485,6 +489,7 @@ def run_comparison(args, mod):
             validate_pc_xpass_startup(variant.models.get("pass_success"))
     names = list(selection.rendered_components)
     report = ComparisonExport(root, variants, args, args.visualization_comparison)
+    report.policy = policy
     report.metadata.update(run_id=root.name, script=Path(mod.__file__).name, graph_schema=schema,
                            source_context=shared, bundle_id=args.bundle_id, rendered_components=names,
                            only_physical_xpass=bool(getattr(args, "only_physical_xpass", False)))
@@ -515,12 +520,12 @@ def run_comparison(args, mod):
         same_schema = all(variant.provenance["graph_schema"] == schema for variant in variants)
         same_context = all(variant.provenance["source_context"] == variants[0].provenance["source_context"] for variant in variants)
         if same_schema and (not sportec or same_context):
-            groups = (sportec_groups(args, mod, variants, selection, variants[0].provenance["source_context"], bundle, schema, device, deferred=True)
+            groups = (sportec_groups(args, mod, variants, selection, variants[0].provenance["source_context"], bundle, schema, device, deferred=True, warning_collector=report.policy)
                       if sportec else hawkeye_groups(args, mod, variants, selection, schema, device, deferred=True))
             variant_groups = [groups]
         else:
             variant_groups = [sportec_groups(args, mod, [variant], selection, variant.provenance["source_context"], bundle,
-                              variant.provenance["graph_schema"], device, deferred=True) if sportec else hawkeye_groups(
+                              variant.provenance["graph_schema"], device, deferred=True, warning_collector=report.policy) if sportec else hawkeye_groups(
                               args, mod, [variant], selection, variant.provenance["graph_schema"], device, deferred=True) for variant in variants]
         render_comparison_groups(report, variant_groups, names, shared=same_schema and (not sportec or same_context),
                                  skip_failed_groups=sportec and args.visualization_comparison != "pc_xpass")
