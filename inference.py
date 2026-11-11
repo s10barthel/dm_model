@@ -1090,6 +1090,51 @@ def _prediction_node_ids(match, graph, label, policy, post_action=False, teammat
     return ids
 
 
+@blending_stage("cache_prediction")
+def inference_xpass_v0(match, model, *, graphs, labels):
+    """Copy cached xPass without a learned checkpoint; model holds runtime args only.
+
+    Use the same cache acceptance, attachment and coverage policy as GNN blending.
+    A possessor/carry has no physical pass probability and remains unavailable.
+    """
+    if not inference_uses_physical_xpass(model.args) or physical_xpass_weight_version(model.args) != "v0":
+        raise ValueError("Checkpoint-free xPass requires active --xpass-weight v0.")
+    preflight_pc_xpass(match, model, graph_override=graphs, label_override=labels)
+    graphs = [graph.clone() for graph in graphs]
+    graphs, labels = filter_missing_physical_xpass_rows_for_inference(match, graphs, labels, model)
+    graphs = attach_physical_xpass_for_inference(match, graphs, labels, model)
+    _validate_pc_attachments(match, model, graphs, labels)
+    report = empty_pc_xpass_coverage() if pc_blending_required(model) else None
+    predictions = []
+    for graph, label in zip(graphs, labels):
+        action = int(label[config.LABEL_INDEX["action_index"]])
+        players = [str(player) for player in graph.node_ids]
+        candidate = ((graph.x[:, config.NODE_FEATURE_IS_TEAMMATE] == 1)
+                     & (graph.x[:, config.NODE_FEATURE_IS_GOAL] != 1)
+                     & (graph.x[:, config.NODE_FEATURE_IS_POSSESSOR] != 1)).cpu().numpy()
+        if bool(label[config.LABEL_INDEX["is_dribble"]]):
+            candidate[:] = False
+        offside = (graph.x[:, -1].bool().cpu().numpy() if _uses_offside_rule_mask(model, graph.x.shape[1])
+                   else np.zeros(len(players), dtype=bool))
+        values = getattr(graph, PHYSICAL_XPASS_RAW_PROB_ATTR).cpu().numpy().copy()
+        values[~candidate | ~np.isfinite(values)] = np.nan
+        values[candidate & offside] = 0.0
+        predictions.append(dict(zip(players, values), index=action))
+        if report is not None:
+            eligible = candidate & ~offside
+            selected_players = getattr(match, "pc_xpass_coverage_players", None)
+            if selected_players is not None:
+                eligible &= np.array([player in selected_players for player in players])
+            _record_pc_blend_row(report, eligible, eligible & np.isfinite(values),
+                {"xpass": values, "prediction": values}, players,
+                {"match_id": str(match.match_id), "state": action})
+    result = pd.DataFrame(predictions).set_index("index") if predictions else pd.DataFrame()
+    if report is not None:
+        result.attrs["pc_xpass_blending_coverage"] = report
+        record_pc_xpass_coverage(model, report)
+    return result
+
+
 def inference_gnn(
     match: Match,
     model: GNN,

@@ -2556,6 +2556,35 @@ Fits reusable empirical player-reachability circles for pc-xPass. Artifacts are 
 
 ### `scripts/run_hawkeye.py`
 
+All six component checkpoint IDs are optional. Explicit IDs override bundle selections;
+IDs present in `--bundle-id` count as selected. Before loading tracking data or
+checkpoints, every omitted component is listed in a warning and the runner requires
+an explicit `yes` or `no` decision. Blank answers are not accepted, and
+`--accept-comparison-warnings` does not bypass this decision. A `no`, EOF, or
+interruption cancels without exporting predictions or updating the latest successful run.
+Unselected components retain their output columns as NaN in Parquet and blank in CSV.
+With no models and no xPass requested, the runner exports tracking rows with all
+component predictions unavailable.
+
+Active `--xpass-weight v0` copies the selected cached physical/PC xPass metric and
+does not require a pass-success checkpoint. Without that checkpoint,
+`model_pass_success` and carry success stay NaN. If supplied, the checkpoint still
+provides `model_pass_success` and carry predictions. Active v1–v5 blending requires
+a pass-success checkpoint; v4/v5 also require their explicit auxiliary model IDs.
+Cache validation and coverage requirements apply to checkpoint-free v0 as usual.
+
+For scoring/conceding outcomes plus PC xPass only, run:
+
+```powershell
+python scripts/run_hawkeye.py --outcome-scoring-model-id outcome_scoring/<id> --outcome-conceding-model-id outcome_conceding/<id> --use-physical-xpass --pc-xpass --xpass-weight v0 --pc-xpass-id <cache_id>
+```
+
+Confirm the omitted-model warning with `yes`. The run exports
+`outcome_scoring_success`, `outcome_scoring_failure`, `outcome_conceding_success`,
+`outcome_conceding_failure`, and `pass_success`; the omitted model outputs are NaN.
+Metadata records omitted models, confirmation, component sources, and whether
+checkpoint pass-success predictions are available.
+
 - `--pass-height-threshold <meters>`: select the observed-height definition used by height-aware pass-success diagnostics and physical/xPass lookups; see [Shared pass-height target option](#shared-pass-height-target-option).
 - `--tracking-csv <path>`: Hawkeye player-tracking CSV. Default: `hawkeye_data/centroid_data_team.csv`.
 - `--ball-csv <path>`: Hawkeye ball-tracking CSV. Default: `hawkeye_data/ball_data_selected.csv`.

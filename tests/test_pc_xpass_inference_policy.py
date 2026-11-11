@@ -316,6 +316,7 @@ def test_runner_startup_writes_failed_metadata_before_unit_preparation(tmp_path,
     else:
         monkeypatch.setattr(script, "load_" + provider + "_models", lambda **k: models)
         if provider == "hawkeye":
+            monkeypatch.setattr("builtins.input", lambda *a: "yes")
             monkeypatch.setattr(script, "load_hawkeye_tracking", lambda *a: pd.DataFrame())
             monkeypatch.setattr(script, "clean_hawkeye_tracking", lambda data: data)
             monkeypatch.setattr(script, "load_hawkeye_ball", lambda *a: pd.DataFrame())

@@ -7967,7 +7967,7 @@ class PhysicalXPassTests(unittest.TestCase):
                     "run_hawkeye.py", "--device", "cpu", "--bundle-id", "bundle", "--run-id", "selection_test",
                     "--output-dir", tmpdir, "--physical-cache-dir", str(Path(tmpdir) / "cache"), *flags,
                 ]
-                with patch.object(sys, "argv", argv), patch.multiple(
+                with patch.object(sys, "argv", argv), patch("builtins.input", return_value="yes"), patch.multiple(
                     run_hawkeye,
                     resolve_model_selection=Mock(return_value=(model_ids, {
                         "intended_receiver_mode": "angle_only", "return_type": "disc_0.9", "target_family": "goal",

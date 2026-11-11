@@ -84,6 +84,7 @@ tests/AS_viz/
 !tests/test_only_physical_xpass_visualization.py
 !tests/test_hawkeye_target_clamping.py
 !tests/test_hawkeye_goal_placement.py
+!tests/test_hawkeye_optional_models.py
 !tests/test_temporal_splits.py
 !tests/test_split_inference.py
 !tests/test_recorded_splits.py

@@ -15,7 +15,7 @@ from torch_geometric.data import Data
 from datatools import config, utils
 import datatools.preprocess as proc
 from datatools.graph_feature import construct_graph_for_frame, infer_node_feature_dim
-from inference import PhysicalXPassNoUsableRowsError, inference_gnn, preflight_pc_xpass
+from inference import PhysicalXPassNoUsableRowsError, inference_gnn, inference_xpass_v0, preflight_pc_xpass
 
 FRAME_KEY_COLUMNS = ["game_id", "half", "abs_time"]
 SITUATION_FRAME_KEY_COLUMNS = ["id", *FRAME_KEY_COLUMNS]
@@ -823,47 +823,63 @@ def infer_hawkeye_components(
     situation: HawkeyeSituation,
     model_specs: dict[str, Any],
     device: str = "cpu",
+    *,
+    xpass_runtime=None,
 ) -> dict[str, pd.DataFrame]:
     components: dict[str, pd.DataFrame] = {}
     if situation.labels.numel() == 0 or not situation.graph_features_0:
         return components
 
-    preflight_pc_xpass(situation, model_specs["pass_success"], graph_override=situation.graph_features_0, label_override=situation.labels)
+    pass_model = model_specs.get("pass_success")
+    preflight_pc_xpass(situation, pass_model or xpass_runtime, graph_override=situation.graph_features_0, label_override=situation.labels)
 
-    action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
+    action_intent = pd.DataFrame()
+    if "action_intent" in model_specs:
+        action_intent, _ = inference_gnn(situation, model_specs["action_intent"], device=device, post_action=False)
     precomputed_auxiliaries = {}
-    pass_intent, _ = inference_gnn(situation, model_specs["pass_intent"], device=device, post_action=False,
-                                   precomputed_auxiliaries=precomputed_auxiliaries)
+    pass_intent = pd.DataFrame()
+    if "pass_intent" in model_specs:
+        pass_intent, _ = inference_gnn(situation, model_specs["pass_intent"], device=device, post_action=False,
+                                       precomputed_auxiliaries=precomputed_auxiliaries)
     if "pass_height" in model_specs:
         pass_height, _ = inference_gnn(situation, model_specs["pass_height"], device=device, post_action=False,
                                        precomputed_auxiliaries=precomputed_auxiliaries)
     else:
         pass_height = pd.DataFrame()
     try:
-        pass_success, model_pass_success = inference_gnn(
-            situation,
-            model_specs["pass_success"],
-            device=device,
-            post_action=False,
-            return_model_pass_success=True,
-            pass_intent_probs=pass_intent,
-            precomputed_auxiliaries=precomputed_auxiliaries,
-        )
+        pass_success, model_pass_success = pd.DataFrame(), pd.DataFrame()
+        if pass_model is None and xpass_runtime is not None:
+            pass_success = inference_xpass_v0(situation, xpass_runtime,
+                graphs=situation.graph_features_0, labels=situation.labels)
+        elif pass_model is not None:
+            pass_success, model_pass_success = inference_gnn(
+                situation,
+                pass_model,
+                device=device,
+                post_action=False,
+                return_model_pass_success=True,
+                pass_intent_probs=pass_intent,
+                precomputed_auxiliaries=precomputed_auxiliaries,
+            )
     except PhysicalXPassNoUsableRowsError:
         pass_success = pd.DataFrame()
         model_pass_success = pd.DataFrame()
-    scoring_failure, scoring_success = inference_gnn(
-        situation,
-        model_specs["outcome_scoring"],
-        device=device,
-        post_action=False,
-    )
-    conceding_failure, conceding_success = inference_gnn(
-        situation,
-        model_specs["outcome_conceding"],
-        device=device,
-        post_action=False,
-    )
+    scoring_failure, scoring_success = pd.DataFrame(), pd.DataFrame()
+    if "outcome_scoring" in model_specs:
+        scoring_failure, scoring_success = inference_gnn(
+            situation,
+            model_specs["outcome_scoring"],
+            device=device,
+            post_action=False,
+        )
+    conceding_failure, conceding_success = pd.DataFrame(), pd.DataFrame()
+    if "outcome_conceding" in model_specs:
+        conceding_failure, conceding_success = inference_gnn(
+            situation,
+            model_specs["outcome_conceding"],
+            device=device,
+            post_action=False,
+        )
 
     components["action_intent"] = action_intent
     components["pass_intent"] = pass_intent
@@ -1123,25 +1139,25 @@ def build_hawkeye_visualization_probs(row: pd.Series | None) -> pd.Series:
 
 
 def load_hawkeye_models(
-    action_intent_model_id: str,
-    pass_intent_model_id: str,
-    pass_success_model_id: str,
-    outcome_scoring_model_id: str,
-    outcome_conceding_model_id: str,
-    device: str,
+    action_intent_model_id: str | None = None,
+    pass_intent_model_id: str | None = None,
+    pass_success_model_id: str | None = None,
+    outcome_scoring_model_id: str | None = None,
+    outcome_conceding_model_id: str | None = None,
+    device: str = "cpu",
     pass_height_model_id: str | None = None,
 ) -> dict[str, Any]:
     from models.utils import load_model
 
-    model_specs = {
-        "action_intent": load_model(action_intent_model_id, device),
-        "pass_intent": load_model(pass_intent_model_id, device),
-        "pass_success": load_model(pass_success_model_id, device),
-        "outcome_scoring": load_model(outcome_scoring_model_id, device),
-        "outcome_conceding": load_model(outcome_conceding_model_id, device),
+    model_ids = {
+        "action_intent": action_intent_model_id,
+        "pass_intent": pass_intent_model_id,
+        "pass_success": pass_success_model_id,
+        "outcome_scoring": outcome_scoring_model_id,
+        "outcome_conceding": outcome_conceding_model_id,
+        "pass_height": pass_height_model_id,
     }
-    if pass_height_model_id:
-        model_specs["pass_height"] = load_model(pass_height_model_id, device)
+    model_specs = {task: load_model(model_id, device) for task, model_id in model_ids.items() if model_id}
     missing = [name for name, model in model_specs.items() if model is None]
     if missing:
         raise FileNotFoundError(f"Missing model checkpoints for: {', '.join(missing)}")

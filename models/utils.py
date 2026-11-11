@@ -905,8 +905,13 @@ def resolve_model_selection(
     allow_pass_only_success: bool = False,
     require_shared_split: bool = True,
     warning_collector=None,
+    optional_tasks: list[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, Any], dict[str, Any] | None]:
-    """Resolve checkpoints; require a shared split when it selects runtime data."""
+    """Resolve required and optional checkpoints, with explicit IDs overriding bundles.
+
+    Supplying optional_tasks also permits an empty selection. Existing callers
+    retain strict model requirements and shared-split validation by default.
+    """
     explicit_model_ids = explicit_model_ids or {}
 
     if bundle_id:
@@ -919,6 +924,11 @@ def resolve_model_selection(
         resolved_model_ids = require_explicit_model_ids(required_tasks, explicit_model_ids)
         bundle = None
 
+    for task in optional_tasks or []:
+        model_id = explicit_model_ids.get(task) or (bundle or {}).get("model_ids", {}).get(task)
+        if model_id:
+            resolved_model_ids[task] = str(model_id)
+
     model_records = get_model_records(resolved_model_ids)
     shared = validate_model_record_consistency(
         model_records,
@@ -928,7 +938,10 @@ def resolve_model_selection(
         require_target_family=require_target_family,
         allow_pass_only_success=allow_pass_only_success,
         warning_collector=warning_collector,
-    )
+    ) if model_records or optional_tasks is None else {
+        "feature_run_id": None, "intended_receiver_mode": None,
+        "return_type": None, "target_family": None,
+    }
     shared["model_records"] = model_records
     from models.membership import explicit_split_provenance
     shared["source_splits"] = {task: explicit_split_provenance(record) for task, record in model_records.items()}
