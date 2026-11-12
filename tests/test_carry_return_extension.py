@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 import torch
 
+import project_config
 from datatools import config, graph_feature as gf
 from datatools.stop_conditions import label_path
 from scripts import generate_relevant_features as generator
@@ -69,37 +70,56 @@ def test_return_addition_without_carries_keeps_existing_workload():
 
 @pytest.fixture
 def label_run(tmp_path, monkeypatch):
+    return make_label_run(tmp_path, monkeypatch)
+
+
+def make_label_run(tmp_path, monkeypatch, *, layout=1, carries=True, matches=2,
+                   added_returns=("next_5",), set_pieces=False):
     root = tmp_path / "base"
-    root.mkdir()
+    root.mkdir(parents=True)
+    train_ids = ["train", *[f"train_{i}" for i in range(matches - 2)]]
+    test_ids = ["test"]
+    match_ids = [*train_ids, *test_ids]
     metadata = make_metadata(["next_10"], ["original", "angle_only", "model"], "success_intent/saved")
-    metadata.update(label_layout_version=1, carry_variant=dict(available=True, definition="fixture"),
-                    split_manifest=dict(universe_count=2))
-    metadata["stop_conditions"]["available"]["next_5"] = ["base"]
+    metadata.update(carry_variant=dict(available=carries, definition="fixture"),
+                    split_manifest=dict(universe_count=matches))
+    if layout == 1:
+        metadata["label_layout_version"] = 1
+    for ret in added_returns:
+        metadata["stop_conditions"]["available"][ret] = ["base", *(["set-pieces"] if set_pieces else [])]
     (root / "metadata.json").write_text(json.dumps(metadata))
-    for directory in ("action_graphs", "post_action_graphs", "action_graphs_carries", "post_action_graphs_carries",
-                      "action_graphs_intent_train"):
+    directories = ["action_graphs", "post_action_graphs", "action_graphs_intent_train"]
+    if carries:
+        directories.extend(["action_graphs_carries", "post_action_graphs_carries"])
+    for directory in directories:
         folder = root / directory
         folder.mkdir()
-        for mid in (["train"] if directory == "action_graphs_intent_train" else ["train", "test"]):
+        for mid in (train_ids if directory == "action_graphs_intent_train" else match_ids):
             (folder / f"{mid}.pt").write_bytes(b"retained graph payload")
+    returns = ["next_10", *added_returns]
     for mode in metadata["intended_receiver_modes"]:
-        for carry in (False, True):
+        for carry in ([False, True] if carries else [False]):
             ids = [1, 3, 8] if carry else [1, 3]
-            for mid in ("train", "test"):
+            for mid in match_ids:
                 actions = gf.get_resolved_action_path(mid, intended_receiver_mode=mode, root=root, use_carries=carry)
                 actions.parent.mkdir(exist_ok=True)
                 pd.DataFrame(dict(saved=[True] * len(ids)), index=ids).to_parquet(actions)
-                for ret in ("next_10", "next_5"):
+                for ret in returns:
                     path = gf.get_action_label_dir(ret, mode, root=root, use_carries=carry) / f"{mid}.pt"
                     write_labels(path, ids)
-        for ret in ("next_10", "next_5"):
-            path = gf.get_intent_train_label_dir(ret, mode, root=root) / "train.pt"
-            write_labels(path, [1, 1, 3])
+                    if set_pieces and ret in added_returns:
+                        write_labels(label_path(path, root, "set-pieces"), ids)
+        for ret in returns:
+            for mid in train_ids:
+                path = gf.get_intent_train_label_dir(ret, mode, root=root) / f"{mid}.pt"
+                write_labels(path, [1, 1, 3])
+                if set_pieces and ret in added_returns:
+                    write_labels(label_path(path, root, "set-pieces"), [1, 1, 3])
     plan = SimpleNamespace(target_run_id="base", base_metadata=metadata,
-        base_return_types=["next_10"], final_return_types=["next_10", "next_5"],
-        added_return_types=["next_5"], final_intended_receiver_modes=metadata["intended_receiver_modes"])
+        base_return_types=["next_10"], final_return_types=returns,
+        added_return_types=list(added_returns), final_intended_receiver_modes=metadata["intended_receiver_modes"])
     monkeypatch.setattr(generator, "get_feature_run_root", lambda run: tmp_path / run)
-    monkeypatch.setattr(generator, "resolve_split_manifest", lambda **_: dict(train=["train"], test=["test"]))
+    monkeypatch.setattr(generator, "resolve_split_manifest", lambda **_: dict(train=train_ids, test=test_ids))
     return root, metadata, plan
 
 
@@ -115,6 +135,116 @@ def test_audit_preserves_graphs_and_validates_all_modes(label_run):
     before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
     generator.audit_return_type_extension(plan, metadata)
     assert all(p.read_bytes() == data for p, data in before.items())
+
+
+@pytest.mark.parametrize("layout", [0, 1])
+@pytest.mark.parametrize("carries", [False, True])
+def test_audit_metadata_reads_do_not_grow_with_matches(tmp_path, monkeypatch, layout, carries):
+    counts = []
+    read_json = project_config.read_json
+    for matches in (2, 7):
+        root, metadata, plan = make_label_run(tmp_path / str(matches), monkeypatch,
+            layout=layout, carries=carries, matches=matches, added_returns=("next_5", "next_3"), set_pieces=True)
+        reads = []
+        def counted(path, **kwargs):
+            if Path(path) == root / "metadata.json":
+                reads.append(path)
+            return read_json(path, **kwargs)
+        # Fixture creation and other metadata files do not enter the measurement.
+        with monkeypatch.context() as counter:
+            counter.setattr(project_config, "read_json", counted)
+            generator.audit_return_type_extension(plan, metadata, set_piece_return_types=plan.added_return_types)
+        counts.append(len(reads))
+    assert counts[0] > 0
+    assert counts[0] == counts[1]
+
+
+def test_audit_reuses_candidate_directory_across_conditions(label_run, monkeypatch):
+    root, metadata, plan = label_run
+    read_json = project_config.read_json
+    reads, loaded = [], []
+    def counted(path, **kwargs):
+        if Path(path) == root / "metadata.json":
+            reads.append(path)
+        return read_json(path, **kwargs)
+    with monkeypatch.context() as counter:
+        counter.setattr(project_config, "read_json", counted)
+        generator.audit_return_type_extension(plan, metadata)
+    base_count = len(reads)
+    candidates = [path for path in (root / "labels" / "base").rglob("*.pt") if "next_5" in path.parent.name]
+    for path in candidates:
+        target = label_path(path, root, "set-pieces")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+    metadata["stop_conditions"]["available"]["next_5"].extend(["set-pieces", "base", "set-pieces"])
+    plan.added_return_types.append("next_5")
+    load = torch.load
+    def tracked_load(path, **kwargs):
+        loaded.append(Path(path))
+        return load(path, **kwargs)
+    reads.clear()
+    with monkeypatch.context() as counter:
+        counter.setattr(project_config, "read_json", counted)
+        counter.setattr(torch, "load", tracked_load)
+        generator.audit_return_type_extension(plan, metadata, set_piece_return_types=["next_5", "next_5"])
+    assert len(reads) == base_count
+    for path in candidates:
+        assert loaded.count(path) == 1
+        assert loaded.count(label_path(path, root, "set-pieces")) == 1
+
+
+def test_audit_reuses_reference_directory_when_return_is_selected(label_run, monkeypatch):
+    root, metadata, plan = label_run
+    reads = []
+    read_json = project_config.read_json
+    def counted(path, **kwargs):
+        if Path(path) == root / "metadata.json":
+            reads.append(path)
+        return read_json(path, **kwargs)
+    monkeypatch.setattr(project_config, "read_json", counted)
+    generator.audit_return_type_extension(plan, metadata)
+    base_count = len(reads)
+    reads.clear()
+    plan.added_return_types.insert(0, "next_10")
+    generator.audit_return_type_extension(plan, metadata)
+    assert len(reads) == base_count
+
+
+def test_audit_resolves_layout_again_on_next_invocation(label_run):
+    root, metadata, plan = label_run
+    generator.audit_return_type_extension(plan, metadata)
+    for directory in (root / "labels" / "base").iterdir():
+        directory.rename(root / directory.name)
+    metadata.pop("label_layout_version")
+    (root / "metadata.json").write_text(json.dumps(metadata))
+    generator.audit_return_type_extension(plan, metadata)
+
+
+@pytest.mark.parametrize("problem", ["not_tensor", "rank", "dtype", "columns",
+                                    "reference_rank", "nonfinite_ids", "fractional_ids", "duplicate_ids"])
+def test_audit_rejects_malformed_labels(label_run, problem):
+    root, metadata, plan = label_run
+    reference = problem in ("reference_rank", "nonfinite_ids", "fractional_ids", "duplicate_ids")
+    path = gf.get_action_label_dir("next_10" if reference else "next_5", "angle_only",
+                                  root=root, use_carries=True) / "test.pt"
+    labels = torch.load(path, weights_only=True)
+    if problem == "not_tensor":
+        labels = {"labels": labels}
+    elif problem in ("rank", "reference_rank"):
+        labels = labels[:, 0]
+    elif problem == "dtype":
+        labels = labels.to(torch.int64)
+    elif problem == "columns":
+        labels = labels[:, :1]
+    elif problem == "nonfinite_ids":
+        labels[0, 0] = float("nan")
+    elif problem == "fractional_ids":
+        labels[0, 0] = 1.5
+    else:
+        labels[1, 0] = labels[0, 0]
+    torch.save(labels, path)
+    with pytest.raises(ValueError, match="Malformed reference|Invalid reference|Duplicate reference|alignment"):
+        generator.audit_return_type_extension(plan, metadata)
 
 
 @pytest.mark.parametrize("problem", ["missing", "reordered", "wrong_ids", "missing_set_pieces", "wrong_split"])

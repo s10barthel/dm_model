@@ -1740,6 +1740,8 @@ def audit_return_type_extension(plan, metadata, *, set_piece_return_types=()):
         raise ValueError("Return-type extension intent-training coverage disagrees with the saved train split")
     selected_returns = list(dict.fromkeys([*plan.added_return_types, *set_piece_return_types]))
     available = (metadata.get("stop_conditions") or {}).get("available", {})
+    conditions_by_return = {ret: list(dict.fromkeys(["base", *available.get(ret, []),
+        *(["set-pieces"] if ret in set_piece_return_types else [])])) for ret in selected_returns}
     for carry in ([False, True] if carries else [False]):
         variants = [(get_action_label_dir, set(inventory))]
         if not carry:
@@ -1747,9 +1749,12 @@ def audit_return_type_extension(plan, metadata, *, set_piece_return_types=()):
         for builder, match_ids in variants:
             for mode in modes:
                 kwargs = dict(use_carries=carry) if builder == get_action_label_dir else {}
+                # Builders parse run metadata to choose the label layout. Resolve each
+                # directory once per variant/mode, then reuse it for every match.
+                directories = {ret: builder(ret, intended_receiver_mode=mode, root=root, **kwargs)
+                               for ret in dict.fromkeys([plan.base_return_types[0], *selected_returns])}
                 for mid in sorted(match_ids):
-                    reference_path = builder(plan.base_return_types[0], intended_receiver_mode=mode,
-                                             root=root, **kwargs) / f"{mid}.pt"
+                    reference_path = directories[plan.base_return_types[0]] / f"{mid}.pt"
                     reference = torch.load(reference_path, weights_only=False, map_location="cpu")
                     if (not isinstance(reference, torch.Tensor) or reference.ndim != 2
                             or reference.shape[1] < 1):
@@ -1766,10 +1771,8 @@ def audit_return_type_extension(plan, metadata, *, set_piece_return_types=()):
                     if builder == get_action_label_dir and len(np.unique(ids)) != len(ids):
                         raise ValueError(f"Duplicate reference label action IDs: {reference_path}")
                     for ret in selected_returns:
-                        conditions = list(dict.fromkeys(["base", *available.get(ret, []),
-                            *(["set-pieces"] if ret in set_piece_return_types else [])]))
-                        for condition in conditions:
-                            path = builder(ret, intended_receiver_mode=mode, root=root, **kwargs) / f"{mid}.pt"
+                        for condition in conditions_by_return[ret]:
+                            path = directories[ret] / f"{mid}.pt"
                             if condition != "base":
                                 path = label_path(path, root, condition)
                             labels = torch.load(path, weights_only=False, map_location="cpu")

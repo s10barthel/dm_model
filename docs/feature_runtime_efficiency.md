@@ -116,3 +116,69 @@ Multi-return label construction was approximately 15% faster in the final
 refresh comparisons are under `tmp/feature_efficiency/comparison_large/`.
 Production-data benchmarking was blocked by read permissions on the source
 Parquet files.
+
+## Final return-type label audit
+
+`audit_return_type_extension()` resolves reference and candidate label
+directories once per action variant and receiver mode, before iterating over
+matches. The same candidate directory serves base and set-piece conditions;
+condition paths continue to use the existing label-path helper. Selected return
+types and conditions retain their order and are deduplicated.
+
+This avoids reading and parsing the run metadata for every label path.
+Directory resolution stays local to the audit invocation, so a later audit
+detects a changed label layout. The shared path helpers retain their existing
+behavior. Inventory preflight still reads metadata per directory; the total
+metadata-read count is independent of match count rather than reduced to one.
+
+Validation remains serial and checks every selected file. Split membership,
+saved-action identities, ordinary-label uniqueness, intentional intent-training
+duplicates, tensor shape/dtype, and exact action-ID alignment keep their existing
+rules. Completion publication and training eligibility are unchanged.
+
+For the 918-match, three-mode `time_15` extension with carries, intent-training
+labels, and base/set-piece conditions, the main audit's metadata resolutions
+fall from approximately 23,409 to 18. That count is derived from the workload;
+it does not represent a measured full-production audit. The already running
+process continues to use its loaded code.
+
+### Validation on 13 November 2026
+
+The focused return-extension, feature-extension, and failure/publication suites
+passed 198 test cases and 40 subtests. The captured pre-change implementation
+passed the original 183 cases and 40 subtests. Added tests verify metadata-read
+scaling, both layouts, all receiver modes, carries present/absent, multiple
+returns, condition deduplication, layout freshness, and malformed labels.
+
+A bounded comparison used isolated synthetic label/parquet fixtures with all
+three receiver modes, carries, intent-training labels, and base/set-piece
+conditions. Each implementation ran twice; the order was reversed on the
+second pass. No OS cache eviction was attempted, so first samples are not
+cold-storage measurements.
+
+With small metadata, total metadata reads behaved identically for both layouts:
+
+| Matches | Before | Optimized | Optimized inventory / main audit |
+|---|---:|---:|---:|
+| 2 | 67 | 40 | 22 / 18 |
+| 7 | 202 | 40 | 22 / 18 |
+
+Using two matches and a copy of the production run's approximately 68 MB JSON
+metadata, elapsed times were:
+
+| Label layout | Before, first / repeat | Optimized, first / repeat |
+|---|---:|---:|
+| Legacy top-level | 37.17 / 35.26 s | 21.29 / 21.50 s |
+| Canonical `labels/base` | 35.84 / 35.23 s | 21.22 / 21.23 s |
+
+This bounded workload was about 40% faster. Its inventory preflight accounted
+for 22 of the remaining 40 metadata reads. More matches amortize those
+directory-level reads, while tensor/parquet work still grows with match count.
+These results do not establish a full-production duration or speedup.
+
+All six comparison cases retained identical artifact hashes. Missing and
+misaligned set-piece labels produced identical exception types and messages
+with the captured baseline and optimized audit in both layouts. Captured source,
+the comparison script, and raw results are retained locally under
+`tmp/label_validation_optimization/`; the result file is
+`tmp/label_validation_optimization/comparison/benchmark.json`.
